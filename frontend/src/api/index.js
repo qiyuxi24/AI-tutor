@@ -19,10 +19,10 @@ export const getUserId = () => {
 // 健康检查
 export const healthCheck = () => apiClient.get('/api/health')
 
-// 发送对话消息（预留）
-export const sendMessage = (message, mode) =>
+// 发送对话消息
+export const sendMessage = (messages, mode) =>
   apiClient.post('/api/v1/chat', {
     user_id: getUserId(),
-    message,
+    messages,
     mode,
   })

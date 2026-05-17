@@ -10,7 +10,7 @@ async def handle_chat(request: ChatRequest):
     """处理对话请求"""
     reply, mode = await process_message(
         user_id=request.user_id,
-        message=request.message,
+        messages=request.messages,
         mode=request.mode,
     )
     return ChatResponse(reply=reply, mode=mode)

@@ -1,0 +1,15 @@
+# 环境变量 - 包含API Key，绝不能上传
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/

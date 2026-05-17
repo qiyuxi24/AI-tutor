@@ -1,16 +1,50 @@
-"""大模型 API 客户端（当前为模拟版本，后续接入真实 API）"""
-import httpx
+"""大模型API客户端 —— 接入阿里云千问"""
+import os
+from openai import OpenAI
+from dotenv import load_dotenv
 
-async def call_llm(system_prompt: str, user_message: str) -> str:
+# 加载 .env 文件里的环境变量
+load_dotenv()
+
+# 创建OpenAI兼容客户端，指向千问的地址
+client = OpenAI(
+    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+)
+
+# 千问的模型名称
+MODEL_NAME = "qwen-plus"
+
+
+async def call_llm(system_prompt: str, messages: list) -> str:
     """
-    调用大模型 API，返回 AI 回复。
-    当前模拟版本：直接返回一条固定回复，验证链路通畅。
+    调用千问API，返回AI回复
+    
+    参数:
+        system_prompt: 系统提示词（定义了AI的引导策略）
+        messages: 完整对话历史 [{role, content}, ...]
+    
+    返回:
+        AI的回复文本
     """
-    # TODO: 后续替换为真实的 API 调用
-    # 模拟回复
-    return (
-        f"收到你的问题了。"
-        f"我会用以下引导策略来帮你思考：\n\n"
-        f"【系统提示词已加载】{system_prompt[:100]}...\n\n"
-        f"这是一个模拟回复，验证全链路通畅。"
-    )
+    try:
+        # 拼出 API 需要的 messages 格式
+        api_messages = [{"role": "system", "content": system_prompt}]
+        for msg in messages:
+            api_messages.append({"role": msg["role"] if isinstance(msg, dict) else msg.role,
+                                 "content": msg["content"] if isinstance(msg, dict) else msg.content})
+
+        # 调用千问API（同步调用，因为openai库不支持async）
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=api_messages,
+            temperature=0.7,   # 控制随机性
+            max_tokens=500,     # 限制回复长度
+        )
+        
+        # 提取回复内容
+        return response.choices[0].message.content
+        
+    except Exception as e:
+        # 如果调用失败，返回错误信息
+        return f"AI调用失败: {str(e)}"

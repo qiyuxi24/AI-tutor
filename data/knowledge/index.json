@@ -1,0 +1,49 @@
+{
+  "nodes": [
+    {
+      "id": "recursion_def",
+      "name": "递归定义",
+      "file": "nodes/recursion_def.md",
+      "tags": ["核心概念", "一级"],
+      "added_by": "human",
+      "created_at": "2026-05-17",
+      "confidence": null
+    },
+    {
+      "id": "recursion_base_case",
+      "name": "递归终止条件",
+      "file": "nodes/recursion_base_case.md",
+      "tags": ["核心概念", "二级"],
+      "added_by": "human",
+      "created_at": "2026-05-17",
+      "confidence": null
+    },
+    {
+      "id": "recursion_formula",
+      "name": "递归递推公式",
+      "file": "nodes/recursion_formula.md",
+      "tags": ["核心概念", "二级"],
+      "added_by": "human",
+      "created_at": "2026-05-17",
+      "confidence": null
+    }
+  ],
+  "edges": [
+    {
+      "from": "recursion_base_case",
+      "to": "recursion_def",
+      "relation": "prerequisite",
+      "label": "需要先理解递归定义",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "recursion_formula",
+      "to": "recursion_base_case",
+      "relation": "prerequisite",
+      "label": "需要先掌握终止条件",
+      "added_by": "human",
+      "confidence": null
+    }
+  ]
+}

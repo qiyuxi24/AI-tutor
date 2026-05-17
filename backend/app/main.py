@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.chat import router as chat_router
+from app.api.v1.knowledge import router as knowledge_router
 
 app = FastAPI(title="AI Tutor API", version="0.1.0")
 
@@ -14,6 +15,7 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(chat_router, prefix="/api/v1")
+app.include_router(knowledge_router, prefix="/api/v1")
 
 @app.get("/api/health")
 async def health_check():
