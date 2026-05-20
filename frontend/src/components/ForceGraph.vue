@@ -1,46 +1,29 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import * as d3 from 'd3'
 
 const props = defineProps({
-  apiUrl: {
-    type: String,
-    default: '/api/v1/knowledge/graph'
-  }
+  nodes: { type: Array, default: () => [] },
+  edges: { type: Array, default: () => [] },
+  loading: { type: Boolean, default: false },
+  error: { type: String, default: '' },
 })
 
-const emit = defineEmits(['node-click'])
+const emit = defineEmits(['node-click', 'node-dblclick'])
 
 const containerRef = ref(null)
-const loading = ref(true)
-const error = ref('')
+const SIDEBAR_WIDTH = 260
 
 let simulation = null
 let svgSelection = null
 
-const levelColors = {
-  '一级': '#60a5fa',
-  '二级': '#34d399',
-  '三级': '#fbbf24'
-}
-
-/* 掌握程度 → 颜色映射：从灰色渐变到绿色 */
+/* 掌握程度 → 颜色映射 */
 function masteryColor(mastery) {
-  if (mastery == null || mastery === 0) return '#9ca3af'   // 未掌握-灰
-  if (mastery <= 25)  return '#86efac'                      // 入门-浅绿
-  if (mastery <= 50)  return '#34d399'                      // 熟悉-中绿
-  if (mastery <= 75)  return '#10b981'                      // 熟练-深绿
-  return '#059669'                                          // 精通-墨绿
-}
-
-function extractLevel(tags) {
-  if (!tags) return '一级'
-  for (const tag of tags) {
-    if (tag === '一级' || tag === '二级' || tag === '三级') {
-      return tag
-    }
-  }
-  return '一级'
+  if (mastery == null || mastery === 0) return '#9ca3af'
+  if (mastery <= 25)  return '#86efac'
+  if (mastery <= 50)  return '#34d399'
+  if (mastery <= 75)  return '#10b981'
+  return '#059669'
 }
 
 function initForceGraph(nodes, links) {
@@ -159,6 +142,10 @@ function initForceGraph(nodes, links) {
     emit('node-click', d.id)
   })
 
+  node.on('dblclick', function(event, d) {
+    emit('node-dblclick', d.id)
+  })
+
   simulation.on('tick', () => {
     link
       .attr('x1', d => d.source.x)
@@ -193,34 +180,23 @@ function initForceGraph(nodes, links) {
   }
 }
 
-async function fetchData() {
-  loading.value = true
-  error.value = ''
-
-  try {
-    const res = await fetch(props.apiUrl)
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`)
-    }
-    const data = await res.json()
-
-    const nodes = (data.nodes || []).map(n => ({
-      ...n,
-      level: extractLevel(n.tags)
-    }))
-    const links = (data.edges || []).map(e => ({
-      source: e.from,
-      target: e.to,
-      label: e.label
-    }))
-
+/* 从 props 初始化或更新图谱 */
+function renderGraph() {
+  const nodes = (props.nodes || []).map(n => ({ ...n }))
+  const links = (props.edges || []).map(e => ({
+    source: e.source || e.from,
+    target: e.target || e.to,
+    label: e.label
+  }))
+  if (nodes.length > 0 && containerRef.value) {
     initForceGraph(nodes, links)
-  } catch (e) {
-    error.value = 'ERROR'
-  } finally {
-    loading.value = false
   }
 }
+
+/* 监听数据变化（AI 编辑后自动更新） */
+watch(() => [props.nodes, props.edges], () => {
+  renderGraph()
+}, { deep: true })
 
 function handleResize() {
   if (simulation && containerRef.value) {
@@ -231,7 +207,7 @@ function handleResize() {
 }
 
 onMounted(() => {
-  fetchData()
+  renderGraph()
   window.addEventListener('resize', handleResize)
 })
 
@@ -245,12 +221,17 @@ onUnmounted(() => {
 
 <template>
   <div ref="containerRef" class="force-graph-container">
-    <div v-if="loading" class="loading-overlay">
+    <div v-if="loading && props.nodes.length === 0" class="loading-overlay">
       <div class="spinner"></div>
       <p>图谱加载中...</p>
     </div>
-    <div v-else-if="error" class="error-overlay">
-      <p>{{ error }}</p>
+    <div v-else-if="error === 'ERROR'" class="error-overlay">
+      <p>图谱加载失败</p>
+      <span class="error-hint">请确认后端服务已启动</span>
+    </div>
+    <div v-else-if="!loading && props.nodes.length === 0 && !error" class="empty-overlay">
+      <div class="empty-icon">📭</div>
+      <p>知识图谱暂无内容</p>
     </div>
   </div>
 </template>
@@ -312,9 +293,31 @@ onUnmounted(() => {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   color: #f87171;
   font-size: 14px;
+  gap: 6px;
 }
+
+.error-hint {
+  font-size: 12px;
+  color: #a6adc8;
+  margin-top: 2px;
+}
+
+.empty-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #a6adc8;
+  font-size: 14px;
+  gap: 6px;
+}
+
+.empty-icon { font-size: 40px; }
 </style>

@@ -1,12 +1,13 @@
-
-
 {
   "nodes": [
     {
       "id": "recursion_def",
       "name": "递归定义",
       "file": "nodes/recursion_def.md",
-      "tags": ["核心概念", "一级"],
+      "tags": [
+        "核心概念",
+        "一级"
+      ],
       "added_by": "human",
       "created_at": "2026-05-17",
       "confidence": null
@@ -15,7 +16,10 @@
       "id": "recursion_base_case",
       "name": "递归终止条件",
       "file": "nodes/recursion_base_case.md",
-      "tags": ["核心概念", "二级"],
+      "tags": [
+        "核心概念",
+        "二级"
+      ],
       "added_by": "human",
       "created_at": "2026-05-17",
       "confidence": null
@@ -24,7 +28,10 @@
       "id": "recursion_formula",
       "name": "递归递推公式",
       "file": "nodes/recursion_formula.md",
-      "tags": ["核心概念", "二级"],
+      "tags": [
+        "核心概念",
+        "二级"
+      ],
       "added_by": "human",
       "created_at": "2026-05-17",
       "confidence": null
@@ -33,7 +40,10 @@
       "id": "recursion_stack",
       "name": "递归与栈",
       "file": "nodes/recursion_stack.md",
-      "tags": ["进阶概念", "三级"],
+      "tags": [
+        "进阶概念",
+        "三级"
+      ],
       "added_by": "human",
       "created_at": "2026-05-20",
       "confidence": null
@@ -42,7 +52,10 @@
       "id": "recursion_vs_iteration",
       "name": "递归 vs 迭代",
       "file": "nodes/recursion_vs_iteration.md",
-      "tags": ["对比分析", "三级"],
+      "tags": [
+        "对比分析",
+        "三级"
+      ],
       "added_by": "human",
       "created_at": "2026-05-20",
       "confidence": null
@@ -51,7 +64,10 @@
       "id": "tail_recursion",
       "name": "尾递归优化",
       "file": "nodes/tail_recursion.md",
-      "tags": ["进阶概念", "三级"],
+      "tags": [
+        "进阶概念",
+        "三级"
+      ],
       "added_by": "human",
       "created_at": "2026-05-20",
       "confidence": null
@@ -60,10 +76,29 @@
       "id": "divide_and_conquer",
       "name": "分治算法",
       "file": "nodes/divide_and_conquer.md",
-      "tags": ["算法思想", "二级"],
+      "tags": [
+        "算法思想",
+        "二级"
+      ],
       "added_by": "human",
       "created_at": "2026-05-20",
       "confidence": null
+    },
+    {
+      "id": "os_intro",
+      "name": "计算机操作系统",
+      "file": "nodes/os_intro.md",
+      "tags": [
+        "操作系统",
+        "基础",
+        "三级"
+      ],
+      "summary": "",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 30,
+      "added_by": "ai",
+      "created_at": ""
     }
   ],
   "edges": [

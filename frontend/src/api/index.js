@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 // 创建axios实例，指向后端地址
-const apiClient = axios.create({
+export const apiClient = axios.create({
   baseURL: 'http://localhost:8000',
   timeout: 10000,
 })

@@ -6,13 +6,12 @@ router = APIRouter()
 kg = KnowledgeGraph()
 
 
+# ── 读取 ──
+
 @router.get("/knowledge/graph")
 async def get_graph():
     """返回完整图谱数据"""
-    return {
-        "nodes": kg.nodes,
-        "edges": kg.edges
-    }
+    return {"nodes": kg.nodes, "edges": kg.edges}
 
 
 @router.get("/knowledge/node/{node_id}")
@@ -27,8 +26,6 @@ async def get_node_detail(node_id: str):
     if file_path.exists():
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
-    else:
-        content = f"（文件未找到：{file_path}）"
 
     prerequisites = kg.get_prerequisites(node_id)
     related_ids = []
@@ -50,12 +47,95 @@ async def get_node_detail(node_id: str):
         "difficulty": node.get("difficulty", 3),
         "estimated_minutes": node.get("estimated_minutes", 15),
         "summary": node.get("summary", ""),
+        "file_path": node.get("file", ""),
     }
+
+
+# ── 写入（供 AI function calling 使用）───
+
+@router.post("/knowledge/node")
+async def create_node(data: dict):
+    """创建新节点及 MD 文件"""
+    try:
+        node_data = {
+            "id": data["id"],
+            "name": data["name"],
+            "file": f"nodes/{data['id']}.md",
+            "tags": data.get("tags", []),
+            "summary": data.get("summary", ""),
+            "mastery": 0,
+            "difficulty": data.get("difficulty", 3),
+            "estimated_minutes": data.get("estimated_minutes", 15),
+            "added_by": data.get("added_by", "ai"),
+            "created_at": "",
+        }
+        kg.add_node(node_data)
+        md_path = kg.data_dir / node_data["file"]
+        md_content = data.get("content", f"# {data['name']}\n\n待完善...\n")
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(md_content)
+        return {"status": "ok", "node_id": data["id"]}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=400, detail=f"缺少必填字段：{e}")
+
+
+@router.put("/knowledge/node/{node_id}")
+async def update_node(node_id: str, data: dict):
+    """更新节点信息或 MD 文件内容"""
+    node = kg.get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
+
+    for key in ["name", "mastery", "difficulty", "estimated_minutes", "summary", "tags"]:
+        if key in data:
+            node[key] = data[key]
+    kg.save()
+
+    if "content" in data:
+        md_path = kg.data_dir / node.get("file", f"nodes/{node_id}.md")
+        op = data.get("op", "replace")
+        if op == "replace":
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(data["content"])
+        elif op == "append":
+            with open(md_path, "a", encoding="utf-8") as f:
+                f.write(f"\n\n{data['content']}")
+
+    return {"status": "ok"}
+
+
+@router.delete("/knowledge/node/{node_id}")
+async def delete_node(node_id: str):
+    """删除节点和对应 MD 文件"""
+    node = kg.get_node(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
+
+    md_path = kg.data_dir / node.get("file", f"nodes/{node_id}.md")
+    if md_path.exists():
+        md_path.unlink()
+
+    kg.nodes = [n for n in kg.nodes if n["id"] != node_id]
+    kg.edges = [e for e in kg.edges if e["from"] != node_id and e["to"] != node_id]
+    kg.save()
+    return {"status": "ok"}
+
+
+@router.post("/knowledge/edge")
+async def create_edge(data: dict):
+    """创建关联边"""
+    try:
+        kg.add_edge(data)
+        return {"status": "ok"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.put("/knowledge/node/{node_id}/mastery")
 async def update_mastery(node_id: str, data: dict):
-    """更新节点的掌握程度（AI 或用户设置）"""
+    """更新节点的掌握程度"""
     node = kg.get_node(node_id)
     if node is None:
         raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
@@ -66,21 +146,21 @@ async def update_mastery(node_id: str, data: dict):
 
     node["mastery"] = mastery
     node["added_by"] = data.get("added_by", "ai")
-    kg.save()  # 持久化到文件
+    kg.save()
     return {"status": "ok", "node_id": node_id, "mastery": mastery}
 
 
 @router.post("/knowledge/ai/edit")
 async def ai_edit_graph(data: dict):
-    """AI 助手编辑知识图谱（添加/修改节点或边）"""
-    action = data.get("action")  # "add_node" | "add_edge" | "update_node"
+    """AI 助手编辑知识图谱（向后兼容）"""
+    action = data.get("action")
     try:
         if action == "add_node":
             kg.add_node(data["node"])
-            return {"status": "ok", "message": f"节点 {data['node']['id']} 已添加"}
+            return {"status": "ok"}
         elif action == "add_edge":
             kg.add_edge(data["edge"])
-            return {"status": "ok", "message": "边已添加"}
+            return {"status": "ok"}
         elif action == "update_node":
             node = kg.get_node(data["node_id"])
             if node is None:
@@ -89,7 +169,7 @@ async def ai_edit_graph(data: dict):
                 if key in data:
                     node[key] = data[key]
             kg.save()
-            return {"status": "ok", "message": f"节点 {data['node_id']} 已更新"}
+            return {"status": "ok"}
         else:
             raise HTTPException(status_code=400, detail=f"未知操作：{action}")
     except ValueError as e:

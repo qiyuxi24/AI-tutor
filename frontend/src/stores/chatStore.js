@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { sendMessage } from '../api/index.js'
+import { sendMessage, apiClient } from '../api/index.js'
 
 const STORAGE_KEY_CONVERSATIONS = 'ai_tutor_conversations'
 const STORAGE_KEY_CURRENT = 'ai_tutor_current_id'
@@ -17,7 +17,6 @@ function todayLabel(date) {
   const yesterday = new Date(now)
   yesterday.setDate(yesterday.getDate() - 1)
   const sameYesterday = d.toDateString() === yesterday.toDateString()
-
   if (sameDay) return '今天'
   if (sameYesterday) return '昨天'
   return `${d.getMonth() + 1}/${d.getDate()}`
@@ -30,16 +29,39 @@ export const useChatStore = defineStore('chat', () => {
   const mode = ref('scaffolding')
   const loading = ref(false)
 
-  // ─── 知识图谱数据 ───
-  const knowledgeNodes = ref([
-    { id: 'recursion_def', name: '递归定义', tags: ['核心概念'], level: '一级' },
-    { id: 'recursion_base_case', name: '递归终止条件', tags: ['核心概念'], level: '二级' },
-    { id: 'recursion_formula', name: '递归递推公式', tags: ['数学'], level: '二级' }
-  ])
-  const knowledgeEdges = ref([
-    { from: 'recursion_base_case', to: 'recursion_def', label: '前置依赖' },
-    { from: 'recursion_formula', to: 'recursion_base_case', label: '前置依赖' }
-  ])
+  // ─── 知识图谱数据（一次性从后端加载）───
+  const knowledgeNodes = ref([])
+  const knowledgeEdges = ref([])
+  const graphLoaded = ref(false)
+  const graphError = ref('')
+
+  async function fetchGraph() {
+    if (graphLoaded.value) return
+    try {
+      const { data } = await apiClient.get('/api/v1/knowledge/graph')
+      knowledgeNodes.value = (data.nodes || []).map(n => ({
+        ...n,
+        level: (n.tags || []).find(t => ['一级','二级','三级'].includes(t)) || '一级'
+      }))
+      knowledgeEdges.value = (data.edges || []).map(e => ({
+        source: e.from,
+        target: e.to,
+        label: e.label
+      }))
+      graphLoaded.value = true
+      graphError.value = ''
+    } catch {
+      graphError.value = 'ERROR'
+    }
+  }
+
+  // ─── AI 编辑后刷新图谱 ───
+  async function refreshGraph() {
+    graphLoaded.value = false
+    knowledgeNodes.value = []
+    knowledgeEdges.value = []
+    await fetchGraph()
+  }
 
   // ─── 计算属性 ───
   const currentConversation = computed(() =>
@@ -66,7 +88,7 @@ export const useChatStore = defineStore('chat', () => {
     return groups
   })
 
-  // ─── 初始化：从 localStorage 恢复 ───
+  // ─── 初始化：从 localStorage 恢复 + 加载图谱 ───
   function init() {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_CONVERSATIONS)
@@ -80,6 +102,8 @@ export const useChatStore = defineStore('chat', () => {
     } catch {
       // ignore
     }
+    // 一次性加载知识图谱
+    fetchGraph()
   }
 
   // ─── 持久化 ───
@@ -171,12 +195,16 @@ export const useChatStore = defineStore('chat', () => {
     loading,
     knowledgeNodes,
     knowledgeEdges,
+    graphLoaded,
+    graphError,
     currentConversation,
     currentMessages,
     currentTitle,
     hasConversations,
     groupedConversations,
     init,
+    fetchGraph,
+    refreshGraph,
     newConversation,
     switchConversation,
     deleteConversation,

@@ -1,9 +1,11 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { useChatStore } from './stores/chatStore'
+import { apiClient } from './api/index.js'
 import Sidebar from './components/Sidebar.vue'
 import ChatArea from './components/ChatArea.vue'
 import ForceGraph from './components/ForceGraph.vue'
+import NodeDetail from './components/NodeDetail.vue'
 import Settings from './components/Settings.vue'
 
 const store = useChatStore()
@@ -21,9 +23,44 @@ const MODE_LABELS = {
 }
 const modeInfo = computed(() => MODE_LABELS[store.mode] || { label: store.mode, color: '#6b7280' })
 
+// ─── 节点详情弹窗 ───
+const nodeDetailModal = ref(null)
+const nodeDetailVisible = ref(false)
+const nodeDetailLoading = ref(false)
+
 onMounted(() => {
   store.init()
+  store.fetchGraph()
 })
+
+async function handleNodeDblClick(nodeId) {
+  if (viewMode.value !== 'graph') return
+  nodeDetailVisible.value = true
+  nodeDetailLoading.value = true
+  try {
+    const { data } = await apiClient.get(`/api/v1/knowledge/node/${nodeId}`)
+    nodeDetailModal.value = data
+  } catch {
+    nodeDetailModal.value = { id: nodeId, name: '加载失败', content: '无法加载节点详情' }
+  } finally {
+    nodeDetailLoading.value = false
+  }
+}
+
+function closeNodeDetail() {
+  nodeDetailVisible.value = false
+}
+
+async function refreshGraph() {
+  await store.fetchGraph()
+  // 如果当前有打开的节点，刷新它的内容
+  if (nodeDetailModal.value?.id) {
+    try {
+      const { data } = await apiClient.get(`/api/v1/knowledge/node/${nodeDetailModal.value.id}`)
+      nodeDetailModal.value = data
+    } catch { /* ignore */ }
+  }
+}
 
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
@@ -140,7 +177,13 @@ const slideTransition = {
       <!-- 知识图谱视图 -->
       <Transition name="view-fade" v-bind="slideTransition">
         <div v-if="viewMode === 'graph'" class="graph-layout" data-view="graph">
-          <ForceGraph />
+          <ForceGraph
+            :nodes="store.knowledgeNodes"
+            :edges="store.knowledgeEdges"
+            :loading="!store.graphLoaded"
+            :error="store.graphError ? 'ERROR' : ''"
+            @node-dblclick="handleNodeDblClick"
+          />
         </div>
       </Transition>
     </div>
@@ -149,6 +192,14 @@ const slideTransition = {
     <Transition name="fade">
       <Settings v-if="showSettings" @close="closeSettings" />
     </Transition>
+
+    <!-- 知识图谱节点详情弹窗 -->
+    <NodeDetail
+      :nodeInfo="nodeDetailModal"
+      :visible="nodeDetailVisible"
+      @close="closeNodeDetail"
+      @refresh="refreshGraph"
+    />
   </div>
 </template>
 
