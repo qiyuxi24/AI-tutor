@@ -24,6 +24,15 @@ const levelColors = {
   '三级': '#fbbf24'
 }
 
+/* 掌握程度 → 颜色映射：从灰色渐变到绿色 */
+function masteryColor(mastery) {
+  if (mastery == null || mastery === 0) return '#9ca3af'   // 未掌握-灰
+  if (mastery <= 25)  return '#86efac'                      // 入门-浅绿
+  if (mastery <= 50)  return '#34d399'                      // 熟悉-中绿
+  if (mastery <= 75)  return '#10b981'                      // 熟练-深绿
+  return '#059669'                                          // 精通-墨绿
+}
+
 function extractLevel(tags) {
   if (!tags) return '一级'
   for (const tag of tags) {
@@ -101,8 +110,8 @@ function initForceGraph(nodes, links) {
 
   node.append('circle')
     .attr('r', 20)
-    .attr('fill', d => levelColors[d.level] || '#60a5fa')
-    .attr('stroke', d => levelColors[d.level] || '#60a5fa')
+    .attr('fill', d => masteryColor(d.mastery))
+    .attr('stroke', d => masteryColor(d.mastery))
     .attr('stroke-width', 2)
     .attr('stroke-opacity', 0.5)
     .style('filter', 'drop-shadow(0 0 8px currentColor)')
@@ -207,7 +216,7 @@ async function fetchData() {
 
     initForceGraph(nodes, links)
   } catch (e) {
-    error.value = '图谱加载失败，请确认后端已启动'
+    error.value = 'ERROR'
   } finally {
     loading.value = false
   }

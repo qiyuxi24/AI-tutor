@@ -1,3 +1,5 @@
+
+
 {
   "nodes": [
     {
@@ -26,6 +28,42 @@
       "added_by": "human",
       "created_at": "2026-05-17",
       "confidence": null
+    },
+    {
+      "id": "recursion_stack",
+      "name": "递归与栈",
+      "file": "nodes/recursion_stack.md",
+      "tags": ["进阶概念", "三级"],
+      "added_by": "human",
+      "created_at": "2026-05-20",
+      "confidence": null
+    },
+    {
+      "id": "recursion_vs_iteration",
+      "name": "递归 vs 迭代",
+      "file": "nodes/recursion_vs_iteration.md",
+      "tags": ["对比分析", "三级"],
+      "added_by": "human",
+      "created_at": "2026-05-20",
+      "confidence": null
+    },
+    {
+      "id": "tail_recursion",
+      "name": "尾递归优化",
+      "file": "nodes/tail_recursion.md",
+      "tags": ["进阶概念", "三级"],
+      "added_by": "human",
+      "created_at": "2026-05-20",
+      "confidence": null
+    },
+    {
+      "id": "divide_and_conquer",
+      "name": "分治算法",
+      "file": "nodes/divide_and_conquer.md",
+      "tags": ["算法思想", "二级"],
+      "added_by": "human",
+      "created_at": "2026-05-20",
+      "confidence": null
     }
   ],
   "edges": [
@@ -42,6 +80,46 @@
       "to": "recursion_base_case",
       "relation": "prerequisite",
       "label": "需要先掌握终止条件",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "recursion_stack",
+      "to": "recursion_formula",
+      "relation": "prerequisite",
+      "label": "需要理解递推公式",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "recursion_stack",
+      "to": "recursion_def",
+      "relation": "related",
+      "label": "与递归定义相关",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "recursion_vs_iteration",
+      "to": "recursion_def",
+      "relation": "related",
+      "label": "与递归定义对比",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "tail_recursion",
+      "to": "recursion_stack",
+      "relation": "prerequisite",
+      "label": "需要理解调用栈",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "divide_and_conquer",
+      "to": "recursion_def",
+      "relation": "prerequisite",
+      "label": "需要理解递归定义",
       "added_by": "human",
       "confidence": null
     }
