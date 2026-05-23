@@ -184,18 +184,22 @@ def execute_kg_tool(tool_call) -> str:
         return f"工具执行出错: {str(e)}"
 
 
-async def call_llm(system_prompt: str, messages: list) -> str:
+async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True) -> str:
     """
-    调用千问API，支持 function calling 编辑知识图谱
+    调用千问API
     
     参数:
         system_prompt: 系统提示词
-        messages: 完整对话历史 [{role, content}, ...]
+        messages: 完整对话历史 [{role, content}, ...] 或 Pydantic ChatMessage 列表
+        enable_tools: 是否启用 function calling 编辑知识图谱。
+                      True  → 带 KG_TOOLS，支持工具调用（对话场景）
+                      False → 不带 tools，纯文本返回（分析/生成场景）
     
     返回:
         AI的回复文本
     """
     try:
+        # 1. 构造 API 消息列表
         api_messages = [{"role": "system", "content": system_prompt}]
         for msg in messages:
             api_messages.append({
@@ -203,19 +207,23 @@ async def call_llm(system_prompt: str, messages: list) -> str:
                 "content": msg["content"] if isinstance(msg, dict) else msg.content
             })
 
-        # 带 tools 调用千问
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=api_messages,
-            tools=KG_TOOLS,
-            temperature=0.7,
-            max_tokens=2000,
-        )
+        # 2. 构建请求参数
+        create_kwargs = {
+            "model": MODEL_NAME,
+            "messages": api_messages,
+            "temperature": 0.7,
+            "max_tokens": 2000,
+        }
+        # 根据 enable_tools 决定是否注入 function calling 工具定义
+        if enable_tools:
+            create_kwargs["tools"] = KG_TOOLS
 
+        # 3. 调用千问 API
+        response = client.chat.completions.create(**create_kwargs)
         message = response.choices[0].message
 
-        # 如果千问请求了工具调用
-        if message.tool_calls:
+        # 4. 如果启用了工具且千问请求了工具调用
+        if enable_tools and message.tool_calls:
             # 先把 assistant 的消息加入历史（含 tool_calls）
             api_messages.append({
                 "role": "assistant",
@@ -245,7 +253,7 @@ async def call_llm(system_prompt: str, messages: list) -> str:
             )
             return response2.choices[0].message.content
 
-        # 没有工具调用，直接返回
+        # 5. 没有工具调用，直接返回
         return message.content
 
     except Exception as e:

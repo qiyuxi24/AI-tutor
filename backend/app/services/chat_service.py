@@ -1,12 +1,33 @@
-"""对话服务层：编排整个对话处理流程"""
+"""
+对话服务层：编排整个对话处理流程
+
+流程：
+1. 加载对应模式的系统提示词
+2. 注入知识图谱上下文（节点摘要 + 关系列表）
+3. 调用大模型获取 AI 回复（带 function calling）
+4. 对话后分析图谱更新建议
+5. 返回 (AI回复, 模式, 图谱分析结果)
+"""
+
 from app.core.prompt_loader import get_system_prompt
 from app.core.llm_client import call_llm
+from app.core.graph_analyzer import GraphAnalyzer
 from app.api.v1.knowledge import kg
 from pathlib import Path
 
-async def process_message(user_id: str, messages: list, mode: str) -> tuple[str, str]:
+
+async def process_message(user_id: str, messages: list, mode: str) -> tuple[str, str, dict]:
     """
-    处理一条学生消息，返回 (AI 回复，使用的模式)
+    处理一条学生消息
+    
+    参数:
+        user_id: 用户唯一标识
+        messages: 完整对话历史（Pydantic ChatMessage 列表）
+        mode: 引导模式（scaffolding / think_first / reverse_teaching）
+        
+    返回:
+        (AI回复文本, 使用的模式, 图谱分析结果)
+        图谱分析结果格式: {"suggestions": [...], "applied": [...], "pending": [...]}
     """
     # 1. 用最新用户消息生成系统提示词
     last_user_msg = next((m.content for m in reversed(messages) if m.role == 'user'), '')
@@ -60,7 +81,53 @@ async def process_message(user_id: str, messages: list, mode: str) -> tuple[str,
 
 你不需要等用户说"修改"才动手。只要对话涉及某节点内容，就主动去完善它。
 """
-    # 3. 调用 AI（传入完整历史）
-    reply = await call_llm(system_prompt, messages)
+    # 3. 调用 AI（传入完整历史，启用 function calling 编辑图谱）
+    reply = await call_llm(system_prompt, messages, enable_tools=True)
 
-    return reply, mode
+    # 4. 对话后：异步分析图谱更新建议
+    #    获取最后一条用户消息的纯文本
+    user_message_text = last_user_msg
+
+    #    调用图谱分析器
+    graph_analysis = {"suggestions": [], "applied": [], "pending": []}
+    try:
+        analyzer = GraphAnalyzer(kg)
+        analysis = analyzer.analyze_conversation(user_message_text, reply)
+        graph_analysis["suggestions"] = analysis.get("suggestions", [])
+
+        #    自动应用高置信度建议（阈值 0.9）
+        if graph_analysis["suggestions"]:
+            from app.api.v1.knowledge import _apply_suggestion, _load_suggestions, _save_suggestions
+            from datetime import datetime
+
+            auto_threshold = 0.9
+            applied_list = []
+            pending_list = []
+
+            for suggestion in graph_analysis["suggestions"]:
+                confidence = suggestion.get("confidence", 0)
+                if confidence >= auto_threshold:
+                    try:
+                        result = _apply_suggestion(suggestion)
+                        if result:
+                            applied_list.append({**suggestion, "apply_result": result})
+                    except Exception:
+                        pending_list.append(suggestion)
+                else:
+                    pending_list.append(suggestion)
+
+            graph_analysis["applied"] = applied_list
+            graph_analysis["pending"] = pending_list
+
+            # 持久化待审核建议
+            if pending_list:
+                existing = _load_suggestions()
+                for p in pending_list:
+                    p["submitted_at"] = datetime.now().isoformat()
+                existing.extend(pending_list)
+                _save_suggestions(existing)
+    except Exception:
+        # 图谱分析失败不影响对话流程，静默处理
+        pass
+
+    return reply, mode, graph_analysis
