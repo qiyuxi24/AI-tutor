@@ -1,7 +1,15 @@
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.chat import router as chat_router
 from app.api.v1.knowledge import router as knowledge_router
+
+# 配置 "ai-tutor" 日志器，输出到控制台（FastAPI/Uvicorn 默认输出目标）
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 app = FastAPI(title="AI Tutor API", version="0.1.0")
 

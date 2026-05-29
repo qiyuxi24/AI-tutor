@@ -17,13 +17,14 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
   PUT    /knowledge/edge/{edge_index}        - 更新边
   DELETE /knowledge/edge/{edge_index}        - 删除边
   POST   /knowledge/ai/edit                  - AI 编辑图谱（向后兼容）
-  POST   /knowledge/analyze-and-update       - 对话分析 + 自动更新
 """
 
 import json
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from app.core.knowledge_graph import KnowledgeGraph
+from app.core.event_bus import publish, subscribe
 from app.models.schemas import (
     CreateNodeRequest, UpdateNodeInfoRequest,
     CreateEdgeRequest, UpdateEdgeRequest,
@@ -35,6 +36,20 @@ kg = KnowledgeGraph()
 
 # 待审核建议文件路径
 SUGGESTIONS_PATH = kg.data_dir / "ai_suggestions.json"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  SSE 事件推送
+# ══════════════════════════════════════════════════════════════════
+
+@router.get("/knowledge/events")
+async def knowledge_events():
+    """
+    知识图谱变更事件流（SSE）。
+    前端通过 EventSource 连接此端点，当图谱数据变更时自动收到通知并刷新。
+    事件格式：data: {"type": "graph_updated", ...}\n\n
+    """
+    return StreamingResponse(subscribe(), media_type="text/event-stream")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -135,11 +150,11 @@ async def create_node(data: dict):
         md_path = kg.data_dir / node_data["file"]
         md_content = data.get("content")
         if not md_content:
-            # 默认模板
             md_content = f"# {data['name']}\n\n> 手动创建\n\n## 概述\n\n待完善...\n"
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(md_content)
 
+        publish("graph_updated")
         return {"status": "ok", "node": node_data}
 
     except ValueError as e:
@@ -178,6 +193,7 @@ async def update_node(node_id: str, data: dict):
             with open(md_path, "a", encoding="utf-8") as f:
                 f.write(f"\n\n{data['content']}")
 
+    publish("graph_updated")
     return {"status": "ok"}
 
 
@@ -195,6 +211,7 @@ async def update_node_info(node_id: str, request: UpdateNodeInfoRequest):
 
     try:
         kg.update_node_info(node_id, data)
+        publish("graph_updated")
         return {"status": "ok", "node_id": node_id, "updated": list(data.keys())}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -209,6 +226,7 @@ async def delete_node(node_id: str):
     """
     try:
         removed_edges = kg.remove_node(node_id)
+        publish("graph_updated")
         return {"deleted": True, "node_id": node_id, "removed_edges": removed_edges}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -228,12 +246,13 @@ async def update_mastery(node_id: str, data: dict):
     node["mastery"] = mastery
     node["added_by"] = data.get("added_by", "ai")
     kg.save()
+    publish("graph_updated")
     return {"status": "ok", "node_id": node_id, "mastery": mastery}
 
 
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════
 #  边 CRUD
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════
 
 @router.post("/knowledge/edge")
 async def create_edge(data: dict):
@@ -245,6 +264,7 @@ async def create_edge(data: dict):
     """
     try:
         kg.add_edge(data)
+        publish("graph_updated")
         return {"status": "ok", "edge": data}
     except ValueError as e:
         # 判断是否是重复边错误
@@ -271,6 +291,7 @@ async def update_edge(edge_index: int, request: UpdateEdgeRequest):
     try:
         kg.update_edge(edge_index, data)
         updated_edge = kg.edges[edge_index]
+        publish("graph_updated")
         return {"status": "ok", "edge_index": edge_index, "edge": updated_edge}
     except IndexError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -285,6 +306,7 @@ async def delete_edge(edge_index: int):
     """
     try:
         kg.remove_edge(edge_index)
+        publish("graph_updated")
         return {"deleted": True, "edge_index": edge_index}
     except IndexError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -301,9 +323,11 @@ async def ai_edit_graph(data: dict):
     try:
         if action == "add_node":
             kg.add_node(data["node"])
+            publish("graph_updated")
             return {"status": "ok"}
         elif action == "add_edge":
             kg.add_edge(data["edge"])
+            publish("graph_updated")
             return {"status": "ok"}
         elif action == "update_node":
             node = kg.get_node(data["node_id"])
@@ -313,6 +337,7 @@ async def ai_edit_graph(data: dict):
                 if key in data:
                     node[key] = data[key]
             kg.save()
+            publish("graph_updated")
             return {"status": "ok"}
         else:
             raise HTTPException(status_code=400, detail=f"未知操作：{action}")
@@ -321,7 +346,7 @@ async def ai_edit_graph(data: dict):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  图谱分析 + 自动更新
+#  AI 建议执行（公共函数，供 llm_client 和 chat_service 共用）
 # ══════════════════════════════════════════════════════════════════
 
 def _load_suggestions() -> list:
@@ -341,125 +366,109 @@ def _save_suggestions(suggestions: list) -> None:
         json.dump(suggestions, f, ensure_ascii=False, indent=2)
 
 
-@router.post("/knowledge/analyze-and-update")
-async def analyze_and_update(data: dict):
+def create_node_from_ai(node_id: str, node_name: str,
+                        tags: list | None = None, summary: str = "",
+                        difficulty: int = 3, estimated_minutes: int = 15,
+                        content: str = "", from_nodes: list | None = None,
+                        confidence: float | None = None) -> str:
     """
-    分析对话并自动更新知识图谱
+    公共函数：创建一个 AI 生成的节点（写图谱 + 写 MD 文件 + 建前置边）。
+    供 execute_kg_tool() 和 _apply_suggestion() 共用，消除重复代码。
 
-    请求体:
-    {
-        "user_message": "学生说的话",
-        "ai_reply": "AI的回复",
-        "auto_approve_threshold": 0.9  // 超过此分数的建议自动生效
-    }
+    参数:
+        node_id:          节点英文 ID
+        node_name:        节点中文名
+        tags:             标签列表
+        summary:          一句话摘要
+        difficulty:       难度 1-5
+        estimated_minutes: 预估学习分钟数
+        content:          Markdown 正文（空则生成默认模板）
+        from_nodes:       前置节点 ID 列表，自动创建 prerequisite 边
+        confidence:       AI 置信度
 
     返回:
-    {
-        "applied": [...],       // 已自动生效的建议
-        "pending": [...],       // 待审核的建议
-        "graph_updated": bool   // 图谱是否有变化
-    }
+        操作结果描述字符串
     """
-    from app.core.graph_analyzer import GraphAnalyzer
-
-    user_message = data.get("user_message", "")
-    ai_reply = data.get("ai_reply", "")
-    threshold = data.get("auto_approve_threshold", 0.9)
-
-    analyzer = GraphAnalyzer(kg)
-    analysis = analyzer.analyze_conversation(user_message, ai_reply)
-
-    applied = []
-    pending = []
-
-    for suggestion in analysis.get("suggestions", []):
-        confidence = suggestion.get("confidence", 0)
-        if confidence >= threshold:
-            try:
-                result = _apply_suggestion(suggestion)
-                if result:
-                    applied.append({**suggestion, "apply_result": result})
-            except Exception as e:
-                pending.append({**suggestion, "apply_error": str(e)})
-        else:
-            pending.append(suggestion)
-
-    if pending:
-        existing = _load_suggestions()
-        from datetime import datetime
-        for p in pending:
-            p["submitted_at"] = datetime.now().isoformat()
-        existing.extend(pending)
-        _save_suggestions(existing)
-
-    return {
-        "applied": applied,
-        "pending": pending,
-        "graph_updated": len(applied) > 0,
+    node_data = {
+        "id": node_id,
+        "name": node_name,
+        "file": f"nodes/{node_id}.md",
+        "tags": tags or [],
+        "summary": summary,
+        "mastery": 0,
+        "difficulty": difficulty,
+        "estimated_minutes": estimated_minutes,
+        "added_by": "ai",
+        "confidence": confidence,
+        "created_at": "",
     }
+    kg.add_node(node_data)
+
+    # 写 MD 文件
+    md_path = kg.data_dir / node_data["file"]
+    if content.strip():
+        md_content = content if content.strip().startswith("#") else \
+                     f"# {node_name}\n\n> 由 AI 自动创建\n\n{content}"
+    else:
+        summary_line = f"\n> {summary}" if summary else ""
+        md_content = f"# {node_name}\n> 由 AI 自动创建{summary_line}\n\n## 概述\n\n待完善...\n"
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md_content)
+
+    # 创建前置边
+    edge_count = 0
+    for pid in (from_nodes or []):
+        if kg.get_node(pid):
+            try:
+                kg.add_edge({
+                    "from": pid, "to": node_id,
+                    "relation": "prerequisite",
+                    "label": f"是学习 {node_name} 的前置知识",
+                    "added_by": "ai",
+                })
+                edge_count += 1
+            except ValueError:
+                pass
+
+    return f"已创建节点「{node_name}」(ID: {node_id})，关联 {edge_count} 条边"
 
 
 def _apply_suggestion(suggestion: dict) -> str:
-    """执行单条图谱更新建议，返回结果描述字符串"""
+    """
+    执行单条图谱分析建议（来自 GraphAnalyzer），返回结果描述字符串。
+    注意：与 execute_kg_tool() 不同，suggestion 数据结构来自分析 LLM 的 JSON。
+    """
     action = suggestion.get("action")
 
     if action == "add_node":
-        node = suggestion["node"]
-        node_data = {
-            "id": node["id"],
-            "name": node["name"],
-            "file": node.get("file", f"nodes/{node['id']}.md"),
-            "tags": node.get("tags", []),
-            "summary": "",
-            "mastery": 0,
-            "difficulty": 3,
-            "estimated_minutes": 15,
-            "added_by": "ai",
-            "confidence": suggestion.get("confidence"),
-            "created_at": "",
-        }
-        kg.add_node(node_data)
-
-        md_path = kg.data_dir / node_data["file"]
-        md_content = f"# {node['name']}\n\n> 由 AI 自动创建\n\n## 概述\n\n待完善...\n"
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(md_content)
-
-        edge_count = 0
-        for rec_edge in suggestion.get("recommended_edges", []):
-            if kg.get_node(rec_edge.get("from")) and kg.get_node(rec_edge.get("to")):
-                try:
-                    kg.add_edge({
-                        "from": rec_edge["from"],
-                        "to": rec_edge["to"],
-                        "relation": rec_edge.get("relation", "related"),
-                        "label": rec_edge.get("label", ""),
-                        "added_by": "ai",
-                        "confidence": suggestion.get("confidence"),
-                    })
-                    edge_count += 1
-                except ValueError:
-                    pass
-
-        return f"已创建节点「{node['name']}」(ID: {node['id']})，关联 {edge_count} 条边"
+        node = suggestion.get("node", {})
+        return create_node_from_ai(
+            node_id=node.get("id", ""),
+            node_name=node.get("name", ""),
+            tags=node.get("tags"),
+            summary=node.get("summary", ""),
+            difficulty=int(node.get("difficulty", 3)),
+            estimated_minutes=int(node.get("estimated_minutes", 15)),
+            content=node.get("content", ""),
+            from_nodes=[e["from"] for e in suggestion.get("recommended_edges", [])
+                        if e.get("to") == node.get("id", "")],
+            confidence=suggestion.get("confidence"),
+        )
 
     elif action == "add_edge":
         edge = suggestion["edge"]
         kg.add_edge({
-            "from": edge["from"],
-            "to": edge["to"],
+            "from": edge["from"], "to": edge["to"],
             "relation": edge.get("relation", "related"),
             "label": edge.get("label", ""),
-            "added_by": "ai",
-            "confidence": suggestion.get("confidence"),
+            "added_by": "ai", "confidence": suggestion.get("confidence"),
         })
         return f"已创建边: {edge['from']} → {edge['to']} ({edge.get('relation', 'related')})"
 
     elif action == "update_content":
-        node_id = suggestion["node_id"]
-        content_snippet = suggestion.get("content_snippet", "")
-        kg.update_node_content(node_id, content_snippet, mode="append")
-        return f"已更新节点 {node_id} 的内容"
+        kg.update_node_content(suggestion["node_id"],
+                               suggestion.get("content_snippet", ""), mode="append")
+        return f"已更新节点 {suggestion['node_id']} 的内容"
 
     else:
         raise ValueError(f"不支持的操作：{action}")

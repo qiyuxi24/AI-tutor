@@ -1,9 +1,10 @@
 import axios from 'axios'
 
 // 创建axios实例，指向后端地址
+// timeout 设为 300s，因为 LLM API 调用可能需要较长时间（含 function calling 多轮）
 export const apiClient = axios.create({
   baseURL: 'http://localhost:8000',
-  timeout: 10000,
+  timeout: 300000,
 })
 
 // 获取或生成用户ID

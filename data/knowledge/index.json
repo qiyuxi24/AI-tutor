@@ -142,6 +142,74 @@
       "added_by": "human",
       "confidence": null,
       "created_at": "2026-05-23T16:15:01.604365"
+    },
+    {
+      "id": "intro_prompt_eng",
+      "name": "提示词工程入门",
+      "file": "nodes/intro_prompt_eng.md",
+      "tags": [
+        "AI",
+        "LLM",
+        "入门"
+      ],
+      "summary": "学习如何通过设计结构和要素来更好地与 AI 沟通。",
+      "mastery": 0,
+      "difficulty": 2,
+      "estimated_minutes": 20,
+      "added_by": "ai",
+      "confidence": null,
+      "created_at": "2026-05-28T23:23:40.995552"
+    },
+    {
+      "id": "harmony_dev_intro",
+      "name": "鸿蒙开发入门",
+      "file": "nodes/harmony_dev_intro.md",
+      "tags": [
+        "鸿蒙",
+        "移动开发",
+        "二级"
+      ],
+      "summary": "了解 HarmonyOS 的核心特性、分布式架构以及 ArkTS 开发语言。",
+      "mastery": 0,
+      "difficulty": 2,
+      "estimated_minutes": 20,
+      "added_by": "ai",
+      "confidence": null,
+      "created_at": "2026-05-29T20:02:04.283463"
+    },
+    {
+      "id": "harmonyos_intro",
+      "name": "鸿蒙开发入门",
+      "file": "nodes/harmonyos_intro.md",
+      "tags": [
+        "鸿蒙",
+        "移动开发",
+        "IoT"
+      ],
+      "summary": "介绍HarmonyOS操作系统的核心概念、分布式特性以及ArkTS开发基础。",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 20,
+      "added_by": "ai",
+      "confidence": null,
+      "created_at": "2026-05-29T20:02:04.286998"
+    },
+    {
+      "id": "german_learning_path",
+      "name": "德语入门",
+      "file": "nodes/german_learning_path.md",
+      "tags": [
+        "外语",
+        "爱好",
+        "入门"
+      ],
+      "summary": "为语言爱好者设计的德语学习路径",
+      "mastery": 0,
+      "difficulty": 1,
+      "estimated_minutes": 10,
+      "added_by": "ai",
+      "confidence": null,
+      "created_at": "2026-05-29T23:32:08.066065"
     }
   ],
   "edges": [

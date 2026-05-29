@@ -14,8 +14,12 @@
 
 import json
 import re
+import logging
 from typing import Optional
 from app.core.llm_client import call_llm
+from app.core.error_codes import ErrorCode, log_error, log_info
+
+logger = logging.getLogger("ai-tutor")
 
 
 # ── 图谱分析专用系统提示词 ──
@@ -34,7 +38,11 @@ JSON 格式如下：
         "id": "英文下划线ID",
         "name": "中文名称",
         "tags": ["标签1", "标签2"],
-        "file": "nodes/英文ID.md"
+        "file": "nodes/英文ID.md",
+        "summary": "一句话概括这个知识点",
+        "difficulty": 3,
+        "estimated_minutes": 15,
+        "content": "这个知识点的Markdown详细内容，至少包含定义、要点、示例"
       },
       "recommended_edges": [
         { "from": "源节点ID", "to": "新节点ID", "relation": "prerequisite|related|confusion|extension", "label": "关系说明" }
@@ -68,7 +76,8 @@ JSON 格式如下：
 4. 边的 relation 只能是：prerequisite（前置依赖）、related（相关）、confusion（易混淆）、extension（扩展）
 5. 不要建议删除节点或边
 6. 答案必须是有效的 JSON，不要包含换行符以外的控制字符
-7. 注意针对node中的content和标签进行更新
+7. **重要**：新增节点的 content 字段必须根据对话内容填写完整的 Markdown 知识讲解，包含定义、要点、示例等，不要留空
+8. difficulty 取值 1-5（1=最简单，5=最难），estimated_minutes 为预估学习分钟数
 """
 
 
@@ -92,18 +101,40 @@ class GraphAnalyzer:
         """
         self.kg = knowledge_graph
 
-    def _build_graph_context(self) -> str:
+    def _build_graph_context(self, detailed: bool = False) -> str:
         """
         构造当前图谱的文本摘要，作为 LLM 分析的上下文
+        
+        参数:
+            detailed: 若为 True，会读取 MD 文件摘要并包含掌握度/难度等字段，
+                      适用于聊天 LLM 的上下文注入；
+                      若为 False，仅输出节点名和标签的概览，适用于分析 LLM。
         
         返回:
             格式化的图谱信息字符串（节点列表 + 关系列表）
         """
-        # 节点列表：ID、名称、标签
+        # 节点列表
         node_lines = []
         for n in self.kg.nodes:
             tags = ", ".join(n.get("tags", []))
-            node_lines.append(f"  [{n['id']}] {n['name']} (标签: {tags})")
+            if detailed:
+                # 详细模式：含掌握度、难度、MD 摘要（用于聊天 AI 上下文）
+                md_path = self.kg.data_dir / n.get("file", f"nodes/{n['id']}.md")
+                content = ""
+                if md_path.exists():
+                    with open(md_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                        content = "".join(lines[:30])[:1000]
+                mastery = n.get("mastery", 0)
+                diff = n.get("difficulty", 3)
+                mins = n.get("estimated_minutes", 15)
+                node_lines.append(
+                    f"  [{n['id']}] {n['name']} (掌握度:{mastery}, 难度:{diff}, 预计:{mins}分)\n"
+                    f"    摘要: {content[:200].replace(chr(10), ' ')}"
+                )
+            else:
+                # 概览模式：仅 ID + 名称 + 标签（用于分析 LLM）
+                node_lines.append(f"  [{n['id']}] {n['name']} (标签: {tags})")
         node_list = "\n".join(node_lines) if node_lines else "  (暂无节点)"
 
         # 关系列表
@@ -122,7 +153,7 @@ class GraphAnalyzer:
 ### 现有关系（共 {len(self.kg.edges)} 条）
 {edge_list}"""
 
-    def analyze_conversation(self, user_message: str, ai_reply: str) -> dict:
+    async def analyze_conversation(self, user_message: str, ai_reply: str) -> dict:
         """
         分析一段对话，生成图谱更新建议
         
@@ -168,13 +199,30 @@ AI导师：{ai_reply}
         analysis_messages = [{"role": "user", "content": analysis_prompt}]
 
         try:
-            raw_response = call_llm(
+            raw_response = await call_llm(
                 full_system_prompt,
                 analysis_messages,
                 enable_tools=False  # ← 关键：禁用 function calling，只要纯 JSON
             )
         except Exception as e:
-            # LLM 调用失败时，返回空建议
+            # LLM 调用失败时，记录错误并发布事件，返回空建议
+            user_msg = log_error(
+                ErrorCode.GRAPH_ANALYZE_FAILED,
+                detail=str(e),
+                exception=e,
+                context={"phase": "llm_call"}
+            )
+            # 尝试发布错误事件到 SSE（如果 event_bus 可用）
+            try:
+                from app.core.event_bus import publish
+                publish("error", {
+                    "code": ErrorCode.code_only(ErrorCode.GRAPH_ANALYZE_FAILED),
+                    "message": user_msg,
+                    "module": "graph_analyzer",
+                    "detail": str(e)[:200],
+                })
+            except Exception:
+                pass
             return {"suggestions": []}
 
         # 4. 解析 JSON 响应
@@ -223,7 +271,11 @@ AI导师：{ai_reply}
             except json.JSONDecodeError:
                 pass
 
-        # 所有策略都失败，返回空建议
+        # 所有策略都失败，记录日志
+        log_info(
+            ErrorCode.GRAPH_JSON_PARSE_ERROR,
+            detail=f"无法解析LLM返回的JSON，原始响应前200字: {raw[:200]}"
+        )
         return []
 
     def _validate_and_filter(self, data: dict) -> list[dict]:

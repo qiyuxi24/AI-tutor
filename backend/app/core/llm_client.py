@@ -1,20 +1,24 @@
 """大模型API客户端 —— 接入阿里云千问 + 知识图谱编辑工具"""
 import os
 import json
-from urllib.request import Request, urlopen
-from urllib.error import URLError
-from openai import OpenAI
+import logging
+from openai import AsyncOpenAI, APIStatusError, APITimeoutError, APIConnectionError, AuthenticationError, RateLimitError
 from dotenv import load_dotenv
+from app.core.error_codes import ErrorCode, log_error
 
 load_dotenv()
 
-client = OpenAI(
+logger = logging.getLogger("ai-tutor")
+
+# 使用 AsyncOpenAI 实现真正的异步 I/O，不阻塞 FastAPI 事件循环
+# timeout 设为 120s：阿里云百炼 qwen-plus 模型在 function calling 多轮调用场景下可能需要较长时间
+client = AsyncOpenAI(
     api_key=os.getenv("DASHSCOPE_API_KEY"),
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    timeout=120.0,
 )
 
 MODEL_NAME = os.getenv("MODEL_NAME", "qwen-plus")
-KG_API_BASE = "http://localhost:8000/api/v1/knowledge"
 
 # ─── 知识图谱编辑工具定义（千问 function calling）───
 KG_TOOLS = [
@@ -110,77 +114,77 @@ KG_TOOLS = [
 
 
 def execute_kg_tool(tool_call) -> str:
-    """执行千问请求的知识图谱操作，返回结果描述"""
+    """
+    执行千问请求的知识图谱操作，返回结果描述
+    
+    直接调用 KnowledgeGraph 对象的方法，不走 HTTP 自调用。
+    这样做的好处：
+    - 无网络开销（避免 localhost HTTP 往返）
+    - 异常类型更清晰（ValueError vs URLError）
+    - 与 _apply_suggestion() 使用同一套 kg 操作方式
+    """
+    # 延迟 import，避免模块加载时的循环依赖
+    from app.api.v1.knowledge import kg
+
     try:
         args = json.loads(tool_call.function.arguments)
         name = tool_call.function.name
 
         if name == "add_knowledge_node":
-            node_payload = {
-                "id": args["id"], "name": args["name"],
-                "tags": args.get("tags", []),
-                "summary": args.get("summary", ""),
-                "difficulty": args.get("difficulty", 3),
-                "estimated_minutes": args.get("estimated_minutes", 15),
-                "content": args["content"],
-                "added_by": "ai",
-            }
-            body = json.dumps(node_payload, ensure_ascii=False).encode()
-            req = Request(f"{KG_API_BASE}/node", data=body, method='POST',
-                          headers={'Content-Type': 'application/json'})
-            with urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read().decode())
-            if resp.status != 200:
-                return f"创建节点失败: {result.get('detail', str(result))}"
-
-            for pid in args.get("from_nodes", []):
-                edge_payload = {
-                    "from": pid, "to": args["id"],
-                    "relation": "prerequisite",
-                    "label": f"是学习 {args['name']} 的前置知识",
-                    "added_by": "ai",
-                }
-                ebody = json.dumps(edge_payload, ensure_ascii=False).encode()
-                ereq = Request(f"{KG_API_BASE}/edge", data=ebody, method='POST',
-                               headers={'Content-Type': 'application/json'})
-                urlopen(ereq, timeout=5)
-
-            return f"已创建节点「{args['name']}」(ID: {args['id']})，关联了 {len(args.get('from_nodes', []))} 条前置边"
+            from app.api.v1.knowledge import create_node_from_ai
+            return create_node_from_ai(
+                node_id=args["id"],
+                node_name=args["name"],
+                tags=args.get("tags"),
+                summary=args.get("summary", ""),
+                difficulty=int(args.get("difficulty", 3)),
+                estimated_minutes=int(args.get("estimated_minutes", 15)),
+                content=args.get("content", ""),
+                from_nodes=args.get("from_nodes"),
+            )
 
         elif name == "update_node_content":
-            payload = {"content": args["content"], "op": args.get("op", "replace")}
-            body = json.dumps(payload, ensure_ascii=False).encode()
-            req = Request(f"{KG_API_BASE}/node/{args['node_id']}", data=body, method='PUT',
-                          headers={'Content-Type': 'application/json'})
-            with urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read().decode())
-            if resp.status != 200:
-                return f"更新失败: {result.get('detail', str(result))}"
-            return f"已更新节点 {args['node_id']} 的内容（{args.get('op', 'replace')}）"
+            node_id = args["node_id"]
+            content = args["content"]
+            op = args.get("op", "replace")
+            kg.update_node_content(node_id, content, mode=op)
+            return f"已更新节点 {node_id} 的内容（{op}）"
 
         elif name == "update_mastery":
-            payload = json.dumps({"mastery": args["mastery"], "added_by": "ai"}).encode()
-            req = Request(f"{KG_API_BASE}/node/{args['node_id']}/mastery", data=payload,
-                          method='PUT', headers={'Content-Type': 'application/json'})
-            urlopen(req, timeout=10)
-            return f"已将 {args['node_id']} 的掌握程度更新为 {args['mastery']}/100"
+            node_id = args["node_id"]
+            mastery = args["mastery"]
+            node = kg.get_node(node_id)
+            if node is None:
+                return f"更新失败：节点 {node_id} 不存在"
+            node["mastery"] = mastery
+            kg.save()
+            return f"已将 {node_id} 的掌握程度更新为 {mastery}/100"
 
         elif name == "add_edge":
-            payload = json.dumps(args, ensure_ascii=False).encode()
-            req = Request(f"{KG_API_BASE}/edge", data=payload, method='POST',
-                          headers={'Content-Type': 'application/json'})
-            urlopen(req, timeout=10)
+            kg.add_edge({
+                "from": args["from"],
+                "to": args["to"],
+                "relation": args["relation"],
+                "label": args.get("label", ""),
+                "added_by": "ai",
+            })
             return f"已创建边: {args['from']} → {args['to']} ({args['relation']})"
 
         elif name == "delete_node":
-            req = Request(f"{KG_API_BASE}/node/{args['node_id']}", method='DELETE')
-            urlopen(req, timeout=10)
-            return f"已删除节点 {args['node_id']}"
+            node_id = args["node_id"]
+            removed_edges = kg.remove_node(node_id)
+            return f"已删除节点 {node_id}，同时移除 {removed_edges} 条关联边"
 
         else:
             return f"未知工具: {name}"
 
+    except ValueError as e:
+        # 业务逻辑错误（重复节点、不存在的节点等）——这是 AI 的错，返回友好提示
+        log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), context={"tool": name})
+        return f"操作失败: {str(e)}"
     except Exception as e:
+        # 其他意外错误（文件写入失败等）
+        log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), exception=e, context={"tool": name})
         return f"工具执行出错: {str(e)}"
 
 
@@ -197,64 +201,109 @@ async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True
     
     返回:
         AI的回复文本
+    
+    异常:
+        所有异常都会附加错误码信息后向上抛出:
+        - APITimeoutError      → E-LLM-001
+        - RateLimitError       → E-LLM-002
+        - AuthenticationError  → E-LLM-003
+        - APIConnectionError   → E-LLM-004
+        - APIStatusError (5xx) → E-LLM-005
+        - 其他未知异常          → E-SYS-002
     """
+    # 1. 构造 API 消息列表
+    api_messages = [{"role": "system", "content": system_prompt}]
+    for msg in messages:
+        api_messages.append({
+            "role": msg["role"] if isinstance(msg, dict) else msg.role,
+            "content": msg["content"] if isinstance(msg, dict) else msg.content
+        })
+
+    # 2. 构建请求参数
+    create_kwargs = {
+        "model": MODEL_NAME,
+        "messages": api_messages,
+        "temperature": 0.7,
+        "max_tokens": 2000,
+    }
+    # 根据 enable_tools 决定是否注入 function calling 工具定义
+    if enable_tools:
+        create_kwargs["tools"] = KG_TOOLS
+
+    # 3. 异步调用千问 API（真正的非阻塞 I/O）
     try:
-        # 1. 构造 API 消息列表
-        api_messages = [{"role": "system", "content": system_prompt}]
-        for msg in messages:
+        response = await client.chat.completions.create(**create_kwargs)
+    except APITimeoutError as e:
+        user_msg = log_error(ErrorCode.LLM_API_TIMEOUT, detail=str(e), exception=e)
+        raise RuntimeError(user_msg) from e
+    except RateLimitError as e:
+        user_msg = log_error(ErrorCode.LLM_API_RATE_LIMIT, detail=str(e), exception=e)
+        raise RuntimeError(user_msg) from e
+    except AuthenticationError as e:
+        user_msg = log_error(ErrorCode.LLM_API_AUTH_ERROR, detail=str(e), exception=e)
+        raise RuntimeError(user_msg) from e
+    except APIConnectionError as e:
+        user_msg = log_error(ErrorCode.LLM_API_NETWORK, detail=str(e), exception=e)
+        raise RuntimeError(user_msg) from e
+    except APIStatusError as e:
+        if e.status_code >= 500:
+            user_msg = log_error(ErrorCode.LLM_API_SERVER_ERROR, detail=f"HTTP {e.status_code}: {str(e)}", exception=e)
+        else:
+            user_msg = log_error(ErrorCode.LLM_API_SERVER_ERROR, detail=f"HTTP {e.status_code}: {str(e)}", exception=e)
+        raise RuntimeError(user_msg) from e
+    except Exception as e:
+        user_msg = log_error(ErrorCode.SYS_UNKNOWN_ERROR, detail=f"LLM调用未知错误: {str(e)}", exception=e)
+        raise RuntimeError(user_msg) from e
+
+    message = response.choices[0].message
+
+    # 空回复检查
+    if not message.content and not message.tool_calls:
+        user_msg = log_error(ErrorCode.LLM_RESPONSE_EMPTY, detail="AI返回空内容")
+        raise RuntimeError(user_msg)
+
+    # 4. 如果启用了工具且千问请求了工具调用
+    if enable_tools and message.tool_calls:
+        # 先把 assistant 的消息加入历史（含 tool_calls）
+        api_messages.append({
+            "role": "assistant",
+            "content": message.content or "",
+            "tool_calls": [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in message.tool_calls
+            ]
+        })
+
+        # 执行每一个工具，把结果加回消息
+        # 注意：execute_kg_tool 是同步函数（本地文件 I/O），不阻塞事件循环太久
+        for tc in message.tool_calls:
+            result = execute_kg_tool(tc)
             api_messages.append({
-                "role": msg["role"] if isinstance(msg, dict) else msg.role,
-                "content": msg["content"] if isinstance(msg, dict) else msg.content
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result
             })
 
-        # 2. 构建请求参数
-        create_kwargs = {
-            "model": MODEL_NAME,
-            "messages": api_messages,
-            "temperature": 0.7,
-            "max_tokens": 2000,
-        }
-        # 根据 enable_tools 决定是否注入 function calling 工具定义
-        if enable_tools:
-            create_kwargs["tools"] = KG_TOOLS
-
-        # 3. 调用千问 API
-        response = client.chat.completions.create(**create_kwargs)
-        message = response.choices[0].message
-
-        # 4. 如果启用了工具且千问请求了工具调用
-        if enable_tools and message.tool_calls:
-            # 先把 assistant 的消息加入历史（含 tool_calls）
-            api_messages.append({
-                "role": "assistant",
-                "content": message.content or "",
-                "tool_calls": [
-                    {"id": tc.id, "type": "function",
-                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                    for tc in message.tool_calls
-                ]
-            })
-
-            # 执行每一个工具，把结果加回消息
-            for tc in message.tool_calls:
-                result = execute_kg_tool(tc)
-                api_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result
-                })
-
-            # 调用千问第二次，让它基于工具结果生成回复
-            response2 = client.chat.completions.create(
+        # 异步调用千问第二次，让它基于工具结果生成回复
+        try:
+            response2 = await client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=api_messages,
                 temperature=0.7,
                 max_tokens=2000,
             )
-            return response2.choices[0].message.content
+        except APITimeoutError as e:
+            user_msg = log_error(ErrorCode.LLM_API_TIMEOUT, detail=f"第二次调用超时: {str(e)}", exception=e)
+            raise RuntimeError(user_msg) from e
+        except APIConnectionError as e:
+            user_msg = log_error(ErrorCode.LLM_API_NETWORK, detail=f"第二次调用网络错误: {str(e)}", exception=e)
+            raise RuntimeError(user_msg) from e
+        except Exception as e:
+            user_msg = log_error(ErrorCode.SYS_UNKNOWN_ERROR, detail=f"第二次调用失败: {str(e)}", exception=e)
+            raise RuntimeError(user_msg) from e
 
-        # 5. 没有工具调用，直接返回
-        return message.content
+        return response2.choices[0].message.content
 
-    except Exception as e:
-        return f"AI调用失败: {str(e)}"
+    # 5. 没有工具调用，直接返回
+    return message.content
