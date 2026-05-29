@@ -11,12 +11,33 @@ const props = defineProps({
 const store = useChatStore()
 const messagesEnd = ref(null)
 
+function scrollToBottom() {
+  nextTick(() => {
+    messagesEnd.value?.scrollIntoView({ behavior: 'smooth' })
+  })
+}
+
+// 消息数量变化时滚动
 watch(
   () => store.currentMessages.length,
-  async () => {
-    await nextTick()
-    messagesEnd.value?.scrollIntoView({ behavior: 'smooth' })
-  }
+  () => scrollToBottom()
+)
+
+// 切换对话时滚动到底部
+watch(
+  () => store.currentId,
+  () => scrollToBottom()
+)
+
+// 流式内容变化时也滚动（内容长度变化）
+watch(
+  () => {
+    const msgs = store.currentMessages
+    if (msgs.length === 0) return ''
+    const last = msgs[msgs.length - 1]
+    return last?.content?.length ?? 0
+  },
+  () => scrollToBottom()
 )
 
 const greetingMessages = [

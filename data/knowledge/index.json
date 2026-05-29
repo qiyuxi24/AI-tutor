@@ -210,6 +210,40 @@
       "added_by": "ai",
       "confidence": null,
       "created_at": "2026-05-29T23:32:08.066065"
+    },
+    {
+      "id": "german_du_sie",
+      "name": "德语的 Du 与 Sie（称呼规范）",
+      "file": "nodes/german_du_sie.md",
+      "tags": [
+        "语言学习",
+        "德国文化",
+        "基础"
+      ],
+      "summary": "讲解德语中用于表示“你”和“您”的两个核心代词及其使用场景与文化背景。",
+      "mastery": 25,
+      "difficulty": 2,
+      "estimated_minutes": 10,
+      "added_by": "ai",
+      "confidence": 0.95,
+      "created_at": ""
+    },
+    {
+      "id": "german_formal_intro",
+      "name": "德语正式问候与自我介绍",
+      "file": "nodes/german_formal_intro.md",
+      "tags": [
+        "语言学习",
+        "日常会话",
+        "基础"
+      ],
+      "summary": "掌握使用Sie进行正式场合下询问姓名及回应的标准句型",
+      "mastery": 0,
+      "difficulty": 1,
+      "estimated_minutes": 10,
+      "added_by": "ai",
+      "confidence": 0.9,
+      "created_at": ""
     }
   ],
   "edges": [
@@ -267,6 +301,22 @@
       "relation": "related",
       "label": "",
       "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "german_learning_path",
+      "to": "german_du_sie",
+      "relation": "prerequisite",
+      "label": "是学习 德语的 Du 与 Sie（称呼规范） 的前置知识",
+      "added_by": "ai",
+      "confidence": null
+    },
+    {
+      "from": "german_du_sie",
+      "to": "german_formal_intro",
+      "relation": "prerequisite",
+      "label": "是学习 德语正式问候与自我介绍 的前置知识",
+      "added_by": "ai",
       "confidence": null
     }
   ]

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
-import { sendMessage, apiClient } from '../api/index.js'
+import { ref, reactive, computed } from 'vue'
+import { sendMessage, sendMessageStream, apiClient } from '../api/index.js'
 
 const STORAGE_KEY_CONVERSATIONS = 'ai_tutor_conversations'
 const STORAGE_KEY_CURRENT = 'ai_tutor_current_id'
@@ -182,7 +182,10 @@ export const useChatStore = defineStore('chat', () => {
     persist()
   }
 
-  // ─── 发送消息 ───
+  // ─── 流式请求的 AbortController（用于取消） ───
+  let streamController = null
+
+  // ─── 发送消息（流式） ───
   async function send(text) {
     if (!text.trim()) return
 
@@ -202,55 +205,47 @@ export const useChatStore = defineStore('chat', () => {
       conv.title = text.length > 20 ? text.slice(0, 20) + '…' : text
     }
 
+    // 添加占位 AI 消息（流式填充）
+    conv.messages.push({ role: 'assistant', content: '' })
     loading.value = true
     persist()
 
-    try {
-      const res = await sendMessage(conv.messages, mode.value)
-      const aiReply = res.data.reply
-      conv.messages.push({ role: 'assistant', content: aiReply })
-    } catch (err) {
-      // ─── 区分错误类型，映射到不同的错误码 ───
-      // E-COMM：前后端通信层（axios 超时、网络断连、HTTP 状态码）
-      // E-LLM/等：后端模块层（后端返回的 body 中已包含错误码）
-      let errorMsg = '❌ 请求失败，请确认后端已启动'
-
-      if (err.response) {
-        // 后端正常响应了，但 HTTP 状态码非 2xx
-        // 优先使用后端返回体中的错误码（已由后端模块附加）
-        const bodyDetail = err.response.data?.detail || ''
-        if (bodyDetail && bodyDetail.startsWith('[E-')) {
-          // 后端已经给了错误码（如 [E-LLM-001]），直接使用
-          errorMsg = bodyDetail
-        } else {
-          // 后端没有给错误码，按 HTTP 状态码归类为通信层错误
-          const status = err.response.status
-          if (status === 502) {
-            errorMsg = '[E-COMM-003] 后端网关错误 (502)，服务可能未就绪'
-          } else if (status === 503) {
-            errorMsg = '[E-COMM-004] 后端服务不可用 (503)，请稍后重试'
-          } else if (status === 504) {
-            errorMsg = '[E-COMM-005] 后端网关超时 (504)，AI调用可能仍在处理中'
-          } else if (status >= 500) {
-            errorMsg = `[E-COMM-006] 后端内部错误 (HTTP ${status})`
-          } else {
-            errorMsg = `[E-COMM-007] 后端返回异常 (HTTP ${status})${bodyDetail ? ': ' + bodyDetail : ''}`
+    // 使用流式 API
+    streamController = sendMessageStream(
+      conv.messages.slice(0, -1), // 不含占位消息的对话历史
+      mode.value,
+      {
+        // 每收到一个 token，追加到占位消息
+        onToken: (token) => {
+          const lastIdx = conv.messages.length - 1
+          const lastMsg = conv.messages[lastIdx]
+          if (lastMsg.role === 'assistant') {
+            // 用 splice 替换元素强制触发 Vue 响应式更新
+            conv.messages.splice(lastIdx, 1, {
+              ...lastMsg,
+              content: lastMsg.content + token,
+            })
           }
-        }
-      } else if (err.code === 'ECONNABORTED') {
-        // axios 超时 → 前后端通信超时
-        errorMsg = '[E-COMM-001] 请求超时，后端处理过慢或网络延迟'
-      } else if (err.message === 'Network Error') {
-        // 网络断连 → 后端可能没启动
-        errorMsg = '[E-COMM-002] 无法连接到后端服务器，请确认后端已启动'
-      } else {
-        errorMsg = `[E-SYS-002] 未知异常: ${err.message || '未知错误'}`
+        },
+        // 流式完成
+        onDone: (fullReply) => {
+          loading.value = false
+          // 如果流式没给任何内容，移除占位消息
+          if (!fullReply) {
+            conv.messages.pop()
+          }
+          persist()
+        },
+        // 出错
+        onError: (errorMsg) => {
+          loading.value = false
+          // 移除占位消息，替换为错误消息
+          conv.messages.pop()
+          conv.messages.push({ role: 'assistant', content: errorMsg })
+          persist()
+        },
       }
-      conv.messages.push({ role: 'assistant', content: errorMsg })
-    } finally {
-      loading.value = false
-      persist()
-    }
+    )
   }
 
   return {

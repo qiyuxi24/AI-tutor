@@ -7,9 +7,11 @@ const props = defineProps({
 })
 
 const isUser = computed(() => props.message.role === 'user')
+const isStreaming = computed(() => !isUser.value && !props.message.content)
 
 const renderedContent = computed(() => {
   if (isUser.value) return props.message.content
+  // 流式内容直接渲染纯文本（不用 markdown，因为内容不完整时可能格式错乱）
   return marked(props.message.content || '', { breaks: true })
 })
 </script>
@@ -21,6 +23,11 @@ const renderedContent = computed(() => {
     </div>
     <div class="bubble" :class="{ 'user-bubble': isUser, 'ai-bubble': !isUser }">
       <div v-if="isUser" class="text">{{ message.content }}</div>
+      <!-- 流式填充中：显示打字动画 -->
+      <div v-else-if="isStreaming" class="typing-indicator">
+        <span></span><span></span><span></span>
+      </div>
+      <!-- 流式内容渲染 -->
       <div v-else class="markdown-body" v-html="renderedContent"></div>
     </div>
   </div>
@@ -169,5 +176,39 @@ const renderedContent = computed(() => {
 .markdown-body :deep(th) {
   background: #f8fafc;
   font-weight: 600;
+}
+
+/* 流式打字动画 */
+.typing-indicator {
+  display: flex;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.typing-indicator span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #94a3b8;
+  animation: typingBounce 1.2s ease-in-out infinite;
+}
+
+.typing-indicator span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-indicator span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes typingBounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-6px);
+    opacity: 1;
+  }
 }
 </style>

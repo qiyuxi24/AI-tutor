@@ -1,7 +1,13 @@
-"""大模型API客户端 —— 接入阿里云千问 + 知识图谱编辑工具"""
+"""大模型API客户端 —— 接入阿里云千问 + 知识图谱编辑工具
+
+调用策略（两阶段分离）：
+  阶段1 call_llm_stream():  流式输出文本给用户 → 不等待工具调用
+  阶段2 call_llm_tools():   后台判断是否需要调用工具 → 执行工具 → 可选的流式补充输出
+"""
 import os
 import json
 import logging
+from typing import AsyncGenerator, Optional
 from openai import AsyncOpenAI, APIStatusError, APITimeoutError, APIConnectionError, AuthenticationError, RateLimitError
 from dotenv import load_dotenv
 from app.core.error_codes import ErrorCode, log_error
@@ -307,3 +313,162 @@ async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True
 
     # 5. 没有工具调用，直接返回
     return message.content
+
+
+# ══════════════════════════════════════════════════════════════════
+#  阶段1：流式输出（纯文本，不带 tools）
+# ══════════════════════════════════════════════════════════════════
+
+async def call_llm_stream(
+    system_prompt: str,
+    messages: list,
+) -> AsyncGenerator[str, None]:
+    """
+    流式调用千问 API，逐 token yield 给前端。
+    
+    关键设计：不带 tools，只做纯文本回复。
+    工具调用在 call_llm_tools() 中单独处理（后台）。
+    
+    参数:
+        system_prompt: 系统提示词（含图谱上下文，但不含工具能力说明）
+        messages:      完整对话历史 [{role, content}, ...]
+    
+    Yields:
+        每个 chunk 的文本 token（str）
+    
+    异常:
+        所有异常都会附加错误码后向上抛出
+    """
+    # 构造 API 消息列表
+    api_messages = [{"role": "system", "content": system_prompt}]
+    for msg in messages:
+        api_messages.append({
+            "role": msg["role"] if isinstance(msg, dict) else msg.role,
+            "content": msg["content"] if isinstance(msg, dict) else msg.content
+        })
+
+    try:
+        # 流式调用，不带 tools
+        response = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=api_messages,
+            temperature=0.7,
+            max_tokens=2000,
+            stream=True,
+        )
+    except APITimeoutError as e:
+        user_msg = log_error(ErrorCode.LLM_API_TIMEOUT, detail=str(e), exception=e)
+        raise RuntimeError(user_msg) from e
+    except RateLimitError as e:
+        user_msg = log_error(ErrorCode.LLM_API_RATE_LIMIT, detail=str(e), exception=e)
+        raise RuntimeError(user_msg) from e
+    except AuthenticationError as e:
+        user_msg = log_error(ErrorCode.LLM_API_AUTH_ERROR, detail=str(e), exception=e)
+        raise RuntimeError(user_msg) from e
+    except APIConnectionError as e:
+        user_msg = log_error(ErrorCode.LLM_API_NETWORK, detail=str(e), exception=e)
+        raise RuntimeError(user_msg) from e
+    except APIStatusError as e:
+        user_msg = log_error(ErrorCode.LLM_API_SERVER_ERROR, detail=f"HTTP {e.status_code}: {str(e)}", exception=e)
+        raise RuntimeError(user_msg) from e
+    except Exception as e:
+        user_msg = log_error(ErrorCode.SYS_UNKNOWN_ERROR, detail=f"流式调用未知错误: {str(e)}", exception=e)
+        raise RuntimeError(user_msg) from e
+
+    # 逐 chunk yield 文本内容
+    async for chunk in response:
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta and delta.content:
+            yield delta.content
+
+
+# ══════════════════════════════════════════════════════════════════
+#  阶段2：后台工具调用（带 function calling）
+# ══════════════════════════════════════════════════════════════════
+
+async def call_llm_tools(
+    system_prompt: str,
+    messages: list,
+) -> Optional[str]:
+    """
+    后台调用千问 API，判断是否需要执行知识图谱工具。
+    
+    关键设计：
+    - 带 KG_TOOLS，允许 function calling
+    - 如果有 tool_calls → 执行工具 → 再次调用 LLM 生成确认回复
+    - 返回的确认回复通过 SSE 的 graph_update 事件推送给前端（而非流式输出）
+    
+    参数:
+        system_prompt: 系统提示词（含工具能力说明）
+        messages:      完整对话历史
+    
+    返回:
+        工具执行后的确认消息（如"已创建节点 xxx"），无 tool_calls 时返回 None
+    
+    异常:
+        不向上抛出，所有错误内部消化（后台任务不应影响主流程）
+    """
+    # 构造 API 消息列表
+    api_messages = [{"role": "system", "content": system_prompt}]
+    for msg in messages:
+        api_messages.append({
+            "role": msg["role"] if isinstance(msg, dict) else msg.role,
+            "content": msg["content"] if isinstance(msg, dict) else msg.content
+        })
+
+    try:
+        response = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=api_messages,
+            temperature=0.3,  # 工具调用用低温度，更确定性
+            max_tokens=2000,
+            tools=KG_TOOLS,
+        )
+    except Exception as e:
+        # 后台任务失败不影响主流程，只记日志
+        log_error(ErrorCode.LLM_API_SERVER_ERROR, detail=f"后台工具调用失败: {str(e)}", exception=e)
+        return None
+
+    message = response.choices[0].message
+
+    # 没有工具调用 → 无需处理
+    if not message.tool_calls:
+        return None
+
+    # 有工具调用 → 执行工具
+    api_messages.append({
+        "role": "assistant",
+        "content": message.content or "",
+        "tool_calls": [
+            {"id": tc.id, "type": "function",
+             "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+            for tc in message.tool_calls
+        ]
+    })
+
+    tool_results = []
+    for tc in message.tool_calls:
+        try:
+            result = execute_kg_tool(tc)
+            tool_results.append(result)
+        except Exception as e:
+            tool_results.append(f"工具 {tc.function.name} 执行失败: {str(e)}")
+        api_messages.append({
+            "role": "tool",
+            "tool_call_id": tc.id,
+            "content": tool_results[-1]
+        })
+
+    # 第二次调用 LLM，让 AI 基于工具结果生成确认回复
+    try:
+        response2 = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=api_messages,
+            temperature=0.7,
+            max_tokens=500,
+        )
+        return response2.choices[0].message.content
+    except Exception as e:
+        log_error(ErrorCode.LLM_API_SERVER_ERROR, detail=f"工具确认回复失败: {str(e)}", exception=e)
+        # 即使第二次调用失败，工具已执行，返回简单汇总
+        return "已自动完成图谱更新：" + "; ".join(tool_results)
