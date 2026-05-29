@@ -1,7 +1,7 @@
 # AI Tutor——大模型驱动的主动交互导学系统
 
 ## 项目简介
-AI Tutor 是一个基于大模型的导学系统，旨在改变学生与AI的对话方式，从“直接给答案”转变为“引导式提问”。系统提供三种引导模式（阶梯提问、先思后答、反向教学），并通过知识图谱可视化展示知识点结构，未来将加入诊断算法实现自适应引导。
+AI Tutor 是一个基于大模型的导学系统，旨在改变学生与AI的对话方式，从"直接给答案"转变为"引导式提问"。系统提供三种引导模式（阶梯提问、先思后答、反向教学），并通过知识图谱可视化展示知识点结构，未来将加入诊断算法实现自适应引导。
 
 ## 技术栈
 - **前端**：Vue 3 + Vite + D3.js + ECharts + Pinia
@@ -27,6 +27,72 @@ AI Tutor 是一个基于大模型的导学系统，旨在改变学生与AI的对
 - **后端知识图谱核心**：`KnowledgeGraph` 类封装了 `index.json` 读写、前置依赖查询等操作。
 - **诊断算法**：规则引擎 + 贝叶斯推断，用于动态评估学生知识点掌握程度。
 - **知识点掌握图可视化**：基于 ECharts 的个人掌握度雷达图/热力图。
+
+### 🆕 两阶段流式对话架构（2026-05-30）
+
+实现了流式对话与知识图谱自动更新的分离架构，大幅提升用户体验：
+
+**架构概览**
+```
+前端 sendMessageStream() ──POST──▶ /api/v1/chat/stream
+                                      │
+                                      ▼
+                              process_message_stream()
+                              call_llm_stream() 逐 token yield
+                                      │
+                           SSE ───────┘ (逐 token 推送)
+                           "data: {\"token\":\"...\"}\n\n"
+                                      │
+                           "data: [DONE]\n\n"
+                                      │
+                           BackgroundTasks:
+                           process_background_tools()
+                              │
+                              ├── call_llm_tools() (带 KG_TOOLS)
+                              └── _analyze_and_apply() (图谱分析)
+                                      │
+                              publish("graph_updated") ──SSE──▶ 前端自动刷新图谱
+```
+
+**阶段1：流式文本回复**
+- LLM 调用不带 tools，确保纯文本流式输出，逐 token 通过 SSE 推送
+- 前端用 `fetch` + `ReadableStream` 解析 SSE，实时追加到气泡中
+- 气泡内三点跳动打字动画 + 全局"AI 思考中…"指示器
+
+**阶段2：后台工具调用**
+- 流式结束后，FastAPI `BackgroundTasks` 触发后台线程
+- 后台再次调用 LLM（带 `KG_TOOLS` function calling），判断是否需要操作知识图谱
+- 支持 5 种工具：`add_knowledge_node`、`update_node_content`、`update_mastery`、`add_edge`、`delete_node`
+- 工具执行完成后通过 `event_bus` 发布 `graph_updated` 事件，前端 SSE 自动刷新图谱
+- 后台任务失败不影响主对话流程
+
+**新增/修改文件**
+
+| 文件 | 变更 |
+|------|------|
+| `backend/app/core/llm_client.py` | 新增 `call_llm_stream()` 流式纯文本生成器、`call_llm_tools()` 后台带 tools 调用 |
+| `backend/app/services/chat_service.py` | 新增 `_build_stream_prompt()` 流式提示词、`process_message_stream()` SSE 生成器、`process_background_tools()` 后台工具调度 |
+| `backend/app/api/v1/chat.py` | 新增 `/chat/stream` SSE 端点（两阶段），保留 `/chat` 兼容旧版 |
+| `backend/app/core/event_bus.py` | 新增进程内事件总线，`publish()`/`subscribe()` 解耦图谱更新通知 |
+| `frontend/src/api/index.js` | 新增 `sendMessageStream()` 基于 fetch + ReadableStream 的 SSE 客户端 |
+| `frontend/src/stores/chatStore.js` | `send()` 改为流式调用，`onToken` 用 splice 替换触发响应式更新 |
+| `frontend/src/components/ChatArea.vue` | 新增三条 watch（消息数、对话切换、流式内容长度）自动滚动到底部 |
+| `frontend/src/components/MessageBubble.vue` | 新增 `isStreaming` 状态 + 三点跳动打字动画 |
+
+**SSE 事件格式**
+```json
+// 流式 token
+data: {"token": "递归是"}
+
+// 流式结束
+data: [DONE]
+
+// 图谱更新（通过 /api/v1/knowledge/events 长连接推送）
+data: {"type": "graph_updated"}
+
+// 错误事件
+data: {"type": "error", "code": "E-LLM-001", "message": "...", "module": "llm"}
+```
 
 ## 未完成/规划中 🔧
 - **自适应引导引擎**：根据诊断结果自动切换引导模式。
@@ -58,15 +124,15 @@ npm run dev
 AI-Tutor/
 ├── frontend/          # Vue 3 前端
 │   ├── src/
-│   │   ├── components/   # ForceGraph, ChatArea, Sidebar, NodeDetail 等
-│   │   ├── api/          # axios 请求封装
-│   │   └── stores/       # Pinia 状态管理
+│   │   ├── components/   # ForceGraph, ChatArea, Sidebar, MessageBubble 等
+│   │   ├── api/          # axios + fetch SSE 请求封装
+│   │   └── stores/       # Pinia 状态管理（含流式对话）
 │   └── ...
 ├── backend/           # FastAPI 后端
 │   ├── app/
-│   │   ├── api/v1/       # chat, knowledge 路由
-│   │   ├── core/         # KnowledgeGraph, LLM客户端, 提示词加载器
-│   │   └── services/     # 对话服务
+│   │   ├── api/v1/       # chat, knowledge 路由（含 /chat/stream SSE）
+│   │   ├── core/         # KnowledgeGraph, LLM客户端(流式+工具), 提示词加载器, event_bus
+│   │   └── services/     # 对话服务（两阶段流式编排）
 │   └── ...
 ├── data/knowledge/    # 知识图谱数据
 │   ├── index.json        # 节点和边定义
