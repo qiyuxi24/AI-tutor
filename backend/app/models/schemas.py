@@ -5,8 +5,8 @@ from typing import List, Literal, Optional
 # 对话相关
 # ================================================================
 
-# 定义三种引导模式
-GuideMode = Literal['scaffolding', 'think_first', 'reverse_teaching']
+# 引导模式：adaptive = 自适应引导，free_talk = 自由对话（允许直接回答）
+GuideMode = Literal['adaptive', 'free_talk']
 
 class ChatMessage(BaseModel):
     role: str    # "user" 或 "assistant"

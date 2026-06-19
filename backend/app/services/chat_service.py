@@ -210,7 +210,7 @@ async def process_message(user_id: int, messages: list, mode: str) -> tuple[str,
     参数:
         user_id:  数据库用户 ID（从 JWT 解析）
         messages: 完整对话历史（Pydantic ChatMessage 列表）
-        mode:     引导模式（scaffolding / think_first / reverse_teaching）
+        mode:     引导模式（adaptive / free_talk）
 
     返回:
         (AI回复文本, 使用的模式, 图谱分析结果)

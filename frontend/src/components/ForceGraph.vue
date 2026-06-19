@@ -759,6 +759,43 @@ onUnmounted(() => {
   }
   clearDrawingMode()
 })
+
+/* ================================================================
+   暴露方法
+   ================================================================ */
+
+/**
+ * 聚焦指定节点：平滑移动到该节点并高亮
+ * @param {string} nodeId - 节点 ID
+ */
+function focusNode(nodeId) {
+  if (!simulation || !svgSelection) return
+  const node = simulation.nodes().find(n => n.id === nodeId)
+  if (!node) return
+
+  const { width, height } = containerRef.value.getBoundingClientRect()
+  const scale = 1.5
+  const tx = width / 2 - node.x * scale
+  const ty = height / 2 - node.y * scale
+
+  svgSelection.transition().duration(600)
+    .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale))
+
+  // 高亮节点（脉冲效果）
+  const nodeGroup = svgSelection.selectAll('.node').filter(d => d.id === nodeId)
+  nodeGroup.select('.node-body')
+    .transition().duration(200)
+    .attr('r', NODE_RADIUS + 6)
+    .attr('stroke', 'var(--color-accent)')
+    .attr('stroke-width', 2.5)
+    .attr('stroke-opacity', 1)
+    .transition().duration(400)
+    .attr('r', NODE_RADIUS)
+    .attr('stroke-width', 1)
+    .attr('stroke-opacity', 0.3)
+}
+
+defineExpose({ focusNode })
 </script>
 
 <template>

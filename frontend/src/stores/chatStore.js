@@ -61,7 +61,7 @@ export const useChatStore = defineStore('chat', () => {
   // ─── 对话状态 ───
   const conversations = ref([])
   const currentId = ref(null)
-  const mode = ref('scaffolding')
+  const mode = ref('adaptive')
   const loading = ref(false)
 
   // ─── 知识图谱状态 ───

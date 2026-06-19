@@ -96,16 +96,21 @@ async def ensure_default_admin():
         ).fetchone()
 
         if not existing:
-            default_password = "admin123"
-            password_hash = get_password_hash(default_password)
-            conn.execute(
-                "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-                ("admin", password_hash),
-            )
-            conn.commit()
-            logging.getLogger("ai-tutor").info(
-                "默认管理员账户已创建: admin / admin123"
-            )
+            default_password = os.getenv("DEFAULT_ADMIN_PASSWORD")
+            if not default_password:
+                logging.getLogger("ai-tutor").warning(
+                    "未设置 DEFAULT_ADMIN_PASSWORD 环境变量，无法创建默认管理员账户"
+                )
+            else:
+                password_hash = get_password_hash(default_password)
+                conn.execute(
+                    "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                    ("admin", password_hash),
+                )
+                conn.commit()
+                logging.getLogger("ai-tutor").info(
+                    "默认管理员账户已创建: admin"
+                )
     finally:
         conn.close()
 

@@ -16,9 +16,8 @@ env = Environment(loader=FileSystemLoader(str(PROMPT_DIR)))
 
 # 模式与模板文件名的映射
 MODE_TEMPLATE_MAP = {
-    "scaffolding": "system_prompt_scaffolding.j2",
-    "think_first": "system_prompt_think_first.j2",
-    "reverse_teaching": "system_prompt_reverse_teaching.j2",
+    "adaptive": "system_prompt_adaptive.j2",
+    "free_talk": "system_prompt_free_talk.j2",
 }
 
 # 通用模板名
@@ -31,7 +30,7 @@ def get_system_prompt(mode: str, student_message: str, graph_summary: str = "",
     根据模式、用户消息、图谱摘要和用户画像，生成最终的完整系统提示词。
 
     参数:
-        mode:            引导模式（scaffolding / think_first / reverse_teaching）
+        mode:            引导模式（adaptive / free_talk）
         student_message: 学生当前消息内容
         graph_summary:   知识图谱摘要文本（可选，由调用方构建后传入）
         user_profile:    用户画像 Markdown（可选，用于个性化教学）

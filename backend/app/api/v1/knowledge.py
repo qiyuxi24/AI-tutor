@@ -204,16 +204,14 @@ async def update_node(node_id: str, data: dict = Body(...), user_id: int = Depen
         if update_data:
             kg.update_node_info(node_id, update_data)
 
-        # 更新 MD 内容（如果提供了）
+        # 更新 MD 内容（如果提供了）—— 统一走 kg.update_node_content() 权限保护
         if "content" in data:
-            md_path = kg.nodes_dir / f"{node_id}.md"
-            op = data.get("op", "replace")
-            if op == "replace":
-                with open(md_path, "w", encoding="utf-8") as f:
-                    f.write(data["content"])
-            elif op == "append":
-                with open(md_path, "a", encoding="utf-8") as f:
-                    f.write(f"\n\n{data['content']}")
+            kg.update_node_content(
+                node_id,
+                data["content"],
+                mode=data.get("op", "replace"),
+                caller="human",
+            )
 
         publish("graph_updated")
         return {"status": "ok"}

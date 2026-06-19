@@ -26,6 +26,8 @@ import ChatArea from '../components/ChatArea.vue'
 import ForceGraph from '../components/ForceGraph.vue'
 import NodeDetail from '../components/NodeDetail.vue'
 import UserProfile from '../components/UserProfile.vue'
+import GraphSearch from '../components/GraphSearch.vue'
+import OnboardingGuide from '../components/OnboardingGuide.vue'
 
 const store = useChatStore()
 const authStore = useAuthStore()
@@ -35,13 +37,14 @@ const sidebarCollapsed = ref(false)
 const showUserProfile = ref(false)
 const isTransitioning = ref(false)
 const showUserMenu = ref(false)
+const graphSearchRef = ref(null)
+const forceGraphRef = ref(null)
 
 const SIDEBAR_WIDTH = 260
 
 const MODE_LABELS = {
-  scaffolding: { label: '阶梯提问', color: '#10b981' },
-  think_first: { label: '先思后答', color: '#f59e0b' },
-  reverse_teaching: { label: '反向教学', color: '#8b5cf6' },
+  adaptive: { label: '自适应引导', color: '#10b981' },
+  free_talk: { label: '自由对话', color: '#f59e0b' },
 }
 const modeInfo = computed(() => MODE_LABELS[store.mode] || { label: store.mode, color: '#6b7280' })
 
@@ -169,6 +172,20 @@ async function handleGraphAction({ action, payload }) {
     // Store 方法内部已调用 refreshGraph，此处仅提示错误
     alert(formatError(e, { action: `图谱操作: ${action}` }))
   }
+}
+
+/**
+ * 搜索选中节点 → 切换到图谱视图并聚焦该节点
+ */
+async function handleGraphSearchSelect(nodeId) {
+  // 切换到图谱视图
+  if (viewMode.value !== 'graph') {
+    switchViewMode('graph')
+    // 等切换动画完成后聚焦
+    await new Promise(r => setTimeout(r, 450))
+  }
+  // 聚焦节点
+  forceGraphRef.value?.focusNode(nodeId)
 }
 
 function toggleSidebar() {
@@ -315,7 +332,16 @@ const slideTransition = {
 
       <Transition name="view-fade" v-bind="slideTransition">
         <div v-if="viewMode === 'graph'" class="graph-layout" data-view="graph">
+          <!-- 图谱搜索 -->
+          <div class="graph-search-bar">
+            <GraphSearch
+              ref="graphSearchRef"
+              :nodes="store.knowledgeNodes"
+              @select-node="handleGraphSearchSelect"
+            />
+          </div>
           <ForceGraph
+            ref="forceGraphRef"
             :nodes="store.knowledgeNodes"
             :edges="store.knowledgeEdges"
             :loading="!store.graphLoaded"
@@ -342,6 +368,9 @@ const slideTransition = {
       @close="showUserProfile = false"
       @profile-updated="store.refreshGraph()"
     />
+
+    <!-- 新手引导 -->
+    <OnboardingGuide />
   </div>
 </template>
 
@@ -595,6 +624,14 @@ const slideTransition = {
   position: absolute;
   top: 0;
   left: 0;
+}
+
+/* ── 图谱搜索栏 ── */
+.graph-search-bar {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 25;
 }
 
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }

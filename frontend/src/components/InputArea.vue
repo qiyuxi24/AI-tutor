@@ -8,9 +8,8 @@ const text = ref('')
 const textareaRef = ref(null)
 
 const MODE_OPTIONS = [
-  { value: 'scaffolding', label: '阶梯提问' },
-  { value: 'think_first', label: '先思后答' },
-  { value: 'reverse_teaching', label: '反向教学' },
+  { value: 'adaptive', label: '自适应引导' },
+  { value: 'free_talk', label: '自由对话' },
 ]
 
 function handleModeChange(e) {
