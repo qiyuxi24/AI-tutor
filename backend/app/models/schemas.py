@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Literal, Optional
 
 # ================================================================
@@ -13,8 +13,7 @@ class ChatMessage(BaseModel):
     content: str
 
 class ChatRequest(BaseModel):
-    """前端发给后端的请求体"""
-    user_id: str                # 学生唯一标识
+    """前端发给后端的请求体（user_id 由 JWT token 提供，无需在请求体中传递）"""
     messages: List[ChatMessage] # 全部对话历史
     mode: GuideMode             # 引导模式
 
@@ -73,14 +72,10 @@ class UpdateMasteryRequest(BaseModel):
 
 class CreateEdgeRequest(BaseModel):
     """创建新边的请求体"""
-    from_: str                          # 源节点 ID（从请求 JSON 的 "from" 字段映射）
+    from_: str = Field(alias='from')    # 源节点 ID（从请求 JSON 的 "from" 字段映射）
     to: str                             # 目标节点 ID
     relation: EdgeRelation = 'related'  # 关系类型
     label: str = ""                     # 关系说明文字
-
-    class Config:
-        # 允许 JSON 中的 "from" 映射到 Python 的 from_ 字段
-        fields = {'from_': 'from'}
 
 
 class UpdateEdgeRequest(BaseModel):
@@ -91,12 +86,24 @@ class UpdateEdgeRequest(BaseModel):
 
 class CreateEdgeRawRequest(BaseModel):
     """创建边的原始请求体（兼容 AI function calling 的任意字段传入）"""
-    from_: str
+    from_: str = Field(alias='from')
     to: str
     relation: str
     label: str = ""
     added_by: str = "ai"
     confidence: Optional[float] = None
 
-    class Config:
-        fields = {'from_': 'from'}
+
+# ================================================================
+# 用户画像相关
+# ================================================================
+
+class ProfileResponse(BaseModel):
+    """用户画像响应"""
+    content: str                        # Markdown 格式的画像内容
+
+
+class ProfileUpdateRequest(BaseModel):
+    """更新用户画像的请求体"""
+    content: str                        # 新的画像内容（Markdown）
+    op: Literal['replace', 'append'] = 'replace'  # 操作类型

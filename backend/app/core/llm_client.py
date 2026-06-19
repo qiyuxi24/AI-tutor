@@ -32,7 +32,7 @@ KG_TOOLS = [
         "type": "function",
         "function": {
             "name": "add_knowledge_node",
-            "description": "添加一个新知识点节点及其 MD 文件",
+            "description": "添加一个新知识点节点及其 MD 文件。⚠️ from_nodes 只应包含真正的前置知识节点（即必须先学会它们才能理解新节点），不要随便填已有的节点 ID。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -45,7 +45,7 @@ KG_TOOLS = [
                     "estimated_minutes": {"type": "integer", "description": "预估学习分钟数"},
                     "content": {"type": "string", "description": "完整的 Markdown 内容"},
                     "from_nodes": {"type": "array", "items": {"type": "string"},
-                                   "description": "前置节点 ID 列表，会自动创建边"},
+                                   "description": "前置节点 ID 列表（会自动创建 prerequisite 边）。⚠️ 只能包含真正必须先学的前置知识节点。如果新节点不需要任何已有节点作为前置，传空数组或不传。"},
                 },
                 "required": ["id", "name", "content"]
             }
@@ -88,15 +88,15 @@ KG_TOOLS = [
         "type": "function",
         "function": {
             "name": "add_edge",
-            "description": "在两个已有节点之间创建关联边",
+            "description": "在两个已有节点之间创建关联边。⚠️ 重要：仅在确认两个节点之间存在实质性的知识关系时才调用此工具。如果只是猜测或关系不明确，不要调用。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "from": {"type": "string", "description": "源节点 ID"},
                     "to": {"type": "string", "description": "目标节点 ID"},
                     "relation": {"type": "string", "enum": ["prerequisite", "related", "confusion", "extension"],
-                                 "description": "关系类型"},
-                    "label": {"type": "string", "description": "关系描述"},
+                                 "description": "关系类型。prerequisite=必须先学from才能学to；related=共享核心概念但无严格先后；confusion=容易混淆；extension=to是from的深入/扩展"},
+                    "label": {"type": "string", "description": "关系标签，用简短的中文词概括，如'前置知识'、'相关概念'、'易混淆'、'扩展延伸'。不要用长句子。"},
                 },
                 "required": ["from", "to", "relation"]
             }
@@ -116,10 +116,52 @@ KG_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_user_profile",
+            "description": "更新学生用户画像。当你在教学中观察到学生的性格特点、学习习惯、知识薄弱点等新信息时，应主动更新用户画像，以便后续更好地个性化教学。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "要追加的用户画像内容（Markdown 格式）。应包含你观察到的学生信息，如：学习风格、知识薄弱点、性格特点、偏好等。会追加到现有画像的「AI 教学笔记」部分。"},
+                },
+                "required": ["content"]
+            }
+        }
+    },
 ]
 
 
-def execute_kg_tool(tool_call) -> str:
+def _build_api_messages(system_prompt: str, messages: list) -> list[dict]:
+    """将 system_prompt + 对话历史合并为 OpenAI API 消息格式（消除 3 处重复）"""
+    api_messages = [{"role": "system", "content": system_prompt}]
+    for msg in messages:
+        api_messages.append({
+            "role": msg["role"] if isinstance(msg, dict) else msg.role,
+            "content": msg["content"] if isinstance(msg, dict) else msg.content
+        })
+    return api_messages
+
+
+def _map_api_error(e: Exception, prefix: str = "") -> RuntimeError:
+    """统一分类 LLM API 异常 → RuntimeError（带错误码），消除异常处理重复"""
+    if isinstance(e, APITimeoutError):
+        user_msg = log_error(ErrorCode.LLM_API_TIMEOUT, detail=f"{prefix}{str(e)}" if prefix else str(e), exception=e)
+    elif isinstance(e, RateLimitError):
+        user_msg = log_error(ErrorCode.LLM_API_RATE_LIMIT, detail=str(e), exception=e)
+    elif isinstance(e, AuthenticationError):
+        user_msg = log_error(ErrorCode.LLM_API_AUTH_ERROR, detail=str(e), exception=e)
+    elif isinstance(e, APIConnectionError):
+        user_msg = log_error(ErrorCode.LLM_API_NETWORK, detail=str(e), exception=e)
+    elif isinstance(e, APIStatusError):
+        user_msg = log_error(ErrorCode.LLM_API_SERVER_ERROR, detail=f"HTTP {e.status_code}: {str(e)}", exception=e)
+    else:
+        user_msg = log_error(ErrorCode.SYS_UNKNOWN_ERROR, detail=f"{prefix}{str(e)}" if prefix else str(e), exception=e)
+    return RuntimeError(user_msg)
+
+
+def execute_kg_tool(tool_call, kg) -> str:
     """
     执行千问请求的知识图谱操作，返回结果描述
     
@@ -128,10 +170,11 @@ def execute_kg_tool(tool_call) -> str:
     - 无网络开销（避免 localhost HTTP 往返）
     - 异常类型更清晰（ValueError vs URLError）
     - 与 _apply_suggestion() 使用同一套 kg 操作方式
+    
+    参数:
+        tool_call: 千问返回的工具调用对象
+        kg:        KnowledgeGraph 实例（已绑定当前 user_id）
     """
-    # 延迟 import，避免模块加载时的循环依赖
-    from app.api.v1.knowledge import kg
-
     try:
         args = json.loads(tool_call.function.arguments)
         name = tool_call.function.name
@@ -139,6 +182,7 @@ def execute_kg_tool(tool_call) -> str:
         if name == "add_knowledge_node":
             from app.api.v1.knowledge import create_node_from_ai
             return create_node_from_ai(
+                kg=kg,
                 node_id=args["id"],
                 node_name=args["name"],
                 tags=args.get("tags"),
@@ -153,17 +197,13 @@ def execute_kg_tool(tool_call) -> str:
             node_id = args["node_id"]
             content = args["content"]
             op = args.get("op", "replace")
-            kg.update_node_content(node_id, content, mode=op)
+            kg.update_node_content(node_id, content, mode=op, caller="ai")
             return f"已更新节点 {node_id} 的内容（{op}）"
 
         elif name == "update_mastery":
             node_id = args["node_id"]
             mastery = args["mastery"]
-            node = kg.get_node(node_id)
-            if node is None:
-                return f"更新失败：节点 {node_id} 不存在"
-            node["mastery"] = mastery
-            kg.save()
+            kg.update_node_info(node_id, {"mastery": mastery, "added_by": "ai"}, caller="ai")
             return f"已将 {node_id} 的掌握程度更新为 {mastery}/100"
 
         elif name == "add_edge":
@@ -173,13 +213,20 @@ def execute_kg_tool(tool_call) -> str:
                 "relation": args["relation"],
                 "label": args.get("label", ""),
                 "added_by": "ai",
-            })
+            }, caller="ai")
             return f"已创建边: {args['from']} → {args['to']} ({args['relation']})"
 
         elif name == "delete_node":
             node_id = args["node_id"]
-            removed_edges = kg.remove_node(node_id)
+            removed_edges = kg.remove_node(node_id, caller="ai")
             return f"已删除节点 {node_id}，同时移除 {removed_edges} 条关联边"
+
+        elif name == "update_user_profile":
+            from app.core.user_profile import UserProfile
+            content = args["content"]
+            profile = UserProfile(user_id=kg.user_id)
+            profile.update(content=content, mode="append")
+            return f"已更新用户画像"
 
         else:
             return f"未知工具: {name}"
@@ -188,13 +235,18 @@ def execute_kg_tool(tool_call) -> str:
         # 业务逻辑错误（重复节点、不存在的节点等）——这是 AI 的错，返回友好提示
         log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), context={"tool": name})
         return f"操作失败: {str(e)}"
+    except PermissionError as e:
+        # AI 权限不足（试图修改人类创建的节点）——友好提示 AI 不要这样做
+        log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), context={"tool": name})
+        return f"权限不足: {str(e)}。如需修改，请让用户手动操作。"
     except Exception as e:
         # 其他意外错误（文件写入失败等）
         log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), exception=e, context={"tool": name})
         return f"工具执行出错: {str(e)}"
 
 
-async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True) -> str:
+async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True,
+                  kg=None) -> str:
     """
     调用千问API
     
@@ -204,6 +256,7 @@ async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True
         enable_tools: 是否启用 function calling 编辑知识图谱。
                       True  → 带 KG_TOOLS，支持工具调用（对话场景）
                       False → 不带 tools，纯文本返回（分析/生成场景）
+        kg:           KnowledgeGraph 实例（enable_tools=True 时需传入）
     
     返回:
         AI的回复文本
@@ -218,12 +271,7 @@ async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True
         - 其他未知异常          → E-SYS-002
     """
     # 1. 构造 API 消息列表
-    api_messages = [{"role": "system", "content": system_prompt}]
-    for msg in messages:
-        api_messages.append({
-            "role": msg["role"] if isinstance(msg, dict) else msg.role,
-            "content": msg["content"] if isinstance(msg, dict) else msg.content
-        })
+    api_messages = _build_api_messages(system_prompt, messages)
 
     # 2. 构建请求参数
     create_kwargs = {
@@ -239,27 +287,8 @@ async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True
     # 3. 异步调用千问 API（真正的非阻塞 I/O）
     try:
         response = await client.chat.completions.create(**create_kwargs)
-    except APITimeoutError as e:
-        user_msg = log_error(ErrorCode.LLM_API_TIMEOUT, detail=str(e), exception=e)
-        raise RuntimeError(user_msg) from e
-    except RateLimitError as e:
-        user_msg = log_error(ErrorCode.LLM_API_RATE_LIMIT, detail=str(e), exception=e)
-        raise RuntimeError(user_msg) from e
-    except AuthenticationError as e:
-        user_msg = log_error(ErrorCode.LLM_API_AUTH_ERROR, detail=str(e), exception=e)
-        raise RuntimeError(user_msg) from e
-    except APIConnectionError as e:
-        user_msg = log_error(ErrorCode.LLM_API_NETWORK, detail=str(e), exception=e)
-        raise RuntimeError(user_msg) from e
-    except APIStatusError as e:
-        if e.status_code >= 500:
-            user_msg = log_error(ErrorCode.LLM_API_SERVER_ERROR, detail=f"HTTP {e.status_code}: {str(e)}", exception=e)
-        else:
-            user_msg = log_error(ErrorCode.LLM_API_SERVER_ERROR, detail=f"HTTP {e.status_code}: {str(e)}", exception=e)
-        raise RuntimeError(user_msg) from e
     except Exception as e:
-        user_msg = log_error(ErrorCode.SYS_UNKNOWN_ERROR, detail=f"LLM调用未知错误: {str(e)}", exception=e)
-        raise RuntimeError(user_msg) from e
+        raise _map_api_error(e) from e
 
     message = response.choices[0].message
 
@@ -284,7 +313,7 @@ async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True
         # 执行每一个工具，把结果加回消息
         # 注意：execute_kg_tool 是同步函数（本地文件 I/O），不阻塞事件循环太久
         for tc in message.tool_calls:
-            result = execute_kg_tool(tc)
+            result = execute_kg_tool(tc, kg)
             api_messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -299,15 +328,8 @@ async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True
                 temperature=0.7,
                 max_tokens=2000,
             )
-        except APITimeoutError as e:
-            user_msg = log_error(ErrorCode.LLM_API_TIMEOUT, detail=f"第二次调用超时: {str(e)}", exception=e)
-            raise RuntimeError(user_msg) from e
-        except APIConnectionError as e:
-            user_msg = log_error(ErrorCode.LLM_API_NETWORK, detail=f"第二次调用网络错误: {str(e)}", exception=e)
-            raise RuntimeError(user_msg) from e
         except Exception as e:
-            user_msg = log_error(ErrorCode.SYS_UNKNOWN_ERROR, detail=f"第二次调用失败: {str(e)}", exception=e)
-            raise RuntimeError(user_msg) from e
+            raise _map_api_error(e, prefix="第二次调用: ") from e
 
         return response2.choices[0].message.content
 
@@ -340,15 +362,9 @@ async def call_llm_stream(
         所有异常都会附加错误码后向上抛出
     """
     # 构造 API 消息列表
-    api_messages = [{"role": "system", "content": system_prompt}]
-    for msg in messages:
-        api_messages.append({
-            "role": msg["role"] if isinstance(msg, dict) else msg.role,
-            "content": msg["content"] if isinstance(msg, dict) else msg.content
-        })
+    api_messages = _build_api_messages(system_prompt, messages)
 
     try:
-        # 流式调用，不带 tools
         response = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=api_messages,
@@ -356,24 +372,8 @@ async def call_llm_stream(
             max_tokens=2000,
             stream=True,
         )
-    except APITimeoutError as e:
-        user_msg = log_error(ErrorCode.LLM_API_TIMEOUT, detail=str(e), exception=e)
-        raise RuntimeError(user_msg) from e
-    except RateLimitError as e:
-        user_msg = log_error(ErrorCode.LLM_API_RATE_LIMIT, detail=str(e), exception=e)
-        raise RuntimeError(user_msg) from e
-    except AuthenticationError as e:
-        user_msg = log_error(ErrorCode.LLM_API_AUTH_ERROR, detail=str(e), exception=e)
-        raise RuntimeError(user_msg) from e
-    except APIConnectionError as e:
-        user_msg = log_error(ErrorCode.LLM_API_NETWORK, detail=str(e), exception=e)
-        raise RuntimeError(user_msg) from e
-    except APIStatusError as e:
-        user_msg = log_error(ErrorCode.LLM_API_SERVER_ERROR, detail=f"HTTP {e.status_code}: {str(e)}", exception=e)
-        raise RuntimeError(user_msg) from e
     except Exception as e:
-        user_msg = log_error(ErrorCode.SYS_UNKNOWN_ERROR, detail=f"流式调用未知错误: {str(e)}", exception=e)
-        raise RuntimeError(user_msg) from e
+        raise _map_api_error(e) from e
 
     # 逐 chunk yield 文本内容
     async for chunk in response:
@@ -389,6 +389,7 @@ async def call_llm_stream(
 async def call_llm_tools(
     system_prompt: str,
     messages: list,
+    kg=None,
 ) -> Optional[str]:
     """
     后台调用千问 API，判断是否需要执行知识图谱工具。
@@ -401,6 +402,7 @@ async def call_llm_tools(
     参数:
         system_prompt: 系统提示词（含工具能力说明）
         messages:      完整对话历史
+        kg:            KnowledgeGraph 实例
     
     返回:
         工具执行后的确认消息（如"已创建节点 xxx"），无 tool_calls 时返回 None
@@ -409,12 +411,7 @@ async def call_llm_tools(
         不向上抛出，所有错误内部消化（后台任务不应影响主流程）
     """
     # 构造 API 消息列表
-    api_messages = [{"role": "system", "content": system_prompt}]
-    for msg in messages:
-        api_messages.append({
-            "role": msg["role"] if isinstance(msg, dict) else msg.role,
-            "content": msg["content"] if isinstance(msg, dict) else msg.content
-        })
+    api_messages = _build_api_messages(system_prompt, messages)
 
     try:
         response = await client.chat.completions.create(
@@ -449,7 +446,7 @@ async def call_llm_tools(
     tool_results = []
     for tc in message.tool_calls:
         try:
-            result = execute_kg_tool(tc)
+            result = execute_kg_tool(tc, kg)
             tool_results.append(result)
         except Exception as e:
             tool_results.append(f"工具 {tc.function.name} 执行失败: {str(e)}")

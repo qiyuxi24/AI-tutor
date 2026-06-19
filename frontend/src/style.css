@@ -1,7 +1,117 @@
 /* ═══════════════════════════════════════
-   AI Tutor — Global Styles
+   AI Tutor — Global Styles + Theme Variables
+   
+   data-theme="dark"  → 默认深色主题
+   data-theme="light" → 浅色主题
+   
+   使用: 组件中引用 var(--color-xxx)，切换主题只需改 <html> 属性
    ═══════════════════════════════════════ */
 
+/* ──────────── 深色主题（默认） ──────────── */
+:root,
+[data-theme="dark"] {
+  /* 背景 */
+  --color-bg-primary:    #1e1e2e;
+  --color-bg-secondary:  #11111b;
+  --color-bg-tertiary:   #181825;
+  --color-bg-surface:    #313244;
+  --color-bg-hover:      rgba(255, 255, 255, 0.06);
+  --color-bg-overlay:    rgba(0, 0, 0, 0.55);
+
+  /* 文字 */
+  --color-text-primary:    #cdd6f4;
+  --color-text-secondary:  #a6adc8;
+  --color-text-tertiary:   #6c7086;
+  --color-text-muted:      rgba(205, 214, 244, 0.45);
+  --color-text-inverse:    #ffffff;
+
+  /* 边框 */
+  --color-border:         #313244;
+  --color-border-light:   rgba(255, 255, 255, 0.15);
+  --color-border-subtle:  rgba(255, 255, 255, 0.08);
+
+  /* 强调色 */
+  --color-accent:         #4f46e5;
+  --color-accent-hover:   #4338ca;
+  --color-accent-light:   rgba(79, 70, 229, 0.18);
+  --color-blue:           #60a5fa;
+  --color-blue-hover:     #3b82f6;
+  --color-blue-light:     #89b4fa;
+  --color-green:          #10b981;
+  --color-green-light:    rgba(16, 185, 129, 0.14);
+  --color-red:            #f87171;
+  --color-red-light:      rgba(243, 139, 168, 0.12);
+  --color-yellow:         #f59e0b;
+  --color-orange:         #fb923c;
+  --color-purple:         #8b5cf6;
+
+  /* 对话区域 */
+  --color-chat-bg:        #ffffff;
+  --color-chat-bubble-ai: #f1f5f9;
+  --color-chat-bubble-user: #4f46e5;
+  --color-chat-text:      #1e293b;
+  --color-chat-subtle:    #94a3b8;
+  --color-chat-border:    #e5e7eb;
+
+  /* 图谱 */
+  --color-graph-node:     #9ca3af;
+  --color-graph-edge:     #4b5563;
+
+  /* 阴影 */
+  --shadow-popup: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --shadow-card:  0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+/* ──────────── 浅色主题 ──────────── */
+[data-theme="light"] {
+  --color-bg-primary:    #f8f9fa;
+  --color-bg-secondary:  #ffffff;
+  --color-bg-tertiary:   #e9ecef;
+  --color-bg-surface:    #dee2e6;
+  --color-bg-hover:      rgba(0, 0, 0, 0.05);
+  --color-bg-overlay:    rgba(0, 0, 0, 0.35);
+
+  --color-text-primary:    #212529;
+  --color-text-secondary:  #495057;
+  --color-text-tertiary:   #868e96;
+  --color-text-muted:      rgba(33, 37, 41, 0.35);
+  --color-text-inverse:    #212529;
+
+  --color-border:         #dee2e6;
+  --color-border-light:   rgba(0, 0, 0, 0.12);
+  --color-border-subtle:  rgba(0, 0, 0, 0.06);
+
+  --color-accent:         #4f46e5;
+  --color-accent-hover:   #4338ca;
+  --color-accent-light:   rgba(79, 70, 229, 0.10);
+  --color-blue:           #3b82f6;
+  --color-blue-hover:     #2563eb;
+  --color-blue-light:     #60a5fa;
+  --color-green:          #059669;
+  --color-green-light:    rgba(5, 150, 105, 0.10);
+  --color-red:            #ef4444;
+  --color-red-light:      rgba(239, 68, 68, 0.08);
+  --color-yellow:         #d97706;
+  --color-orange:         #f97316;
+  --color-purple:         #7c3aed;
+
+  --color-chat-bg:        #ffffff;
+  --color-chat-bubble-ai: #f1f5f9;
+  --color-chat-bubble-user: #4f46e5;
+  --color-chat-text:      #1e293b;
+  --color-chat-subtle:    #94a3b8;
+  --color-chat-border:    #e2e8f0;
+
+  --color-graph-node:     #94a3b8;
+  --color-graph-edge:     #cbd5e1;
+
+  --shadow-popup: 0 8px 24px rgba(0, 0, 0, 0.12);
+  --shadow-card:  0 4px 16px rgba(0, 0, 0, 0.10);
+}
+
+/* ═══════════════════════════════════════
+   全局 Reset
+   ═══════════════════════════════════════ */
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
@@ -15,14 +125,14 @@ html, body {
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
   font-size: 16px;
   line-height: 1.5;
-  color: #1e293b;
-  background: #ffffff;
+  color: var(--color-text-primary);
+  background: var(--color-bg-secondary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  transition: background 0.3s ease, color 0.3s ease;
 }
 
 #app {
   width: 100%;
   height: 100%;
 }
-

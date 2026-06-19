@@ -4,6 +4,8 @@ import { useChatStore } from '../stores/chatStore'
 const store = useChatStore()
 
 function handleNew() {
+  // 如果当前已是空对话，不做任何事
+  if (store.isCurrentEmpty) return
   store.newConversation()
 }
 
@@ -20,7 +22,12 @@ function handleDelete(e, id) {
 <template>
   <aside class="sidebar">
     <!-- 新对话按钮 -->
-    <button class="new-chat-btn" @click="handleNew">
+    <button
+      class="new-chat-btn"
+      :class="{ disabled: store.isCurrentEmpty }"
+      @click="handleNew"
+      :title="store.isCurrentEmpty ? '当前已是新对话' : '新建对话'"
+    >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
         <line x1="12" y1="5" x2="12" y2="19" />
         <line x1="5" y1="12" x2="19" y2="12" />
@@ -61,73 +68,53 @@ function handleDelete(e, id) {
   width: 260px;
   min-width: 260px;
   height: 100%;
-  background: #1e1e2e;
-  color: #cdd6f4;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
   display: flex;
   flex-direction: column;
   user-select: none;
   transform-origin: left;
 }
 
-/* 品牌区 */
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 20px 18px 16px;
-}
-
-.logo-icon {
-  font-size: 24px;
-  line-height: 1;
-}
-
-.brand-text {
-  font-size: 18px;
-  font-weight: 700;
-  color: #ffffff;
-  letter-spacing: 0.3px;
-}
 .new-chat-btn {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 0 14px 14px;
   padding: 10px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid var(--color-border-light);
   border-radius: 10px;
   background: transparent;
-  color: #cdd6f4;
+  color: var(--color-text-primary);
   font-size: 14px;
   cursor: pointer;
   transition: background 0.2s, border-color 0.2s;
 }
-
 .new-chat-btn:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.25);
+  background: var(--color-bg-hover);
+  border-color: var(--color-border);
+}
+.new-chat-btn.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
-/* 历史列表 */
 .history-list {
   flex: 1;
   overflow-y: auto;
   padding: 0 8px;
 }
-
-.history-list::-webkit-scrollbar {
-  width: 4px;
-}
-
+.history-list::-webkit-scrollbar { width: 4px; }
 .history-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--color-border-light);
   border-radius: 2px;
 }
 
 .date-label {
   font-size: 11px;
   font-weight: 600;
-  color: rgba(205, 214, 244, 0.45);
+  color: var(--color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.8px;
   padding: 12px 10px 6px;
@@ -144,20 +131,13 @@ function handleDelete(e, id) {
   transition: background 0.15s;
   position: relative;
 }
-
-.history-item:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
-
+.history-item:hover { background: var(--color-bg-hover); }
 .history-item.active {
-  background: rgba(79, 70, 229, 0.18);
-  border-left-color: #4f46e5;
+  background: var(--color-accent-light);
+  border-left-color: var(--color-accent);
 }
 
-.chat-icon {
-  flex-shrink: 0;
-  opacity: 0.5;
-}
+.chat-icon { flex-shrink: 0; opacity: 0.5; }
 
 .item-title {
   flex: 1;
@@ -178,23 +158,19 @@ function handleDelete(e, id) {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: rgba(205, 214, 244, 0.4);
+  color: var(--color-text-muted);
   cursor: pointer;
   transition: color 0.15s, background 0.15s;
 }
-
-.history-item:hover .delete-btn {
-  display: flex;
-}
-
+.history-item:hover .delete-btn { display: flex; }
 .delete-btn:hover {
-  color: #f87171;
-  background: rgba(248, 113, 113, 0.12);
+  color: var(--color-red);
+  background: var(--color-red-light);
 }
 
 .empty-hint {
   text-align: center;
-  color: rgba(205, 214, 244, 0.3);
+  color: var(--color-text-muted);
   font-size: 13px;
   padding: 30px 0;
 }

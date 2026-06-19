@@ -1,14 +1,35 @@
 <script setup>
+/**
+ * NodeDetail.vue — 节点详情弹窗
+ *
+ * 职责：展示节点详情 + 编辑 Markdown 内容。
+ *
+ * 去耦设计：
+ *   - 保存操作通过 emit('save-content', { nodeId, content }) 通知父组件
+ *   - 父组件（HomeView）调用 Store.updateNodeContent() 执行保存
+ *   - 组件不直接调用 apiClient
+ *
+ * Props:
+ *   nodeInfo: Object  — 节点详情数据
+ *   visible: Boolean  — 弹窗显示状态
+ *
+ * Emits:
+ *   close: ()                  — 关闭弹窗
+ *   refresh: ()                — 请求父组件刷新数据
+ *   save-content: ({ nodeId, content }) — 保存节点内容（父组件调用 Store）
+ */
+
 import { ref, computed, watch } from 'vue'
 import { marked } from 'marked'
-import { apiClient } from '../api/index.js'
+// ★ 不再直接 import apiClient —— 保存操作由父组件通过 Store 处理
+import { formatError } from '../utils/errorCodes.js'
 
 const props = defineProps({
   nodeInfo: { type: Object, default: null },
   visible: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['close', 'refresh'])
+const emit = defineEmits(['close', 'refresh', 'save-content'])
 
 const mode = ref('view')        // 'view' | 'edit'
 const editContent = ref('')
@@ -33,20 +54,36 @@ function displayName(id) {
   return id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 }
 
+/**
+ * 保存节点内容：通过 emit 将保存意图传递给父组件（HomeView），
+ * 父组件调用 Store.updateNodeContent() 完成后通过 callback 通知结果。
+ *
+ * 去耦设计：
+ *   - emit('save-content', { nodeId, content, onResult }) —— 传递数据和回调
+ *   - 父组件保存成功 → 调用 onResult(null) → 切回 view 模式
+ *   - 父组件保存失败 → 调用 onResult(errorMessage) → 显示错误，保持 edit 模式
+ */
 async function handleSave() {
   saving.value = true
   saveError.value = ''
-  try {
-    await apiClient.put(`/api/v1/knowledge/node/${props.nodeInfo.id}`, {
-      content: editContent.value,
-    })
-    emit('refresh')
-    mode.value = 'view'
-  } catch (e) {
-    saveError.value = '保存失败'
-  } finally {
-    saving.value = false
-  }
+
+  // ★ 通过回调让父组件通知保存结果，emit 本身是同步的不会抛异常
+  emit('save-content', {
+    nodeId: props.nodeInfo.id,
+    content: editContent.value,
+    onResult: (error) => {
+      saving.value = false
+      if (error) {
+        // 保存失败：保持编辑模式，显示错误
+        saveError.value = error
+      } else {
+        // 保存成功：切回阅读模式，通知父组件刷新
+        saveError.value = ''
+        mode.value = 'view'
+        emit('refresh')
+      }
+    },
+  })
 }
 
 /* 掌握程度映射 */

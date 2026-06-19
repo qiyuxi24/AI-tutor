@@ -2,23 +2,12 @@
 /**
  * ForceGraph.vue — D3 力导向知识图谱组件
  *
- * 功能：
- *   - D3 力场仿真渲染节点和边
- *   - 缩放平移（d3.zoom + 控制按钮）
- *   - 节点拖拽（d3.drag，优先级高于 zoom）
- *   - 鼠标悬停高亮关联节点/边
- *   - 右键菜单（ContextMenu）创建/编辑/删除节点和边
- *   - 编辑弹窗（EditDialog）表单输入
- *   - 自动刷新检测图谱变化
+ * 职责：纯渲染 + 用户交互，不直接调用后端 API。
  *
- * Props:
- *   nodes, edges — 图谱数据（由父组件 fetch 后传入）
- *   loading, error — 状态
- *   autoRefresh, refreshInterval — 自动刷新
+ * 设计风格：Obsidian 极简 —— 纯色节点、细线边、无光晕/渐变/装饰。
  *
- * Emits:
- *   node-click, node-dblclick — 节点交互
- *   graph-changed — CRUD 后通知父组件重新 fetch 数据
+ * 数据流（单向，去耦合）：
+ *   Store.knowledgeNodes/Edges → (props) → ForceGraph → (emit: graph-action) → HomeView
  */
 
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
@@ -44,7 +33,7 @@ const props = defineProps({
 const emit = defineEmits([
   'node-click',
   'node-dblclick',
-  'graph-changed',  // CRUD 操作后通知父组件刷新
+  'graph-action',
 ])
 
 /* ================================================================
@@ -52,27 +41,23 @@ const emit = defineEmits([
    ================================================================ */
 const containerRef = ref(null)
 
-// 自动刷新
 const graphChanged = ref(false)
 const changeTimer = ref(null)
 const autoRefreshTimer = ref(null)
 const currentZoom = ref(1)
 
-// 右键菜单状态
 const menuVisible = ref(false)
 const menuX = ref(0)
 const menuY = ref(0)
 const menuTargetType = ref('canvas')
 const menuTargetData = ref(null)
 
-// 编辑弹窗状态
 const dialogVisible = ref(false)
 const dialogMode = ref('create-node')
 const dialogData = ref({})
 
-// ── 边连线模式 ──
-const drawingEdgeMode = ref(false)     // 是否处于连线模式
-const drawingSourceId = ref(null)      // 连线源节点 ID
+const drawingEdgeMode = ref(false)
+const drawingSourceId = ref(null)
 
 /* ================================================================
    D3 核心对象引用（不响应式）
@@ -81,25 +66,59 @@ let simulation = null
 let svgSelection = null
 let zoomBehavior = null
 let zoomContainer = null
-
-/** 边击中的透明线引用（用于右键检测） */
 let edgeHitLines = null
-
-/** 连线模式中的临时虚线 */
 let drawingTempLine = null
-
-/** mousemove 回调引用（用于移除监听器） */
 let drawingMouseMoveHandler = null
 
 /* ================================================================
    工具函数
    ================================================================ */
-function masteryColor(mastery) {
-  if (mastery == null || mastery === 0) return '#9ca3af'
-  if (mastery <= 25)  return '#86efac'
-  if (mastery <= 50)  return '#34d399'
-  if (mastery <= 75)  return '#10b981'
-  return '#059669'
+
+/**
+ * 节点颜色：统一使用主题色系，根据掌握度微调透明度
+ * 0% → 默认灰色（未学习），>0% → 主题色（已学习）
+ */
+const NODE_RADIUS = 16
+const NODE_COLOR_DEFAULT = 'var(--color-graph-node)'
+const NODE_COLOR_LEARNED = 'var(--color-accent)'
+
+/**
+ * 关系类型 → 中文短标签
+ */
+const RELATION_LABELS = {
+  prerequisite: '前置知识',
+  related: '相关概念',
+  confusion: '易混淆',
+  extension: '扩展延伸',
+}
+
+/**
+ * 关系类型 → 标签颜色（淡色调，区分不同类型）
+ */
+const RELATION_COLORS = {
+  prerequisite: 'var(--color-blue)',
+  related: 'var(--color-green)',
+  confusion: 'var(--color-orange)',
+  extension: 'var(--color-purple)',
+}
+
+function edgeDisplayLabel(relation) {
+  return RELATION_LABELS[relation] || relation || ''
+}
+
+function edgeDisplayColor(relation) {
+  return RELATION_COLORS[relation] || 'var(--color-text-muted)'
+}
+
+function nodeFill(mastery) {
+  if (mastery == null || mastery === 0) return NODE_COLOR_DEFAULT
+  return NODE_COLOR_LEARNED
+}
+
+function nodeOpacity(mastery) {
+  if (mastery == null || mastery === 0) return 0.6
+  // mastery 0→100 映射 opacity 0.5→1.0
+  return 0.5 + Math.min(100, Math.max(1, mastery)) / 200
 }
 
 /* ================================================================
@@ -107,6 +126,11 @@ function masteryColor(mastery) {
    ================================================================ */
 function initForceGraph(nodes, links) {
   if (!containerRef.value) return
+
+  if (simulation) {
+    simulation.stop()
+    simulation = null
+  }
 
   const { width, height } = containerRef.value.getBoundingClientRect()
 
@@ -119,27 +143,29 @@ function initForceGraph(nodes, links) {
     .attr('height', '100%')
     .style('display', 'block')
 
-  // ── 箭头标记 ──
-  svgSelection.append('defs').append('marker')
+  // ── 箭头标记（极简三角） ──
+  svgSelection.append('defs')
+    .append('marker')
     .attr('id', 'arrowhead')
-    .attr('viewBox', '-0 -5 10 10')
+    .attr('viewBox', '0 -4 8 8')
     .attr('refX', 20).attr('refY', 0)
     .attr('orient', 'auto')
-    .attr('markerWidth', 6).attr('markerHeight', 6)
+    .attr('markerWidth', 4).attr('markerHeight', 4)
     .append('path')
-    .attr('d', 'M 0,-5 L 10,0 L 0,5')
-    .attr('fill', '#6b7280')
+    .attr('d', 'M 0,-3.5 L 7,0 L 0,3.5')
+    .attr('fill', 'var(--color-graph-edge)')
 
-  // ── Zoom 容器 ──
+  // ── Zoom ──
   zoomContainer = svgSelection.append('g')
     .attr('class', 'zoom-container')
 
-  // ── Zoom 行为 ──
   zoomBehavior = d3.zoom()
-    .scaleExtent([0.1, 4])
+    .scaleExtent([0.08, 5])
     .filter((event) => {
       if (event.type === 'wheel' && event.ctrlKey) return false
-      return event.type !== 'dblclick'
+      if (event.type === 'dblclick') return false
+      if (event.type === 'contextmenu') return false
+      return true
     })
     .on('zoom', (event) => {
       zoomContainer.attr('transform', event.transform)
@@ -148,12 +174,58 @@ function initForceGraph(nodes, links) {
 
   svgSelection.call(zoomBehavior)
 
+  // ── 右键事件（原生 capture，绕过 D3 zoom） ──
+  const svgNode = svgSelection.node()
+  svgNode.addEventListener('contextmenu', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+
+    if (drawingEdgeMode.value) {
+      clearDrawingMode()
+      return
+    }
+
+    const target = event.target
+    const tag = target.tagName?.toLowerCase()
+
+    if (tag === 'circle' && target.closest('.node')) {
+      const nodeGroup = target.closest('.node')
+      const nodeData = d3.select(nodeGroup).datum()
+      if (nodeData) {
+        showContextMenu(event.clientX, event.clientY, 'node', nodeData)
+        return
+      }
+    }
+
+    if (target.closest('.edge-hit-lines line')) {
+      const lineEl = target.closest('.edge-hit-lines line')
+      const edgeData = d3.select(lineEl).datum()
+      if (edgeData) {
+        showContextMenu(event.clientX, event.clientY, 'edge', { edge: edgeData })
+        return
+      }
+    }
+
+    showContextMenu(event.clientX, event.clientY, 'canvas', null)
+  }, { capture: true })
+
   // ── 力场仿真 ──
   simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id(d => d.id).distance(150))
-    .force('charge', d3.forceManyBody().strength(-300))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collision', d3.forceCollide().radius(40))
+    .alphaDecay(0.02)
+    .velocityDecay(0.35)
+    .force('link', d3.forceLink(links)
+      .id(d => d.id)
+      .distance(140)
+      .strength(0.3)
+    )
+    .force('charge', d3.forceManyBody()
+      .strength(-250)
+      .distanceMax(500)
+    )
+    .force('center', d3.forceCenter(width / 2, height / 2).strength(0.06))
+    .force('collision', d3.forceCollide().radius(NODE_RADIUS + 12).strength(0.6))
+    .force('x', d3.forceX(width / 2).strength(0.02))
+    .force('y', d3.forceY(height / 2).strength(0.02))
 
   // ── 连线（可视） ──
   const link = zoomContainer.append('g')
@@ -162,30 +234,26 @@ function initForceGraph(nodes, links) {
     .data(links)
     .enter()
     .append('line')
-    .attr('stroke', '#4b5563')
-    .attr('stroke-width', 2)
+    .attr('stroke', 'var(--color-graph-edge)')
+    .attr('stroke-width', 1.2)
+    .attr('stroke-opacity', 0.4)
     .attr('marker-end', 'url(#arrowhead)')
     .style('pointer-events', 'none')
 
-  // ── 连线（透明宽线，用于点击/右键检测） ──
-  // ★ 关键：在可视连线上方叠加更宽的透明线，方便鼠标点击边
-  edgeHitLines = zoomContainer.append('g')
+  // ── 连线（透明击中区） ──
+  const hitGroup = zoomContainer.append('g')
     .attr('class', 'edge-hit-lines')
-    .selectAll('line')
+
+  const hitLines = hitGroup.selectAll('line')
     .data(links)
     .enter()
     .append('line')
     .attr('stroke', 'transparent')
-    .attr('stroke-width', 12)   // 12px 宽，容易点到
+    .attr('stroke-width', 14)
     .style('cursor', 'pointer')
-    .style('pointer-events', 'stroke')
-    .on('contextmenu', function (event, d) {
-      // 右键边 → 显示边的右键菜单
-      event.preventDefault()
-      event.stopPropagation()
-      const idx = links.indexOf(d)
-      showContextMenu(event.clientX, event.clientY, 'edge', { edge: d, index: idx })
-    })
+    .style('pointer-events', 'all')
+
+  edgeHitLines = hitLines
 
   // ── 连线标签 ──
   const linkLabel = zoomContainer.append('g')
@@ -195,13 +263,14 @@ function initForceGraph(nodes, links) {
     .enter()
     .append('text')
     .attr('font-size', 10)
-    .attr('fill', '#9ca3af')
+    .attr('font-weight', '500')
+    .attr('fill', d => edgeDisplayColor(d.relation))
     .attr('text-anchor', 'middle')
-    .text(d => d.label)
+    .text(d => edgeDisplayLabel(d.relation))
     .style('pointer-events', 'none')
     .style('user-select', 'none')
 
-  // ── 节点 ──
+  // ── 节点组 ──
   const node = zoomContainer.append('g')
     .attr('class', 'nodes')
     .selectAll('g')
@@ -219,61 +288,107 @@ function initForceGraph(nodes, links) {
     .filter((event) => event.button === 0)
   )
 
-  // ── 节点圆形 ──
+  // ── 节点圆形（极简：纯色填充 + 细描边） ──
   node.append('circle')
-    .attr('r', 20)
-    .attr('fill', d => masteryColor(d.mastery))
-    .attr('stroke', d => masteryColor(d.mastery))
-    .attr('stroke-width', 2)
-    .attr('stroke-opacity', 0.5)
-    .style('filter', 'drop-shadow(0 0 8px currentColor)')
+    .attr('class', 'node-body')
+    .attr('r', NODE_RADIUS)
+    .attr('fill', d => nodeFill(d.mastery))
+    .attr('opacity', d => nodeOpacity(d.mastery))
+    .attr('stroke', d => nodeFill(d.mastery))
+    .attr('stroke-width', 1)
+    .attr('stroke-opacity', 0.3)
 
-  // ── 节点名称标签 ──
+  // ── 节点名称（标签在节点右侧，Obsidian 风格） ──
   node.append('text')
-    .attr('dy', 35)
-    .attr('text-anchor', 'middle')
-    .attr('fill', '#e5e7eb')
+    .attr('class', 'node-label')
+    .attr('dx', NODE_RADIUS + 8)
+    .attr('dy', 4)
+    .attr('text-anchor', 'start')
+    .attr('fill', 'var(--color-text-primary)')
     .attr('font-size', 12)
+    .attr('font-weight', '500')
     .text(d => d.name)
-
-  // ── 右键：节点 ──
-  node.on('contextmenu', function (event, d) {
-    event.preventDefault()
-    event.stopPropagation()
-    showContextMenu(event.clientX, event.clientY, 'node', d)
-  })
+    .style('pointer-events', 'none')
+    .style('user-select', 'none')
 
   // ── 悬停高亮 ──
   node.on('mouseover', function (event, d) {
     event.stopPropagation()
-    d3.select(this).select('circle').attr('r', 24).attr('stroke-width', 3)
 
-    link.attr('stroke', l =>
-      (l.source.id === d.id || l.target.id === d.id) ? '#fbbf24' : '#4b5563'
-    ).attr('stroke-width', l =>
-      (l.source.id === d.id || l.target.id === d.id) ? 3 : 2
-    )
+    // 悬停节点：放大 + 亮色描边
+    d3.select(this).select('.node-body')
+      .transition().duration(150)
+      .attr('r', NODE_RADIUS + 4)
+      .attr('stroke-width', 2)
+      .attr('stroke-opacity', 0.8)
+      .attr('stroke', 'var(--color-accent)')
 
-    node.select('circle').attr('opacity', n => {
-      if (n.id === d.id) return 1
-      return links.some(l =>
-        (l.source.id === d.id && l.target.id === n.id) ||
-        (l.target.id === d.id && l.source.id === n.id)
-      ) ? 1 : 0.3
-    })
+    d3.select(this).select('.node-label')
+      .transition().duration(150)
+      .attr('font-weight', '600')
+
+    // 关联边高亮
+    link
+      .transition().duration(150)
+      .attr('stroke', l =>
+        (l.source.id === d.id || l.target.id === d.id)
+          ? 'var(--color-accent)'
+          : 'var(--color-graph-edge)'
+      )
+      .attr('stroke-width', l =>
+        (l.source.id === d.id || l.target.id === d.id) ? 2 : 1.2
+      )
+      .attr('stroke-opacity', l =>
+        (l.source.id === d.id || l.target.id === d.id) ? 0.7 : 0.12
+      )
+
+    // 非关联节点淡化
+    node.select('.node-body').transition().duration(150)
+      .attr('opacity', n => {
+        if (n.id === d.id) return nodeOpacity(n.mastery)
+        const connected = links.some(l =>
+          (l.source.id === d.id && l.target.id === n.id) ||
+          (l.target.id === d.id && l.source.id === n.id)
+        )
+        return connected ? nodeOpacity(n.mastery) : 0.12
+      })
+    node.select('.node-label').transition().duration(150)
+      .attr('opacity', n => {
+        if (n.id === d.id) return 1
+        const connected = links.some(l =>
+          (l.source.id === d.id && l.target.id === n.id) ||
+          (l.target.id === d.id && l.source.id === n.id)
+        )
+        return connected ? 1 : 0.15
+      })
   })
 
-  node.on('mouseout', function (event) {
-    event.stopPropagation()
-    d3.select(this).select('circle').attr('r', 20).attr('stroke-width', 2)
-    link.attr('stroke', '#4b5563').attr('stroke-width', 2)
-    node.select('circle').attr('opacity', 1)
+  node.on('mouseout', function () {
+    d3.select(this).select('.node-body')
+      .transition().duration(200)
+      .attr('r', NODE_RADIUS)
+      .attr('stroke-width', 1)
+      .attr('stroke-opacity', 0.3)
+      .attr('stroke', function () { return d3.select(this).attr('fill') })
+
+    d3.select(this).select('.node-label')
+      .transition().duration(200)
+      .attr('font-weight', '500')
+
+    link.transition().duration(200)
+      .attr('stroke', 'var(--color-graph-edge)')
+      .attr('stroke-width', 1.2)
+      .attr('stroke-opacity', 0.4)
+
+    node.select('.node-body').transition().duration(200)
+      .attr('opacity', n => nodeOpacity(n.mastery))
+    node.select('.node-label').transition().duration(200)
+      .attr('opacity', 1)
   })
 
   // ── 点击 / 双击 ──
   node.on('click', function (event, d) {
     event.stopPropagation()
-    // 连线模式下：左键点击节点 = 目标节点
     if (drawingEdgeMode.value) {
       handleDrawingTarget(d.id)
       return
@@ -285,36 +400,21 @@ function initForceGraph(nodes, links) {
     emit('node-dblclick', d.id)
   })
 
-  // ── 右键：SVG 空白区域 ──
-  svgSelection.on('contextmenu', function (event) {
-    event.preventDefault()
-    // 连线模式下：右键取消连线
-    if (drawingEdgeMode.value) {
-      clearDrawingMode()
-      return
-    }
-    // 只在点击空白区域时触发（不是节点或边）
-    const target = event.target
-    if (target.tagName === 'svg' || target === containerRef.value) {
-      showContextMenu(event.clientX, event.clientY, 'canvas', null)
-    }
-  })
-
-  // 左键点击空白：关闭菜单 / 连线模式下不做处理
   svgSelection.on('click', () => {
     if (menuVisible.value) menuVisible.value = false
   })
 
-  // ── Tick 更新 ──
+  // ── Tick ──
   simulation.on('tick', () => {
     link
       .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
       .attr('x2', d => d.target.x).attr('y2', d => d.target.y)
 
-    // 同步透明击中线的位置
-    edgeHitLines
-      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-      .attr('x2', d => d.target.x).attr('y2', d => d.target.y)
+    if (edgeHitLines) {
+      edgeHitLines
+        .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x).attr('y2', d => d.target.y)
+    }
 
     linkLabel
       .attr('x', d => (d.source.x + d.target.x) / 2)
@@ -322,19 +422,22 @@ function initForceGraph(nodes, links) {
 
     node.attr('transform', d => `translate(${d.x},${d.y})`)
 
-    // 连线模式：同步临时虚线源节点位置
     if (drawingTempLine && drawingSourceId.value) {
-      const src = nodes.find(n => n.id === drawingSourceId.value)
+      const src = simulation.nodes().find(n => n.id === drawingSourceId.value)
       if (src) drawingTempLine.attr('x1', src.x).attr('y1', src.y)
     }
   })
 
-  // ── 拖拽处理 ──
+  // ── 拖拽 ──
   function dragstarted(event, d) {
     if (event.sourceEvent) event.sourceEvent.stopPropagation()
-    if (!event.active) simulation.alphaTarget(0.3).restart()
+    if (!event.active) simulation.alphaTarget(0.12).restart()
     d.fx = d.x; d.fy = d.y
     d3.select(this).style('cursor', 'grabbing')
+    d3.select(this).select('.node-body')
+      .transition().duration(100)
+      .attr('r', NODE_RADIUS + 3)
+      .attr('stroke-opacity', 0.6)
   }
   function dragged(event, d) {
     if (event.sourceEvent) event.sourceEvent.stopPropagation()
@@ -345,6 +448,10 @@ function initForceGraph(nodes, links) {
     if (!event.active) simulation.alphaTarget(0)
     d.fx = null; d.fy = null
     d3.select(this).style('cursor', 'grab')
+    d3.select(this).select('.node-body')
+      .transition().duration(200)
+      .attr('r', NODE_RADIUS)
+      .attr('stroke-opacity', 0.3)
   }
 }
 
@@ -352,20 +459,39 @@ function initForceGraph(nodes, links) {
    图谱渲染入口
    ================================================================ */
 function renderGraph() {
-  const nodes = (props.nodes || []).map(n => ({ ...n }))
-  const links = (props.edges || []).map(e => ({
-    source: e.source || e.from,
-    target: e.target || e.to,
-    label: e.label,
-    relation: e.relation || '',
-  }))
-  if (nodes.length > 0 && containerRef.value) {
-    initForceGraph(nodes, links)
+  try {
+    const nodes = (props.nodes || []).map(n => ({ ...n }))
+    const links = (props.edges || []).map((e) => ({
+      source: e.source || e.from_node || e.from,
+      target: e.target || e.to_node || e.to,
+      label: e.label || '',
+      relation: e.relation || '',
+      edgeId: e.edgeId,
+    }))
+    if (nodes.length > 0 && containerRef.value) {
+      initForceGraph(nodes, links)
+    }
+  } catch (e) {
+    console.error('[ForceGraph] renderGraph 失败:', e)
   }
 }
 
+let lastGraphFingerprint = ''
+
+function graphFingerprint(nodes, edges) {
+  const nodeIds = (nodes || []).map(n => n.id).sort().join(',')
+  const edgeKeys = (edges || []).map(e =>
+    `${e.source || e.from_node || e.from}->${e.target || e.to_node || e.to}`
+  ).sort().join(',')
+  return `${nodeIds}|${edgeKeys}`
+}
+
 watch(() => [props.nodes, props.edges], () => {
-  renderGraph()
+  const fp = graphFingerprint(props.nodes, props.edges)
+  if (fp !== lastGraphFingerprint) {
+    lastGraphFingerprint = fp
+    renderGraph()
+  }
 }, { deep: true })
 
 /* ================================================================
@@ -386,8 +512,7 @@ function closeMenu() {
 /* ================================================================
    右键菜单事件 → 打开编辑弹窗
    ================================================================ */
-
-function handleCreateNode(payload) {
+function handleCreateNode() {
   dialogMode.value = 'create-node'
   dialogData.value = {}
   dialogVisible.value = true
@@ -400,45 +525,33 @@ function handleEditNode(nodeData) {
 }
 
 function handleAddEdgeFromNode(nodeId) {
-  // 进入连线模式：从该节点拖出一条虚线到鼠标光标
   startEdgeDrawing(nodeId)
 }
 
 /* ================================================================
-   连线模式（拖线创建边）
+   连线模式
    ================================================================ */
-
-/**
- * 进入连线模式：从指定节点出发，显示一条跟随鼠标的虚线
- * 左键点击目标节点 → 创建边并打开编辑弹窗
- * 右键 → 取消连线
- */
 function startEdgeDrawing(sourceNodeId) {
   drawingEdgeMode.value = true
   drawingSourceId.value = sourceNodeId
 
-  // 找到源节点在仿真中的坐标
   const sourceNode = simulation?.nodes()?.find(n => n.id === sourceNodeId)
   const sx = sourceNode?.x ?? 0
   const sy = sourceNode?.y ?? 0
 
-  // 在 zoomContainer 上追加临时虚线
   drawingTempLine = zoomContainer.append('line')
     .attr('class', 'drawing-temp-line')
     .attr('x1', sx).attr('y1', sy)
     .attr('x2', sx).attr('y2', sy)
-    .attr('stroke', '#60a5fa')
-    .attr('stroke-width', 2)
-    .attr('stroke-dasharray', '8,4')
+    .attr('stroke', 'var(--color-accent)')
+    .attr('stroke-width', 1.5)
+    .attr('stroke-dasharray', '6,4')
     .style('pointer-events', 'none')
 
-  // 改变 SVG 光标
   svgSelection.style('cursor', 'crosshair')
 
-  // 在 SVG 上监听鼠标移动
   drawingMouseMoveHandler = (event) => {
     if (!drawingEdgeMode.value || !drawingTempLine) return
-    // 将屏幕坐标转换为 zoomContainer 坐标
     const [mx, my] = d3.pointer(event, svgSelection.node())
     const transform = d3.zoomTransform(svgSelection.node())
     const zx = (mx - transform.x) / transform.k
@@ -448,9 +561,6 @@ function startEdgeDrawing(sourceNodeId) {
   svgSelection.on('mousemove.drawing', drawingMouseMoveHandler)
 }
 
-/**
- * 退出连线模式，清理临时虚线及事件监听
- */
 function clearDrawingMode() {
   drawingEdgeMode.value = false
   drawingSourceId.value = null
@@ -462,13 +572,10 @@ function clearDrawingMode() {
 
   if (svgSelection) {
     svgSelection.style('cursor', '')
-    svgSelection.on('mousemove.drawing', null)  // 移除命名空间监听
+    svgSelection.on('mousemove.drawing', null)
   }
 }
 
-/**
- * 连线模式下点击目标节点：创建边 → 打开编辑弹窗
- */
 async function handleDrawingTarget(targetNodeId) {
   const sourceId = drawingSourceId.value
   if (targetNodeId === sourceId) {
@@ -477,196 +584,84 @@ async function handleDrawingTarget(targetNodeId) {
     return
   }
 
-  try {
-    // 先用默认值创建边
-    const resp = await fetch('/api/v1/knowledge/edge', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: sourceId,
-        to: targetNodeId,
-        relation: 'related',
-        label: '',
-      }),
-    })
+  clearDrawingMode()
 
-    clearDrawingMode()
+  emit('graph-action', {
+    action: 'create-edge',
+    payload: { from: sourceId, to: targetNodeId, relation: 'related', label: '' },
+  })
 
-    if (!resp.ok) {
-      const err = await resp.json()
-      alert(`添加边失败：${err.detail || resp.statusText}`)
-      return
-    }
-
-    // 刷新图谱（emit + fetch + 重新渲染）
-    await notifyGraphChanged()
-
-    // 再拉一次最新数据，找到刚创建的边索引以打开编辑弹窗
-    const graphResp = await fetch('/api/v1/knowledge/graph')
-    if (!graphResp.ok) return
-    const graphData = await graphResp.json()
-    const edges = graphData.edges || []
-
-    // 匹配刚创建的边（from + to + relation）
-    const newEdgeIdx = edges.findIndex(e =>
-      e.from === sourceId && e.to === targetNodeId && e.relation === 'related'
-    )
-
-    if (newEdgeIdx >= 0) {
-      // 自动打开编辑边弹窗
-      const edge = edges[newEdgeIdx]
-      dialogMode.value = 'edit-edge'
-      dialogData.value = { ...edge, _index: newEdgeIdx }
-      dialogVisible.value = true
-    }
-  } catch (e) {
-    alert(`网络错误：${e.message}`)
-    clearDrawingMode()
-  }
+  await new Promise((resolve) => {
+    let resolved = false
+    const timeout = setTimeout(() => {
+      if (!resolved) { resolved = true; stop(); resolve() }
+    }, 5000)
+    const stop = watch(() => props.edges, (newEdges) => {
+      const found = (newEdges || []).find(e => {
+        const eSource = e.source || e.from_node || e.from
+        const eTarget = e.target || e.to_node || e.to
+        return eSource === sourceId && eTarget === targetNodeId && e.relation === 'related'
+      })
+      if (found) {
+        resolved = true
+        clearTimeout(timeout)
+        stop()
+        dialogMode.value = 'edit-edge'
+        dialogData.value = { ...found }
+        dialogVisible.value = true
+      }
+    }, { deep: true, immediate: true })
+  })
 }
 
 function handleEditEdge(edgeData) {
   dialogMode.value = 'edit-edge'
-  // edgeData = { edge: {...}, index: N }
-  dialogData.value = { ...edgeData.edge, _index: edgeData.index }
+  dialogData.value = { ...edgeData.edge }
   dialogVisible.value = true
 }
 
 /* ================================================================
-   删除操作（无需弹窗，直接确认后调 API）
+   删除操作
    ================================================================ */
-async function handleDeleteNode(nodeId) {
+function handleDeleteNode(nodeId) {
   if (!confirm(`确定删除节点「${nodeId}」及其所有关联边吗？此操作不可撤销。`)) return
-  try {
-    const resp = await fetch(`/api/v1/knowledge/node/${encodeURIComponent(nodeId)}`, {
-      method: 'DELETE',
-    })
-    if (!resp.ok) {
-      const err = await resp.json()
-      alert(`删除失败：${err.detail || resp.statusText}`)
-      return
-    }
-    const result = await resp.json()
-    notifyGraphChanged()
-  } catch (e) {
-    alert(`网络错误：${e.message}`)
-  }
+  emit('graph-action', { action: 'delete-node', payload: { nodeId } })
 }
 
-async function handleDeleteEdge(edgeData) {
-  // edgeData = { edge: {...}, index: N }
+function handleDeleteEdge(edgeData) {
   if (!confirm('确定删除这条边吗？')) return
-  const idx = edgeData.index
-  try {
-    const resp = await fetch(`/api/v1/knowledge/edge/${idx}`, { method: 'DELETE' })
-    if (!resp.ok) {
-      const err = await resp.json()
-      alert(`删除失败：${err.detail || resp.statusText}`)
-      return
-    }
-    notifyGraphChanged()
-  } catch (e) {
-    alert(`网络错误：${e.message}`)
-  }
+  emit('graph-action', { action: 'delete-edge', payload: { edgeId: edgeData.edge.edgeId } })
 }
 
 /* ================================================================
-   编辑弹窗提交 → 调用 API
+   编辑弹窗提交
    ================================================================ */
-async function handleDialogSubmit(formData) {
-  try {
-    switch (dialogMode.value) {
-      case 'create-node': {
-        const resp = await fetch('/api/v1/knowledge/node', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: formData.name,
-            tags: formData.tags,
-            content: formData.content || undefined,
-          }),
-        })
-        if (!resp.ok) {
-          const err = await resp.json()
-          alert(`创建失败：${err.detail || resp.statusText}`)
-          return
-        }
-        break
-      }
-
-      case 'edit-node': {
-        const nodeId = dialogData.value?.id
-        if (!nodeId) return
-        const resp = await fetch(`/api/v1/knowledge/node/${encodeURIComponent(nodeId)}/info`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: formData.name,
-            tags: formData.tags,
-          }),
-        })
-        if (!resp.ok) {
-          const err = await resp.json()
-          alert(`更新失败：${err.detail || resp.statusText}`)
-          return
-        }
-        break
-      }
-
-      case 'edit-edge': {
-        const idx = dialogData.value?._index
-        if (idx == null) return
-        const resp = await fetch(`/api/v1/knowledge/edge/${idx}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            relation: formData.relation,
-            label: formData.label,
-          }),
-        })
-        if (!resp.ok) {
-          const err = await resp.json()
-          alert(`更新边失败：${err.detail || resp.statusText}`)
-          return
-        }
-        break
-      }
+function handleDialogSubmit(formData) {
+  switch (dialogMode.value) {
+    case 'create-node':
+      emit('graph-action', {
+        action: 'create-node',
+        payload: { name: formData.name, tags: formData.tags, content: formData.content || undefined },
+      })
+      break
+    case 'edit-node': {
+      const nodeId = dialogData.value?.id
+      if (!nodeId) return
+      emit('graph-action', {
+        action: 'edit-node',
+        payload: { nodeId, name: formData.name, tags: formData.tags },
+      })
+      break
     }
-
-    // 成功后通知父组件刷新
-    notifyGraphChanged()
-
-  } catch (e) {
-    alert(`网络错误：${e.message}`)
-  }
-}
-
-/* ================================================================
-   通知图谱变化（主动 fetch + 直接重新渲染，不依赖父组件）
-   ================================================================ */
-async function notifyGraphChanged() {
-  // 1. 通知父组件（供其更新自身状态，如节点列表等）
-  emit('graph-changed')
-
-  // 2. 主动拉取最新图谱并直接重新渲染
-  try {
-    const resp = await fetch('/api/v1/knowledge/graph')
-    if (!resp.ok) return
-    const data = await resp.json()
-
-    const nodes = (data.nodes || []).map(n => ({ ...n }))
-    const links = (data.edges || []).map(e => ({
-      source: e.source || e.from,
-      target: e.target || e.to,
-      label: e.label,
-      relation: e.relation || '',
-    }))
-
-    if (nodes.length > 0 && containerRef.value) {
-      initForceGraph(nodes, links)
+    case 'edit-edge': {
+      const edgeId = dialogData.value?.edgeId
+      if (edgeId == null) return
+      emit('graph-action', {
+        action: 'edit-edge',
+        payload: { edgeId, relation: formData.relation, label: formData.label },
+      })
+      break
     }
-  } catch {
-    // 静默失败：emit 已发出，父组件 watch 可能会兜底
   }
 }
 
@@ -676,27 +671,27 @@ async function notifyGraphChanged() {
 function handleResize() {
   if (simulation && containerRef.value) {
     const { width, height } = containerRef.value.getBoundingClientRect()
-    simulation.force('center', d3.forceCenter(width / 2, height / 2))
-    simulation.alpha(0.3).restart()
+    simulation
+      .force('center', d3.forceCenter(width / 2, height / 2).strength(0.06))
+      .force('x', d3.forceX(width / 2).strength(0.02))
+      .force('y', d3.forceY(height / 2).strength(0.02))
+    simulation.alpha(0.2).restart()
   }
 }
 
 /* ================================================================
    自动刷新
    ================================================================ */
-async function checkGraphUpdate() {
-  try {
-    const resp = await fetch('/api/v1/knowledge/graph')
-    if (!resp.ok) return
-    const data = await resp.json()
-    const newNodeCount = (data.nodes || []).length
-    const newEdgeCount = (data.edges || []).length
-    const currentNodes = (props.nodes || []).length
-    const currentEdges = (props.edges || []).length
-    if (newNodeCount !== currentNodes || newEdgeCount !== currentEdges) {
-      showChangeNotification()
-    }
-  } catch { /* 静默 */ }
+let lastNodeCount = 0
+let lastEdgeCount = 0
+function checkGraphUpdate() {
+  const nn = (props.nodes || []).length
+  const ne = (props.edges || []).length
+  if (lastNodeCount && lastEdgeCount && (nn !== lastNodeCount || ne !== lastEdgeCount)) {
+    showChangeNotification()
+  }
+  lastNodeCount = nn
+  lastEdgeCount = ne
 }
 
 function showChangeNotification() {
@@ -749,10 +744,20 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (simulation) simulation.stop()
+  if (simulation) {
+    simulation.stop()
+    simulation = null
+  }
+  if (containerRef.value) {
+    d3.select(containerRef.value).select('svg').remove()
+  }
   window.removeEventListener('resize', handleResize)
   stopAutoRefresh()
-  if (changeTimer.value) clearTimeout(changeTimer.value)
+  if (changeTimer.value) {
+    clearTimeout(changeTimer.value)
+    changeTimer.value = null
+  }
+  clearDrawingMode()
 })
 </script>
 
@@ -765,19 +770,19 @@ onUnmounted(() => {
     </div>
 
     <!-- 错误状态 -->
-    <div v-else-if="error === 'ERROR'" class="error-overlay">
-      <p>图谱加载失败</p>
+    <div v-else-if="error" class="error-overlay">
+      <p>{{ error }}</p>
       <span class="error-hint">请确认后端服务已启动</span>
     </div>
 
     <!-- 空状态 -->
     <div v-else-if="!loading && props.nodes.length === 0 && !error" class="empty-overlay">
-      <div class="empty-icon">📭</div>
+      <div class="empty-icon">◉</div>
       <p>知识图谱暂无内容</p>
       <p class="empty-hint">右键空白区域创建第一个节点</p>
     </div>
 
-    <!-- 缩放控制按钮 -->
+    <!-- 缩放控制 -->
     <div v-if="props.nodes.length > 0" class="zoom-controls">
       <button class="zoom-btn" title="放大" @click="zoomIn">+</button>
       <span class="zoom-level">{{ currentZoom }}x</span>
@@ -788,7 +793,7 @@ onUnmounted(() => {
     <!-- 图谱更新提示 -->
     <transition name="fade">
       <div v-if="graphChanged" class="update-toast">
-        🔄 图谱已更新
+        图谱已更新
       </div>
     </transition>
 
@@ -826,7 +831,7 @@ onUnmounted(() => {
 .force-graph-container {
   width: 100%;
   height: 100%;
-  background: #1e1e2e;
+  background: var(--color-bg-primary);
   border-radius: 8px;
   overflow: hidden;
   position: relative;
@@ -834,17 +839,27 @@ onUnmounted(() => {
 
 .force-graph-container :deep(svg) { display: block; }
 
-/* D3 元素 */
-.force-graph-container :deep(.node) { transition: opacity 0.2s ease; }
-.force-graph-container :deep(circle) { transition: r 0.2s ease, stroke-width 0.2s ease; }
+/* ── D3 元素（极简过渡） ── */
+.force-graph-container :deep(.node-body) {
+  transition: r 0.15s ease, opacity 0.15s ease, stroke-width 0.15s ease;
+}
+.force-graph-container :deep(.node-label) {
+  transition: opacity 0.15s ease, font-weight 0.15s ease;
+}
 .force-graph-container :deep(text) {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   user-select: none;
   pointer-events: none;
 }
 .force-graph-container :deep(.zoom-container) { pointer-events: auto; }
+.force-graph-container :deep(.links line) {
+  transition: stroke 0.15s ease, stroke-width 0.15s ease, stroke-opacity 0.15s ease;
+}
+.force-graph-container :deep(.link-labels text) {
+  transition: opacity 0.15s ease;
+}
 
-/* 边击中线的光标样式 */
+/* ── 边击中区 ── */
 .force-graph-container :deep(.edge-hit-lines line) {
   cursor: pointer;
 }
@@ -856,12 +871,12 @@ onUnmounted(() => {
   position: absolute; inset: 0;
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
-  color: #a6adc8; font-size: 14px; gap: 16px; z-index: 10;
+  color: var(--color-text-secondary); font-size: 14px; gap: 16px; z-index: 10;
 }
 .spinner {
-  width: 40px; height: 40px;
-  border: 3px solid #313244;
-  border-top-color: #60a5fa;
+  width: 32px; height: 32px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -871,18 +886,18 @@ onUnmounted(() => {
   position: absolute; inset: 0;
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
-  color: #f87171; font-size: 14px; gap: 6px; z-index: 10;
+  color: var(--color-red); font-size: 14px; gap: 6px; z-index: 10;
 }
-.error-hint { font-size: 12px; color: #a6adc8; margin-top: 2px; }
+.error-hint { font-size: 12px; color: var(--color-text-secondary); margin-top: 2px; }
 
 .empty-overlay {
   position: absolute; inset: 0;
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
-  color: #a6adc8; font-size: 14px; gap: 6px; z-index: 10;
+  color: var(--color-text-secondary); font-size: 14px; gap: 6px; z-index: 10;
 }
-.empty-icon { font-size: 40px; }
-.empty-hint { font-size: 12px; color: #6b7280; margin-top: 4px; }
+.empty-icon { font-size: 36px; opacity: 0.4; }
+.empty-hint { font-size: 12px; color: var(--color-text-muted); margin-top: 4px; }
 
 /* ================================================================
    缩放控制
@@ -892,21 +907,19 @@ onUnmounted(() => {
   display: flex; flex-direction: column; align-items: center; gap: 4px; z-index: 20;
 }
 .zoom-btn {
-  width: 32px; height: 32px;
-  border: 1px solid rgba(255,255,255,0.15);
-  border-radius: 6px;
-  background: rgba(30,30,46,0.75);
-  color: rgba(255,255,255,0.85);
-  font-size: 16px; font-weight: bold; line-height: 1;
+  width: 28px; height: 28px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 4px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-secondary);
+  font-size: 14px; font-weight: 500; line-height: 1;
   cursor: pointer;
   display: flex; align-items: center; justify-content: center;
-  transition: background 0.2s, border-color 0.2s;
-  backdrop-filter: blur(8px);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
-.zoom-btn:hover { background: rgba(60,60,80,0.85); border-color: rgba(255,255,255,0.3); }
-.zoom-btn:active { background: rgba(80,80,100,0.85); }
-.zoom-reset { font-size: 14px; margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 8px; }
-.zoom-level { font-size: 11px; color: rgba(255,255,255,0.5); user-select: none; padding: 2px 0; }
+.zoom-btn:hover { background: var(--color-bg-surface); color: var(--color-text-primary); border-color: var(--color-border); }
+.zoom-reset { font-size: 12px; margin-top: 4px; border-top: 1px solid var(--color-border-subtle); padding-top: 8px; }
+.zoom-level { font-size: 10px; color: var(--color-text-muted); user-select: none; padding: 2px 0; }
 
 /* ================================================================
    更新提示
@@ -914,20 +927,23 @@ onUnmounted(() => {
 .update-toast {
   position: absolute; bottom: 20px; left: 50%;
   transform: translateX(-50%);
-  background: rgba(16,185,129,0.9);
-  color: #fff; padding: 10px 20px; border-radius: 8px;
-  font-size: 13px; font-weight: 500;
-  box-shadow: 0 4px 16px rgba(16,185,129,0.3);
-  z-index: 30; backdrop-filter: blur(8px); white-space: nowrap;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  padding: 8px 18px; border-radius: 6px;
+  font-size: 12px; font-weight: 500;
+  border: 1px solid var(--color-border-subtle);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  z-index: 30;
+  white-space: nowrap;
 }
-.fade-enter-active { animation: toastIn 0.3s ease; }
-.fade-leave-active { animation: toastOut 0.3s ease; }
+.fade-enter-active { animation: toastIn 0.2s ease; }
+.fade-leave-active { animation: toastOut 0.2s ease; }
 @keyframes toastIn {
-  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
   to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 @keyframes toastOut {
   from { opacity: 1; transform: translateX(-50%) translateY(0); }
-  to   { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to   { opacity: 0; transform: translateX(-50%) translateY(8px); }
 }
 </style>

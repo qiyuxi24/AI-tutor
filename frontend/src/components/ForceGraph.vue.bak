@@ -1,0 +1,961 @@
+<script setup>
+/**
+ * ForceGraph.vue — D3 力导向知识图谱组件
+ *
+ * 功能：
+ *   - D3 力场仿真渲染节点和边
+ *   - 缩放平移（d3.zoom + 控制按钮）
+ *   - 节点拖拽（d3.drag，优先级高于 zoom）
+ *   - 鼠标悬停高亮关联节点/边
+ *   - 右键菜单（ContextMenu）创建/编辑/删除节点和边
+ *   - 编辑弹窗（EditDialog）表单输入
+ *   - 自动刷新检测图谱变化
+ *
+ * 数据流：
+ *   父组件通过 props 传入 nodes/edges → watch 触发 renderGraph
+ *   CRUD 操作通过 apiClient 调用后端 → emit('graph-changed') 通知父组件
+ *   父组件调用 store.refreshGraph() 重新 fetch → props 更新 → 自动重渲染
+ *
+ * Props:
+ *   nodes, edges — 图谱数据（由父组件 fetch 后传入）
+ *   loading, error — 状态
+ *   autoRefresh, refreshInterval — 自动刷新
+ *
+ * Emits:
+ *   node-click, node-dblclick — 节点交互
+ *   graph-changed — CRUD 后通知父组件重新 fetch 数据
+ */
+
+import { ref, onMounted, onUnmounted, watch } from 'vue'
+import * as d3 from 'd3'
+import { apiClient } from '../api/index.js'
+import { formatError } from '../utils/errorCodes.js'
+import ContextMenu from './ContextMenu.vue'
+import EditDialog from './EditDialog.vue'
+
+/* ================================================================
+   组件 Props
+   ================================================================ */
+const props = defineProps({
+  nodes: { type: Array, default: () => [] },
+  edges: { type: Array, default: () => [] },
+  loading: { type: Boolean, default: false },
+  error: { type: String, default: '' },
+  autoRefresh: { type: Boolean, default: false },
+  refreshInterval: { type: Number, default: 30000 },
+})
+
+/* ================================================================
+   组件 Events
+   ================================================================ */
+const emit = defineEmits([
+  'node-click',
+  'node-dblclick',
+  'graph-changed',  // CRUD 操作后通知父组件刷新
+])
+
+/* ================================================================
+   响应式状态
+   ================================================================ */
+const containerRef = ref(null)
+
+// 自动刷新
+const graphChanged = ref(false)
+const changeTimer = ref(null)
+const autoRefreshTimer = ref(null)
+const currentZoom = ref(1)
+
+// 右键菜单状态
+const menuVisible = ref(false)
+const menuX = ref(0)
+const menuY = ref(0)
+const menuTargetType = ref('canvas')
+const menuTargetData = ref(null)
+
+// 编辑弹窗状态
+const dialogVisible = ref(false)
+const dialogMode = ref('create-node')
+const dialogData = ref({})
+
+// ── 边连线模式 ──
+const drawingEdgeMode = ref(false)     // 是否处于连线模式
+const drawingSourceId = ref(null)      // 连线源节点 ID
+
+/* ================================================================
+   D3 核心对象引用（不响应式）
+   ================================================================ */
+let simulation = null
+let svgSelection = null
+let zoomBehavior = null
+let zoomContainer = null
+
+/** 边击中的透明线引用（用于右键检测） */
+let edgeHitLines = null
+
+/** 连线模式中的临时虚线 */
+let drawingTempLine = null
+
+/** mousemove 回调引用（用于移除监听器） */
+let drawingMouseMoveHandler = null
+
+/* ================================================================
+   工具函数
+   ================================================================ */
+function masteryColor(mastery) {
+  if (mastery == null || mastery === 0) return 'var(--color-graph-node)'
+  if (mastery <= 25)  return '#86efac'
+  if (mastery <= 50)  return '#34d399'
+  if (mastery <= 75)  return '#10b981'
+  return '#059669'
+}
+
+/* ================================================================
+   图谱渲染核心
+   ================================================================ */
+function initForceGraph(nodes, links) {
+  if (!containerRef.value) return
+
+  // 先停止旧仿真，防止内存泄漏
+  if (simulation) {
+    simulation.stop()
+    simulation = null
+  }
+
+  const { width, height } = containerRef.value.getBoundingClientRect()
+
+  d3.select(containerRef.value).select('svg').remove()
+
+  // ── SVG ──
+  svgSelection = d3.select(containerRef.value)
+    .append('svg')
+    .attr('width', '100%')
+    .attr('height', '100%')
+    .style('display', 'block')
+
+  // ── 箭头标记 ──
+  svgSelection.append('defs').append('marker')
+    .attr('id', 'arrowhead')
+    .attr('viewBox', '-0 -5 10 10')
+    .attr('refX', 20).attr('refY', 0)
+    .attr('orient', 'auto')
+    .attr('markerWidth', 6).attr('markerHeight', 6)
+    .append('path')
+    .attr('d', 'M 0,-5 L 10,0 L 0,5')
+    .attr('fill', 'var(--color-graph-edge)')
+
+  // ── Zoom 容器 ──
+  zoomContainer = svgSelection.append('g')
+    .attr('class', 'zoom-container')
+
+  // ── Zoom 行为 ──
+  zoomBehavior = d3.zoom()
+    .scaleExtent([0.1, 4])
+    .filter((event) => {
+      // 允许：左键拖拽、滚轮缩放
+      // 阻止：Ctrl+滚轮、双击
+      // 注意：不阻止 contextmenu 事件（右键菜单需要）
+      if (event.type === 'wheel' && event.ctrlKey) return false
+      if (event.type === 'dblclick') return false
+      if (event.type === 'contextmenu') return false  // 不拦截右键
+      return true
+    })
+    .on('zoom', (event) => {
+      zoomContainer.attr('transform', event.transform)
+      currentZoom.value = Math.round(event.transform.k * 100) / 100
+    })
+
+  svgSelection.call(zoomBehavior)
+
+  // ── 阻止 SVG 默认右键菜单（用原生 addEventListener，绕过 D3 zoom 拦截）
+  svgSelection.node().addEventListener('contextmenu', (event) => {
+    event.preventDefault()
+  })
+
+  // ── 力场仿真 ──
+  simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(150))
+    .force('charge', d3.forceManyBody().strength(-300))
+    .force('center', d3.forceCenter(width / 2, height / 2))
+    .force('collision', d3.forceCollide().radius(40))
+
+  // ── 连线（可视） ──
+  const link = zoomContainer.append('g')
+    .attr('class', 'links')
+    .selectAll('line')
+    .data(links)
+    .enter()
+    .append('line')
+    .attr('stroke', 'var(--color-graph-edge)')
+    .attr('stroke-width', 2)
+    .attr('marker-end', 'url(#arrowhead)')
+    .style('pointer-events', 'none')
+
+  // ── 连线（透明宽线，用于点击/右键检测） ──
+  // ★ 关键：在可视连线上方叠加更宽的透明线，方便鼠标点击边
+  // 注意：不能用 stroke:transparent，浏览器会对透明区域跳过命中检测
+  // 用 stroke-opacity:0 让线不可见，但保留pointer-events 命中区域
+  const hitGroup = zoomContainer.append('g')
+    .attr('class', 'edge-hit-lines')
+
+  const hitLines = hitGroup.selectAll('line')
+    .data(links)
+    .enter()
+    .append('line')
+    .attr('stroke', 'currentColor')
+    .attr('stroke-opacity', 0)   // 不可见但保留命中区域
+    .attr('stroke-width', 12)   // 12px 宽，容易点到
+    .style('cursor', 'pointer')
+    .style('pointer-events', 'all')   // 对整个线区域响应事件（不只是 stroke）
+    .on('mousedown', function (event, d) {
+      if (event.button === 2) {  // 右键
+        event.preventDefault()
+        event.stopPropagation()
+        const idx = d._index != null ? d._index : links.indexOf(d)
+        showContextMenu(event.clientX, event.clientY, 'edge', { edge: d, index: idx })
+      }
+    })
+    // 同时保留 contextmenu 事件作为备用
+    .on('contextmenu', function (event, d) {
+      event.preventDefault()
+      event.stopPropagation()
+      const idx = d._index != null ? d._index : links.indexOf(d)
+      showContextMenu(event.clientX, event.clientY, 'edge', { edge: d, index: idx })
+    })
+
+  edgeHitLines = hitLines   // 保存引用，供后续更新
+
+  // 保存引用，供后续更新
+  edgeHitLines = hitLines
+
+  // ── 连线标签 ──
+  const linkLabel = zoomContainer.append('g')
+    .attr('class', 'link-labels')
+    .selectAll('text')
+    .data(links)
+    .enter()
+    .append('text')
+    .attr('font-size', 10)
+    .attr('fill', 'var(--color-text-secondary)')
+    .attr('text-anchor', 'middle')
+    .text(d => d.label)
+    .style('pointer-events', 'none')
+    .style('user-select', 'none')
+
+  // ── 节点 ──
+  const node = zoomContainer.append('g')
+    .attr('class', 'nodes')
+    .selectAll('g')
+    .data(nodes)
+    .enter()
+    .append('g')
+    .attr('class', 'node')
+    .style('cursor', 'grab')
+
+  // 节点拖拽
+  node.call(d3.drag()
+    .on('start', dragstarted)
+    .on('drag', dragged)
+    .on('end', dragended)
+    .filter((event) => event.button === 0)
+  )
+
+  // ── 节点圆形 ──
+  node.append('circle')
+    .attr('r', 20)
+    .attr('fill', d => masteryColor(d.mastery))
+    .attr('stroke', d => masteryColor(d.mastery))
+    .attr('stroke-width', 2)
+    .attr('stroke-opacity', 0.5)
+    .style('filter', 'drop-shadow(0 0 8px currentColor)')
+
+  // ── 节点名称标签 ──
+  node.append('text')
+    .attr('dy', 35)
+    .attr('text-anchor', 'middle')
+    .attr('fill', 'var(--color-text-primary)')
+    .attr('font-size', 12)
+    .text(d => d.name)
+
+  // ── 右键：节点（用 mousedown+button===2 替代 contextmenu，兼容性更好）
+  node.on('mousedown', function (event, d) {
+    if (event.button === 2) {  // 右键
+      event.preventDefault()
+      event.stopPropagation()
+      showContextMenu(event.clientX, event.clientY, 'node', d)
+    }
+  })
+  // 同时保留 contextmenu 事件作为备用
+  node.on('contextmenu', function (event, d) {
+    event.preventDefault()
+    event.stopPropagation()
+    showContextMenu(event.clientX, event.clientY, 'node', d)
+  })
+
+  // ── 悬停高亮 ──
+  node.on('mouseover', function (event, d) {
+    event.stopPropagation()
+    d3.select(this).select('circle').attr('r', 24).attr('stroke-width', 3)
+
+    link.attr('stroke', l =>
+      (l.source.id === d.id || l.target.id === d.id) ? '#fbbf24' : 'var(--color-graph-edge)'
+    ).attr('stroke-width', l =>
+      (l.source.id === d.id || l.target.id === d.id) ? 3 : 2
+    )
+
+    node.select('circle').attr('opacity', n => {
+      if (n.id === d.id) return 1
+      return links.some(l =>
+        (l.source.id === d.id && l.target.id === n.id) ||
+        (l.target.id === d.id && l.source.id === n.id)
+      ) ? 1 : 0.3
+    })
+  })
+
+  node.on('mouseout', function (event) {
+    event.stopPropagation()
+    d3.select(this).select('circle').attr('r', 20).attr('stroke-width', 2)
+    link.attr('stroke', 'var(--color-graph-edge)').attr('stroke-width', 2)
+    node.select('circle').attr('opacity', 1)
+  })
+
+  // ── 点击 / 双击 ──
+  node.on('click', function (event, d) {
+    event.stopPropagation()
+    // 连线模式下：左键点击节点 = 目标节点
+    if (drawingEdgeMode.value) {
+      handleDrawingTarget(d.id)
+      return
+    }
+    emit('node-click', d.id)
+  })
+  node.on('dblclick', function (event, d) {
+    event.stopPropagation()
+    emit('node-dblclick', d.id)
+  })
+
+  // ── 右键：SVG 空白区域 ──
+  svgSelection.on('contextmenu', function (event) {
+    event.preventDefault()
+    // 连线模式下：右键取消连线
+    if (drawingEdgeMode.value) {
+      clearDrawingMode()
+      return
+    }
+    // 只在点击空白区域时触发（不是节点或边）
+    // 检查 target 是否是 SVG 元素或容器 div
+    const target = event.target
+    const svgEl = svgSelection.node()
+    if (target === svgEl || target === containerRef.value || target.tagName?.toLowerCase() === 'svg') {
+      showContextMenu(event.clientX, event.clientY, 'canvas', null)
+    }
+  })
+
+  // 左键点击空白：关闭菜单 / 连线模式下不做处理
+  svgSelection.on('click', () => {
+    if (menuVisible.value) menuVisible.value = false
+  })
+
+  // ── Tick 更新 ──
+  simulation.on('tick', () => {
+    link
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y)
+
+    // 同步透明击中线的位置
+    edgeHitLines
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y)
+
+    linkLabel
+      .attr('x', d => (d.source.x + d.target.x) / 2)
+      .attr('y', d => (d.source.y + d.target.y) / 2)
+
+    node.attr('transform', d => `translate(${d.x},${d.y})`)
+
+    // 连线模式：同步临时虚线源节点位置
+    if (drawingTempLine && drawingSourceId.value) {
+      const src = nodes.find(n => n.id === drawingSourceId.value)
+      if (src) drawingTempLine.attr('x1', src.x).attr('y1', src.y)
+    }
+  })
+
+  // ── 拖拽处理 ──
+  function dragstarted(event, d) {
+    if (event.sourceEvent) event.sourceEvent.stopPropagation()
+    if (!event.active) simulation.alphaTarget(0.3).restart()
+    d.fx = d.x; d.fy = d.y
+    d3.select(this).style('cursor', 'grabbing')
+  }
+  function dragged(event, d) {
+    if (event.sourceEvent) event.sourceEvent.stopPropagation()
+    d.fx = event.x; d.fy = event.y
+  }
+  function dragended(event, d) {
+    if (event.sourceEvent) event.sourceEvent.stopPropagation()
+    if (!event.active) simulation.alphaTarget(0)
+    d.fx = null; d.fy = null
+    d3.select(this).style('cursor', 'grab')
+  }
+}
+
+/* ================================================================
+   图谱渲染入口
+   ================================================================ */
+function renderGraph() {
+  try {
+    const nodes = (props.nodes || []).map(n => ({ ...n }))
+    const links = (props.edges || []).map((e, i) => ({
+      source: e.source || e.from_node || e.from,
+      target: e.target || e.to_node || e.to,
+      label: e.label || '',
+      relation: e.relation || '',
+      _index: e._index ?? i,  // 保留原始索引，用于删除/编辑边时定位
+    }))
+    if (nodes.length > 0 && containerRef.value) {
+      initForceGraph(nodes, links)
+    }
+  } catch (e) {
+    console.error('[ForceGraph] renderGraph 失败:', e)
+  }
+}
+
+/**
+ * 浅比较图谱结构是否变化（避免 deep watch 导致不必要的重建）
+ * 比较节点 ID 集合 + 边的 source-target 对
+ */
+let lastGraphFingerprint = ''
+
+function graphFingerprint(nodes, edges) {
+  const nodeIds = (nodes || []).map(n => n.id).sort().join(',')
+  const edgeKeys = (edges || []).map(e => `${e.source || e.from_node || e.from}->${e.target || e.to_node || e.to}`).sort().join(',')
+  return `${nodeIds}|${edgeKeys}`
+}
+
+watch(() => [props.nodes, props.edges], () => {
+  const fp = graphFingerprint(props.nodes, props.edges)
+  if (fp !== lastGraphFingerprint) {
+    lastGraphFingerprint = fp
+    renderGraph()
+  }
+}, { deep: true })
+
+/* ================================================================
+   右键菜单控制
+   ================================================================ */
+function showContextMenu(x, y, type, data) {
+  console.log('[ForceGraph] showContextMenu', { x, y, type, data })
+  menuX.value = x
+  menuY.value = y
+  menuTargetType.value = type
+  menuTargetData.value = data
+  menuVisible.value = true
+  // 强制触发响应式更新
+  nextTick(() => {
+    console.log('[ForceGraph] menuVisible after nextTick:', menuVisible.value)
+  })
+}
+
+function closeMenu() {
+  menuVisible.value = false
+}
+
+/* ================================================================
+   右键菜单事件 → 打开编辑弹窗
+   ================================================================ */
+
+function handleCreateNode() {
+  dialogMode.value = 'create-node'
+  dialogData.value = {}
+  dialogVisible.value = true
+}
+
+function handleEditNode(nodeData) {
+  dialogMode.value = 'edit-node'
+  dialogData.value = nodeData
+  dialogVisible.value = true
+}
+
+function handleAddEdgeFromNode(nodeId) {
+  // 进入连线模式：从该节点拖出一条虚线到鼠标光标
+  startEdgeDrawing(nodeId)
+}
+
+/* ================================================================
+   连线模式（拖线创建边）
+   ================================================================ */
+
+/**
+ * 进入连线模式：从指定节点出发，显示一条跟随鼠标的虚线
+ * 左键点击目标节点 → 创建边并打开编辑弹窗
+ * 右键 → 取消连线
+ */
+function startEdgeDrawing(sourceNodeId) {
+  drawingEdgeMode.value = true
+  drawingSourceId.value = sourceNodeId
+
+  // 找到源节点在仿真中的坐标
+  const sourceNode = simulation?.nodes()?.find(n => n.id === sourceNodeId)
+  const sx = sourceNode?.x ?? 0
+  const sy = sourceNode?.y ?? 0
+
+  // 在 zoomContainer 上追加临时虚线
+  drawingTempLine = zoomContainer.append('line')
+    .attr('class', 'drawing-temp-line')
+    .attr('x1', sx).attr('y1', sy)
+    .attr('x2', sx).attr('y2', sy)
+    .attr('stroke', '#60a5fa')
+    .attr('stroke-width', 2)
+    .attr('stroke-dasharray', '8,4')
+    .style('pointer-events', 'none')
+
+  // 改变 SVG 光标
+  svgSelection.style('cursor', 'crosshair')
+
+  // 在 SVG 上监听鼠标移动
+  drawingMouseMoveHandler = (event) => {
+    if (!drawingEdgeMode.value || !drawingTempLine) return
+    // 将屏幕坐标转换为 zoomContainer 坐标
+    const [mx, my] = d3.pointer(event, svgSelection.node())
+    const transform = d3.zoomTransform(svgSelection.node())
+    const zx = (mx - transform.x) / transform.k
+    const zy = (my - transform.y) / transform.k
+    drawingTempLine.attr('x2', zx).attr('y2', zy)
+  }
+  svgSelection.on('mousemove.drawing', drawingMouseMoveHandler)
+}
+
+/**
+ * 退出连线模式，清理临时虚线及事件监听
+ */
+function clearDrawingMode() {
+  drawingEdgeMode.value = false
+  drawingSourceId.value = null
+
+  if (drawingTempLine) {
+    drawingTempLine.remove()
+    drawingTempLine = null
+  }
+
+  if (svgSelection) {
+    svgSelection.style('cursor', '')
+    svgSelection.on('mousemove.drawing', null)  // 移除命名空间监听
+  }
+}
+
+/**
+ * 连线模式下点击目标节点：创建边 → 打开编辑弹窗
+ */
+async function handleDrawingTarget(targetNodeId) {
+  const sourceId = drawingSourceId.value
+  if (targetNodeId === sourceId) {
+    alert('不能连接到自身')
+    clearDrawingMode()
+    return
+  }
+
+  try {
+    await apiClient.post('/api/v1/knowledge/edge', {
+      from: sourceId,
+      to: targetNodeId,
+      relation: 'related',
+      label: '',
+    })
+
+    clearDrawingMode()
+
+    // 先 emit，让父组件刷新数据
+    emit('graph-changed')
+
+    // 用 watch 可靠地等待 props.edges 更新后再匹配新边
+    await new Promise((resolve) => {
+      let resolved = false
+      // 超时保护：5 秒后自动 resolve（避免无限等待）
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true
+          stop()
+          resolve()
+        }
+      }, 5000)
+      const stop = watch(() => props.edges, (newEdges) => {
+        // 找到刚创建的边（source + target + relation 匹配）
+        const newEdgeIdx = (newEdges || []).findIndex(e => {
+          const eSource = e.source || e.from_node || e.from
+          const eTarget = e.target || e.to_node || e.to
+          return eSource === sourceId && eTarget === targetNodeId && (e.relation === 'related' || !e.relation)
+        })
+        if (newEdgeIdx >= 0) {
+          resolved = true
+          clearTimeout(timeout)
+          stop()  // 找到后停止 watch
+          const edge = newEdges[newEdgeIdx]
+          dialogMode.value = 'edit-edge'
+          dialogData.value = { ...edge, _index: newEdgeIdx }
+          dialogVisible.value = true
+        }
+      }, { deep: true, immediate: true })  // immediate: true 处理数据已更新的情况
+    })
+  } catch (e) {
+    alert(formatError(e, { action: '添加关联边' }))
+    clearDrawingMode()
+  }
+}
+
+function handleEditEdge(edgeData) {
+  dialogMode.value = 'edit-edge'
+  // edgeData = { edge: {...}, index: N }
+  dialogData.value = { ...edgeData.edge, _index: edgeData.index }
+  dialogVisible.value = true
+}
+
+/* ================================================================
+   删除操作（无需弹窗，直接确认后调 API）
+   ================================================================ */
+async function handleDeleteNode(nodeId) {
+  if (!confirm(`确定删除节点「${nodeId}」及其所有关联边吗？此操作不可撤销。`)) return
+  try {
+    await apiClient.delete(`/api/v1/knowledge/node/${encodeURIComponent(nodeId)}`)
+    notifyGraphChanged()
+  } catch (e) {
+    alert(formatError(e, { action: '删除节点' }))
+  }
+}
+
+async function handleDeleteEdge(edgeData) {
+  if (!confirm('确定删除这条边吗？')) return
+  const idx = edgeData.index
+  try {
+    await apiClient.delete(`/api/v1/knowledge/edge/${idx}`)
+    notifyGraphChanged()
+  } catch (e) {
+    alert(formatError(e, { action: '删除边' }))
+  }
+}
+
+/* ================================================================
+   编辑弹窗提交 → 调用 API
+   ================================================================ */
+async function handleDialogSubmit(formData) {
+  try {
+    switch (dialogMode.value) {
+      case 'create-node':
+        await apiClient.post('/api/v1/knowledge/node', {
+          name: formData.name,
+          tags: formData.tags,
+          content: formData.content || undefined,
+        })
+        break
+
+      case 'edit-node': {
+        const nodeId = dialogData.value?.id
+        if (!nodeId) return
+        await apiClient.put(`/api/v1/knowledge/node/${encodeURIComponent(nodeId)}/info`, {
+          name: formData.name,
+          tags: formData.tags,
+        })
+        break
+      }
+
+      case 'edit-edge': {
+        const idx = dialogData.value?._index
+        if (idx == null) return
+        await apiClient.put(`/api/v1/knowledge/edge/${idx}`, {
+          relation: formData.relation,
+          label: formData.label,
+        })
+        break
+      }
+    }
+
+    // 成功后通知父组件刷新
+    notifyGraphChanged()
+
+  } catch (e) {
+    alert(formatError(e, { action: dialogMode.value === 'create-node' ? '创建节点' : '保存' }))
+  }
+}
+
+/* ================================================================
+   通知图谱变化
+   父组件用 refreshGraph 统一管理数据流，
+   随后通过 props.nodes / props.edges 传入新数据触发 watch → renderGraph。
+   ================================================================ */
+function notifyGraphChanged() {
+  emit('graph-changed')
+}
+
+/* ================================================================
+   窗口 resize
+   ================================================================ */
+function handleResize() {
+  if (simulation && containerRef.value) {
+    const { width, height } = containerRef.value.getBoundingClientRect()
+    simulation.force('center', d3.forceCenter(width / 2, height / 2))
+    simulation.alpha(0.3).restart()
+  }
+}
+
+/* ================================================================
+   自动刷新
+   ================================================================ */
+/**
+ * 自动刷新检测：对比 props 快照 (nodes/edges 数量) 是否变化。
+ * 不再自己 fetch —— 避免与 chatStore 的数据流冲突。
+ */
+let lastNodeCount = 0
+let lastEdgeCount = 0
+function checkGraphUpdate() {
+  const nn = (props.nodes || []).length
+  const ne = (props.edges || []).length
+  if (lastNodeCount && lastEdgeCount && (nn !== lastNodeCount || ne !== lastEdgeCount)) {
+    showChangeNotification()
+  }
+  lastNodeCount = nn
+  lastEdgeCount = ne
+}
+
+function showChangeNotification() {
+  graphChanged.value = true
+  if (changeTimer.value) clearTimeout(changeTimer.value)
+  changeTimer.value = setTimeout(() => { graphChanged.value = false }, 3000)
+}
+
+function startAutoRefresh() {
+  if (!props.autoRefresh) return
+  stopAutoRefresh()
+  autoRefreshTimer.value = setInterval(checkGraphUpdate, props.refreshInterval)
+}
+
+function stopAutoRefresh() {
+  if (autoRefreshTimer.value) {
+    clearInterval(autoRefreshTimer.value)
+    autoRefreshTimer.value = null
+  }
+}
+
+watch(() => props.autoRefresh, (val) => {
+  if (val) startAutoRefresh()
+  else stopAutoRefresh()
+})
+
+/* ================================================================
+   缩放控制
+   ================================================================ */
+function zoomIn() {
+  if (!svgSelection) return
+  svgSelection.transition().duration(300).call(zoomBehavior.scaleBy, 1.3)
+}
+function zoomOut() {
+  if (!svgSelection) return
+  svgSelection.transition().duration(300).call(zoomBehavior.scaleBy, 0.7)
+}
+function zoomReset() {
+  if (!svgSelection) return
+  svgSelection.transition().duration(500).call(zoomBehavior.transform, d3.zoomIdentity)
+}
+
+/* ================================================================
+   生命周期
+   ================================================================ */
+onMounted(() => {
+  renderGraph()
+  window.addEventListener('resize', handleResize)
+  startAutoRefresh()
+})
+
+onUnmounted(() => {
+  // 停止仿真
+  if (simulation) {
+    simulation.stop()
+    simulation = null
+  }
+  // 清除 SVG 避免残留事件监听
+  if (containerRef.value) {
+    d3.select(containerRef.value).select('svg').remove()
+  }
+  window.removeEventListener('resize', handleResize)
+  stopAutoRefresh()
+  if (changeTimer.value) {
+    clearTimeout(changeTimer.value)
+    changeTimer.value = null
+  }
+  // 清理连线模式残留
+  clearDrawingMode()
+})
+</script>
+
+<template>
+  <div ref="containerRef" class="force-graph-container">
+    <!-- 加载状态 -->
+    <div v-if="loading && props.nodes.length === 0" class="loading-overlay">
+      <div class="spinner"></div>
+      <p>图谱加载中...</p>
+    </div>
+
+    <!-- 错误状态 -->
+    <div v-else-if="error" class="error-overlay">
+      <p>{{ error }}</p>
+      <span class="error-hint">请确认后端服务已启动</span>
+    </div>
+
+    <!-- 空状态 -->
+    <div v-else-if="!loading && props.nodes.length === 0 && !error" class="empty-overlay">
+      <div class="empty-icon">📭</div>
+      <p>知识图谱暂无内容</p>
+      <p class="empty-hint">右键空白区域创建第一个节点</p>
+    </div>
+
+    <!-- 缩放控制按钮 -->
+    <div v-if="props.nodes.length > 0" class="zoom-controls">
+      <button class="zoom-btn" title="放大" @click="zoomIn">+</button>
+      <span class="zoom-level">{{ currentZoom }}x</span>
+      <button class="zoom-btn" title="缩小" @click="zoomOut">−</button>
+      <button class="zoom-btn zoom-reset" title="重置视图" @click="zoomReset">↺</button>
+    </div>
+
+    <!-- 图谱更新提示 -->
+    <transition name="fade">
+      <div v-if="graphChanged" class="update-toast">
+        🔄 图谱已更新
+      </div>
+    </transition>
+
+    <!-- 右键菜单 -->
+    <ContextMenu
+      :visible="menuVisible"
+      :x="menuX"
+      :y="menuY"
+      :targetType="menuTargetType"
+      :targetData="menuTargetData"
+      @close="closeMenu"
+      @create-node="handleCreateNode"
+      @edit-node="handleEditNode"
+      @delete-node="handleDeleteNode"
+      @add-edge-from-node="handleAddEdgeFromNode"
+      @edit-edge="handleEditEdge"
+      @delete-edge="handleDeleteEdge"
+    />
+
+    <!-- 编辑弹窗 -->
+    <EditDialog
+      :visible="dialogVisible"
+      :mode="dialogMode"
+      :data="dialogData"
+      @close="dialogVisible = false"
+      @submit="handleDialogSubmit"
+    />
+  </div>
+</template>
+
+<style scoped>
+/* ================================================================
+   容器
+   ================================================================ */
+.force-graph-container {
+  width: 100%;
+  height: 100%;
+  background: var(--color-bg-primary);
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+}
+
+.force-graph-container :deep(svg) { display: block; }
+
+/* D3 元素 */
+.force-graph-container :deep(.node) { transition: opacity 0.2s ease; }
+.force-graph-container :deep(circle) { transition: r 0.2s ease, stroke-width 0.2s ease; }
+.force-graph-container :deep(text) {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  user-select: none;
+  pointer-events: none;
+}
+.force-graph-container :deep(.zoom-container) { pointer-events: auto; }
+
+/* 边击中线的光标样式 */
+.force-graph-container :deep(.edge-hit-lines line) {
+  cursor: pointer;
+}
+
+/* ================================================================
+   覆盖层
+   ================================================================ */
+.loading-overlay {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  color: var(--color-text-secondary); font-size: 14px; gap: 16px; z-index: 10;
+}
+.spinner {
+  width: 40px; height: 40px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-blue);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.error-overlay {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  color: var(--color-red); font-size: 14px; gap: 6px; z-index: 10;
+}
+.error-hint { font-size: 12px; color: var(--color-text-secondary); margin-top: 2px; }
+
+.empty-overlay {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  color: var(--color-text-secondary); font-size: 14px; gap: 6px; z-index: 10;
+}
+.empty-icon { font-size: 40px; }
+.empty-hint { font-size: 12px; color: var(--color-text-tertiary); margin-top: 4px; }
+
+/* ================================================================
+   缩放控制
+   ================================================================ */
+.zoom-controls {
+  position: absolute; top: 12px; left: 12px;
+  display: flex; flex-direction: column; align-items: center; gap: 4px; z-index: 20;
+}
+.zoom-btn {
+  width: 32px; height: 32px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 6px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-size: 16px; font-weight: bold; line-height: 1;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.2s, border-color 0.2s;
+  backdrop-filter: blur(8px);
+}
+.zoom-btn:hover { background: var(--color-bg-surface); border-color: var(--color-border); }
+.zoom-btn:active { background: var(--color-bg-hover); }
+.zoom-reset { font-size: 14px; margin-top: 4px; border-top: 1px solid var(--color-border-subtle); padding-top: 8px; }
+.zoom-level { font-size: 11px; color: var(--color-text-muted); user-select: none; padding: 2px 0; }
+
+/* ================================================================
+   更新提示
+   ================================================================ */
+.update-toast {
+  position: absolute; bottom: 20px; left: 50%;
+  transform: translateX(-50%);
+  background: var(--color-green);
+  color: #fff; padding: 10px 20px; border-radius: 8px;
+  font-size: 13px; font-weight: 500;
+  box-shadow: 0 4px 16px rgba(16,185,129,0.3);
+  z-index: 30; backdrop-filter: blur(8px); white-space: nowrap;
+}
+.fade-enter-active { animation: toastIn 0.3s ease; }
+.fade-leave-active { animation: toastOut 0.3s ease; }
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+@keyframes toastOut {
+  from { opacity: 1; transform: translateX(-50%) translateY(0); }
+  to   { opacity: 0; transform: translateX(-50%) translateY(10px); }
+}
+</style>

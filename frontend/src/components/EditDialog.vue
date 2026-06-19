@@ -3,23 +3,25 @@
  * EditDialog.vue — 知识图谱编辑弹窗组件
  *
  * 根据 mode 动态显示不同表单：
- *   - create-node:    名称、标签、初始内容
+ *   - create-node:    名称、标签、初始内容（Markdown）
  *   - edit-node:      名称、标签
- *   - add-edge-from-node: 目标节点下拉、关系类型、标签
- *   - edit-edge:      关系类型、标签
+ *   - edit-edge:      关系类型、关系说明
+ *
+ * 注意：连线模式创建边时，实际复用的是 edit-edge 模式。
+ * ForceGraph 先 emit create-edge 给父组件调用 API 创建边，
+ * 等 props.edges 刷新后，再用 edit-edge 模式打开本弹窗让用户编辑关系信息。
  *
  * Props:
  *   visible: Boolean       是否显示
- *   mode: String           编辑模式
+ *   mode: String           编辑模式（'create-node' | 'edit-node' | 'edit-edge'）
  *   data: Object           预填充数据
- *   nodeOptions: Array     节点 ID 选项列表（用于边的目标节点下拉）
  *
  * Emits:
  *   close: ()              关闭弹窗
  *   submit: (formData)     提交表单数据
  */
 
-import { ref, reactive, watch, computed, onMounted } from 'vue'
+import { reactive, watch, computed } from 'vue'
 
 /* ================================================================
    Props
@@ -193,25 +195,12 @@ function handleCancel() {
           >
             <label class="form-label">关系类型</label>
             <select v-model="form.relation" class="form-select">
-              <option value="prerequisite">prerequisite（前置依赖）</option>
-              <option value="related">related（相关）</option>
-              <option value="confusion">confusion（易混淆）</option>
-              <option value="extension">extension（扩展）</option>
+              <option value="prerequisite">前置知识</option>
+              <option value="related">相关概念</option>
+              <option value="confusion">易混淆</option>
+              <option value="extension">扩展延伸</option>
             </select>
-          </div>
-
-          <!-- ── 编辑边：标签 ── -->
-          <div
-            v-if="mode === 'edit-edge'"
-            class="form-group"
-          >
-            <label class="form-label">关系说明</label>
-            <input
-              v-model="form.label"
-              class="form-input"
-              type="text"
-              placeholder="例如：需要先理解递归定义"
-            />
+            <span class="form-hint">边上的标签将根据关系类型自动显示</span>
           </div>
         </div>
 
@@ -232,7 +221,7 @@ function handleCancel() {
 .dialog-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--color-bg-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -241,10 +230,10 @@ function handleCancel() {
 }
 
 .dialog-panel {
-  background: #1e1e2e;
-  border: 1px solid #313244;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
   border-radius: 12px;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-popup);
   width: 420px;
   max-width: 90vw;
   max-height: 80vh;
@@ -261,20 +250,20 @@ function handleCancel() {
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid #313244;
+  border-bottom: 1px solid var(--color-border);
 }
 
 .dialog-title {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
-  color: #e5e7eb;
+  color: var(--color-text-primary);
 }
 
 .dialog-close {
   background: none;
   border: none;
-  color: #9ca3af;
+  color: var(--color-text-secondary);
   font-size: 20px;
   cursor: pointer;
   padding: 0 4px;
@@ -283,7 +272,7 @@ function handleCancel() {
 }
 
 .dialog-close:hover {
-  color: #e5e7eb;
+  color: var(--color-text-primary);
 }
 
 /* ================================================================
@@ -306,22 +295,22 @@ function handleCancel() {
 .form-label {
   font-size: 13px;
   font-weight: 500;
-  color: #a6adc8;
+  color: var(--color-text-secondary);
 }
 
 .form-hint {
   font-size: 11px;
-  color: #6b7280;
-  font-weight: 400;
+  color: var(--color-text-muted);
+  margin-top: 2px;
 }
 
 .form-input,
 .form-select,
 .form-textarea {
-  background: #11111b;
-  border: 1px solid #313244;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
   border-radius: 6px;
-  color: #e5e7eb;
+  color: var(--color-text-primary);
   padding: 8px 12px;
   font-size: 13px;
   font-family: inherit;
@@ -332,7 +321,7 @@ function handleCancel() {
 .form-select:focus,
 .form-textarea:focus {
   outline: none;
-  border-color: #60a5fa;
+  border-color: var(--color-blue);
 }
 
 .form-textarea {
@@ -340,14 +329,6 @@ function handleCancel() {
   min-height: 80px;
 }
 
-.form-select[size] {
-  padding: 4px;
-}
-
-.form-select[size] option {
-  padding: 6px 8px;
-  border-radius: 4px;
-}
 
 /* ================================================================
    按钮区
@@ -357,7 +338,7 @@ function handleCancel() {
   justify-content: flex-end;
   gap: 10px;
   padding: 14px 20px;
-  border-top: 1px solid #313244;
+  border-top: 1px solid var(--color-border);
 }
 
 .btn {
@@ -372,23 +353,23 @@ function handleCancel() {
 
 .btn-cancel {
   background: transparent;
-  color: #a6adc8;
-  border-color: #313244;
+  color: var(--color-text-secondary);
+  border-color: var(--color-border);
 }
 
 .btn-cancel:hover {
-  background: #313244;
-  color: #e5e7eb;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
 }
 
 .btn-primary {
-  background: #60a5fa;
-  color: #11111b;
-  border-color: #60a5fa;
+  background: var(--color-blue);
+  color: var(--color-bg-secondary);
+  border-color: var(--color-blue);
 }
 
 .btn-primary:hover {
-  background: #3b82f6;
-  border-color: #3b82f6;
+  background: var(--color-blue-hover);
+  border-color: var(--color-blue-hover);
 }
 </style>

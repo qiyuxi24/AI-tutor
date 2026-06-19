@@ -1,32 +1,62 @@
 import axios from 'axios'
+import { fmt, ErrorDefs } from '../utils/errorCodes.js'
 
-// 创建axios实例，指向后端地址
+// 创建axios实例
+// 不设 baseURL，使用相对路径走 Vite 代理（开发环境）或同源部署（生产环境）
 // timeout 设为 300s，因为 LLM API 调用可能需要较长时间（含 function calling 多轮）
 export const apiClient = axios.create({
-  baseURL: 'http://localhost:8000',
   timeout: 300000,
 })
 
-// 获取或生成用户ID
-export const getUserId = () => {
-  let userId = localStorage.getItem('ai_tutor_user_id')
-  if (!userId) {
-    userId = crypto.randomUUID()
-    localStorage.setItem('ai_tutor_user_id', userId)
+// ═══ 公共工具 ═══
+
+/**
+ * 401 时的统一处理：清除凭据 + 跳转登录页
+ * axios 拦截器和 fetch 流式请求共用此逻辑
+ */
+function handleUnauthorized() {
+  localStorage.removeItem('ai_tutor_token')
+  localStorage.removeItem('ai_tutor_user')
+  if (window.location.hash !== '#/login') {
+    window.location.hash = '#/login'
   }
-  return userId
 }
+
+// ═══ 请求拦截器：自动附加 JWT token ═══
+apiClient.interceptors.request.use((config) => {
+  const token = localStorage.getItem('ai_tutor_token')
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+// ═══ 响应拦截器：401 时清除 token 并跳转登录页 ═══
+apiClient.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      handleUnauthorized()
+    }
+    return Promise.reject(error)
+  }
+)
 
 // 健康检查
 export const healthCheck = () => apiClient.get('/api/health')
 
-// 发送对话消息（传统一次性回复）
-export const sendMessage = (messages, mode) =>
-  apiClient.post('/api/v1/chat', {
-    user_id: getUserId(),
-    messages,
-    mode,
-  })
+// ═══ 用户画像 ═══
+
+/** 获取用户画像（Markdown 格式） */
+export const getProfile = () => apiClient.get('/api/v1/profile')
+
+/** 更新用户画像（全量替换） */
+export const updateProfile = (content) =>
+  apiClient.put('/api/v1/profile', { content, op: 'replace' })
+
+/** 追加内容到用户画像 */
+export const appendProfile = (content) =>
+  apiClient.put('/api/v1/profile', { content, op: 'append' })
 
 /**
  * 流式发送对话消息（两阶段分离）
@@ -46,22 +76,31 @@ export const sendMessageStream = (messages, mode, callbacks = {}) => {
   const controller = new AbortController()
   const { onToken, onDone, onError } = callbacks
 
-  const body = JSON.stringify({
-    user_id: getUserId(),
-    messages,
-    mode,
-  })
+  const token = localStorage.getItem('ai_tutor_token')
 
-  fetch('http://localhost:8000/api/v1/chat/stream', {
+  const body = JSON.stringify({ messages, mode })
+
+  const headers = { 'Content-Type': 'application/json' }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
+  fetch('/api/v1/chat/stream', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body,
     signal: controller.signal,
   })
     .then(async (response) => {
       if (!response.ok) {
+        if (response.status === 401) {
+          handleUnauthorized()
+          return
+        }
+        // 流式错误使用统一的错误码映射
         const text = await response.text().catch(() => '')
-        onError?.(`[E-COMM-007] 后端返回异常 (HTTP ${response.status})${text ? ': ' + text : ''}`)
+        const mockErr = { response: { status: response.status, data: { detail: text || undefined } } }
+        onError?.(fmt(ErrorDefs.COMM.UNKNOWN_RESPONSE, { status: response.status, detail: text || undefined }))
         return
       }
 
@@ -78,7 +117,7 @@ export const sendMessageStream = (messages, mode, callbacks = {}) => {
 
         // 解析 SSE 数据行
         const lines = buffer.split('\n')
-        buffer = lines.pop() || '' // 最后一行可能不完整，保留到下次
+        buffer = lines.pop() || ''
 
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
@@ -94,6 +133,7 @@ export const sendMessageStream = (messages, mode, callbacks = {}) => {
               fullReply += parsed.token
               onToken?.(parsed.token)
             } else if (parsed.error) {
+              // 后端 SSE 推送的错误已带错误码，直接透传
               onError?.(parsed.error)
               return
             }
@@ -108,7 +148,7 @@ export const sendMessageStream = (messages, mode, callbacks = {}) => {
     })
     .catch((err) => {
       if (err.name === 'AbortError') return
-      onError?.(`[E-COMM-002] 无法连接到后端服务器，请确认后端已启动`)
+      onError?.(fmt(ErrorDefs.COMM.NETWORK_ERROR))
     })
 
   return controller

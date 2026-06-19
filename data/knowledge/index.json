@@ -10,7 +10,11 @@
       ],
       "added_by": "human",
       "created_at": "2026-05-17",
-      "confidence": null
+      "confidence": null,
+      "summary": "",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 15
     },
     {
       "id": "recursion_base_case",
@@ -22,7 +26,11 @@
       ],
       "added_by": "human",
       "created_at": "2026-05-17",
-      "confidence": null
+      "confidence": null,
+      "summary": "",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 15
     },
     {
       "id": "recursion_formula",
@@ -34,7 +42,11 @@
       ],
       "added_by": "human",
       "created_at": "2026-05-17",
-      "confidence": null
+      "confidence": null,
+      "summary": "",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 15
     },
     {
       "id": "recursion_stack",
@@ -46,7 +58,11 @@
       ],
       "added_by": "human",
       "created_at": "2026-05-20",
-      "confidence": null
+      "confidence": null,
+      "summary": "",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 15
     },
     {
       "id": "recursion_vs_iteration",
@@ -58,7 +74,11 @@
       ],
       "added_by": "human",
       "created_at": "2026-05-20",
-      "confidence": null
+      "confidence": null,
+      "summary": "",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 15
     },
     {
       "id": "tail_recursion",
@@ -70,7 +90,11 @@
       ],
       "added_by": "human",
       "created_at": "2026-05-20",
-      "confidence": null
+      "confidence": null,
+      "summary": "",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 15
     },
     {
       "id": "divide_and_conquer",
@@ -82,7 +106,11 @@
       ],
       "added_by": "human",
       "created_at": "2026-05-20",
-      "confidence": null
+      "confidence": null,
+      "summary": "",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 15
     },
     {
       "id": "os_intro",
@@ -98,7 +126,8 @@
       "difficulty": 3,
       "estimated_minutes": 30,
       "added_by": "ai",
-      "created_at": ""
+      "created_at": "",
+      "confidence": null
     },
     {
       "id": "cooking_basics",
@@ -113,7 +142,8 @@
       "difficulty": 2,
       "estimated_minutes": 20,
       "added_by": "ai",
-      "created_at": ""
+      "created_at": "",
+      "confidence": null
     },
     {
       "id": "new_001",

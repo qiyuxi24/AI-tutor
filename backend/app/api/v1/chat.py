@@ -2,6 +2,7 @@
 对话接口路由模块
 
 与 services/chat_service.py 配合，处理前端发来的对话请求。
+所有接口需要 JWT 认证，按用户隔离对话数据。
 
 两阶段流式架构：
   /chat        — 传统一次性回复（兼容旧版）
@@ -9,16 +10,17 @@
 """
 import json
 import asyncio
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, Request, Depends
 from fastapi.responses import StreamingResponse
 from app.models.schemas import ChatRequest, ChatResponse
+from app.core.auth import get_current_user
 from app.services.chat_service import process_message, process_message_stream, process_background_tools
 
 router = APIRouter()
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def handle_chat(request: ChatRequest):
+async def handle_chat(request: ChatRequest, user_id: int = Depends(get_current_user)):
     """
     处理对话请求（一次性回复，兼容旧版前端）
     
@@ -28,7 +30,7 @@ async def handle_chat(request: ChatRequest):
     - graph_analysis: 图谱分析结果（含 applied/pending 建议）
     """
     reply, mode, graph_analysis = await process_message(
-        user_id=request.user_id,
+        user_id=user_id,
         messages=request.messages,
         mode=request.mode,
     )
@@ -36,7 +38,8 @@ async def handle_chat(request: ChatRequest):
 
 
 @router.post("/chat/stream")
-async def handle_chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
+async def handle_chat_stream(request: ChatRequest, background_tasks: BackgroundTasks,
+                             user_id: int = Depends(get_current_user)):
     """
     流式对话端点（两阶段分离）
     
@@ -47,7 +50,11 @@ async def handle_chat_stream(request: ChatRequest, background_tasks: BackgroundT
         # 收集完整的 AI 回复文本（供后台阶段使用）
         full_reply_parts = []
         
-        async for sse_chunk in process_message_stream(request.messages, request.mode):
+        async for sse_chunk in process_message_stream(
+            messages=request.messages,
+            mode=request.mode,
+            user_id=user_id,
+        ):
             # 提取 token 文本（从 SSE 格式中解析）
             if sse_chunk.startswith("data: ") and sse_chunk != "data: [DONE]\n\n":
                 try:
@@ -69,6 +76,7 @@ async def handle_chat_stream(request: ChatRequest, background_tasks: BackgroundT
                 process_background_tools,
                 enriched_messages,
                 request.mode,
+                user_id,
             )
     
     return StreamingResponse(

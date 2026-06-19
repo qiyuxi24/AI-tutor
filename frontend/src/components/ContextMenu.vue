@@ -107,89 +107,87 @@ function handleClick(action, payload = null) {
 
 <template>
   <Teleport to="body">
-    <!-- 点击空白处关闭菜单的遮罩层 -->
-    <div
-      v-if="visible"
-      class="context-menu-backdrop"
-      @click.self="emit('close')"
-      @contextmenu.prevent="emit('close')"
-    ></div>
+    <div class="ctx-menu-root">
+      <!-- 点击空白处关闭菜单的遮罩层 -->
+      <div
+        v-if="visible"
+        class="context-menu-backdrop"
+        @click.self="emit('close')"
+        @contextmenu.prevent="emit('close')"
+      ></div>
 
-    <!-- 菜单主体 -->
-    <div
-      v-if="visible"
-      ref="menuRef"
-      class="context-menu"
-      :style="{ left: adjustedX + 'px', top: adjustedY + 'px' }"
-    >
-      <!-- ── 空白区域 ── -->
-      <template v-if="targetType === 'canvas'">
-        <div class="menu-item" @click="handleClick('create-node', { x, y })">
-          <span class="menu-icon">➕</span> 创建新节点
-        </div>
-      </template>
+      <!-- 菜单主体 -->
+      <div
+        v-if="visible"
+        ref="menuRef"
+        class="context-menu"
+        :style="{ left: adjustedX + 'px', top: adjustedY + 'px' }"
+      >
+        <!-- ── 空白区域 ── -->
+        <template v-if="targetType === 'canvas'">
+          <div class="menu-item" @click="handleClick('create-node', { x: props.x, y: props.y })">
+            <span class="menu-icon">➕</span> 创建新节点
+          </div>
+        </template>
 
-      <!-- ── 节点 ── -->
-      <template v-else-if="targetType === 'node'">
-        <div class="menu-item" @click="handleClick('edit-node', targetData)">
-          <span class="menu-icon">✏️</span> 编辑节点
-        </div>
-        <div class="menu-item" @click="handleClick('add-edge-from-node', targetData?.id)">
-          <span class="menu-icon">🔗</span> 添加关联边
-        </div>
-        <div class="menu-divider"></div>
-        <div class="menu-item menu-item-danger" @click="handleClick('delete-node', targetData?.id)">
-          <span class="menu-icon">❌</span> 删除节点
-        </div>
-      </template>
+        <!-- ── 节点 ── -->
+        <template v-else-if="targetType === 'node'">
+          <div class="menu-item" @click="handleClick('edit-node', targetData)">
+            <span class="menu-icon">✏️</span> 编辑节点
+          </div>
+          <div class="menu-item" @click="handleClick('add-edge-from-node', targetData?.id)">
+            <span class="menu-icon">🔗</span> 添加关联边
+          </div>
+          <div class="menu-divider"></div>
+          <div class="menu-item menu-item-danger" @click="handleClick('delete-node', targetData?.id)">
+            <span class="menu-icon">❌</span> 删除节点
+          </div>
+        </template>
 
-      <!-- ── 边 ── -->
-      <template v-else-if="targetType === 'edge'">
-        <div class="menu-item" @click="handleClick('edit-edge', targetData)">
-          <span class="menu-icon">✏️</span> 编辑边标签
-        </div>
-        <div class="menu-divider"></div>
-        <div class="menu-item menu-item-danger" @click="handleClick('delete-edge', targetData)">
-          <span class="menu-icon">❌</span> 删除边
-        </div>
-      </template>
+        <!-- ── 边 ── -->
+        <template v-else-if="targetType === 'edge'">
+          <div class="menu-item" @click="handleClick('edit-edge', targetData)">
+            <span class="menu-icon">✏️</span> 编辑边标签
+          </div>
+          <div class="menu-divider"></div>
+          <div class="menu-item menu-item-danger" @click="handleClick('delete-edge', targetData)">
+            <span class="menu-icon">❌</span> 删除边
+          </div>
+        </template>
+      </div>
     </div>
   </Teleport>
 </template>
 
-<style scoped>
-/* ================================================================
-   遮罩层：点击即关闭菜单
-   ================================================================ */
-.context-menu-backdrop {
+<style>
+/* ContextMenu 样式（非 scoped，因为使用 Teleport）
+   所有选择器加 .ctx-menu-root 前缀防止全局污染 */
+
+/* 遮罩层：点击即关闭菜单 */
+.ctx-menu-root .context-menu-backdrop {
   position: fixed;
   inset: 0;
   z-index: 998;
   background: transparent;
 }
 
-/* ================================================================
-   菜单容器
-   ================================================================ */
-.context-menu {
+/* 菜单容器 */
+.ctx-menu-root .context-menu {
   position: fixed;
   z-index: 999;
   min-width: 170px;
-  background: #1e1e2e;
-  border: 1px solid #313244;
+  background: var(--color-bg-primary, #ffffff);
+  border: 1px solid var(--color-border, #e5e7eb);
   border-radius: 8px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-popup, 0 4px 16px rgba(0,0,0,0.12));
   padding: 6px 0;
-  /* 字体 */
   font-size: 13px;
-  color: #e5e7eb;
+  color: var(--color-text-primary, #1f2937);
   user-select: none;
 }
 
-/* ================================================================
-   菜单项
-   ================================================================ */
-.menu-item {
+/* 菜单项 */
+.ctx-menu-root .menu-item {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -199,25 +197,25 @@ function handleClick(action, payload = null) {
   white-space: nowrap;
 }
 
-.menu-item:hover {
-  background: #313244;
+.ctx-menu-root .menu-item:hover {
+  background: var(--color-bg-surface, #f3f4f6);
 }
 
-.menu-item:active {
-  background: #45475a;
+.ctx-menu-root .menu-item:active {
+  background: var(--color-bg-hover, #e5e7eb);
 }
 
 /* 危险操作（删除） */
-.menu-item-danger {
-  color: #f87171;
+.ctx-menu-root .menu-item-danger {
+  color: var(--color-red, #ef4444);
 }
 
-.menu-item-danger:hover {
-  background: #3b2025;
+.ctx-menu-root .menu-item-danger:hover {
+  background: var(--color-red-light, #fef2f2);
 }
 
 /* 图标区域 */
-.menu-icon {
+.ctx-menu-root .menu-icon {
   width: 18px;
   text-align: center;
   font-size: 13px;
@@ -225,9 +223,9 @@ function handleClick(action, payload = null) {
 }
 
 /* 分隔线 */
-.menu-divider {
+.ctx-menu-root .menu-divider {
   height: 1px;
-  background: #313244;
+  background: var(--color-border, #e5e7eb);
   margin: 4px 8px;
 }
 </style>

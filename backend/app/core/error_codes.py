@@ -8,6 +8,7 @@
 
 模块划分:
   E-LLM-xxx   : 大模型 API 调用（SDK→千问：超时、限流、认证等）
+  E-AUTH-xxx  : 用户认证（登录、注册、Token 校验、速率限制等）
   E-COMM-xxx  : 前后端通信（axios 超时、网络断连、HTTP 错误等）
   E-GRAPH-xxx : 图谱分析器（JSON 解析、分析失败等）
   E-KG-xxx    : 知识图谱核心（节点/边操作、文件读写等）
@@ -64,6 +65,14 @@ class ErrorCode:
     EVENT_PUBLISH_FAILED = ("E-EVENT-001", "事件发布失败")
     EVENT_QUEUE_FULL     = ("E-EVENT-002", "事件队列已满")
     EVENT_SSE_ERROR      = ("E-EVENT-003", "SSE连接异常")
+
+    # ── 用户认证层 (E-AUTH) ──
+    AUTH_INVALID_CREDENTIALS = ("E-AUTH-001", "用户名或密码错误")
+    AUTH_USERNAME_TAKEN      = ("E-AUTH-002", "用户名已被注册")
+    AUTH_USER_NOT_FOUND      = ("E-AUTH-003", "用户不存在")
+    AUTH_RATE_LIMITED        = ("E-AUTH-004", "登录请求过于频繁，请稍后再试")
+    AUTH_TOKEN_INVALID       = ("E-AUTH-005", "身份凭证无效或已过期，请重新登录")
+    AUTH_VALIDATION_ERROR    = ("E-AUTH-006", "输入格式不符合要求")
 
     # ── 前后端通信层 (E-COMM) ──
     # 注意：这些错误码由前端在 catch 块中生成，后端不直接使用
@@ -157,3 +166,21 @@ def log_info(code_tuple: tuple, detail: str = "", context: Optional[dict] = None
         ctx_str = ", ".join(f"{k}={v}" for k, v in context.items())
         log_parts.append(f" | ctx={{{ctx_str}}}")
     logger.info("".join(log_parts))
+
+
+def publish_error_event(code_tuple: tuple, message: str, module: str,
+                        detail: str = "") -> None:
+    """
+    安全发布错误事件到 SSE 事件总线（失败时静默，不影响主流程）。
+    消除 graph_analyzer / chat_service 中 3 处重复的 try-except publish("error")。
+    """
+    try:
+        from app.core.event_bus import publish
+        publish("error", {
+            "code": ErrorCode.code_only(code_tuple),
+            "message": message,
+            "module": module,
+            "detail": detail[:200],
+        })
+    except Exception:
+        pass

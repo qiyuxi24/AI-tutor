@@ -1,0 +1,323 @@
+{
+  "nodes": [
+    {
+      "id": "recursion_def",
+      "name": "递归定义",
+      "file": "nodes/recursion_def.md",
+      "tags": [
+        "核心概念",
+        "一级"
+      ],
+      "added_by": "human",
+      "created_at": "2026-05-17",
+      "confidence": null
+    },
+    {
+      "id": "recursion_base_case",
+      "name": "递归终止条件",
+      "file": "nodes/recursion_base_case.md",
+      "tags": [
+        "核心概念",
+        "二级"
+      ],
+      "added_by": "human",
+      "created_at": "2026-05-17",
+      "confidence": null
+    },
+    {
+      "id": "recursion_formula",
+      "name": "递归递推公式",
+      "file": "nodes/recursion_formula.md",
+      "tags": [
+        "核心概念",
+        "二级"
+      ],
+      "added_by": "human",
+      "created_at": "2026-05-17",
+      "confidence": null
+    },
+    {
+      "id": "recursion_stack",
+      "name": "递归与栈",
+      "file": "nodes/recursion_stack.md",
+      "tags": [
+        "进阶概念",
+        "三级"
+      ],
+      "added_by": "human",
+      "created_at": "2026-05-20",
+      "confidence": null
+    },
+    {
+      "id": "recursion_vs_iteration",
+      "name": "递归 vs 迭代",
+      "file": "nodes/recursion_vs_iteration.md",
+      "tags": [
+        "对比分析",
+        "三级"
+      ],
+      "added_by": "human",
+      "created_at": "2026-05-20",
+      "confidence": null
+    },
+    {
+      "id": "tail_recursion",
+      "name": "尾递归优化",
+      "file": "nodes/tail_recursion.md",
+      "tags": [
+        "进阶概念",
+        "三级"
+      ],
+      "added_by": "human",
+      "created_at": "2026-05-20",
+      "confidence": null
+    },
+    {
+      "id": "divide_and_conquer",
+      "name": "分治算法",
+      "file": "nodes/divide_and_conquer.md",
+      "tags": [
+        "算法思想",
+        "二级"
+      ],
+      "added_by": "human",
+      "created_at": "2026-05-20",
+      "confidence": null
+    },
+    {
+      "id": "os_intro",
+      "name": "计算机操作系统",
+      "file": "nodes/os_intro.md",
+      "tags": [
+        "操作系统",
+        "基础",
+        "三级"
+      ],
+      "summary": "",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 30,
+      "added_by": "ai",
+      "created_at": ""
+    },
+    {
+      "id": "cooking_basics",
+      "name": "烹饪入门",
+      "file": "nodes/cooking_basics.md",
+      "tags": [
+        "生活技能",
+        "二级"
+      ],
+      "summary": "烹饪的基础概念、必备工具和安全注意事项",
+      "mastery": 0,
+      "difficulty": 2,
+      "estimated_minutes": 20,
+      "added_by": "ai",
+      "created_at": ""
+    },
+    {
+      "id": "new_001",
+      "name": "数据结构",
+      "file": "nodes/new_001.md",
+      "tags": [
+        "what"
+      ],
+      "summary": "",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 15,
+      "added_by": "human",
+      "confidence": null,
+      "created_at": "2026-05-23T16:12:35.683902"
+    },
+    {
+      "id": "new_002",
+      "name": "离散数学",
+      "file": "nodes/new_002.md",
+      "tags": [],
+      "summary": "",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 15,
+      "added_by": "human",
+      "confidence": null,
+      "created_at": "2026-05-23T16:15:01.604365"
+    },
+    {
+      "id": "intro_prompt_eng",
+      "name": "提示词工程入门",
+      "file": "nodes/intro_prompt_eng.md",
+      "tags": [
+        "AI",
+        "LLM",
+        "入门"
+      ],
+      "summary": "学习如何通过设计结构和要素来更好地与 AI 沟通。",
+      "mastery": 0,
+      "difficulty": 2,
+      "estimated_minutes": 20,
+      "added_by": "ai",
+      "confidence": null,
+      "created_at": "2026-05-28T23:23:40.995552"
+    },
+    {
+      "id": "harmony_dev_intro",
+      "name": "鸿蒙开发入门",
+      "file": "nodes/harmony_dev_intro.md",
+      "tags": [
+        "鸿蒙",
+        "移动开发",
+        "二级"
+      ],
+      "summary": "了解 HarmonyOS 的核心特性、分布式架构以及 ArkTS 开发语言。",
+      "mastery": 0,
+      "difficulty": 2,
+      "estimated_minutes": 20,
+      "added_by": "ai",
+      "confidence": null,
+      "created_at": "2026-05-29T20:02:04.283463"
+    },
+    {
+      "id": "harmonyos_intro",
+      "name": "鸿蒙开发入门",
+      "file": "nodes/harmonyos_intro.md",
+      "tags": [
+        "鸿蒙",
+        "移动开发",
+        "IoT"
+      ],
+      "summary": "介绍HarmonyOS操作系统的核心概念、分布式特性以及ArkTS开发基础。",
+      "mastery": 0,
+      "difficulty": 3,
+      "estimated_minutes": 20,
+      "added_by": "ai",
+      "confidence": null,
+      "created_at": "2026-05-29T20:02:04.286998"
+    },
+    {
+      "id": "german_learning_path",
+      "name": "德语入门",
+      "file": "nodes/german_learning_path.md",
+      "tags": [
+        "外语",
+        "爱好",
+        "入门"
+      ],
+      "summary": "为语言爱好者设计的德语学习路径",
+      "mastery": 0,
+      "difficulty": 1,
+      "estimated_minutes": 10,
+      "added_by": "ai",
+      "confidence": null,
+      "created_at": "2026-05-29T23:32:08.066065"
+    },
+    {
+      "id": "german_du_sie",
+      "name": "德语的 Du 与 Sie（称呼规范）",
+      "file": "nodes/german_du_sie.md",
+      "tags": [
+        "语言学习",
+        "德国文化",
+        "基础"
+      ],
+      "summary": "讲解德语中用于表示“你”和“您”的两个核心代词及其使用场景与文化背景。",
+      "mastery": 25,
+      "difficulty": 2,
+      "estimated_minutes": 10,
+      "added_by": "ai",
+      "confidence": 0.95,
+      "created_at": ""
+    },
+    {
+      "id": "german_formal_intro",
+      "name": "德语正式问候与自我介绍",
+      "file": "nodes/german_formal_intro.md",
+      "tags": [
+        "语言学习",
+        "日常会话",
+        "基础"
+      ],
+      "summary": "掌握使用Sie进行正式场合下询问姓名及回应的标准句型",
+      "mastery": 0,
+      "difficulty": 1,
+      "estimated_minutes": 10,
+      "added_by": "ai",
+      "confidence": 0.9,
+      "created_at": ""
+    }
+  ],
+  "edges": [
+    {
+      "from": "recursion_base_case",
+      "to": "recursion_def",
+      "relation": "prerequisite",
+      "label": "需要先理解递归定义",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "recursion_formula",
+      "to": "recursion_base_case",
+      "relation": "prerequisite",
+      "label": "需要先掌握终止条件",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "recursion_stack",
+      "to": "recursion_formula",
+      "relation": "prerequisite",
+      "label": "需要理解递推公式",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "tail_recursion",
+      "to": "recursion_stack",
+      "relation": "prerequisite",
+      "label": "需要理解调用栈",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "divide_and_conquer",
+      "to": "recursion_def",
+      "relation": "prerequisite",
+      "label": "需要理解递归定义",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "recursion_vs_iteration",
+      "to": "tail_recursion",
+      "relation": "related",
+      "label": "",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "recursion_formula",
+      "to": "cooking_basics",
+      "relation": "related",
+      "label": "",
+      "added_by": "human",
+      "confidence": null
+    },
+    {
+      "from": "german_learning_path",
+      "to": "german_du_sie",
+      "relation": "prerequisite",
+      "label": "是学习 德语的 Du 与 Sie（称呼规范） 的前置知识",
+      "added_by": "ai",
+      "confidence": null
+    },
+    {
+      "from": "german_du_sie",
+      "to": "german_formal_intro",
+      "relation": "prerequisite",
+      "label": "是学习 德语正式问候与自我介绍 的前置知识",
+      "added_by": "ai",
+      "confidence": null
+    }
+  ]
+}
