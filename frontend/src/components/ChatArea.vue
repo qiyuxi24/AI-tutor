@@ -8,6 +8,8 @@ const props = defineProps({
   sidebarCollapsed: Boolean,
 })
 
+const emit = defineEmits(['navigate-to-node'])
+
 const store = useChatStore()
 const messagesEnd = ref(null)
 
@@ -57,6 +59,8 @@ const greetingMessages = [
           v-for="(msg, idx) in store.currentMessages"
           :key="idx"
           :message="msg"
+          :knowledge-nodes="store.knowledgeNodes"
+          @navigate-to-node="(nodeId) => emit('navigate-to-node', nodeId)"
         />
       </template>
 

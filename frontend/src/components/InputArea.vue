@@ -10,6 +10,7 @@ const textareaRef = ref(null)
 const MODE_OPTIONS = [
   { value: 'adaptive', label: '自适应引导' },
   { value: 'free_talk', label: '自由对话' },
+  { value: 'recursive', label: '递归式教学' },
 ]
 
 function handleModeChange(e) {

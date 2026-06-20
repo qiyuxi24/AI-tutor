@@ -29,7 +29,7 @@ const props = defineProps({
   visible: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['close', 'refresh', 'save-content'])
+const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node'])
 
 const mode = ref('view')        // 'view' | 'edit'
 const editContent = ref('')
@@ -177,9 +177,15 @@ function masteryBarWidth(m) {
         <div v-if="nodeInfo.prerequisites?.length" class="relations-section">
           <h3>前置知识</h3>
           <div class="relation-list">
-            <span v-for="pid in nodeInfo.prerequisites" :key="pid" class="relation-tag">
+            <button
+              v-for="pid in nodeInfo.prerequisites"
+              :key="pid"
+              class="relation-tag link-btn"
+              title="跳转到「{{ displayName(pid) }}」"
+              @click="emit('navigate-to-node', pid)"
+            >
               ← {{ displayName(pid) }}
-            </span>
+            </button>
           </div>
         </div>
 
@@ -187,9 +193,15 @@ function masteryBarWidth(m) {
         <div v-if="nodeInfo.related_nodes?.length" class="relations-section">
           <h3>相关节点</h3>
           <div class="relation-list">
-            <span v-for="rid in nodeInfo.related_nodes" :key="rid" class="relation-tag related">
+            <button
+              v-for="rid in nodeInfo.related_nodes"
+              :key="rid"
+              class="relation-tag related link-btn"
+              title="跳转到「{{ displayName(rid) }}」"
+              @click="emit('navigate-to-node', rid)"
+            >
               ↔ {{ displayName(rid) }}
-            </span>
+            </button>
           </div>
         </div>
       </div>
@@ -285,6 +297,15 @@ function masteryBarWidth(m) {
 .relation-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .relation-tag { padding: 3px 10px; border-radius: 6px; font-size: 12px; background: #eff6ff; color: #3b82f6; border: 1px solid #dbeafe; }
 .relation-tag.related { background: #f5f3ff; color: #8b5cf6; border-color: #e9d5ff; }
+.relation-tag.link-btn {
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+.relation-tag.link-btn:hover {
+  filter: brightness(0.95);
+  transform: translateY(-1px);
+}
 
 /* 弹窗动画 */
 .modal-enter-active, .modal-leave-active { transition: opacity 0.2s ease; }

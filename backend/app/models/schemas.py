@@ -5,8 +5,8 @@ from typing import List, Literal, Optional
 # 对话相关
 # ================================================================
 
-# 引导模式：adaptive = 自适应引导，free_talk = 自由对话（允许直接回答）
-GuideMode = Literal['adaptive', 'free_talk']
+# 引导模式：adaptive = 自适应引导，free_talk = 自由对话，recursive = 递归式教学
+GuideMode = Literal['adaptive', 'free_talk', 'recursive']
 
 class ChatMessage(BaseModel):
     role: str    # "user" 或 "assistant"
@@ -16,6 +16,7 @@ class ChatRequest(BaseModel):
     """前端发给后端的请求体（user_id 由 JWT token 提供，无需在请求体中传递）"""
     messages: List[ChatMessage] # 全部对话历史
     mode: GuideMode             # 引导模式
+    current_node: Optional[str] = None  # 递归模式：当前正在教学的知识点 ID
 
 class ChatResponse(BaseModel):
     """后端返回给前端的响应体"""
@@ -107,3 +108,35 @@ class ProfileUpdateRequest(BaseModel):
     """更新用户画像的请求体"""
     content: str                        # 新的画像内容（Markdown）
     op: Literal['replace', 'append'] = 'replace'  # 操作类型
+
+
+# ================================================================
+# 学习路径推荐相关
+# ================================================================
+
+class DecomposeRequest(BaseModel):
+    """问题拆解请求"""
+    question: str                       # 用户原始问题
+
+class DecomposeResponse(BaseModel):
+    """问题拆解响应"""
+    target: dict | None = None          # 目标节点 {id, name}
+    nodes: list[dict] = []              # 所有知识点 [{id, name, tags}, ...]
+    edges: list[dict] = []              # 依赖边 [{from, to, relation}, ...]
+    created_nodes: list[str] = []       # 实际创建到图谱中的节点 ID 列表
+    created_edges: int = 0              # 实际创建的边数量
+
+class LearningPathResponse(BaseModel):
+    """学习路径响应"""
+    ordered_nodes: list[str] = []       # 拓扑排序后的节点 ID 列表
+    nodes_detail: list[dict] = []       # 节点详情 [{id, name, mastery, difficulty, ...}, ...]
+    root_nodes: list[str] = []          # 入度为 0 的根节点
+    current_recommendation: str | None = None  # 推荐下一步学的节点 ID
+    target_node: str | None = None      # 目标节点 ID（如果指定）
+
+class NextToLearnResponse(BaseModel):
+    """下一步学习推荐响应"""
+    node_id: str | None = None          # 推荐节点 ID（全部已掌握则为 None）
+    name: str = ""                      # 节点名称
+    mastery: int = 0                    # 当前掌握度
+    reason: str = ""                    # 推荐理由

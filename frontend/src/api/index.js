@@ -72,13 +72,13 @@ export const appendProfile = (content) =>
  * @param {Function} callbacks.onError - 出错时调用 (error: string)
  * @returns {AbortController} 用于取消请求
  */
-export const sendMessageStream = (messages, mode, callbacks = {}) => {
+export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = '') => {
   const controller = new AbortController()
   const { onToken, onDone, onError } = callbacks
 
   const token = localStorage.getItem('ai_tutor_token')
 
-  const body = JSON.stringify({ messages, mode })
+  const body = JSON.stringify({ messages, mode, current_node: currentNode })
 
   const headers = { 'Content-Type': 'application/json' }
   if (token) {

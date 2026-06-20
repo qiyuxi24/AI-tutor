@@ -45,6 +45,7 @@ const SIDEBAR_WIDTH = 260
 const MODE_LABELS = {
   adaptive: { label: '自适应引导', color: '#10b981' },
   free_talk: { label: '自由对话', color: '#f59e0b' },
+  recursive: { label: '递归式教学', color: '#8b5cf6' },
 }
 const modeInfo = computed(() => MODE_LABELS[store.mode] || { label: store.mode, color: '#6b7280' })
 
@@ -188,6 +189,30 @@ async function handleGraphSearchSelect(nodeId) {
   forceGraphRef.value?.focusNode(nodeId)
 }
 
+/**
+ * NodeDetail 中点击前置知识/相关节点 → 关闭弹窗并聚焦目标节点
+ */
+async function handleNodeDetailNavigate(nodeId) {
+  // 关闭节点详情弹窗
+  nodeDetailVisible.value = false
+  // 加载目标节点详情
+  nodeDetailLoading.value = true
+  try {
+    nodeDetailModal.value = await store.fetchNodeDetail(nodeId)
+    nodeDetailVisible.value = true
+  } catch {
+    nodeDetailModal.value = { id: nodeId, name: '加载失败', content: clientError('NODE_LOAD') }
+    nodeDetailVisible.value = true
+  } finally {
+    nodeDetailLoading.value = false
+  }
+  // 同步在图谱中聚焦
+  if (viewMode.value === 'graph') {
+    await new Promise(r => setTimeout(r, 100))
+    forceGraphRef.value?.focusNode(nodeId)
+  }
+}
+
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
 }
@@ -326,7 +351,7 @@ const slideTransition = {
           <div class="sidebar-panel" :class="{ collapsed: sidebarCollapsed }" :style="{ width: SIDEBAR_WIDTH + 'px' }">
             <Sidebar />
           </div>
-          <ChatArea :sidebarCollapsed="sidebarCollapsed" />
+          <ChatArea :sidebarCollapsed="sidebarCollapsed" @navigate-to-node="handleGraphSearchSelect" />
         </div>
       </Transition>
 
@@ -360,6 +385,7 @@ const slideTransition = {
       @close="closeNodeDetail"
       @refresh="refreshGraph"
       @save-content="handleNodeDetailSave"
+      @navigate-to-node="handleNodeDetailNavigate"
     />
 
     <!-- 用户画像面板 -->

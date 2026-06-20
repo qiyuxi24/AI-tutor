@@ -88,13 +88,14 @@ def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True) -> str:
 
 
 def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
-                        inject_tools: bool = False) -> tuple[str, str]:
+                        inject_tools: bool = False, current_node: str = "") -> tuple[str, str]:
     """
     构建系统提示词（合并原 _build_stream_prompt / _build_chat_prompt）。
     
     参数:
         inject_tools: True=后台阶段（详细图谱 + 工具能力说明）
                       False=流式阶段（精简图谱，纯教学引导）
+        current_node: 递归模式：当前正在教学的知识点 ID
     返回: (system_prompt, last_user_message)
     """
     last_user_msg = next(
@@ -109,11 +110,34 @@ def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
     profile = UserProfile(user_id=kg.user_id)
     profile_text = profile.get_summary()
 
+    # 递归模式额外参数
+    extra_kwargs = {}
+    if mode == "recursive":
+        # 构建框架摘要（所有节点 ID + 名称 + 依赖关系，不含内容）
+        framework_lines = []
+        for n in kg.nodes:
+            tags = ", ".join(n.get("tags", []))
+            mastery = n.get("mastery", 0)
+            framework_lines.append(f"  [{n['id']}] {n['name']} (掌握度:{mastery}, 标签:{tags})")
+        node_list = "\n".join(framework_lines) if framework_lines else "  (暂无节点)"
+
+        edge_lines = []
+        for e in kg.edges:
+            if e.get("relation") == "prerequisite":
+                edge_lines.append(f"  {e['from_node']} → {e['to_node']} (前置依赖)")
+        edge_list = "\n".join(edge_lines) if edge_lines else "  (暂无依赖关系)"
+
+        extra_kwargs["knowledge_graph_framework"] = (
+            f"### 框架节点\n{node_list}\n\n### 依赖关系\n{edge_list}"
+        )
+        extra_kwargs["current_node"] = current_node or "未知节点"
+
     system_prompt = get_system_prompt(
         mode=mode,
         student_message=last_user_msg,
         graph_summary=graph_summary,
         user_profile=profile_text,
+        **extra_kwargs,
     )
 
     if inject_tools:
@@ -203,14 +227,16 @@ async def _analyze_and_apply(user_message: str, ai_reply: str,
 #  对话处理入口
 # ══════════════════════════════════════════════════════════════════
 
-async def process_message(user_id: int, messages: list, mode: str) -> tuple[str, str, dict]:
+async def process_message(user_id: int, messages: list, mode: str,
+                        current_node: str = "") -> tuple[str, str, dict]:
     """
     处理一条学生消息。
 
     参数:
-        user_id:  数据库用户 ID（从 JWT 解析）
-        messages: 完整对话历史（Pydantic ChatMessage 列表）
-        mode:     引导模式（adaptive / free_talk）
+        user_id:      数据库用户 ID（从 JWT 解析）
+        messages:     完整对话历史（Pydantic ChatMessage 列表）
+        mode:         引导模式（adaptive / free_talk / recursive）
+        current_node: 递归模式：当前正在教学的知识点 ID
 
     返回:
         (AI回复文本, 使用的模式, 图谱分析结果)
@@ -223,7 +249,9 @@ async def process_message(user_id: int, messages: list, mode: str) -> tuple[str,
 
     try:
         # 1. 构建系统提示词（含图谱上下文 + 工具能力）
-        system_prompt, last_user_msg = _build_system_prompt(messages, mode, kg, inject_tools=True)
+        system_prompt, last_user_msg = _build_system_prompt(
+            messages, mode, kg, inject_tools=True, current_node=current_node
+        )
 
         # 2. 调用 AI 获取回复
         reply = await call_llm(system_prompt, messages, enable_tools=True, kg=kg)
@@ -254,6 +282,7 @@ async def process_message_stream(
     messages: list,
     mode: str,
     user_id: int,
+    current_node: str = "",
 ) -> AsyncGenerator[str, None]:
     """
     流式处理一条学生消息。
@@ -262,9 +291,10 @@ async def process_message_stream(
     阶段2（后台）：在生成器结束后，通过 BackgroundTasks 触发工具调用和图谱分析。
 
     参数:
-        messages: 完整对话历史（Pydantic ChatMessage 列表）
-        mode:     引导模式
-        user_id:  数据库用户 ID（从 JWT 解析）
+        messages:     完整对话历史（Pydantic ChatMessage 列表）
+        mode:         引导模式
+        user_id:      数据库用户 ID（从 JWT 解析）
+        current_node: 递归模式：当前正在教学的知识点 ID
 
     Yields:
         SSE 格式的字符串（"data: {...}\n\n"）
@@ -272,7 +302,9 @@ async def process_message_stream(
     kg = KnowledgeGraph(user_id=user_id)
     try:
         # 阶段1：流式生成回复（纯教学，不带 tools）
-        stream_prompt, _ = _build_system_prompt(messages, mode, kg, inject_tools=False)
+        stream_prompt, _ = _build_system_prompt(
+            messages, mode, kg, inject_tools=False, current_node=current_node
+        )
 
         try:
             async for token in call_llm_stream(stream_prompt, messages):
@@ -294,6 +326,7 @@ async def process_background_tools(
     messages: list,
     mode: str,
     user_id: int,
+    current_node: str = "",
 ) -> None:
     """
     后台任务：调用 LLM 判断是否需要执行工具 + 图谱分析。
@@ -302,14 +335,17 @@ async def process_background_tools(
     失败不影响主对话流程。
 
     参数:
-        messages: 完整对话历史
-        mode:     引导模式
-        user_id:  数据库用户 ID（从 JWT 解析）
+        messages:     完整对话历史
+        mode:         引导模式
+        user_id:      数据库用户 ID（从 JWT 解析）
+        current_node: 递归模式：当前正在教学的知识点 ID
     """
     kg = KnowledgeGraph(user_id=user_id)
     try:
         # 1. 工具调用（function calling）—— 使用含工具说明的 prompt
-        tool_prompt, last_user_msg = _build_system_prompt(messages, mode, kg, inject_tools=True)
+        tool_prompt, last_user_msg = _build_system_prompt(
+            messages, mode, kg, inject_tools=True, current_node=current_node
+        )
         tool_result = await call_llm_tools(tool_prompt, messages, kg=kg)
 
         # 2. 图谱分析（GraphAnalyzer 独立判断）

@@ -62,6 +62,7 @@ export const useChatStore = defineStore('chat', () => {
   const conversations = ref([])
   const currentId = ref(null)
   const mode = ref('adaptive')
+  const currentNode = ref('')  // 递归模式：当前教学知识点 ID
   const loading = ref(false)
 
   // ─── 知识图谱状态 ───
@@ -580,7 +581,8 @@ export const useChatStore = defineStore('chat', () => {
           conv.messages.push({ role: 'assistant', content: errorMsg })
           persist()
         },
-      }
+      },
+      currentNode.value,
     )
   }
 
@@ -589,6 +591,7 @@ export const useChatStore = defineStore('chat', () => {
     conversations,
     currentId,
     mode,
+    currentNode,
     loading,
     currentConversation,
     currentMessages,

@@ -206,6 +206,170 @@ class KnowledgeGraph:
         """, (node_id, self.user_id, self.user_id)).fetchall()
         return [r["to_node"] for r in rows]
 
+    def topological_sort(self) -> list[str]:
+        """
+        对所有 prerequisite 边构成的 DAG 做拓扑排序，返回学习顺序。
+
+        算法（Kahn's Algorithm）：
+        1. 只考虑 relation='prerequisite' 的边
+        2. 入度为 0 的节点作为起点
+        3. 每次移除一个入度为 0 的节点，更新其出边的目标入度
+
+        返回：
+            拓扑排序后的节点 ID 列表（从最基础到最进阶）。
+            如果没有节点，返回空列表。
+            如果图有环，返回部分排序结果。
+        """
+        # 获取所有节点 ID
+        all_ids = self.get_node_ids()
+        if not all_ids:
+            return []
+
+        # 只取 prerequisite 边
+        prereq_edges = self._conn.execute(
+            "SELECT from_node, to_node FROM edges WHERE relation = 'prerequisite' AND user_id = ?",
+            (self.user_id,)
+        ).fetchall()
+
+        # 构建邻接表和入度表
+        in_degree = {nid: 0 for nid in all_ids}
+        adj = {nid: [] for nid in all_ids}
+
+        for edge in prereq_edges:
+            from_id = edge["from_node"]
+            to_id = edge["to_node"]
+            # from → to (prerequisite): from 是 to 的前置，所以应该先学 from
+            # 拓扑排序中：from 先于 to
+            if from_id in adj and to_id in in_degree:
+                adj[from_id].append(to_id)
+                in_degree[to_id] += 1
+
+        # Kahn 算法
+        queue = [nid for nid, deg in in_degree.items() if deg == 0]
+        result = []
+
+        while queue:
+            current = queue.pop(0)
+            result.append(current)
+            for neighbor in adj[current]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+
+        # 如果还有未处理的节点（有环），追加到末尾
+        for nid in all_ids:
+            if nid not in result:
+                result.append(nid)
+
+        return result
+
+    def get_learning_path(self, target_node_id: str | None = None) -> dict:
+        """
+        生成学习路径：拓扑排序 + 标记已掌握/当前应学节点。
+
+        参数:
+            target_node_id: 可选的目标节点。若指定，路径只包含到目标的链上节点。
+
+        返回:
+            {
+                "ordered_nodes": [node_id, ...],           # 学习顺序
+                "nodes_detail": [{id, name, mastery, ...}, ...],
+                "root_nodes": [node_id, ...],               # 入度为 0 的根节点
+                "current_recommendation": node_id | None,   # 推荐下一步学的节点
+                "target_node": node_id | None,
+            }
+        """
+        ordered = self.topological_sort()
+        if not ordered:
+            return {
+                "ordered_nodes": [], "nodes_detail": [],
+                "root_nodes": [], "current_recommendation": None,
+                "target_node": target_node_id,
+            }
+
+        # 如果指定了 target，过滤出到 target 路径上的节点
+        if target_node_id and target_node_id in ordered:
+            target_prereqs = set(self.get_prerequisites(target_node_id))
+            target_prereqs.add(target_node_id)
+            ordered = [n for n in ordered if n in target_prereqs]
+
+        # 构建节点详情
+        nodes_detail = []
+        for nid in ordered:
+            node = self.get_node(nid)
+            if node:
+                nodes_detail.append({
+                    "id": node["id"],
+                    "name": node["name"],
+                    "mastery": node.get("mastery", 0),
+                    "difficulty": node.get("difficulty", 3),
+                    "summary": node.get("summary", ""),
+                    "tags": node.get("tags", []),
+                })
+
+        # 找根节点（入度为 0 的节点）
+        prereq_edges = self._conn.execute(
+            "SELECT from_node, to_node FROM edges WHERE relation = 'prerequisite' AND user_id = ?",
+            (self.user_id,)
+        ).fetchall()
+        has_incoming = {e["to_node"] for e in prereq_edges}
+        root_nodes = [n for n in ordered if n not in has_incoming]
+
+        # 推荐下一步：第一个 mastery < 50 的节点
+        current_recommendation = None
+        for nid in ordered:
+            node = self.get_node(nid)
+            if node and node.get("mastery", 0) < 50:
+                current_recommendation = nid
+                break
+
+        return {
+            "ordered_nodes": ordered,
+            "nodes_detail": nodes_detail,
+            "root_nodes": root_nodes,
+            "current_recommendation": current_recommendation,
+            "target_node": target_node_id,
+        }
+
+    def get_next_to_learn(self) -> dict | None:
+        """
+        快速获取"下一步该学什么"：返回拓扑排序中第一个未掌握的节点。
+
+        返回:
+            {"node_id": ..., "name": ..., "mastery": ..., "reason": "..."}
+            如果全部已掌握，返回 None。
+        """
+        path = self.get_learning_path()
+        if not path["ordered_nodes"]:
+            return None
+
+        rec = path["current_recommendation"]
+        if rec is None:
+            return None
+
+        node = self.get_node(rec)
+        if node is None:
+            return None
+
+        # 获取该节点的直接前置（尚未掌握的）
+        prereqs = self.get_prerequisites(rec)
+        unmastered_prereqs = []
+        for pid in prereqs:
+            pn = self.get_node(pid)
+            if pn and pn.get("mastery", 0) < 50:
+                unmastered_prereqs.append(pn["name"])
+
+        reason = f"学习路径上的下一个知识点"
+        if unmastered_prereqs:
+            reason += f"（建议先巩固：{'、'.join(unmastered_prereqs)}）"
+
+        return {
+            "node_id": rec,
+            "name": node["name"],
+            "mastery": node.get("mastery", 0),
+            "reason": reason,
+        }
+
     def _has_path(self, from_id: str, to_id: str) -> bool:
         """
         检查是否存在从 from_id 到 to_id 的 prerequisite 路径。

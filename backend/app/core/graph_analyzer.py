@@ -312,6 +312,124 @@ AI导师：{ai_reply}
         )
         return []
 
+    # ════════════════════════════════════════════
+    #  问题拆解（学习路径推荐模块）
+    # ════════════════════════════════════════════
+
+    DECOMPOSE_SYSTEM_PROMPT = """你是一个理工科知识图谱构建专家。你的任务是将用户的提问拆解为"知识点依赖树"。
+
+## 任务要求
+1. 提取用户问题中的核心目标知识点（target）。
+2. 逆向递归思考：学习 target 必须掌握哪些直接前置知识？
+3. 针对每个前置知识，继续思考它的前置知识（深度至少 2 层）。
+4. 每个知识点只给出 id（英文下划线命名）和 name（中文名称），不需要 content。
+
+## 输出格式
+请仅输出严格的 JSON，不要包含任何其他文字：
+{
+  "target": {"id": "english_id", "name": "最终目标知识点名称"},
+  "nodes": [
+    {"id": "node_id_1", "name": "知识点名称1", "tags": ["标签"]},
+    {"id": "node_id_2", "name": "知识点名称2", "tags": ["标签"]}
+  ],
+  "edges": [
+    {"from": "前置节点id", "to": "后置节点id", "relation": "prerequisite"}
+  ]
+}
+
+注意：
+- nodes 包含所有涉及的知识点（含 target），每个节点必须有 id 和 name
+- edges 描述 prerequisite 关系：from 是前置知识，to 是后置知识（from 必须先学才能学 to）
+- 如果目标知识点无需前置，则 nodes 只含 target，edges 为空数组
+- 所有 id 必须使用英文下划线命名，如 "binary_tree_traversal"
+- tags 用于分类，如 ["数据结构", "算法", "数学基础"]"""
+
+    async def decompose_question(self, user_question: str) -> dict:
+        """
+        将用户问题拆解为知识点依赖树（骨架图谱，不含内容）。
+
+        参数:
+            user_question: 用户原始问题
+
+        返回:
+            {
+                "target": {"id": "...", "name": "..."},
+                "nodes": [{id, name, tags}, ...],
+                "edges": [{from, to, relation}, ...]
+            }
+            失败时返回 {"target": None, "nodes": [], "edges": []}
+        """
+        decompose_prompt = f"请将以下用户问题拆解为知识点依赖树：\n\n{user_question}"
+
+        try:
+            raw_response = await call_llm(
+                self.DECOMPOSE_SYSTEM_PROMPT,
+                [{"role": "user", "content": decompose_prompt}],
+                enable_tools=False,
+            )
+        except Exception as e:
+            logger.warning(f"问题拆解 LLM 调用失败: {e}")
+            return {"target": None, "nodes": [], "edges": []}
+
+        # 解析 JSON
+        try:
+            data = json.loads(raw_response.strip())
+        except json.JSONDecodeError:
+            # 尝试提取 JSON 块
+            match = re.search(r'```(?:json)?\s*([\s\S]*?)```', raw_response)
+            if match:
+                try:
+                    data = json.loads(match.group(1).strip())
+                except json.JSONDecodeError:
+                    match = re.search(r'\{[\s\S]*\}', raw_response)
+                    if match:
+                        try:
+                            data = json.loads(match.group(0))
+                        except json.JSONDecodeError:
+                            return {"target": None, "nodes": [], "edges": []}
+                    else:
+                        return {"target": None, "nodes": [], "edges": []}
+            else:
+                return {"target": None, "nodes": [], "edges": []}
+
+        # 验证并规范化
+        target = data.get("target")
+        if not isinstance(target, dict) or "id" not in target or "name" not in target:
+            return {"target": None, "nodes": [], "edges": []}
+
+        nodes = data.get("nodes", [])
+        if not isinstance(nodes, list):
+            nodes = []
+        # 确保 target 在 nodes 中
+        target_ids = {n.get("id") for n in nodes if isinstance(n, dict)}
+        if target["id"] not in target_ids:
+            nodes.append(target)
+
+        edges = data.get("edges", [])
+        if not isinstance(edges, list):
+            edges = []
+
+        # 过滤无效边
+        valid_edges = []
+        node_ids = {n.get("id") for n in nodes if isinstance(n, dict)}
+        for e in edges:
+            if not isinstance(e, dict):
+                continue
+            frm = e.get("from")
+            to = e.get("to")
+            if frm in node_ids and to in node_ids and frm != to:
+                valid_edges.append({
+                    "from": frm,
+                    "to": to,
+                    "relation": "prerequisite",
+                })
+
+        return {
+            "target": target,
+            "nodes": [n for n in nodes if isinstance(n, dict) and "id" in n and "name" in n],
+            "edges": valid_edges,
+        }
+
     def _validate_and_filter(self, data: dict) -> list[dict]:
         """
         验证并过滤 LLM 返回的建议数据

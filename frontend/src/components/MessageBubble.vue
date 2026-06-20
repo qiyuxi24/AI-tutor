@@ -1,18 +1,94 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch, nextTick } from 'vue'
 import { marked } from 'marked'
 
 const props = defineProps({
   message: { type: Object, required: true },
+  knowledgeNodes: { type: Array, default: () => [] },
 })
+
+const emit = defineEmits(['navigate-to-node'])
 
 const isUser = computed(() => props.message.role === 'user')
 const isStreaming = computed(() => !isUser.value && !props.message.content)
+const bubbleRef = ref(null)
 
 const renderedContent = computed(() => {
   if (isUser.value) return props.message.content
-  // 流式内容直接渲染纯文本（不用 markdown，因为内容不完整时可能格式错乱）
   return marked(props.message.content || '', { breaks: true })
+})
+
+/**
+ * 在 AI 回复的 HTML 中，将匹配知识节点名称的文本替换为可点击链接。
+ * 只在非用户消息、非流式状态下执行。
+ */
+function linkifyKnowledgeNodes() {
+  if (isUser.value || isStreaming.value || !bubbleRef.value) return
+  const nodes = props.knowledgeNodes || []
+  if (nodes.length === 0) return
+
+  // 收集所有节点名称，按长度降序（优先匹配长名称）
+  const nodeNames = nodes
+    .map(n => n.name)
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+
+  if (nodeNames.length === 0) return
+
+  // 构建正则：匹配任意一个节点名（全字匹配边界）
+  const escaped = nodeNames.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const pattern = new RegExp(`(${escaped.join('|')})`, 'g')
+
+  // 在 body 的文本节点中查找替换
+  const body = bubbleRef.value.querySelector('.markdown-body')
+  if (!body) return
+
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, null)
+  const textNodes = []
+  while (walker.nextNode()) textNodes.push(walker.currentNode)
+
+  for (const textNode of textNodes) {
+    const text = textNode.textContent
+    if (!pattern.test(text)) {
+      pattern.lastIndex = 0
+      continue
+    }
+    pattern.lastIndex = 0
+
+    const fragment = document.createDocumentFragment()
+    let lastIndex = 0
+    let match
+
+    while ((match = pattern.exec(text)) !== null) {
+      // 前面的文本
+      if (match.index > lastIndex) {
+        fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)))
+      }
+      // 可点击链接
+      const span = document.createElement('span')
+      span.className = 'kg-link'
+      span.textContent = match[0]
+      span.title = '点击跳转到图谱中的「' + match[0] + '」'
+      span.addEventListener('click', () => {
+        const node = nodes.find(n => n.name === match[0])
+        if (node) emit('navigate-to-node', node.id)
+      })
+      fragment.appendChild(span)
+      lastIndex = pattern.lastIndex
+    }
+
+    // 剩余文本
+    if (lastIndex < text.length) {
+      fragment.appendChild(document.createTextNode(text.slice(lastIndex)))
+    }
+
+    textNode.parentNode?.replaceChild(fragment, textNode)
+  }
+}
+
+// 当内容渲染完成后执行链接化
+watch(renderedContent, () => {
+  nextTick(() => linkifyKnowledgeNodes())
 })
 </script>
 
@@ -21,13 +97,13 @@ const renderedContent = computed(() => {
     <div class="avatar" :class="{ 'user-avatar': isUser }">
       {{ isUser ? '👤' : '🤖' }}
     </div>
-    <div class="bubble" :class="{ 'user-bubble': isUser, 'ai-bubble': !isUser }">
+    <div class="bubble" :class="{ 'user-bubble': isUser, 'ai-bubble': !isUser }" ref="bubbleRef">
       <div v-if="isUser" class="text">{{ message.content }}</div>
       <!-- 流式填充中：显示打字动画 -->
       <div v-else-if="isStreaming" class="typing-indicator">
         <span></span><span></span><span></span>
       </div>
-      <!-- 流式内容渲染 -->
+      <!-- 流式内容渲染（完成后自动注入知识节点链接） -->
       <div v-else class="markdown-body" v-html="renderedContent"></div>
     </div>
   </div>
@@ -157,6 +233,23 @@ const renderedContent = computed(() => {
 .markdown-body :deep(a) {
   color: #4f46e5;
   text-decoration: underline;
+}
+
+/* 知识节点可点击链接 */
+.markdown-body :deep(.kg-link) {
+  color: #4f46e5;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 1.5px dashed #a5b4fc;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.markdown-body :deep(.kg-link:hover) {
+  color: #3730a3;
+  border-bottom-color: #4f46e5;
+  background: rgba(79, 70, 229, 0.06);
 }
 
 .markdown-body :deep(table) {

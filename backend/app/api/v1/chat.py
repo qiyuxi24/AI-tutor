@@ -33,6 +33,7 @@ async def handle_chat(request: ChatRequest, user_id: int = Depends(get_current_u
         user_id=user_id,
         messages=request.messages,
         mode=request.mode,
+        current_node=request.current_node,
     )
     return ChatResponse(reply=reply, mode=mode, graph_analysis=graph_analysis)
 
@@ -54,6 +55,7 @@ async def handle_chat_stream(request: ChatRequest, background_tasks: BackgroundT
             messages=request.messages,
             mode=request.mode,
             user_id=user_id,
+            current_node=request.current_node,
         ):
             # 提取 token 文本（从 SSE 格式中解析）
             if sse_chunk.startswith("data: ") and sse_chunk != "data: [DONE]\n\n":
@@ -77,6 +79,7 @@ async def handle_chat_stream(request: ChatRequest, background_tasks: BackgroundT
                 enriched_messages,
                 request.mode,
                 user_id,
+                request.current_node,
             )
     
     return StreamingResponse(
