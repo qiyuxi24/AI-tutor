@@ -10,6 +10,7 @@
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -106,7 +107,7 @@ class ConversationStore:
         :param conv: 对话对象 {id, title, messages, created_at}
                       messages 为 list[dict] 格式
         """
-        now = conv.get("updated_at", conv.get("created_at", __import__("time").time()))
+        now = conv.get("updated_at", conv.get("created_at", time.time()))
         with self._conn:
             self._conn.execute(
                 """INSERT INTO conversations (id, user_id, title, messages, created_at, updated_at)

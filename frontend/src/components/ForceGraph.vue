@@ -58,6 +58,7 @@ const dialogData = ref({})
 
 const drawingEdgeMode = ref(false)
 const drawingSourceId = ref(null)
+let drawingWatchStop = null   // 跟踪 handleDrawingTarget 中创建的 watch，防止竞态泄漏
 
 /* ================================================================
    D3 核心对象引用（不响应式）

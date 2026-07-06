@@ -263,27 +263,22 @@ AI导师：{ai_reply}
         suggestions = self._parse_response(raw_response)
         return {"suggestions": suggestions}
 
-    def _parse_response(self, raw: str) -> list[dict]:
+    def _parse_json_response(self, raw: str) -> dict | None:
         """
-        从 LLM 原始响应中提取 JSON 并解析为建议列表
-        
-        参数:
-            raw: LLM 返回的原始文本
-            
+        从 LLM 原始响应中提取 JSON 对象（三策略，按优先级尝试）
+
+        策略1：直接解析整个响应
+        策略2：提取 ```json ... ``` 代码块
+        策略3：提取第一个 { ... } 对象
+
         返回:
-            建议字典列表，解析失败时返回空列表
-            
-        解析策略（按优先级）：
-        1. 直接解析整个响应为 JSON
-        2. 尝试提取 ```json ... ``` 代码块
-        3. 尝试提取第一个 { ... } JSON 对象
+            解析成功的 dict，失败时返回 None
         """
         result = raw.strip()
 
         # 策略1：直接解析
         try:
-            data = json.loads(result)
-            return self._validate_and_filter(data)
+            return json.loads(result)
         except json.JSONDecodeError:
             pass
 
@@ -291,26 +286,50 @@ AI导师：{ai_reply}
         code_block_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', result)
         if code_block_match:
             try:
-                data = json.loads(code_block_match.group(1).strip())
-                return self._validate_and_filter(data)
+                return json.loads(code_block_match.group(1).strip())
             except json.JSONDecodeError:
                 pass
 
-        # 策略3：提取第一个 { ... } 对象（最外层的完整花括号对）
-        brace_match = re.search(r'\{[\s\S]*\}', result)
-        if brace_match:
-            try:
-                data = json.loads(brace_match.group(0))
-                return self._validate_and_filter(data)
-            except json.JSONDecodeError:
-                pass
+        # 策略3：提取第一个完整 { ... } 对象（非贪婪，逐步缩小范围）
+        # 从第一个 '{' 开始，逐步尝试更大的闭包，直到找到合法 JSON
+        first_brace = result.find('{')
+        if first_brace != -1:
+            # 找到匹配的 closing brace（处理嵌套）
+            depth = 0
+            end = -1
+            for i, ch in enumerate(result[first_brace:], first_brace):
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            if end != -1:
+                try:
+                    return json.loads(result[first_brace:end + 1])
+                except json.JSONDecodeError:
+                    pass
 
-        # 所有策略都失败，记录日志
-        log_info(
-            ErrorCode.GRAPH_JSON_PARSE_ERROR,
-            detail=f"无法解析LLM返回的JSON，原始响应前200字: {raw[:200]}"
-        )
-        return []
+        return None
+
+    def _parse_response(self, raw: str) -> list[dict]:
+        """
+        从 LLM 原始响应中提取 JSON 并解析为建议列表。
+
+        解析策略（按优先级，委托给 _parse_json_response）：
+        1. 直接解析整个响应为 JSON
+        2. 尝试提取 ```json ... ``` 代码块
+        3. 尝试提取第一个 { ... } JSON 对象
+        """
+        data = self._parse_json_response(raw)
+        if data is None:
+            log_info(
+                ErrorCode.GRAPH_JSON_PARSE_ERROR,
+                detail=f"无法解析LLM返回的JSON，原始响应前200字: {raw[:200]}"
+            )
+            return []
+        return self._validate_and_filter(data)
 
     # ════════════════════════════════════════════
     #  问题拆解（学习路径推荐模块）
@@ -371,26 +390,10 @@ AI导师：{ai_reply}
             logger.warning(f"问题拆解 LLM 调用失败: {e}")
             return {"target": None, "nodes": [], "edges": []}
 
-        # 解析 JSON
-        try:
-            data = json.loads(raw_response.strip())
-        except json.JSONDecodeError:
-            # 尝试提取 JSON 块
-            match = re.search(r'```(?:json)?\s*([\s\S]*?)```', raw_response)
-            if match:
-                try:
-                    data = json.loads(match.group(1).strip())
-                except json.JSONDecodeError:
-                    match = re.search(r'\{[\s\S]*\}', raw_response)
-                    if match:
-                        try:
-                            data = json.loads(match.group(0))
-                        except json.JSONDecodeError:
-                            return {"target": None, "nodes": [], "edges": []}
-                    else:
-                        return {"target": None, "nodes": [], "edges": []}
-            else:
-                return {"target": None, "nodes": [], "edges": []}
+        # 解析 JSON（复用 _parse_json_response 三策略解析）
+        data = self._parse_json_response(raw_response)
+        if data is None:
+            return {"target": None, "nodes": [], "edges": []}
 
         # 验证并规范化
         target = data.get("target")

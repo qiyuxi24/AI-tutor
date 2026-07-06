@@ -1,0 +1,44 @@
+[
+  {
+    "action": "add_node",
+    "node": {
+      "id": "uniform_series_future_worth",
+      "name": "等额支付终值",
+      "tags": [
+        "工程经济",
+        "一建",
+        "资金时间价值",
+        "等额支付终值"
+      ],
+      "file": "nodes/uniform_series_future_worth.md",
+      "summary": "将连续多期期末等额资金A折算至第n期末本利和F的计算方法",
+      "difficulty": 3,
+      "estimated_minutes": 15,
+      "content": "## 定义\n等额支付终值（Uniform Series Future Worth）是指在计息期内，每期末发生等额资金A，按照给定利率i计算，到第n期末所累积的本利和F。\n\n## 核心公式\nF = A(F/A,i,n) = A×[(1+i)^n-1]/i\n符号约定：\n- F：终值（本利和）\n- A：等额年金（每期期末存入/支出金额）\n- i：年利率\n- n：期数\n- (F/A,i,n)：等额支付终值系数\n\n## 推导要点\n该公式本质是一次支付终值原理的累加应用。将每一期的A分别折算到第n期，形成等比数列求和，最终简化为上述分式形式。掌握单次支付终值公式是推导此公式的理论基础。\n\n## 示例解析\n某项目部每年年末向专户存入工程款 A=20000 元，年利率 i=5%，连续存放4年。求第4年末账户本利和 F。\n代入公式：F = 20000 × [(1+0.05)^4-1]/0.05 = 20000 × 4.3101 = 86202 元\n实际应用中通常直接查表获取系数 (F/A,5%,4)=4.3101 进行快速计算。"
+    },
+    "recommended_edges": [
+      {
+        "from": "time_value_of_money_single_payment",
+        "to": "uniform_series_future_worth",
+        "relation": "extension",
+        "label": "逻辑延伸",
+        "confidence": 0.85
+      }
+    ],
+    "confidence": 0.85,
+    "reason": "对话中通过具体案例引入了等额支付终值概念及其计算公式。该概念并非孤立存在，而是建立在已有的一次支付终值（F=P(1+i)^n）理论框架之上，通过将各期现金流分别按单次支付折算后等比求和推导而来。符合‘B直接建立在A的理论框架之上’的扩展定义，建议添加此节点以完善资金时间价值的换算体系。",
+    "submitted_at": "2026-07-02T18:59:22.301857"
+  },
+  {
+    "action": "add_edge",
+    "edge": {
+      "from": "time_value_of_money",
+      "to": "time_value_of_money_single_payment",
+      "relation": "prerequisite",
+      "label": "前置知识"
+    },
+    "confidence": 0.85,
+    "reason": "对话中强调高效学习的底层路径是先掌握‘复利等值原理’和‘现金流时序建模’（对应资金时间价值基础节点），再据此绘制时间轴、校验计息周期一致性，最后才能正确套用基线公式进行单次支付折算。若学生不理解资金随时间推移的等值转换逻辑及周期匹配原则，直接记忆和应用单次支付公式必然导致方向错误或期数混淆，因此基础概念是具体计算方法不可跳过的前置依赖。",
+    "submitted_at": "2026-07-02T19:00:37.435438"
+  }
+]
