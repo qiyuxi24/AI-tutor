@@ -1,142 +1,210 @@
 # AI Tutor——大模型驱动的主动交互导学系统
 
 ## 项目简介
-AI Tutor 是一个基于大模型的导学系统，旨在改变学生与AI的对话方式，从"直接给答案"转变为"引导式提问"。系统提供三种引导模式（阶梯提问、先思后答、反向教学），并通过知识图谱可视化展示知识点结构，未来将加入诊断算法实现自适应引导。
+
+AI Tutor 是一个基于大模型的智能导学系统，通过知识图谱 + 用户画像 + 多模式教学策略，实现个性化、结构化的自适应学习。系统支持多种教学模式（自适应引导、自由对话、递归式教学），并在后台自动维护知识图谱和用户能力画像。
 
 ## 技术栈
-- **前端**：Vue 3 + Vite + D3.js + ECharts + Pinia
-- **后端**：Python FastAPI + Jinja2 + pandas + scipy
-- **AI 接口**：阿里云百炼（qwen-plus），OpenAI 兼容客户端
-- **数据**：JSON + localStorage + YAML 知识体系
 
-## 已完成功能 ✅
-- **前后端分离架构**：Vue 3 前端通过 RESTful API 与 FastAPI 后端通信，支持 CORS 代理。
-- **三种引导对话模式**：
-  - 阶梯提问：逐步拆解问题，每次只提一个跟进问题
-  - 先思后答：强制学生先输入自己的思路
-  - 反向教学：学生向AI讲授，AI追问澄清（费曼学习法）
-- **对话历史管理**：自动保存对话记录至 localStorage，支持多轮上下文记忆。
-- **Markdown 渲染**：AI 回复支持 Markdown 格式，使用 `marked` 库实时渲染。
-- **知识图谱可视化**：
-  - 力导向图（D3.js）展示知识点节点与前置依赖关系
-  - 支持节点拖拽、缩放平移、右键菜单（创建/编辑/删除节点和边）
-  - 点击节点查看详情（Markdown 内容渲染）
-- **知识图谱管理 API**：提供节点和边的 CRUD 接口（GET/POST/PUT/DELETE），数据持久化在 `index.json`。
-- **视图切换**：对话模式与知识图谱模式之间平滑动画切换。
-- **节点详情面板**：右侧滑出面板显示知识点 MD 文档，支持编辑保存（PUT 接口）。
-- **后端知识图谱核心**：`KnowledgeGraph` 类封装了 `index.json` 读写、前置依赖查询等操作。
-- **诊断算法**：规则引擎 + 贝叶斯推断，用于动态评估学生知识点掌握程度。
-- **知识点掌握图可视化**：基于 ECharts 的个人掌握度雷达图/热力图。
+| 层级 | 技术 | 说明 |
+|------|------|------|
+| **前端** | Vue 3 + Vite + D3.js + Pinia | SPA 单页应用，D3 力导向图可视化知识图谱 |
+| **后端** | Python FastAPI + Jinja2 + Uvicorn | RESTful API + SSE 流式端点 |
+| **数据库** | SQLite (aiosqlite) | knowledge.db（知识图谱）+ conversations.db（对话历史） |
+| **AI** | OpenAI 兼容接口（阿里云百炼） | qwen-plus / qwen3.6-35b-a3b，支持 function calling |
+| **认证** | JWT (python-jose) + bcrypt | 用户注册/登录/Token 鉴权 |
+| **分析** | pandas + scipy | 诊断算法（规则引擎 + 贝叶斯推断） |
 
-### 🆕 两阶段流式对话架构（2026-05-30）
+## 核心功能
 
-实现了流式对话与知识图谱自动更新的分离架构，大幅提升用户体验：
+### 🎯 四种教学模式
 
-**架构概览**
-```
-前端 sendMessageStream() ──POST──▶ /api/v1/chat/stream
-                                      │
-                                      ▼
-                              process_message_stream()
-                              call_llm_stream() 逐 token yield
-                                      │
-                           SSE ───────┘ (逐 token 推送)
-                           "data: {\"token\":\"...\"}\n\n"
-                                      │
-                           "data: [DONE]\n\n"
-                                      │
-                           BackgroundTasks:
-                           process_background_tools()
-                              │
-                              ├── call_llm_tools() (带 KG_TOOLS)
-                              └── _analyze_and_apply() (图谱分析)
-                                      │
-                              publish("graph_updated") ──SSE──▶ 前端自动刷新图谱
-```
-
-**阶段1：流式文本回复**
-- LLM 调用不带 tools，确保纯文本流式输出，逐 token 通过 SSE 推送
-- 前端用 `fetch` + `ReadableStream` 解析 SSE，实时追加到气泡中
-- 气泡内三点跳动打字动画 + 全局"AI 思考中…"指示器
-
-**阶段2：后台工具调用**
-- 流式结束后，FastAPI `BackgroundTasks` 触发后台线程
-- 后台再次调用 LLM（带 `KG_TOOLS` function calling），判断是否需要操作知识图谱
-- 支持 5 种工具：`add_knowledge_node`、`update_node_content`、`update_mastery`、`add_edge`、`delete_node`
-- 工具执行完成后通过 `event_bus` 发布 `graph_updated` 事件，前端 SSE 自动刷新图谱
-- 后台任务失败不影响主对话流程
-
-**新增/修改文件**
-
-| 文件 | 变更 |
+| 模式 | 说明 |
 |------|------|
-| `backend/app/core/llm_client.py` | 新增 `call_llm_stream()` 流式纯文本生成器、`call_llm_tools()` 后台带 tools 调用 |
-| `backend/app/services/chat_service.py` | 新增 `_build_stream_prompt()` 流式提示词、`process_message_stream()` SSE 生成器、`process_background_tools()` 后台工具调度 |
-| `backend/app/api/v1/chat.py` | 新增 `/chat/stream` SSE 端点（两阶段），保留 `/chat` 兼容旧版 |
-| `backend/app/core/event_bus.py` | 新增进程内事件总线，`publish()`/`subscribe()` 解耦图谱更新通知 |
-| `frontend/src/api/index.js` | 新增 `sendMessageStream()` 基于 fetch + ReadableStream 的 SSE 客户端 |
-| `frontend/src/stores/chatStore.js` | `send()` 改为流式调用，`onToken` 用 splice 替换触发响应式更新 |
-| `frontend/src/components/ChatArea.vue` | 新增三条 watch（消息数、对话切换、流式内容长度）自动滚动到底部 |
-| `frontend/src/components/MessageBubble.vue` | 新增 `isStreaming` 状态 + 三点跳动打字动画 |
+| **自适应引导** (adaptive) | 合并原阶梯提问/先思后答/反向教学，根据学生画像自动调整引导强度 |
+| **自由对话** (free_talk) | 无约束自然对话，适合开放式讨论 |
+| **递归式教学** (recursive) | 基于知识图谱拓扑排序，从根节点自顶向下逐层讲解，严格框架约束，不脱离图谱 |
+| **学习路径推荐** | LLM 拆解用户问题 → 生成骨架知识图谱 → 拓扑排序 → 推荐"下一步该学什么" |
 
-**SSE 事件格式**
-```json
-// 流式 token
-data: {"token": "递归是"}
+### 📊 知识图谱
 
-// 流式结束
-data: [DONE]
+- **可视化**：D3.js 力导向图，支持拖拽、缩放、右键菜单（增删改节点/边）
+- **自动生长**：对话后后台 function calling 自动分析是否需要新增/更新知识点
+- **搜索**：即时搜索节点，键盘导航，高亮匹配，聚焦定位
+- **拓扑排序**：Kahn 算法生成学习路径，`/knowledge/learning-path` API
+- **权限控制**：区分 AI 创建/人工编辑，人类内容不被 AI 覆盖
 
-// 图谱更新（通过 /api/v1/knowledge/events 长连接推送）
-data: {"type": "graph_updated"}
+### 👤 用户系统
 
-// 错误事件
-data: {"type": "error", "code": "E-LLM-001", "message": "...", "module": "llm"}
+- JWT 登录/注册，Token 自动刷新
+- 用户画像（Markdown 格式持久化），对话中动态更新
+- 对话历史跨会话持久化（SQLite）
+- 首次使用引导（OnboardingGuide 卡片）
+
+### ⚡ 两阶段流式对话
+
+```
+用户消息 → POST /api/v1/chat/stream
+              │
+    ┌─────────┴─────────┐
+    ▼                   ▼
+阶段1：流式文本         阶段2：后台工具调用
+逐 token SSE 推送      function calling 操作知识图谱
+打字动画展示            event_bus 推送 graph_updated
+                       前端 SSE 自动刷新图谱
 ```
 
-## 未完成/规划中 🔧
-- **自适应引导引擎**：根据诊断结果自动切换引导模式。
-- **AI 知识图谱自动生长（Kiwi）**：对话后分析新概念，建议添加节点/边，经审核后自动更新图谱。
-- **对照实验系统**：实验数据采集、统计分析（pandas/scipy），验证引导效果。
-- **用户认证与多用户支持**：目前仅通过 localStorage 区分用户，无后端认证。
-- **部署与运维**：生产环境部署配置（Nginx + Gunicorn），目前仅开发模式可用。
-- **单元测试与集成测试**。
+## 已实现功能
 
-## 快速启动
+- [x] 前后端分离架构（Vue 3 + FastAPI）
+- [x] 四种教学模式（自适应/自由对话/递归式/学习路径推荐）
+- [x] 知识图谱可视化与管理（D3.js 力导向图 + CRUD API）
+- [x] 知识图谱搜索与焦点跳转
+- [x] 知识点间可点击跳转（AI 回复 + NodeDetail）
+- [x] 拓扑排序学习路径推荐（Kahn 算法）
+- [x] 问题拆解自动生成骨架图谱（LLM decompose_question）
+- [x] 两阶段流式对话（文本 SSE + 后台 function calling）
+- [x] 对话历史管理（SQLite 持久化，多轮上下文）
+- [x] Markdown 渲染（marked 库实时渲染）
+- [x] JWT 用户认证（注册/登录/Token 鉴权）
+- [x] 用户画像系统（动态更新 + 诊断算法）
+- [x] 进程内事件总线（解耦图谱更新通知）
+- [x] 标准化错误码体系
+- [x] 一键安装脚本（install.ps1）
+- [x] 一键启动脚本（start.ps1）
+
+## 规划中
+
+- [ ] 学习进度仪表盘（掌握/学习中/未开始统计）
+- [ ] AI 建议审核面板（待审核节点/边的前端展示）
+- [ ] LLM 请求重试机制
+- [ ] Toast 通知替代 alert
+- [ ] CORS 配置化（从环境变量读取）
+- [ ] 单元测试与集成测试
+- [ ] 生产环境部署（Nginx + Gunicorn）
+
+## 快速开始
+
+### 前置要求
+
+- Python 3.10+
+- Node.js 18+
+
+### 一键安装 & 启动
+
+```powershell
+# 安装所有依赖
+.\install.ps1
+
+# 编辑密钥配置
+notepad backend\.env
+
+# 启动
+.\start.ps1
+```
+
+### 手动安装
+
 ```bash
 # 后端
 cd backend
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+venv\Scripts\activate          # Linux/Mac: source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # 填写 DASHSCOPE_API_KEY
+cp .env.example .env           # 编辑填入 DASHSCOPE_API_KEY
 uvicorn app.main:app --reload --port 8000
 
-# 前端
+# 前端（新终端）
 cd frontend
 npm install
 npm run dev
 ```
-访问 `http://localhost:5173` 即可使用。
+
+访问 http://localhost:5173
+
+### 服务地址
+
+| 服务 | 地址 |
+|------|------|
+| 前端页面 | http://localhost:5173 |
+| 后端 API | http://localhost:8000 |
+| 健康检查 | http://localhost:8000/api/health |
+| Swagger 文档 | http://localhost:8000/docs |
+| 默认管理员 | `admin / admin123`（需配置 DEFAULT_ADMIN_PASSWORD） |
 
 ## 项目结构
+
 ```
 AI-Tutor/
-├── frontend/          # Vue 3 前端
-│   ├── src/
-│   │   ├── components/   # ForceGraph, ChatArea, Sidebar, MessageBubble 等
-│   │   ├── api/          # axios + fetch SSE 请求封装
-│   │   └── stores/       # Pinia 状态管理（含流式对话）
-│   └── ...
-├── backend/           # FastAPI 后端
-│   ├── app/
-│   │   ├── api/v1/       # chat, knowledge 路由（含 /chat/stream SSE）
-│   │   ├── core/         # KnowledgeGraph, LLM客户端(流式+工具), 提示词加载器, event_bus
-│   │   └── services/     # 对话服务（两阶段流式编排）
-│   └── ...
-├── data/knowledge/    # 知识图谱数据
-│   ├── index.json        # 节点和边定义
-│   └── nodes/            # 知识点 MD 文件
+├── frontend/                  # Vue 3 前端
+│   └── src/
+│       ├── components/        # ChatArea, ForceGraph, Sidebar, MessageBubble,
+│       │                        InputArea, NodeDetail, ContextMenu, GraphSearch,
+│       │                        UserProfile, EditDialog, OnboardingGuide, Settings
+│       ├── views/             # HomeView, LoginView
+│       ├── api/               # axios + fetch SSE 请求封装
+│       ├── stores/            # Pinia 状态管理（authStore, chatStore）
+│       ├── router/            # Vue Router 路由配置
+│       └── utils/             # 工具函数
+│
+├── backend/                   # FastAPI 后端
+│   └── app/
+│       ├── main.py            # 入口：CORS + 路由注册 + 启动事件
+│       ├── api/v1/            # REST API 路由
+│       │   ├── auth.py        # 注册/登录/JWT
+│       │   ├── chat.py        # 对话接口（含 /chat/stream SSE 流式）
+│       │   ├── knowledge.py   # 知识图谱 CRUD + 拆解 + 学习路径
+│       │   ├── conversations.py  # 对话历史同步
+│       │   └── profile.py     # 用户画像
+│       ├── core/              # 核心模块
+│       │   ├── knowledge_graph.py  # 图谱引擎（拓扑排序/学习路径/权限控制）
+│       │   ├── graph_analyzer.py   # LLM 图谱分析（问题拆解）
+│       │   ├── llm_client.py       # OpenAI 兼容 LLM 客户端
+│       │   ├── chat_service.py     # 两阶段流式对话编排
+│       │   ├── prompt_loader.py    # Jinja2 提示词模板加载
+│       │   ├── user_profile.py     # 用户画像管理
+│       │   ├── conversation_store.py # 对话持久化
+│       │   ├── auth.py             # JWT 认证
+│       │   ├── event_bus.py        # 进程内事件总线
+│       │   ├── error_codes.py      # 统一错误码
+│       │   └── rate_limiter.py     # 速率限制
+│       ├── models/
+│       │   └── schemas.py     # Pydantic 数据模型
+│       └── services/
+│           └── chat_service.py
+│
+├── data/                      # 数据与模板
+│   ├── knowledge/             # 知识图谱数据（knowledge.db + 节点 MD）
+│   ├── conversations/         # 对话历史（conversations.db）
+│   ├── profiles/              # 用户画像 MD 文件
+│   ├── prompts/               # Jinja2 系统提示词模板
+│   │   ├── system_prompt_common.j2       # 通用教师角色 + 框架约束
+│   │   ├── system_prompt_adaptive.j2     # 自适应引导模式
+│   │   ├── system_prompt_free_talk.j2    # 自由对话模式
+│   │   └── system_prompt_recursive.j2    # 递归式教学模式
+│   └── error_codes.md         # 错误码速查表
+│
+├── install.ps1                # 一键安装依赖
+├── start.ps1                  # 一键启动前后端
+├── TODO.md                    # 改进清单
 └── README.md
 ```
 
+## 配置参考
+
+需要修改地址/端口/网关时，参考以下文件：
+
+| 配置项 | 文件 | 行号/字段 |
+|--------|------|-----------|
+| 前端端口 | `frontend/vite.config.js` | `port: 5173` |
+| 代理目标（后端地址） | `frontend/vite.config.js` | `target: 'http://127.0.0.1:8000'` |
+| 后端端口 | `start.ps1` | `--port 8000` |
+| CORS 白名单 | `backend/app/main.py` | `allow_origins=["http://localhost:5173"]` |
+| LLM API 网关 | `backend/app/core/llm_client.py` | `base_url` |
+| LLM 模型 | `backend/.env` | `MODEL_NAME` |
+| API Key | `backend/.env` | `DASHSCOPE_API_KEY` |
+| JWT 密钥 | `backend/.env` | `SECRET_KEY` |
+
+## License
+
+MIT
