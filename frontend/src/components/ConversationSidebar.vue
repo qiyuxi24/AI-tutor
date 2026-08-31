@@ -1,10 +1,16 @@
 <script setup>
+/**
+ * ConversationSidebar.vue — 对话页的二级侧边栏
+ *
+ * 职责：新对话按钮 + 对话历史列表（VSCode 侧边栏风格）
+ * 由父组件（HomeView）控制折叠，本组件不持业务状态。
+ */
+
 import { useChatStore } from '../stores/chatStore'
 
 const store = useChatStore()
 
 function handleNew() {
-  // 如果当前已是空对话，不做任何事
   if (store.isCurrentEmpty) return
   store.newConversation()
 }
@@ -20,7 +26,12 @@ function handleDelete(e, id) {
 </script>
 
 <template>
-  <aside class="sidebar">
+  <aside class="conv-sidebar">
+    <!-- 标题区 -->
+    <div class="cs-header">
+      <span class="cs-title">对话</span>
+    </div>
+
     <!-- 新对话按钮 -->
     <button
       class="new-chat-btn"
@@ -64,7 +75,7 @@ function handleDelete(e, id) {
 </template>
 
 <style scoped>
-.sidebar {
+.conv-sidebar {
   width: 260px;
   min-width: 260px;
   height: 100%;
@@ -73,7 +84,20 @@ function handleDelete(e, id) {
   display: flex;
   flex-direction: column;
   user-select: none;
-  transform-origin: left;
+}
+
+.cs-header {
+  display: flex;
+  align-items: center;
+  padding: 12px 14px 8px;
+  flex-shrink: 0;
+}
+
+.cs-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--color-text-primary);
 }
 
 .new-chat-btn {
@@ -124,7 +148,7 @@ function handleDelete(e, id) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 10px;
+  padding: 10px;
   border-radius: 8px;
   cursor: pointer;
   border-left: 3px solid transparent;

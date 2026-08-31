@@ -1,15 +1,15 @@
 /* ═══════════════════════════════════════
-   AI Tutor — Global Styles + Theme Variables
-   
-   data-theme="dark"  → 默认深色主题
-   data-theme="light" → 浅色主题
-   
-   使用: 组件中引用 var(--color-xxx)，切换主题只需改 <html> 属性
-   ═══════════════════════════════════════ */
+  AI Tutor — Global Styles + Theme Variables
+  
+  :root         → 浅色主题（默认）
+  html.dark     → 深色主题
+  
+  使用: 组件中引用 var(--color-xxx)，切换主题只需在 <html> 上增删 .dark class
+  （由 src/utils/theme.js 统一管理，并对齐 Element Plus 官方暗色模式）
+  ═══════════════════════════════════════ */
 
-/* ──────────── 深色主题（默认） ──────────── */
-:root,
-[data-theme="dark"] {
+/* ──────────── 深色主题 ──────────── */
+html.dark {
   /* 背景 */
   --color-bg-primary:    #1e1e2e;
   --color-bg-secondary:  #11111b;
@@ -60,10 +60,46 @@
   /* 阴影 */
   --shadow-popup: 0 8px 32px rgba(0, 0, 0, 0.45);
   --shadow-card:  0 8px 32px rgba(0, 0, 0, 0.4);
+
+  /* ── Element Plus 变量覆盖（对齐自定义配色，让 EP 表单控件跟随主题） ── */
+  --el-color-primary:        #4f46e5;
+  --el-color-primary-light-3: #7c6ef0;
+  --el-color-primary-light-5: #9d93f4;
+  --el-color-primary-light-7: #beb7f8;
+  --el-color-primary-light-8: #cec9fa;
+  --el-color-primary-light-9: #dedbfc;
+  --el-color-primary-dark-2: #4338ca;
+  --el-bg-color:            #181825;
+  --el-bg-color-page:       #11111b;
+  --el-bg-color-overlay:    #1e1e2e;
+  --el-fill-color-blank:    #181825;
+  --el-fill-color:          #313244;
+  --el-fill-color-light:    #181825;
+  --el-fill-color-lighter:  #11111b;
+  --el-fill-color-extra-light: #181825;
+  --el-fill-color-dark:     #313244;
+  --el-fill-color-darker:   #313244;
+  --el-fill-color-empty:    transparent;
+  --el-text-color-primary:   #cdd6f4;
+  --el-text-color-regular:   #a6adc8;
+  --el-text-color-secondary: #a6adc8;
+  --el-text-color-placeholder: #6c7086;
+  --el-text-color-disabled:  #6c7086;
+  --el-border-color:         #313244;
+  --el-border-color-light:   #313244;
+  --el-border-color-lighter: #313244;
+  --el-border-color-extra-light: #313244;
+  --el-border-color-hover:   #45475a;
+  --el-border-color-dark:    #45475a;
+  --el-border-color-darker:  #45475a;
+  --el-mask-color:           rgba(0, 0, 0, 0.6);
+  --el-box-shadow:           0 8px 32px rgba(0, 0, 0, 0.45);
+  --el-box-shadow-light:     0 8px 24px rgba(0, 0, 0, 0.35);
+  --el-box-shadow-lighter:   0 4px 16px rgba(0, 0, 0, 0.3);
 }
 
-/* ──────────── 浅色主题 ──────────── */
-[data-theme="light"] {
+/* ──────────── 浅色主题（默认） ──────────── */
+:root {
   --color-bg-primary:    #f8f9fa;
   --color-bg-secondary:  #ffffff;
   --color-bg-tertiary:   #e9ecef;
@@ -107,11 +143,47 @@
 
   --shadow-popup: 0 8px 24px rgba(0, 0, 0, 0.12);
   --shadow-card:  0 4px 16px rgba(0, 0, 0, 0.10);
+
+  /* ── Element Plus 变量覆盖（对齐自定义配色，让 EP 表单控件跟随主题） ── */
+  --el-color-primary:        #4f46e5;
+  --el-color-primary-light-3: #818cf8;
+  --el-color-primary-light-5: #a5b4fc;
+  --el-color-primary-light-7: #c7d2fe;
+  --el-color-primary-light-8: #dbeafe;
+  --el-color-primary-light-9: #eef2ff;
+  --el-color-primary-dark-2: #4338ca;
+  --el-bg-color:            #ffffff;
+  --el-bg-color-page:       #f8f9fa;
+  --el-bg-color-overlay:    #ffffff;
+  --el-fill-color-blank:    #ffffff;
+  --el-fill-color:          #f0f0f0;
+  --el-fill-color-light:    #f5f5f5;
+  --el-fill-color-lighter:  #fafafa;
+  --el-fill-color-extra-light: #fafafa;
+  --el-fill-color-dark:     #e0e0e0;
+  --el-fill-color-darker:   #dcdcdc;
+  --el-fill-color-empty:    transparent;
+  --el-text-color-primary:   #212529;
+  --el-text-color-regular:   #495057;
+  --el-text-color-secondary: #495057;
+  --el-text-color-placeholder: #868e96;
+  --el-text-color-disabled:  #adb5bd;
+  --el-border-color:         #dee2e6;
+  --el-border-color-light:   #e9ecef;
+  --el-border-color-lighter: #e9ecef;
+  --el-border-color-extra-light: #f1f3f5;
+  --el-border-color-hover:   #ced4da;
+  --el-border-color-dark:    #ced4da;
+  --el-border-color-darker:  #adb5bd;
+  --el-mask-color:           rgba(0, 0, 0, 0.4);
+  --el-box-shadow:           0 8px 24px rgba(0, 0, 0, 0.12);
+  --el-box-shadow-light:     0 4px 16px rgba(0, 0, 0, 0.08);
+  --el-box-shadow-lighter:   0 2px 8px rgba(0, 0, 0, 0.06);
 }
 
 /* ═══════════════════════════════════════
-   全局 Reset
-   ═══════════════════════════════════════ */
+  全局 Reset
+  ═══════════════════════════════════════ */
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
@@ -135,4 +207,87 @@ html, body {
 #app {
   width: 100%;
   height: 100%;
+}
+
+/* ═══════════════════════════════════════
+  Markdown 渲染增强（KaTeX 公式 + 代码高亮）
+  ═══════════════════════════════════════ */
+/* 代码高亮 token 配色：跟随主题变量（--color-* 已在 :root / html.dark 定义） */
+.markdown-body .hljs {
+  color: var(--color-text-primary);
+  background: transparent;
+}
+.markdown-body .hljs-comment,
+.markdown-body .hljs-quote {
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
+.markdown-body .hljs-keyword,
+.markdown-body .hljs-selector-tag,
+.markdown-body .hljs-literal,
+.markdown-body .hljs-doctag,
+.markdown-body .hljs-template-tag {
+  color: var(--color-purple);
+}
+.markdown-body .hljs-string,
+.markdown-body .hljs-regexp,
+.markdown-body .hljs-addition,
+.markdown-body .hljs-meta .hljs-string {
+  color: var(--color-green);
+}
+.markdown-body .hljs-number,
+.markdown-body .hljs-symbol,
+.markdown-body .hljs-bullet,
+.markdown-body .hljs-char.escape_ {
+  color: var(--color-orange);
+}
+.markdown-body .hljs-title,
+.markdown-body .hljs-section,
+.markdown-body .hljs-title.function_,
+.markdown-body .hljs-function .hljs-title,
+.markdown-body .hljs-name,
+.markdown-body .hljs-built_in,
+.markdown-body .hljs-type,
+.markdown-body .hljs-class .hljs-title {
+  color: var(--color-blue);
+}
+.markdown-body .hljs-attr,
+.markdown-body .hljs-attribute,
+.markdown-body .hljs-variable,
+.markdown-body .hljs-template-variable,
+.markdown-body .hljs-params {
+  color: var(--color-yellow);
+}
+.markdown-body .hljs-meta,
+.markdown-body .hljs-meta .hljs-keyword {
+  color: var(--color-text-muted);
+}
+.markdown-body .hljs-deletion {
+  color: var(--color-red);
+}
+.markdown-body .hljs-emphasis {
+  font-style: italic;
+}
+.markdown-body .hljs-strong {
+  font-weight: 600;
+}
+.markdown-body .hljs-link {
+  text-decoration: underline;
+}
+
+/* KaTeX 公式：块级公式居中 + 长公式横向滚动，行内公式对齐基线 */
+.markdown-body .katex-display {
+  margin: 12px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0;
+}
+.markdown-body .katex {
+  font-size: 1.05em;
+}
+.markdown-body .katex-display > .katex {
+  white-space: nowrap;
+}
+.markdown-body .katex-html {
+  max-width: 100%;
 }

@@ -193,11 +193,12 @@ export const apiClient = axios.create({ timeout: 300000 })
 
 ```js
 import { formatError, clientError, ErrorDefs, fmt } from '@/utils/errorCodes'
+import { notifyError } from '@/utils/feedback'
 
 // 方式1：自动识别错误（推荐，用于 catch 块）
 catch (err) {
   const msg = formatError(err, { action: '删除节点' })
-  alert(msg)  // "[E-KG-003] 目标知识点不存在"
+  notifyError(msg)  // "[E-KG-003] 目标知识点不存在"
 }
 
 // 方式2：前端校验错误

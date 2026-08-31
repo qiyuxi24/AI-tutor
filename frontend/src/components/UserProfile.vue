@@ -6,7 +6,7 @@
  * 数据流：emit profile-updated → HomeView 刷新图谱上下文
  */
 import { ref, watch } from 'vue'
-import { marked } from 'marked'
+import { renderMarkdown as renderMd } from '../utils/markdown.js'
 import { getProfile, updateProfile } from '../api/index.js'
 
 const props = defineProps({
@@ -30,7 +30,7 @@ const saving = ref(false)
    ================================================================ */
 function renderMarkdown(md) {
   if (!md) return '<p class="profile-empty-hint">暂无画像，点击编辑开始填写</p>'
-  return marked.parse(md)
+  return renderMd(md)
 }
 
 /* ================================================================

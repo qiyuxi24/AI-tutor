@@ -6,7 +6,8 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
 每个请求通过 JWT 识别当前用户，创建隔离的 KnowledgeGraph 实例。
 
 接口清单：
-  GET    /knowledge/graph                    - 获取完整图谱
+  GET    /knowledge/graph                    - 获取完整图谱（可选 ?subject= 按学科过滤）
+  GET    /knowledge/subjects                 - 获取所有学科列表
   GET    /knowledge/node/{node_id}           - 获取节点详情
   GET    /knowledge/node-ids                 - 获取所有节点 ID 列表
   POST   /knowledge/node                     - 创建节点（手动，ID 自动生成）
@@ -24,10 +25,12 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
 """
 
 import json
+import logging
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends, Body, Query
 from fastapi.responses import StreamingResponse
 from app.core.knowledge_graph import KnowledgeGraph
+from app.core import graph_middleware
 from app.core.auth import get_current_user, get_current_user_from_token
 from app.core.event_bus import publish, subscribe
 from app.core.graph_analyzer import GraphAnalyzer
@@ -62,11 +65,51 @@ async def knowledge_events(user_id: int = Depends(get_current_user_from_token)):
 # ══════════════════════════════════════════════════════════════════
 
 @router.get("/knowledge/graph")
-async def get_graph(user_id: int = Depends(get_current_user)):
-    """返回当前用户的完整图谱数据（所有节点 + 所有边）"""
+async def get_graph(subject: str | None = Query(None, description="可选：按学科过滤图谱，如'数据结构'"),
+                    board: str | None = Query(None, description="可选：按知识板块过滤，需同时指定 subject"),
+                    user_id: int = Depends(get_current_user)):
+    """
+    按需返回知识图谱数据（通过 graph_middleware 切片）。
+
+    多级按需粒度：
+        - 都不传        → 返回全量（兼容旧行为）
+        - 只传 subject  → 返回该学科整图
+        - 传 subject+board → 返回该学科下指定板块的局部子图
+
+    推荐的前端按需流程：
+        1. GET /knowledge/subjects        拿学科列表
+        2. GET /knowledge/boards?subject=X 拿某学科的板块列表
+        3. GET /knowledge/graph?subject=X&board=Y 按板块拉取局部子图
+    """
     kg = KnowledgeGraph(user_id=user_id)
     try:
-        return {"nodes": kg.nodes, "edges": kg.edges}
+        return graph_middleware.slice_graph(kg, subject=subject, board=board)
+    finally:
+        kg.close()
+
+
+@router.get("/knowledge/boards")
+async def get_boards(subject: str = Query(..., description="学科名，如'数据结构'"),
+                     user_id: int = Depends(get_current_user)):
+    """
+    返回指定学科下的知识板块列表（含节点数/掌握度统计），供板块侧栏按需导航。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        return {
+            "subject": subject,
+            "boards": graph_middleware.list_boards(kg, subject),
+        }
+    finally:
+        kg.close()
+
+
+@router.get("/knowledge/subjects")
+async def get_subjects(user_id: int = Depends(get_current_user)):
+    """返回当前用户知识图谱中已有的所有学科列表"""
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        return {"subjects": graph_middleware.list_subjects(kg)}
     finally:
         kg.close()
 
@@ -258,6 +301,12 @@ async def delete_node(node_id: str, user_id: int = Depends(get_current_user)):
     kg = KnowledgeGraph(user_id=user_id)
     try:
         removed_edges = kg.remove_node(node_id)
+        # 同步清理该节点的 RAG 索引
+        try:
+            from app.core.rag.manager import rag_manager
+            rag_manager.delete_node_index(user_id, node_id)
+        except Exception as e:
+            logging.getLogger("ai-tutor").warning(f"清理 RAG 索引失败（节点 {node_id}）: {e}")
         publish("graph_updated")
         return {"deleted": True, "node_id": node_id, "removed_edges": removed_edges}
     except ValueError as e:

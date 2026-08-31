@@ -80,8 +80,37 @@ AI Tutor 是一个基于大模型的智能导学系统，通过知识图谱 + �
 - [ ] LLM 请求重试机制
 - [ ] Toast 通知替代 alert
 - [ ] CORS 配置化（从环境变量读取）
-- [ ] 单元测试与集成测试
+- [x] 单元测试与集成测试（pytest，`backend/tests/`，90+ 用例覆盖 RAG 检索链路）
 - [ ] 生产环境部署（Nginx + Gunicorn）
+
+## 项目规模与质量评估（2026-08 统计）
+
+### 代码规模：中小型项目（约 1.7 万行）
+
+| 模块 | 文件数 | 代码行数 | 说明 |
+|------|--------|----------|------|
+| 后端 Python | 58 | 8,783 | FastAPI 应用（api / core / models / services） |
+| 迁移脚本 | 4 | 475 | 数据格式迁移（JSON→SQLite 等） |
+| 前端 Vue 组件 | 20 | 6,389 | 对话、图谱、侧边栏等 |
+| 前端 JS | 9 | 1,250 | API 封装、Pinia、路由、工具函数 |
+| **合计** | **91** | **≈16,900** | 另有 46 个 REST API 路由 |
+| 提示词模板 | 4 | 105 | Jinja2 系统提示词 |
+| 调研/设计文档 | 6 | ≈1,100 | docs/ + 项目框架文档 + API.md |
+
+**依赖规模**：Python 依赖 20 个，npm 依赖 9 个（7 运行时 + 2 开发），依赖面克制、无重型框架。
+
+### 质量优势 ✅
+
+- **架构清晰**：前后端分离；后端按 `api / core / models / services` 分层，core 内再拆子模块（kb、rag、quiz、hybrid_search、rag_pipeline），职责单一，RAG 模块已从主链路解耦（见 `docs/RAG_去耦合调研`）
+- **工程化配套完整**：一键安装/启动脚本、`.env.example` 模板、4 个数据迁移脚本、标准化错误码体系 + `error_codes.md` 速查表、速率限制、JWT 鉴权、Swagger 文档自动生成
+- **设计文档齐全**：`docs/` 下 5 篇调研文档（RAG 召回优化、出题逻辑、OPENMAIC 借鉴方案等）+ 项目框架文档，设计先于实现、决策有据可查（含 35+ 个外部参考引用）
+- **可维护性好**：提示词模板外置（Jinja2）、事件总线解耦图谱更新、数据与代码分离（`data/` 目录）
+
+### 待改进点 ⚠️（对应「规划中」清单）
+
+- **测试与评测体系已建立**：`backend/tests/` 已有 101 个 pytest 用例（单元 90 + 端到端集成 11：分块/融合/父级扩展/路由/pipeline 异常隔离/稀疏索引/图谱切片/rag_search 工具/上传检索全链路/目录过滤/path 溯源/用户隔离），全部 mock 掉 LLM/embedding 零网络依赖。另有**离线评测集**（复用开源 CMRC2018，256 文档/1000 查询，`backend/scripts/eval_rag.py`）量化检索质量：mock 基线 vector R@1=0.470 / bm25 0.964 / RRF hybrid 0.766 / 加权 fuse 0.818；真实 text-embedding-v4 评测待账户充值后运行（`--embed api`）。待办：HyDE 查询扩展
+- **部署能力**：仅支持本地开发模式（uvicorn --reload + vite dev），无 Docker / Nginx / Gunicorn 生产配置，CORS 白名单硬编码在 `main.py`
+- **健壮性**：无 LLM 请求重试机制、前端异常提示依赖 alert；存在 `ForceGraph.vue.bak` 等备份文件，建议用 git 管理替代手工备份文件
 
 ## 快速开始
 
@@ -90,31 +119,43 @@ AI Tutor 是一个基于大模型的智能导学系统，通过知识图谱 + �
 - Python 3.10+
 - Node.js 18+
 
-### 一键安装 & 启动
+### 一键安装 & 启动（Windows PowerShell）
 
 ```powershell
-# 安装所有依赖
+# 1. 安装所有依赖（后端虚拟环境 + 前端 node_modules）
 .\install.ps1
 
-# 编辑密钥配置
+# 2. 配置密钥（必填项：DASHSCOPE_API_KEY、SECRET_KEY）
+copy backend\.env.example backend\.env
 notepad backend\.env
 
-# 启动
+# 3. 一键启动前后端（脚本会自动检查环境、按需补装依赖）
 .\start.ps1
 ```
 
-### 手动安装
+启动成功后访问 http://localhost:5173 ，按 Ctrl+C 停止所有服务。
+
+### 手动安装（Linux / Mac / Windows 通用）
+
+**后端：**
 
 ```bash
-# 后端
 cd backend
 python -m venv venv
-venv\Scripts\activate          # Linux/Mac: source venv/bin/activate
+venv\Scripts\activate          # Windows PowerShell
+# source venv/bin/activate     # Linux / Mac
 pip install -r requirements.txt
-cp .env.example .env           # 编辑填入 DASHSCOPE_API_KEY
-uvicorn app.main:app --reload --port 8000
 
-# 前端（新终端）
+# 配置环境变量（Windows 用 copy，Linux/Mac 用 cp）
+copy .env.example .env         # cp .env.example .env
+# 编辑 .env，填入 DASHSCOPE_API_KEY 和 SECRET_KEY
+
+uvicorn app.main:app --reload --port 8000
+```
+
+**前端（另开一个终端）：**
+
+```bash
 cd frontend
 npm install
 npm run dev
@@ -130,7 +171,16 @@ npm run dev
 | 后端 API | http://localhost:8000 |
 | 健康检查 | http://localhost:8000/api/health |
 | Swagger 文档 | http://localhost:8000/docs |
-| 默认管理员 | `admin / admin123`（需配置 DEFAULT_ADMIN_PASSWORD） |
+| 默认管理员 | `admin / admin123`（需在 `.env` 中配置 `DEFAULT_ADMIN_PASSWORD`） |
+
+### 环境变量说明（backend/.env）
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `DASHSCOPE_API_KEY` | ✅ | 阿里云百炼 API Key |
+| `MODEL_NAME` | ❌ | LLM 模型，默认 `qwen-plus` |
+| `SECRET_KEY` | ✅ | JWT 签名密钥，请替换为随机字符串 |
+| `DEFAULT_ADMIN_PASSWORD` | ❌ | 设置后首次启动自动创建 admin 账户 |
 
 ## 项目结构
 

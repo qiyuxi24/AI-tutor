@@ -4,27 +4,32 @@
   阶段1 call_llm_stream():  流式输出文本给用户 → 不等待工具调用
   阶段2 call_llm_tools():   后台判断是否需要调用工具 → 执行工具 → 可选的流式补充输出
 """
-import os
+import asyncio
 import json
+import html
 import logging
+import random
+import re
+import socket
+from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncGenerator, Optional
+from urllib.parse import urlparse
+import httpx
 from openai import AsyncOpenAI, APIStatusError, APITimeoutError, APIConnectionError, AuthenticationError, RateLimitError
-from dotenv import load_dotenv
+from app.core.config import settings
 from app.core.error_codes import ErrorCode, log_error
-
-load_dotenv()
 
 logger = logging.getLogger("ai-tutor")
 
 # 使用 AsyncOpenAI 实现真正的异步 I/O，不阻塞 FastAPI 事件循环
 # timeout 设为 120s：阿里云百炼 qwen-plus 模型在 function calling 多轮调用场景下可能需要较长时间
 client = AsyncOpenAI(
-    api_key=os.getenv("DASHSCOPE_API_KEY"),
-    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-    timeout=120.0,
+    api_key=settings.dashscope_api_key,
+    base_url=settings.llm_base_url,
+    timeout=settings.llm_timeout,
 )
 
-MODEL_NAME = os.getenv("MODEL_NAME", "qwen-plus")
+MODEL_NAME = settings.model_name
 
 # ─── 知识图谱编辑工具定义（千问 function calling）───
 KG_TOOLS = [
@@ -130,6 +135,38 @@ KG_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_webpage",
+            "description": "抓取并返回一个网页的可读文本内容（会自动剥离 HTML 标签、脚本、样式）。当学生提到某个 URL、网上资料、或需要实时信息（新闻、文档、教程）时，可以用此工具获取网页正文。返回内容会截断到 max_chars 限制内。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "要查询的网页完整 URL，需以 http:// 或 https:// 开头"},
+                    "max_chars": {"type": "integer", "description": "返回文本的最大字符数（默认 3000，最大 20000）。超出部分会被截断。"},
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rag_search",
+            "description": "检索知识库/知识图谱中与某话题最相关的内容片段。当学生的问题涉及某个具体知识点、需要从已有的学习资料或图谱节点中找依据时，可调用此工具获取相关片段。返回内容带来源标注，可据此更准确地回答或引用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "要检索的内容，用学生当前话题或你想深挖的子问题表述"},
+                    "source": {"type": "string", "enum": ["graph", "kb", "all"],
+                               "description": "检索来源：graph=知识图谱，kb=上传知识库，all=全部（默认）"},
+                    "top_k": {"type": "integer", "description": "返回条数 1~5（默认 3）"},
+                },
+                "required": ["query"]
+            }
+        }
+    },
 ]
 
 
@@ -159,6 +196,67 @@ def _map_api_error(e: Exception, prefix: str = "") -> RuntimeError:
     else:
         user_msg = log_error(ErrorCode.SYS_UNKNOWN_ERROR, detail=f"{prefix}{str(e)}" if prefix else str(e), exception=e)
     return RuntimeError(user_msg)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  LLM 请求重试机制
+# ══════════════════════════════════════════════════════════════════
+
+# 最大重试次数（最多尝试 1 + RETRY_MAX 次）
+RETRY_MAX = 3
+# 指数退避基数（秒），第 n 次重试前等待 base * 2^(n-1) 秒
+RETRY_BASE_DELAY = 1.0
+# 随机抖动上限（秒），避免多个请求同时重试造成限流风暴
+RETRY_JITTER = 0.5
+
+
+def _is_retryable(e: Exception) -> bool:
+    """
+    判断错误是否可恢复（值得重试）。
+
+    只对瞬时/临时的错误重试：
+    - APITimeoutError      超时（可能只是网络抖动）
+    - APIConnectionError   连接失败（服务临时不可达）
+    - RateLimitError       限流（429，稍后可能恢复额度）
+    - APIStatusError 且    HTTP 429 或 5xx（服务端临时错误）
+
+    明确**不**重试：
+    - AuthenticationError  认证失败（API Key 配置错误，重试无意义）
+    - 其他业务类错误
+    """
+    if isinstance(e, (APITimeoutError, APIConnectionError, RateLimitError)):
+        return True
+    if isinstance(e, APIStatusError):
+        return e.status_code == 429 or e.status_code >= 500
+    return False
+
+
+async def _with_retry(fn, *args, **kwargs):
+    """
+    带指数退避 + 抖动的异步重试封装。
+
+    只重试 _is_retryable 判定为瞬时错误的异常；不可恢复错误或达到最大重试次数
+    时原样抛出（由调用方 _map_api_error 统一分类映射错误码）。
+
+    参数:
+        fn:   可 await 的调用（如 client.chat.completions.create）
+        *args, **kwargs: 透传给 fn 的参数
+
+    返回:
+        fn 的返回值；重试耗尽或不可恢复错误时抛出原始异常。
+    """
+    for attempt in range(RETRY_MAX + 1):
+        try:
+            return await fn(*args, **kwargs)
+        except Exception as e:
+            if not _is_retryable(e) or attempt == RETRY_MAX:
+                raise  # 不可恢复 或 已达最大次数 → 原样抛给 _map_api_error
+            delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, RETRY_JITTER)
+            logger.warning(
+                f"LLM 请求失败（{type(e).__name__}），"
+                f"{RETRY_MAX - attempt} 次后重试（等待 {delay:.1f}s）: {str(e)[:150]}"
+            )
+            await asyncio.sleep(delay)
 
 
 def execute_kg_tool(tool_call, kg) -> str:
@@ -228,6 +326,17 @@ def execute_kg_tool(tool_call, kg) -> str:
             profile.update(content=content, mode="append")
             return f"已更新用户画像"
 
+        elif name == "fetch_webpage":
+            url = args["url"]
+            max_chars = int(args.get("max_chars", 3000))
+            return fetch_webpage(url, max_chars=max_chars)
+
+        elif name == "rag_search":
+            query = args["query"]
+            source = args.get("source", "all")
+            top_k = int(args.get("top_k", 3))
+            return rag_search(query, source=source, top_k=top_k, user_id=kg.user_id)
+
         else:
             return f"未知工具: {name}"
 
@@ -243,6 +352,223 @@ def execute_kg_tool(tool_call, kg) -> str:
         # 其他意外错误（文件写入失败等）
         log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), exception=e, context={"tool": name})
         return f"工具执行出错: {str(e)}"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  知识库检索工具（MCP 风格：LLM 按需调用 RAG 检索）
+# ══════════════════════════════════════════════════════════════════
+
+# 线程池：用于在同步工具执行（execute_kg_tool）里跑 async RAG 检索
+_ASYNC_TOOL_POOL = ThreadPoolExecutor(max_workers=2)
+
+
+def _run_async(coro) -> object:
+    """
+    在同步上下文里运行 async 协程（用于 RAG 检索等 async 操作）。
+
+    背景：execute_kg_tool 是同步函数，被 async 的 call_llm_tools 同步调用，
+    此时当前线程已有运行中的事件循环，不能直接 asyncio.run / new_event_loop。
+    方案：把协程提交到线程池，在新线程里用 asyncio.run 创建独立事件循环运行。
+    RAG 检索是独立无共享状态的，跨线程安全。
+
+    返回:
+        协程的返回值；任何异常会向上抛出（由调用方捕获处理）。
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # 当前线程无运行中的事件循环 → 直接 asyncio.run
+        return asyncio.run(coro)
+    # 当前线程有运行中的事件循环 → 提交到线程池，在新线程独立循环跑
+    return _ASYNC_TOOL_POOL.submit(asyncio.run, coro).result()
+
+
+def rag_search(query: str, source: str = "all",
+               top_k: int = 3, user_id: Optional[int] = None) -> str:
+    """
+    RAG 检索工具（MCP 风格）：检索知识图谱 / 知识库，返回相关片段供 LLM 使用。
+
+    参数:
+        query:   要检索的内容（学生当前话题或子问题）
+        source:  检索来源 'graph'（知识图谱）/'kb'（上传知识库）/'all'（全部）
+        top_k:   返回条数（1~5）
+        user_id: 用户 ID（从 kg 传入；None 时无法检索，返回友好提示）
+
+    返回:
+        格式化的检索结果文本；检索失败或为空时返回友好提示（不抛异常，让 LLM 直接使用）。
+    """
+    if not user_id:
+        return "检索失败：无法确定用户上下文，请基于已有知识回答。"
+
+    try:
+        top_k = max(1, min(int(top_k), 5))
+    except (TypeError, ValueError):
+        top_k = 3
+    source = (source or "all").lower()
+
+    from app.core.rag_pipeline import pipeline, RagContext
+    kb = None
+    if source == "kb":
+        # 仅检索知识库但用户未指定范围：需要全部上传文档（node_ids=None 表示全部）
+        kb = {"node_ids": None, "name": "知识库"}
+    elif source == "graph":
+        # 仅图谱：构造一个不触发 kb 源的 context（无 kb 则 KbRagSource.should_query=False）
+        kb = None
+
+    ctx = RagContext(user_id=user_id, query=query, top_k=top_k, kb=kb)
+    hits = _run_async(pipeline.run(ctx))
+
+    # 按来源过滤（source=all 时保留全部）
+    if source == "graph":
+        hits = [h for h in hits if h.source == "graph"]
+    elif source == "kb":
+        hits = [h for h in hits if h.source == "kb"]
+
+    if not hits:
+        return "未检索到相关内容，请基于已有知识回答，或换个角度再试。"
+
+    lines = []
+    for i, h in enumerate(hits, 1):
+        header = f"[{i}] 来源:{h.source}"
+        if h.path:
+            header += f" | 出处:{h.path}"
+        lines.append(header)
+        lines.append(h.content)
+    return "\n\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  网页查询工具（MCP 风格：LLM 通过 function calling 调用）
+# ══════════════════════════════════════════════════════════════════
+
+# 禁止访问的内网/回环/保留网段（SSRF 防护）
+_BLOCKED_HOST_PATTERNS = [
+    "localhost", "127.0.0.1", "::1", "0.0.0.0",
+    "169.254.",  # 链路本地
+]
+
+# 抓取超时（秒）
+_FETCH_TIMEOUT = 10.0
+# 返回文本最大长度
+_FETCH_MAX_CHARS = 20000
+# 请求头（模拟浏览器，减少被屏蔽概率）
+_FETCH_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0 Safari/537.36 TutorAgent/1.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+# 剥离 <script> / <style> / <nav> 等非正文内容
+_RE_BLOCK = re.compile(
+    r'<(script|style|noscript|nav|footer|header|aside|iframe|form|svg|head)[^>]*>.*?</\1>',
+    re.IGNORECASE | re.DOTALL,
+)
+# 删除所有剩余 HTML 标签
+_RE_TAG = re.compile(r'<[^>]+>')
+
+
+def _is_blocked_url(url: str) -> Optional[str]:
+    """SSRF 防护：检查 URL 是否指向内网/回环等危险地址，返回拒绝原因或 None。"""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return "无法解析 URL"
+    if parsed.scheme not in ("http", "https"):
+        return f"仅支持 http/https 协议，收到 {parsed.scheme!r}"
+    host = parsed.hostname or ""
+    if any(p in host for p in _BLOCKED_HOST_PATTERNS):
+        return f"拒绝访问内网/回环地址: {host}"
+    # 解析 DNS，进一步校验解析出的 IP 是否为内网保留地址
+    try:
+        for info in socket.getaddrinfo(host, None):
+            ip = info[4][0]
+            if _is_private_ip(ip):
+                return f"拒绝访问私有地址: {host} ({ip})"
+            break
+    except socket.gaierror:
+        return f"无法解析域名: {host}"
+    return None
+
+
+def _is_private_ip(ip: str) -> bool:
+    """判断 IP 是否为内网/保留地址。"""
+    try:
+        import ipaddress
+        addr = ipaddress.ip_address(ip)
+        return (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast)
+    except ValueError:
+        return True
+
+
+def _html_to_text(raw: str) -> str:
+    """将 HTML 转为可读纯文本：剥离阻塞标签、HTML 标签，解码实体，压缩空白。"""
+    text = _RE_BLOCK.sub(" ", raw)
+    text = _RE_TAG.sub(" ", text)
+    text = html.unescape(text)
+    # 压缩连续空白与空行
+    text = re.sub(r'[ \t\u3000]+', ' ', text)
+    text = re.sub(r'\n\s*\n+', '\n\n', text)
+    return text.strip()
+
+
+def fetch_webpage(url: str, max_chars: int = 3000) -> str:
+    """
+    抓取网页正文并返回可读文本（MCP 风格网页查询工具）。
+
+    安全特性：
+    - SSRF 防护：拒绝内网/回环/私有 IP 地址
+    - 超时保护：单次请求 10 秒超时
+    - 长度限制：返回文本截断到 max_chars（默认 3000，最大 20000）
+    - 内容剥离：自动去除脚本、样式、导航等非正文 HTML
+
+    参数:
+        url:       要查询的网页完整 URL（http/https）
+        max_chars: 返回文本最大字符数
+
+    返回:
+        网页可读文本，失败时返回带错误说明的友好提示（不抛异常，让 LLM 直接使用）
+    """
+    try:
+        max_chars = max(500, min(int(max_chars), _FETCH_MAX_CHARS))
+
+        blocked = _is_blocked_url(url)
+        if blocked:
+            log_error(ErrorCode.WEB_FETCH_BLOCKED, detail=f"{url}: {blocked}")
+            return f"无法抓取网页：{blocked}。请提供一个公网 http/https 地址。"
+
+        with httpx.Client(timeout=_FETCH_TIMEOUT, headers=_FETCH_HEADERS,
+                          follow_redirects=True) as client:
+            resp = client.get(url)
+
+        if resp.status_code != 200:
+            log_error(ErrorCode.WEB_FETCH_FAILED, detail=f"HTTP {resp.status_code}: {url}")
+            return f"无法抓取网页：HTTP 状态码 {resp.status_code}"
+
+        # 仅接受 HTML 内容
+        ctype = resp.headers.get("content-type", "").lower()
+        if "html" not in ctype and "text/plain" not in ctype:
+            return (f"目标内容不是可读文本（content-type: {ctype or '未知'}），"
+                    f"可能是文件或接口，无法在对话中展示。")
+
+        text = _html_to_text(resp.text)
+        if not text:
+            return "该网页正文为空，未提取到可读文本。"
+
+        if len(text) > max_chars:
+            text = text[:max_chars] + f"\n\n……（内容过长，已截断，共 {len(text)} 字符）"
+        return text
+
+    except httpx.TimeoutException as e:
+        log_error(ErrorCode.WEB_FETCH_TIMEOUT, detail=str(e), context={"url": url})
+        return f"抓取网页超时：{url}。请稍后重试或换个来源。"
+    except httpx.HTTPError as e:
+        log_error(ErrorCode.WEB_FETCH_FAILED, detail=str(e), context={"url": url})
+        return f"抓取网页失败：{str(e)}"
+    except Exception as e:
+        log_error(ErrorCode.WEB_FETCH_FAILED, detail=str(e), exception=e, context={"url": url})
+        return f"抓取网页出错：{str(e)}"
 
 
 async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True,
@@ -284,9 +610,9 @@ async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True
     if enable_tools:
         create_kwargs["tools"] = KG_TOOLS
 
-    # 3. 异步调用千问 API（真正的非阻塞 I/O）
+    # 3. 异步调用千问 API（真正的非阻塞 I/O，带瞬时错误重试）
     try:
-        response = await client.chat.completions.create(**create_kwargs)
+        response = await _with_retry(client.chat.completions.create, **create_kwargs)
     except Exception as e:
         raise _map_api_error(e) from e
 
@@ -320,9 +646,10 @@ async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True
                 "content": result
             })
 
-        # 异步调用千问第二次，让它基于工具结果生成回复
+        # 异步调用千问第二次，让它基于工具结果生成回复（带瞬时错误重试）
         try:
-            response2 = await client.chat.completions.create(
+            response2 = await _with_retry(
+                client.chat.completions.create,
                 model=MODEL_NAME,
                 messages=api_messages,
                 temperature=0.7,
@@ -365,7 +692,8 @@ async def call_llm_stream(
     api_messages = _build_api_messages(system_prompt, messages)
 
     try:
-        response = await client.chat.completions.create(
+        response = await _with_retry(
+            client.chat.completions.create,
             model=MODEL_NAME,
             messages=api_messages,
             temperature=0.7,
@@ -414,7 +742,8 @@ async def call_llm_tools(
     api_messages = _build_api_messages(system_prompt, messages)
 
     try:
-        response = await client.chat.completions.create(
+        response = await _with_retry(
+            client.chat.completions.create,
             model=MODEL_NAME,
             messages=api_messages,
             temperature=0.3,  # 工具调用用低温度，更确定性
@@ -456,9 +785,10 @@ async def call_llm_tools(
             "content": tool_results[-1]
         })
 
-    # 第二次调用 LLM，让 AI 基于工具结果生成确认回复
+    # 第二次调用 LLM，让 AI 基于工具结果生成确认回复（带瞬时错误重试）
     try:
-        response2 = await client.chat.completions.create(
+        response2 = await _with_retry(
+            client.chat.completions.create,
             model=MODEL_NAME,
             messages=api_messages,
             temperature=0.7,

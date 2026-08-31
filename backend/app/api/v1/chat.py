@@ -29,11 +29,14 @@ async def handle_chat(request: ChatRequest, user_id: int = Depends(get_current_u
     - mode: 当前引导模式
     - graph_analysis: 图谱分析结果（含 applied/pending 建议）
     """
+    kb = {"node_ids": request.kb_node_ids or [], "name": request.kb_node_name} \
+        if request.kb_node_ids else None
     reply, mode, graph_analysis = await process_message(
         user_id=user_id,
         messages=request.messages,
         mode=request.mode,
         current_node=request.current_node,
+        kb=kb,
     )
     return ChatResponse(reply=reply, mode=mode, graph_analysis=graph_analysis)
 
@@ -50,12 +53,15 @@ async def handle_chat_stream(request: ChatRequest, background_tasks: BackgroundT
     async def event_stream():
         # 收集完整的 AI 回复文本（供后台阶段使用）
         full_reply_parts = []
-        
+        kb = {"node_ids": request.kb_node_ids or [], "name": request.kb_node_name} \
+            if request.kb_node_ids else None
+
         async for sse_chunk in process_message_stream(
             messages=request.messages,
             mode=request.mode,
             user_id=user_id,
             current_node=request.current_node,
+            kb=kb,
         ):
             # 提取 token 文本（从 SSE 格式中解析）
             if sse_chunk.startswith("data: ") and sse_chunk != "data: [DONE]\n\n":
@@ -80,6 +86,7 @@ async def handle_chat_stream(request: ChatRequest, background_tasks: BackgroundT
                 request.mode,
                 user_id,
                 request.current_node,
+                kb,
             )
     
     return StreamingResponse(

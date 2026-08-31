@@ -1,0 +1,2 @@
+# 开发/测试依赖（RAG 测试链路全部 mock 掉 LLM/embedding，零网络依赖）
+pytest>=8.0.0

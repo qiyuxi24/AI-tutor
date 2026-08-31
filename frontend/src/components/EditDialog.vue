@@ -22,6 +22,7 @@
  */
 
 import { reactive, watch, computed } from 'vue'
+import { notifyWarning } from '../utils/feedback'
 
 /* ================================================================
    Props
@@ -112,13 +113,13 @@ function handleSubmit() {
       payload.name = form.name.trim()
       payload.tags = form.tags.split(',').map(t => t.trim()).filter(Boolean)
       payload.content = form.content || undefined
-      if (!payload.name) return alert('请输入节点名称')
+      if (!payload.name) return notifyWarning('请输入节点名称')
       break
 
     case 'edit-node':
       payload.name = form.name.trim()
       payload.tags = form.tags.split(',').map(t => t.trim()).filter(Boolean)
-      if (!payload.name) return alert('请输入节点名称')
+      if (!payload.name) return notifyWarning('请输入节点名称')
       break
 
     case 'edit-edge':

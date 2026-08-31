@@ -1,0 +1,33 @@
+{
+  "dataset": "C:\\Users\\34239\\Documents\\GitHub\\AI-tutor\\backend\\eval_data\\cmrc2018_trial.json",
+  "embed_mode": "mock",
+  "docs": null,
+  "queries": 1000,
+  "elapsed_sec": 65.5,
+  "strategies": {
+    "vector": {
+      "recall_at_1": 0.47,
+      "recall_at_3": 0.603,
+      "recall_at_5": 0.669,
+      "mrr": 0.5445
+    },
+    "bm25": {
+      "recall_at_1": 0.964,
+      "recall_at_3": 0.986,
+      "recall_at_5": 0.989,
+      "mrr": 0.9747
+    },
+    "hybrid": {
+      "recall_at_1": 0.766,
+      "recall_at_3": 0.88,
+      "recall_at_5": 0.936,
+      "mrr": 0.8284
+    },
+    "fuse": {
+      "recall_at_1": 0.818,
+      "recall_at_3": 0.902,
+      "recall_at_5": 0.959,
+      "mrr": 0.869
+    }
+  }
+}

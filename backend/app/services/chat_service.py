@@ -47,6 +47,8 @@ TOOL_CAPABILITY_PROMPT = """
 - **更新掌握程度** → 调用 `update_mastery`
 - **创建关联** → 调用 `add_edge`
 - **更新用户画像** → 调用 `update_user_profile`
+- **查询网页** → 调用 `fetch_webpage`（抓取网页正文，获取实时/外部信息）
+- **检索知识** → 调用 `rag_search`（从知识图谱/上传知识库中检索与某话题最相关的内容片段，补充教学依据）
 
 例如用户说"帮我加一个汉诺塔节点"，你就调用 `add_knowledge_node` 创建节点，
 然后自然回复"已添加！汉诺塔现在关联在递归定义下"。
@@ -58,6 +60,8 @@ TOOL_CAPABILITY_PROMPT = """
 4. **扩展图谱**：当用户提到知识图谱中没有的概念时，调用 `add_knowledge_node` 自动创建。`from_nodes` 只能填真正的前置知识节点（必须先学它才能理解新节点），不要随便填
 5. **识别掌握度**：根据用户回复的质量，适当调整 mastery 值（0=未掌握, 1-25=入门, 26-50=熟悉, 51-75=熟练, 76-100=精通）
 6. **更新用户画像**：当你在教学中观察到学生的性格特点、学习习惯、知识薄弱点等新信息时，调用 `update_user_profile` 追加到用户画像。这有助于后续更好地个性化教学。例如：发现学生害怕数学公式、喜欢图形化解释、做题容易粗心等。
+7. **查询网页**：当学生提到一个 URL、需要实时信息（新闻、最新文档、教程）或某个话题你需要外部资料来讲解时，调用 `fetch_webpage` 抓取网页正文。拿到正文后提炼要点，用通俗语言教给学生。若抓取失败，礼貌说明并提供其他学习途径。
+8. **检索知识**：当学生的问题涉及某个具体知识点、需要从已学图谱或上传资料中找依据、或你想确认某个概念的资料时，调用 `rag_search` 检索相关片段。拿到片段后据此准确回答并标注出处（如"据你之前学的《数据结构》第2章…"）。若未检索到相关内容，基于已有知识回答即可，不要编造。
 
 ### ⚠️ 权限限制（严格执行）
 - **你不能修改、删除或更新人类手动创建的节点**（added_by="human"）。这些操作会被系统拒绝。
@@ -87,8 +91,9 @@ def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True) -> str:
     return build_graph_context(kg, detailed=detailed)
 
 
-def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
-                        inject_tools: bool = False, current_node: str = "") -> tuple[str, str]:
+async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
+                              inject_tools: bool = False, current_node: str = "",
+                              kb: dict | None = None) -> tuple[str, str]:
     """
     构建系统提示词（合并原 _build_stream_prompt / _build_chat_prompt）。
     
@@ -96,6 +101,8 @@ def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
         inject_tools: True=后台阶段（详细图谱 + 工具能力说明）
                       False=流式阶段（精简图谱，纯教学引导）
         current_node: 递归模式：当前正在教学的知识点 ID
+        kb: 知识库上下文范围 {node_ids: [...], name: str}，可选；
+            传入后在所选目录范围内检索文档片段注入提示词
     返回: (system_prompt, last_user_message)
     """
     last_user_msg = next(
@@ -140,10 +147,75 @@ def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
         **extra_kwargs,
     )
 
+    # 注入检索上下文（RAG 是增强而非必需：检索失败或为空时不影响主提示词）
+    # 去耦合：检索编排统一走 rag_pipeline，一次 run 按数据源分组生成图谱/知识库两个区块
+    retrieval = await _build_retrieval_context(last_user_msg, kg.user_id, kb)
+    if retrieval:
+        system_prompt += retrieval
+
     if inject_tools:
         system_prompt += TOOL_CAPABILITY_PROMPT
 
     return system_prompt, last_user_msg
+
+
+async def _build_retrieval_context(student_message: str, user_id: int,
+                                   kb: dict | None = None) -> str:
+    """
+    通过 RAG 管道检索相关片段，构造注入系统提示词的检索上下文。
+
+    参数:
+        student_message: 学生当前消息
+        user_id:         用户 ID
+        kb:              知识库上下文范围 {node_ids, name} | None
+
+    返回:
+        格式化的检索上下文 Markdown 文本（图谱区块 + 知识库区块）；
+        无相关内容时返回空字符串。
+
+    说明:
+        检索编排统一走 rag_pipeline，一次 run 并行检索所有已注册数据源，
+        按 source 分组生成两个区块，避免对同一 query 重复 embedding。
+        鲁棒性：pipeline 内部已做按需开关 + 单源超时/异常隔离，绝不抛错。
+    """
+    from app.core.rag_pipeline import pipeline, RagContext
+
+    hits = await pipeline.run(RagContext(
+        user_id=user_id, query=student_message, top_k=5, kb=kb,
+    ))
+
+    graph_hits = [h for h in hits if h.source == "graph"]
+    kb_hits = [h for h in hits if h.source == "kb"]
+
+    blocks: list[str] = []
+
+    # 图谱区块
+    if graph_hits:
+        lines = [
+            "## 相关知识点参考（RAG 检索）",
+            "以下是从你的知识图谱中检索到的与当前话题最相关的学习内容片段，可帮助回答时更准确、贴合你的已学知识：",
+        ]
+        for i, r in enumerate(graph_hits, 1):
+            node_name = r.metadata.get("node_name") or r.path or "知识点"
+            lines.append(f"### 片段 {i}：{node_name}"
+                         + (f"（{r.heading}）" if r.heading else ""))
+            lines.append(r.content)
+        blocks.append("\n\n".join(lines))
+
+    # 知识库区块
+    if kb_hits:
+        kb_name = (kb or {}).get("name") or "我的知识库"
+        lines = [
+            f"## 知识库参考（来自「{kb_name}」）",
+            "以下是从你选择的知识库文档中检索到的与当前话题相关的内容片段，回答时可结合这些资料：",
+        ]
+        for i, r in enumerate(kb_hits, 1):
+            lines.append(f"### 片段 {i}"
+                         + (f"：{r.path}" if r.path else ""))
+            lines.append(r.content)
+        blocks.append("\n\n".join(lines))
+
+    return "\n\n".join(blocks)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -209,6 +281,10 @@ async def _analyze_and_apply(user_message: str, ai_reply: str,
         if applied_list:
             publish("graph_updated")
 
+        # RAG 增量索引：对本次实际变更的节点重新建立语义索引
+        if applied_list:
+            await _index_applied_nodes(applied_list, user_id, kg)
+
     except Exception as e:
         # 图谱分析失败不影响对话流程，但记录日志 + 发布错误事件
         user_msg = log_error(
@@ -223,12 +299,54 @@ async def _analyze_and_apply(user_message: str, ai_reply: str,
     return result
 
 
+async def _index_applied_nodes(applied_list: list[dict], user_id: int, kg) -> None:
+    """
+    对图谱分析后实际变更的节点增量更新 RAG 索引。
+
+    参数:
+        applied_list: 已应用的建议列表
+        user_id:      当前用户 ID
+        kg:           KnowledgeGraph 实例
+
+    说明:
+        - add_node        → 索引新节点
+        - update_content  → 重新索引该节点
+        - add_edge        → 不涉及内容检索，跳过
+        任一节点索引失败不影响整体流程。
+    """
+    from app.core.rag.manager import rag_manager
+
+    # 收集需要（重新）索引的节点 ID
+    node_ids_to_index: set[str] = set()
+    for s in applied_list:
+        action = s.get("action")
+        if action == "add_node":
+            node = s.get("node", {})
+            nid = node.get("id")
+            if nid:
+                node_ids_to_index.add(nid)
+        elif action == "update_content":
+            nid = s.get("node_id")
+            if nid:
+                node_ids_to_index.add(nid)
+
+    for nid in node_ids_to_index:
+        node = kg.get_node(nid)
+        if node is None:
+            continue
+        try:
+            await rag_manager.index_node(user_id, node, kg)
+        except Exception as e:
+            logger.warning(f"RAG 索引节点 {nid} 失败: {e}")
+
+
 # ══════════════════════════════════════════════════════════════════
 #  对话处理入口
 # ══════════════════════════════════════════════════════════════════
 
 async def process_message(user_id: int, messages: list, mode: str,
-                        current_node: str = "") -> tuple[str, str, dict]:
+                        current_node: str = "",
+                        kb: dict | None = None) -> tuple[str, str, dict]:
     """
     处理一条学生消息。
 
@@ -248,9 +366,9 @@ async def process_message(user_id: int, messages: list, mode: str,
     kg = KnowledgeGraph(user_id=user_id)
 
     try:
-        # 1. 构建系统提示词（含图谱上下文 + 工具能力）
-        system_prompt, last_user_msg = _build_system_prompt(
-            messages, mode, kg, inject_tools=True, current_node=current_node
+        # 1. 构建系统提示词（含图谱上下文 + RAG + 工具能力）
+        system_prompt, last_user_msg = await _build_system_prompt(
+            messages, mode, kg, inject_tools=True, current_node=current_node, kb=kb
         )
 
         # 2. 调用 AI 获取回复
@@ -283,6 +401,7 @@ async def process_message_stream(
     mode: str,
     user_id: int,
     current_node: str = "",
+    kb: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     流式处理一条学生消息。
@@ -302,8 +421,8 @@ async def process_message_stream(
     kg = KnowledgeGraph(user_id=user_id)
     try:
         # 阶段1：流式生成回复（纯教学，不带 tools）
-        stream_prompt, _ = _build_system_prompt(
-            messages, mode, kg, inject_tools=False, current_node=current_node
+        stream_prompt, _ = await _build_system_prompt(
+            messages, mode, kg, inject_tools=False, current_node=current_node, kb=kb
         )
 
         try:
@@ -327,6 +446,7 @@ async def process_background_tools(
     mode: str,
     user_id: int,
     current_node: str = "",
+    kb: dict | None = None,
 ) -> None:
     """
     后台任务：调用 LLM 判断是否需要执行工具 + 图谱分析。
@@ -343,8 +463,8 @@ async def process_background_tools(
     kg = KnowledgeGraph(user_id=user_id)
     try:
         # 1. 工具调用（function calling）—— 使用含工具说明的 prompt
-        tool_prompt, last_user_msg = _build_system_prompt(
-            messages, mode, kg, inject_tools=True, current_node=current_node
+        tool_prompt, last_user_msg = await _build_system_prompt(
+            messages, mode, kg, inject_tools=True, current_node=current_node, kb=kb
         )
         tool_result = await call_llm_tools(tool_prompt, messages, kg=kg)
 

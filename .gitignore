@@ -63,6 +63,12 @@ temp/
 # ════════════════════════════════════════════
 data/ai_suggestions.json
 
+# RAG 评测临时索引（可每次重建；评测集 cmrc2018_trial.json 保留）
+backend/eval_data/kb_eval/
+backend/eval_data/prof_test/
+backend/eval_data/prof_sparse/
+backend/eval_data/prof_writer/
+
 # ════════════════════════════════════════════
 # CodeBuddy
 # ════════════════════════════════════════════

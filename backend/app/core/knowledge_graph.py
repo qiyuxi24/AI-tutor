@@ -72,6 +72,7 @@ class KnowledgeGraph:
                     name            TEXT NOT NULL,
                     file_path       TEXT NOT NULL,
                     tags            TEXT DEFAULT '[]',
+                    board           TEXT DEFAULT '',
                     summary         TEXT DEFAULT '',
                     mastery         INTEGER DEFAULT 0,
                     difficulty      INTEGER DEFAULT 3,
@@ -103,14 +104,24 @@ class KnowledgeGraph:
         self._auto_migrate()
 
     def _auto_migrate(self) -> None:
-        """自动迁移：检测并给旧版 nodes/edges 表添加 user_id 列"""
-        for table in ("nodes", "edges"):
-            cols = [r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()]
-            if "user_id" not in cols:
-                with self._conn:
-                    self._conn.execute(
-                        f"ALTER TABLE {table} ADD COLUMN user_id INTEGER REFERENCES users(id)"
-                    )
+        """自动迁移：检测并给旧版 nodes/edges 表添加缺失列"""
+        node_cols = [r[1] for r in self._conn.execute("PRAGMA table_info(nodes)").fetchall()]
+        if "user_id" not in node_cols:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE nodes ADD COLUMN user_id INTEGER REFERENCES users(id)"
+                )
+            node_cols = [r[1] for r in self._conn.execute("PRAGMA table_info(nodes)").fetchall()]
+        if "board" not in node_cols:
+            with self._conn:
+                self._conn.execute("ALTER TABLE nodes ADD COLUMN board TEXT DEFAULT ''")
+
+        edge_cols = [r[1] for r in self._conn.execute("PRAGMA table_info(edges)").fetchall()]
+        if "user_id" not in edge_cols:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE edges ADD COLUMN user_id INTEGER REFERENCES users(id)"
+                )
 
     def _invalidate_cache(self) -> None:
         """写操作后清空缓存"""
@@ -450,6 +461,105 @@ class KnowledgeGraph:
         ).fetchall()
         return [r["id"] for r in rows]
 
+    # ════════════════════════════════════════════
+    #  学科（subject）维度
+    #  学科约定：节点 tags 数组中包含学科名（如 "数据结构"），
+    #  用于"每个学科单独一张图"的过滤与隔离。
+    # ════════════════════════════════════════════
+
+    @staticmethod
+    def node_subject(node: dict) -> str:
+        """返回节点所属学科（tags 中第一个非难度标签，无则返回 ''）"""
+        for tag in node.get("tags", []) or []:
+            if tag not in ("一级", "二级", "三级"):
+                return tag
+        return ""
+
+    def get_subjects(self) -> list[str]:
+        """返回当前用户知识图谱中已有的所有学科（去重，保持出现顺序）"""
+        seen: list[str] = []
+        for n in self.nodes:
+            subj = self.node_subject(n)
+            if subj and subj not in seen:
+                seen.append(subj)
+        return seen
+
+    def get_nodes_by_subject(self, subject: str) -> list[dict]:
+        """返回属于指定学科的所有节点（tags 含学科名）"""
+        return [n for n in self.nodes if self.node_subject(n) == subject]
+
+    def get_edges_by_subject(self, subject: str) -> list[dict]:
+        """
+        返回属于指定学科的边。
+        边的归属以其任一端点节点的学科为准（跨学科边按 from 节点学科标记）。
+        """
+        subj_node_ids = {n["id"] for n in self.get_nodes_by_subject(subject)}
+        result = []
+        for e in self.edges:
+            if e["from_node"] in subj_node_ids or e["to_node"] in subj_node_ids:
+                result.append(e)
+        return result
+
+    # ════════════════════════════════════════════
+    #  知识板块（board）维度
+    #  板块 = 学科之下的一级分组（如"数据结构"下分"线性表/栈队列/树图"）。
+    #  板块存于节点独立 board 列，用于按需切片请求局部子图。
+    # ════════════════════════════════════════════
+
+    @staticmethod
+    def node_board(node: dict) -> str:
+        """返回节点所属知识板块（node['board']，空串表示未分组）"""
+        return (node.get("board") or "").strip()
+
+    def get_boards_by_subject(self, subject: str) -> list[dict]:
+        """
+        返回某学科下的所有知识板块（含各板块节点数、掌握度统计）。
+
+        返回:
+            [{"board": str, "node_count": int, "mastered_count": int, "mastery_avg": float}]
+            按板块名首现顺序排列；未分组节点合并到 {"board": "", "node_count": ...}（仅当有节点）。
+        """
+        nodes = self.get_nodes_by_subject(subject)
+        groups: dict[str, dict] = {}
+        for n in nodes:
+            b = self.node_board(n)
+            g = groups.setdefault(b, {"board": b, "node_count": 0,
+                                      "mastered_count": 0, "mastery_avg": 0.0})
+            g["node_count"] += 1
+            if int(n.get("mastery", 0) or 0) > 0:
+                g["mastered_count"] += 1
+        result = []
+        for g in groups.values():
+            if g["node_count"] == 0:
+                continue
+            g["mastery_avg"] = round(
+                sum(int(n.get("mastery", 0) or 0)
+                    for n in nodes if self.node_board(n) == g["board"])
+                / g["node_count"], 1
+            )
+            result.append(g)
+        # 未分组（board 为空）排到最后
+        result.sort(key=lambda g: (g["board"] == "", g["board"]))
+        return result
+
+    def get_nodes_by_board(self, subject: str, board: str) -> list[dict]:
+        """返回某学科下指定板块的所有节点（board 为空串时返回该学科未分组的节点）"""
+        board = (board or "").strip()
+        return [n for n in self.get_nodes_by_subject(subject)
+                if self.node_board(n) == board]
+
+    def get_edges_by_board(self, subject: str, board: str) -> list[dict]:
+        """
+        返回某学科下指定板块涉及的边。
+        边归属：任一端节点属于该板块即纳入（保证子图内部连通性可见）。
+        """
+        board_node_ids = {n["id"] for n in self.get_nodes_by_board(subject, board)}
+        result = []
+        for e in self.edges:
+            if e["from_node"] in board_node_ids or e["to_node"] in board_node_ids:
+                result.append(e)
+        return result
+
     def get_node_content_preview(
         self, node_id: str, max_lines: int = 30, max_chars: int = 1000
     ) -> str:
@@ -517,9 +627,21 @@ class KnowledgeGraph:
     #  节点 CRUD
     # ════════════════════════════════════════════
 
+    def _node_id_exists_globally(self, node_id: str) -> bool:
+        """
+        检查节点 ID 是否在全局已存在（不区分用户）。
+
+        nodes.id 是全局主键，不同用户的节点 ID 不能重复。
+        仅检查当前用户会漏掉其他用户已占用的 ID，导致插入时主键冲突。
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM nodes WHERE id = ? LIMIT 1", (node_id,)
+        ).fetchone()
+        return row is not None
+
     def generate_node_id(self, name: str = "") -> str:
         """
-        根据节点名称生成唯一英文 ID
+        根据节点名称生成唯一英文 ID（全局唯一）
 
         参数:
             name: 节点中文名称（可选）
@@ -527,20 +649,18 @@ class KnowledgeGraph:
         返回:
             唯一的节点 ID 字符串
         """
-        existing_ids = set(self.get_node_ids())
-
         if name:
             has_chinese = bool(re.search(r'[\u4e00-\u9fff]', name))
             if not has_chinese:
                 base_id = re.sub(r'[^a-z0-9_]', '', name.lower().replace(' ', '_'))[:30]
-                if base_id and base_id not in existing_ids:
+                if base_id and not self._node_id_exists_globally(base_id):
                     return base_id
 
-        # 回退：数字自增 ID
+        # 回退：数字自增 ID（检查全局唯一性，避免与其他用户的节点主键冲突）
         counter = 1
         while True:
             candidate = f"new_{counter:03d}"
-            if candidate not in existing_ids:
+            if not self._node_id_exists_globally(candidate):
                 return candidate
             counter += 1
 
@@ -558,7 +678,8 @@ class KnowledgeGraph:
             raise ValueError("节点必须包含 id 字段")
 
         node_id = node_data["id"]
-        if self.get_node(node_id) is not None:
+        # 检查全局唯一性（nodes.id 是全局主键，避免与其他用户冲突）
+        if self._node_id_exists_globally(node_id):
             raise ValueError(f"节点 ID 已存在：{node_id}")
 
         tags_json = json.dumps(node_data.get("tags", []), ensure_ascii=False)
@@ -566,14 +687,15 @@ class KnowledgeGraph:
 
         with self._conn:
             self._conn.execute("""
-                INSERT INTO nodes (id, name, file_path, tags, summary, mastery,
+                INSERT INTO nodes (id, name, file_path, tags, board, summary, mastery,
                                    difficulty, estimated_minutes, added_by, created_at, confidence, user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 node_id,
                 node_data.get("name", ""),
                 file_path,
                 tags_json,
+                node_data.get("board", ""),
                 node_data.get("summary", ""),
                 node_data.get("mastery", 0),
                 node_data.get("difficulty", 3),
@@ -649,7 +771,7 @@ class KnowledgeGraph:
 
         # 动态构建 UPDATE，只改传入的字段
         allowed_fields = {
-            "name", "tags", "summary", "mastery", "difficulty",
+            "name", "tags", "board", "summary", "mastery", "difficulty",
             "estimated_minutes", "added_by", "confidence"
         }
         updates = {}

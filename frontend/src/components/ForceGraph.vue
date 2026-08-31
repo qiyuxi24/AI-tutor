@@ -14,6 +14,7 @@ import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import * as d3 from 'd3'
 import ContextMenu from './ContextMenu.vue'
 import EditDialog from './EditDialog.vue'
+import { notifyError } from '../utils/feedback'
 
 /* ================================================================
    组件 Props
@@ -580,7 +581,7 @@ function clearDrawingMode() {
 async function handleDrawingTarget(targetNodeId) {
   const sourceId = drawingSourceId.value
   if (targetNodeId === sourceId) {
-    alert('不能连接到自身')
+    notifyError('不能连接到自身')
     clearDrawingMode()
     return
   }
@@ -941,7 +942,7 @@ defineExpose({ focusNode })
    缩放控制
    ================================================================ */
 .zoom-controls {
-  position: absolute; top: 12px; left: 12px;
+  position: absolute; bottom: 20px; right: 16px;
   display: flex; flex-direction: column; align-items: center; gap: 4px; z-index: 20;
 }
 .zoom-btn {

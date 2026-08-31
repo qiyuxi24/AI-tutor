@@ -70,15 +70,23 @@ export const appendProfile = (content) =>
  * @param {Function} callbacks.onToken - 收到新 token 时调用 (token: string)
  * @param {Function} callbacks.onDone - 流式完成时调用 (fullReply: string)
  * @param {Function} callbacks.onError - 出错时调用 (error: string)
+ * @param {string} currentNode - 递归模式当前节点 ID
+ * @param {Object|null} kb - 知识库上下文范围 {nodeIds: [], name: string}
  * @returns {AbortController} 用于取消请求
  */
-export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = '') => {
+export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = '', kb = null) => {
   const controller = new AbortController()
   const { onToken, onDone, onError } = callbacks
 
   const token = localStorage.getItem('ai_tutor_token')
 
-  const body = JSON.stringify({ messages, mode, current_node: currentNode })
+  const body = JSON.stringify({
+    messages,
+    mode,
+    current_node: currentNode,
+    kb_node_ids: kb?.nodeIds || null,
+    kb_node_name: kb?.name || null,
+  })
 
   const headers = { 'Content-Type': 'application/json' }
   if (token) {

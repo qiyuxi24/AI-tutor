@@ -4,30 +4,22 @@ JWT 认证模块
 - JWT token 生成/解析
 - 获取当前登录用户的依赖注入
 """
-import os
 from datetime import datetime, timedelta
-from pathlib import Path
-from dotenv import load_dotenv
 from jose import JWTError, jwt
 import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+from app.core.config import settings
 from app.core.error_codes import ErrorCode, log_error
-
-# 加载 .env 文件（使用相对于本文件的绝对路径，确保无论从哪个目录启动都能找到）
-_ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
-if _ENV_PATH.exists():
-    load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
 # OAuth2 密码流，tokenUrl 指向登录接口
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
-# JWT 配置（SECRET_KEY 必须在环境变量中配置，否则拒绝启动）
-SECRET_KEY = os.getenv("SECRET_KEY")
-if not SECRET_KEY:
-    raise RuntimeError("SECRET_KEY 环境变量未配置，服务拒绝启动。请在 .env 中添加强随机密钥。")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 小时
+# JWT 配置（统一从 Settings 读取，SECRET_KEY 缺失时校验拒绝启动）
+settings.require_secret_key()
+SECRET_KEY = settings.secret_key
+ALGORITHM = settings.jwt_algorithm
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.access_token_expire_minutes
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

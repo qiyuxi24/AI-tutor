@@ -1,12 +1,4 @@
 import logging
-import os
-import traceback
-from pathlib import Path
-from dotenv import load_dotenv
-
-# 加载 .env 文件（从 backend/ 目录向上查找，确保无论从哪个目录启动都能找到）
-_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +8,10 @@ from app.api.v1.knowledge import router as knowledge_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.conversations import router as conversations_router
 from app.api.v1.profile import router as profile_router
+from app.api.v1.rag import router as rag_router
+from app.api.v1.kb import router as kb_router
+from app.api.v1.quiz import router as quiz_router
+from app.core.config import settings
 from app.core.error_codes import ErrorCode, log_error
 
 # 配置 "ai-tutor" 日志器，输出到控制台（FastAPI/Uvicorn 默认输出目标）
@@ -27,12 +23,14 @@ logging.basicConfig(
 
 app = FastAPI(title="AI Tutor API", version="0.1.0")
 
-# 允许前端跨域
+# ════════════════════════════════════════════
+#  CORS 跨域配置（白名单/方法/头从统一 Settings 读取）
+# ════════════════════════════════════════════
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.cors_allow_origins,
+    allow_methods=settings.cors_allow_methods,
+    allow_headers=settings.cors_allow_headers,
 )
 
 # 注册路由
@@ -41,6 +39,9 @@ app.include_router(knowledge_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(conversations_router, prefix="/api/v1")
 app.include_router(profile_router, prefix="/api/v1")
+app.include_router(rag_router, prefix="/api/v1")
+app.include_router(kb_router, prefix="/api/v1")
+app.include_router(quiz_router, prefix="/api/v1")
 
 
 # ════════════════════════════════════════════
@@ -96,7 +97,7 @@ async def ensure_default_admin():
         ).fetchone()
 
         if not existing:
-            default_password = os.getenv("DEFAULT_ADMIN_PASSWORD")
+            default_password = settings.default_admin_password
             if not default_password:
                 logging.getLogger("ai-tutor").warning(
                     "未设置 DEFAULT_ADMIN_PASSWORD 环境变量，无法创建默认管理员账户"

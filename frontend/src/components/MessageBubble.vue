@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue'
-import { marked } from 'marked'
+import { renderMarkdown } from '../utils/markdown.js'
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -15,7 +15,7 @@ const bubbleRef = ref(null)
 
 const renderedContent = computed(() => {
   if (isUser.value) return props.message.content
-  return marked(props.message.content || '', { breaks: true })
+  return renderMarkdown(props.message.content)
 })
 
 /**
@@ -137,11 +137,11 @@ watch(renderedContent, () => {
   align-items: center;
   justify-content: center;
   font-size: 16px;
-  background: #f1f5f9;
+  background: var(--color-bg-surface);
 }
 
 .user-avatar {
-  background: #eef2ff;
+  background: var(--color-accent-light);
 }
 
 .bubble {
@@ -153,14 +153,14 @@ watch(renderedContent, () => {
 }
 
 .user-bubble {
-  background: #4f46e5;
-  color: #ffffff;
+  background: var(--color-accent);
+  color: var(--color-text-inverse);
   border-bottom-right-radius: 4px;
 }
 
 .ai-bubble {
-  background: #f1f5f9;
-  color: #1e293b;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
   border-bottom-left-radius: 4px;
 }
 
@@ -182,7 +182,7 @@ watch(renderedContent, () => {
 }
 
 .markdown-body :deep(code) {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--color-bg-hover);
   padding: 2px 6px;
   border-radius: 4px;
   font-family: 'Consolas', 'Courier New', monospace;
@@ -190,8 +190,8 @@ watch(renderedContent, () => {
 }
 
 .markdown-body :deep(pre) {
-  background: #1e293b;
-  color: #e2e8f0;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
   padding: 14px 16px;
   border-radius: 10px;
   overflow-x: auto;
@@ -217,11 +217,11 @@ watch(renderedContent, () => {
 }
 
 .markdown-body :deep(blockquote) {
-  border-left: 3px solid #4f46e5;
+  border-left: 3px solid var(--color-accent);
   margin: 8px 0;
   padding: 4px 12px;
-  color: #64748b;
-  background: rgba(79, 70, 229, 0.04);
+  color: var(--color-text-secondary);
+  background: var(--color-accent-light);
   border-radius: 0 6px 6px 0;
 }
 
@@ -231,25 +231,25 @@ watch(renderedContent, () => {
 }
 
 .markdown-body :deep(a) {
-  color: #4f46e5;
+  color: var(--color-accent);
   text-decoration: underline;
 }
 
 /* 知识节点可点击链接 */
 .markdown-body :deep(.kg-link) {
-  color: #4f46e5;
+  color: var(--color-accent);
   font-weight: 500;
   cursor: pointer;
-  border-bottom: 1.5px dashed #a5b4fc;
+  border-bottom: 1.5px dashed var(--color-accent-light);
   transition: color 0.15s, border-color 0.15s, background 0.15s;
   padding: 0 2px;
   border-radius: 2px;
 }
 
 .markdown-body :deep(.kg-link:hover) {
-  color: #3730a3;
-  border-bottom-color: #4f46e5;
-  background: rgba(79, 70, 229, 0.06);
+  color: var(--color-accent-hover);
+  border-bottom-color: var(--color-accent);
+  background: var(--color-accent-light);
 }
 
 .markdown-body :deep(table) {
@@ -261,13 +261,13 @@ watch(renderedContent, () => {
 
 .markdown-body :deep(th),
 .markdown-body :deep(td) {
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--color-border);
   padding: 6px 10px;
   text-align: left;
 }
 
 .markdown-body :deep(th) {
-  background: #f8fafc;
+  background: var(--color-bg-surface);
   font-weight: 600;
 }
 
@@ -282,7 +282,7 @@ watch(renderedContent, () => {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #94a3b8;
+  background: var(--color-text-tertiary);
   animation: typingBounce 1.2s ease-in-out infinite;
 }
 

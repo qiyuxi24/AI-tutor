@@ -17,6 +17,8 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage] # 全部对话历史
     mode: GuideMode             # 引导模式
     current_node: Optional[str] = None  # 递归模式：当前正在教学的知识点 ID
+    kb_node_ids: Optional[List[int]] = None  # 知识库上下文范围：选中的文件/文件夹节点 ID
+    kb_node_name: Optional[str] = None       # 当前选中的知识库范围名称（用于提示词）
 
 class ChatResponse(BaseModel):
     """后端返回给前端的响应体"""

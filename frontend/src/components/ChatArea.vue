@@ -92,7 +92,7 @@ const greetingMessages = [
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: #ffffff;
+  background: var(--color-bg-primary);
   min-width: 0;
 }
 
@@ -108,7 +108,7 @@ const greetingMessages = [
 }
 
 .message-list::-webkit-scrollbar-thumb {
-  background: #e2e8f0;
+  background: var(--color-border-light);
   border-radius: 3px;
 }
 
@@ -120,7 +120,7 @@ const greetingMessages = [
   justify-content: center;
   height: 100%;
   text-align: center;
-  color: #94a3b8;
+  color: var(--color-text-muted);
 }
 
 .welcome-icon {
@@ -132,7 +132,7 @@ const greetingMessages = [
 .welcome h3 {
   font-size: 22px;
   font-weight: 600;
-  color: #334155;
+  color: var(--color-text-primary);
   margin: 0 0 8px;
 }
 
@@ -149,7 +149,7 @@ const greetingMessages = [
   align-items: center;
   gap: 10px;
   padding: 12px 16px;
-  color: #64748b;
+  color: var(--color-text-secondary);
   font-size: 14px;
 }
 
@@ -157,7 +157,7 @@ const greetingMessages = [
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #4f46e5;
+  background: var(--color-accent);
   animation: pulse 1.2s ease-in-out infinite;
 }
 

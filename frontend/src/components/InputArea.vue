@@ -87,9 +87,9 @@ function handleKeydown(e) {
 
 <style scoped>
 .input-area {
-  border-top: 1px solid #e5e7eb;
+  border-top: 1px solid var(--color-border);
   padding: 16px 24px 20px;
-  background: #ffffff;
+  background: var(--color-bg-primary);
 }
 
 /* 模式选择 */
@@ -102,7 +102,7 @@ function handleKeydown(e) {
 
 .mode-label {
   font-size: 13px;
-  color: #6b7280;
+  color: var(--color-text-secondary);
   white-space: nowrap;
 }
 
@@ -114,19 +114,19 @@ function handleKeydown(e) {
 .mode-select {
   appearance: none;
   padding: 5px 28px 5px 12px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--color-border);
   border-radius: 8px;
   font-size: 13px;
-  color: #374151;
-  background: #f9fafb;
+  color: var(--color-text-primary);
+  background: var(--color-bg-surface);
   cursor: pointer;
   outline: none;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .mode-select:focus {
-  border-color: #4f46e5;
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-light);
 }
 
 .select-arrow {
@@ -135,7 +135,7 @@ function handleKeydown(e) {
   top: 50%;
   transform: translateY(-50%);
   pointer-events: none;
-  color: #9ca3af;
+  color: var(--color-text-tertiary);
 }
 
 /* 输入行 */
@@ -148,25 +148,27 @@ function handleKeydown(e) {
 .input-textarea {
   flex: 1;
   resize: none;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 12px 16px;
   font-size: 14px;
   line-height: 1.5;
   font-family: inherit;
   outline: none;
+  color: var(--color-text-primary);
+  background: var(--color-bg-secondary);
   transition: border-color 0.2s, box-shadow 0.2s;
   max-height: 120px;
   overflow-y: auto;
 }
 
 .input-textarea:focus {
-  border-color: #4f46e5;
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.08);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-light);
 }
 
 .input-textarea::placeholder {
-  color: #9ca3af;
+  color: var(--color-text-tertiary);
 }
 
 /* 发送按钮 */
@@ -181,16 +183,17 @@ function handleKeydown(e) {
   justify-content: center;
   cursor: pointer;
   transition: background 0.2s, transform 0.15s;
-  background: #d1d5db;
-  color: #ffffff;
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
 }
 
 .send-btn.active {
-  background: #4f46e5;
+  background: var(--color-accent);
+  color: var(--color-text-inverse);
 }
 
 .send-btn.active:hover {
-  background: #4338ca;
+  background: var(--color-accent-hover);
   transform: scale(1.05);
 }
 

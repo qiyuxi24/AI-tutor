@@ -64,12 +64,20 @@ export const useChatStore = defineStore('chat', () => {
   const mode = ref('adaptive')
   const currentNode = ref('')  // 递归模式：当前教学知识点 ID
   const loading = ref(false)
+  // 知识库上下文范围（用户选择放进对话上下文的文件/文件夹）
+  const kbContext = ref(null)
 
   // ─── 知识图谱状态 ───
   const knowledgeNodes = ref([])
   const knowledgeEdges = ref([])
   const graphLoaded = ref(false)
   const graphError = ref('')
+  // 学科维度：每个学科单独一张图，currentSubject=null 表示查看全部
+  const subjects = ref([])
+  const currentSubject = ref(null)
+  // 知识板块维度：学科之下的一级分组，currentBoard=null 表示查看整学科
+  const boards = ref([])           // 当前学科的板块列表 [{board, node_count, ...}]
+  const currentBoard = ref(null)   // 当前查看的板块名；null = 整学科
 
   // CRUD 操作后 3 秒内忽略 SSE 的 graph_updated 事件，避免双重刷新
   let sseSuppressTimer = null
@@ -157,7 +165,12 @@ export const useChatStore = defineStore('chat', () => {
   // ════════════════════════════════════════════════════════════════
 
   /**
-   * 从后端获取完整图谱数据，统一做字段映射。
+   * 从后端按需获取图谱数据，统一做字段映射。
+   * 请求粒度由当前学科/板块状态决定（middleware 按需切片）：
+   *   - 未选学科   → 全量
+   *   - 仅学科     → 整学科图
+   *   - 学科+板块  → 板块局部子图
+   *
    * 边的 source/target 在后端可能是 from_node/to_node，统一转为 source/target。
    *
    * @param {boolean} force - 强制刷新（忽略 graphLoaded 守卫）
@@ -165,7 +178,11 @@ export const useChatStore = defineStore('chat', () => {
   async function fetchGraph(force = false) {
     if (!force && graphLoaded.value) return
     try {
-      const { data } = await apiClient.get('/api/v1/knowledge/graph')
+      const params = {}
+      if (currentSubject.value) params.subject = currentSubject.value
+      // 板块按需切片：仅当已选学科且指定了板块才传 board
+      if (currentSubject.value && currentBoard.value) params.board = currentBoard.value
+      const { data } = await apiClient.get('/api/v1/knowledge/graph', { params })
       knowledgeNodes.value = (data.nodes || []).map(n => ({
         ...n,
         level: (n.tags || []).find(t => ['一级','二级','三级'].includes(t)) || '一级'
@@ -188,6 +205,83 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * 获取当前用户已有的所有学科列表。
+   */
+  async function fetchSubjects() {
+    try {
+      const { data } = await apiClient.get('/api/v1/knowledge/subjects')
+      subjects.value = data.subjects || []
+    } catch {
+      // 静默失败
+    }
+  }
+
+  /**
+   * 按需获取指定学科下的知识板块列表（含各板块节点数/掌握度统计）。
+   * @param {string} subject - 学科名
+   */
+  async function fetchBoards(subject) {
+    if (!subject) {
+      boards.value = []
+      return
+    }
+    try {
+      const { data } = await apiClient.get('/api/v1/knowledge/boards', { params: { subject } })
+      boards.value = data.boards || []
+    } catch {
+      boards.value = []
+    }
+  }
+
+  /**
+   * 切换当前查看的学科（每个学科单独一张图），并重置板块到"整学科"。
+   * @param {string|null} subject - 学科名；null 表示查看全部
+   */
+  async function setSubject(subject) {
+    if (currentSubject.value === subject) return
+    currentSubject.value = subject || null
+    currentBoard.value = null            // 切换学科后回到整学科视图
+    graphLoaded.value = false
+    await fetchBoards(subject || null)   // 按需加载板块列表（学科导航用）
+    await fetchGraph(true)
+  }
+
+  /**
+   * 切换当前查看的知识板块（按需请求该板块局部子图，middleware 切片）。
+   * @param {string|null} board - 板块名；null 表示整学科
+   */
+  async function setBoard(board) {
+    if (currentBoard.value === board) return
+    currentBoard.value = board || null
+    graphLoaded.value = false
+    await fetchGraph(true)
+  }
+
+  /**
+   * 从学科书籍生成知识图谱（AI 直接写库），生成后刷新图谱。
+   *
+   * @param {string} subject - 学科名（如 '数据结构'）
+   * @param {number[]} nodeIds - KB 中的文件/文件夹节点 ID 列表
+   * @param {'subject'|'section'} mode - 生成模式
+   * @returns {Promise<Object>} 生成结果（created_nodes 等）
+   */
+  async function generateSubjectGraph(subject, nodeIds, mode = 'subject') {
+    const { data } = await apiClient.post('/api/v1/kb/graph/generate', {
+      subject,
+      mode,
+      node_ids: nodeIds,
+    }, { timeout: 300000 })  // 生成可能较慢
+    await fetchSubjects()
+    // 生成后自动切换到该学科视图
+    currentSubject.value = subject
+    currentBoard.value = null
+    graphLoaded.value = false
+    await fetchBoards(subject)   // 刷新板块列表（生成后节点可能带板块）
+    await fetchGraph(true)
+    return data
+  }
+
+  /**
    * 刷新图谱数据。
    * 强制重新 fetch，如果是用户操作触发的刷新则抑制 SSE 3 秒避免双重刷新。
    *
@@ -195,6 +289,8 @@ export const useChatStore = defineStore('chat', () => {
    */
   async function refreshGraph(fromUserAction = false) {
     graphLoaded.value = false
+    // 板块计数可能因 CRUD 变化，一并刷新（仅当已选学科时）
+    if (currentSubject.value) await fetchBoards(currentSubject.value)
     await fetchGraph(true)
     if (fromUserAction) {
       suppressSSE()
@@ -517,6 +613,11 @@ export const useChatStore = defineStore('chat', () => {
     persist()
   }
 
+  // ─── 设置知识库上下文范围 ───
+  function setKbContext(ctx) {
+    kbContext.value = ctx // ctx: { nodeIds: [], name: string } 或 null
+  }
+
   // ─── 流式请求的 AbortController（用于取消） ───
   let streamController = null
 
@@ -583,6 +684,7 @@ export const useChatStore = defineStore('chat', () => {
         },
       },
       currentNode.value,
+      kbContext.value,
     )
   }
 
@@ -593,6 +695,7 @@ export const useChatStore = defineStore('chat', () => {
     mode,
     currentNode,
     loading,
+    kbContext,
     currentConversation,
     currentMessages,
     currentTitle,
@@ -604,15 +707,21 @@ export const useChatStore = defineStore('chat', () => {
     switchConversation,
     deleteConversation,
     setMode,
+    setKbContext,
     send,
     // 图谱数据
     knowledgeNodes,
     knowledgeEdges,
     graphLoaded,
     graphError,
+    subjects,
+    currentSubject,
     fetchGraph,
     refreshGraph,
     fetchNodeDetail,
+    fetchSubjects,
+    setSubject,
+    generateSubjectGraph,
     // 图谱 CRUD（统一入口）
     createNode,
     updateNodeInfo,

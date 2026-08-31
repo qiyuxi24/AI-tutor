@@ -14,6 +14,7 @@
   E-KG-xxx    : 知识图谱核心（节点/边操作、文件读写等）
   E-CHAT-xxx  : 对话服务层（提示词构建、流程编排等）
   E-EVENT-xxx : 事件总线（SSE 推送、队列异常等）
+  E-QUIZ-xxx  : 出题模块（生成失败、格式异常、判分失败等）
   E-SYS-xxx   : 通用/系统级（文件 I/O、未知异常等）
 """
 
@@ -84,6 +85,18 @@ class ErrorCode:
     COMM_GATEWAY_TIMEOUT  = ("E-COMM-005", "后端网关超时 (504)，AI调用可能仍在处理中")
     COMM_SERVER_ERROR     = ("E-COMM-006", "后端内部错误 (5xx)，请查看服务端日志")
     COMM_UNKNOWN_RESPONSE = ("E-COMM-007", "后端返回了未预期的响应")
+
+    # ── 网页抓取层 (E-WEB) ──
+    WEB_FETCH_FAILED  = ("E-WEB-001", "网页抓取失败")
+    WEB_FETCH_TIMEOUT = ("E-WEB-002", "网页抓取超时")
+    WEB_FETCH_BLOCKED = ("E-WEB-003", "目标地址被安全策略拦截")
+
+    # ── 出题模块 (E-QUIZ) ──
+    QUIZ_GENERATE_FAILED   = ("E-QUIZ-001", "AI 出题失败，请稍后重试")
+    QUIZ_PARSE_ERROR       = ("E-QUIZ-002", "AI 出题返回格式异常")
+    QUIZ_GRADE_FAILED      = ("E-QUIZ-003", "判分失败，请稍后重试")
+    QUIZ_NOT_FOUND         = ("E-QUIZ-004", "题目不存在")
+    QUIZ_INVALID_TYPE      = ("E-QUIZ-005", "不支持的题型")
 
     # ── 通用/系统层 (E-SYS) ──
     # 仅保留纯系统级错误（文件 I/O、未知异常等）
