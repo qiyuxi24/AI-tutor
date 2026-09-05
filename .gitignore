@@ -70,6 +70,24 @@ backend/eval_data/prof_sparse/
 backend/eval_data/prof_writer/
 
 # ════════════════════════════════════════════
-# CodeBuddy
+# AI 编程助手 / 自动化工具产物
 # ════════════════════════════════════════════
 .codebuddy/
+.workbuddy/
+.playwright-cli/
+# Playwright 页面快照（根目录临时文件）
+/init.yaml
+/login.yaml
+
+# ════════════════════════════════════════════
+# 运行时数据 / 生成文件
+# ════════════════════════════════════════════
+# 备份文件
+*.bak
+# SQLite 运行时文件（WAL / 共享内存）
+*.db-shm
+*.db-wal
+# Whoosh 检索索引（可由知识库重建）
+whoosh_index/
+# 后端运行时数据（知识库索引、测验库等，可重建）
+backend/data/
