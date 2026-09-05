@@ -1,0 +1,49 @@
+# ═══════════════════════════════════════════════════════════════
+# AI Tutor Docker 编排
+# 用法：
+#   1. 复制根目录 .env.example 为 .env 并填入 DASHSCOPE_API_KEY / SECRET_KEY
+#   2. docker compose up -d --build
+#   3. 浏览器访问 http://服务器IP:8080
+# ═══════════════════════════════════════════════════════════════
+services:
+  ai-tutor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-tutor:latest
+    container_name: ai-tutor
+    restart: unless-stopped
+
+    # 宿主机 ${PORT} 端口 → 容器 80（Nginx）
+    ports:
+      - "${PORT:-8080}:80"
+
+    environment:
+      # LLM 服务（:? 语法：未配置直接报错，防止静默启动失败）
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:?请在根目录 .env 中配置 DASHSCOPE_API_KEY}
+      - MODEL_NAME=${MODEL_NAME:-qwen-plus}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      # JWT 签名密钥
+      - SECRET_KEY=${SECRET_KEY:?请在根目录 .env 中配置 SECRET_KEY}
+      # CORS（同源部署不需要；直连 8000 才需要放开）
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://localhost}
+      # 管理员初始密码（留空则不自动创建）
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-}
+
+    volumes:
+      # ── 运行时数据持久化（宿主机目录需预先创建；提示词模板 data/prompts 留在镜像内）──
+      # 知识图谱 + 节点 MD 文件
+      - ./data/knowledge:/app/data/knowledge
+      # 对话历史
+      - ./data/conversations:/app/data/conversations
+      # 用户画像
+      - ./data/profiles:/app/data/profiles
+      # 上传知识库(RAG) + 出题数据（backend/data 下）
+      - ./backend/data:/app/backend/data
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

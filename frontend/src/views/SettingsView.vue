@@ -8,8 +8,11 @@
  *   - 账号：用户信息、退出登录
  */
 
+import { ref, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import { useTheme } from '../utils/theme'
 import { useAuthStore } from '../stores/authStore'
+import { getProfile, saveProfileData } from '../api/index.js'
 
 const { mode, setTheme } = useTheme()
 const authStore = useAuthStore()
@@ -18,6 +21,50 @@ const emit = defineEmits(['replay-onboarding', 'logout'])
 
 function handleThemeChange(value) {
   setTheme(value)
+}
+
+// ─── 资源与版权（usage_mode，读写用户画像 preferences）───
+const usageMode = ref('personal')   // personal | commercial
+const usageSaving = ref(false)
+const usageLoaded = ref(false)
+
+const MODE_OPTIONS = [
+  { value: 'personal', title: '个人使用', desc: '采集 L0 / L1 / L2 资料，仅用于个人学习（默认）' },
+  { value: 'commercial', title: '发布 / 商用', desc: '仅采 L0 开放授权资料，规避商用版权风险' },
+]
+
+onMounted(async () => {
+  try {
+    const { data } = await getProfile()
+    const prefs = data?.data?.preferences || {}
+    usageMode.value = prefs.usage_mode === 'commercial' ? 'commercial' : 'personal'
+  } catch {
+    // 读取失败保持默认 personal
+  } finally {
+    usageLoaded.value = true
+  }
+})
+
+async function handleUsageModeChange(value) {
+  if (!usageLoaded.value || usageSaving.value || usageMode.value === value) return
+  usageSaving.value = true
+  try {
+    // 复用 PATCH /profile：读取当前画像 → 合并 usage_mode → 全量保存（避免覆盖其他偏好）
+    const { data } = await getProfile()
+    const current = data?.data || {}
+    const merged = {
+      ...current,
+      preferences: { ...(current.preferences || {}), usage_mode: value },
+    }
+    await saveProfileData(merged)
+    usageMode.value = value
+    ElMessage.success(value === 'commercial' ? '已切换到发布 / 商用模式' : '已切换到个人使用模式')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message || '保存失败')
+    usageMode.value = value === 'commercial' ? 'personal' : 'commercial'
+  } finally {
+    usageSaving.value = false
+  }
 }
 </script>
 
@@ -41,6 +88,14 @@ function handleThemeChange(value) {
             <line x1="12" y1="17" x2="12.01" y2="17" />
           </svg>
           引导
+        </a>
+        <a class="sn-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          资源与版权
         </a>
         <a class="sn-item">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -116,6 +171,28 @@ function handleThemeChange(value) {
             <div class="sc-row-desc">重新查看产品功能介绍</div>
           </div>
           <button class="sc-btn" @click="emit('replay-onboarding')">重新查看</button>
+        </div>
+      </section>
+
+      <!-- 资源与版权 -->
+      <section class="sc-section">
+        <h3>资源与版权</h3>
+        <p class="usage-hint">用于「资源采集」页的授权范围与检索过滤；切换会即时保存到用户画像。</p>
+        <div v-for="opt in MODE_OPTIONS" :key="opt.value" class="sc-row">
+          <div class="sc-row-info">
+            <div class="sc-row-title">{{ opt.title }}</div>
+            <div class="sc-row-desc">{{ opt.desc }}</div>
+          </div>
+          <button
+            class="usage-radio"
+            :class="{ active: usageMode === opt.value }"
+            :disabled="usageSaving || !usageLoaded"
+            @click="handleUsageModeChange(opt.value)"
+          >
+            <span class="usage-dot" :class="{ on: usageMode === opt.value }"></span>
+            <span v-if="usageMode === opt.value">使用中</span>
+            <span v-else>选择</span>
+          </button>
         </div>
       </section>
 
@@ -309,5 +386,50 @@ function handleThemeChange(value) {
 .sc-btn.danger:hover {
   background: var(--color-red-light);
   color: var(--color-red);
+}
+
+/* ── 资源与版权 ── */
+.usage-hint {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin: -6px 0 14px;
+}
+
+.usage-radio {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.usage-radio:hover:not(.active) {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+.usage-radio.active {
+  background: var(--color-accent-light);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  font-weight: 500;
+}
+.usage-radio:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.usage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-border-light);
+}
+.usage-dot.on {
+  background: var(--color-accent);
 }
 </style>

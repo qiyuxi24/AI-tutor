@@ -39,10 +39,12 @@ class RagContext:
     query:      查询文本（通常是学生最新一条消息）
     top_k:      期望返回条数
     kb:         知识库范围 {node_ids: [...], name: str} | None（仅知识库源使用）
+    mode:       用途模式 "personal"（默认）/ "commercial"，商用模式源自行过滤非商用资料
     metadata:   附加上下文（如当前节点、教学模式等），供各源自行消费
     """
     user_id: int
     query: str
     top_k: int = 5
     kb: Optional[dict] = None
+    mode: str = "personal"
     metadata: dict[str, Any] = field(default_factory=dict)

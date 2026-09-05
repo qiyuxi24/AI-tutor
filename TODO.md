@@ -178,11 +178,13 @@
   - 后端：nodes 表加 subject 列，API 加 `?subject=xxx` 过滤
   - 前端：新增学科选择器（下拉/标签）
   - 已有数据迁移默认为 "default"
-- [ ] **学习进度仪表盘** — 关键指标概览
-  - 后端：新增 `/knowledge/stats?subject=xxx` API
+- [x] **学习进度仪表盘** — 关键指标概览（设计：docs/学习进度仪表盘设计.md，2026-08-31 完成）
+  - ✅ P0 图谱科技树化（2026-08-31）：四色掌握度着色 + 图例 + 学习路径高亮开关 + 薄弱点脉冲（ForceGraph.vue + chatStore）
+  - ✅ 后端：`/knowledge/stats?subject=xxx` API（graph_middleware.compute_stats，单一数据源=mastery 字段）
     - 返回：总节点数、已掌握节点数(>70)、学习中(0<70)、未学(=0)
     - 平均掌握度、预估总时长、已学时长
-  - 前端：HomeView 新增仪表盘面板，纯数值+进度条展示
+  - ✅ 前端：DashboardView 仪表盘面板，纯数值+进度条展示（学科卡片/薄弱点/下一步推荐 → 联动图谱聚焦）
+  - ✅ 修复学科切片悬空边：ForceGraph renderGraph 过滤两端不在节点集中的边（d3.forceLink "node not found" 崩溃）
 - [ ] **节点掌握度手动调整** — 用户可手动改掌握度
   - 现有 API PUT `/node/{id}/mastery`
   - 前端 NodeDetail 加手动调整滑块/按钮

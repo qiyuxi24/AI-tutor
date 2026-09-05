@@ -15,6 +15,7 @@
   E-CHAT-xxx  : 对话服务层（提示词构建、流程编排等）
   E-EVENT-xxx : 事件总线（SSE 推送、队列异常等）
   E-QUIZ-xxx  : 出题模块（生成失败、格式异常、判分失败等）
+  E-COLL-xxx  : 资源采集模块（任务不存在、执行失败等）
   E-SYS-xxx   : 通用/系统级（文件 I/O、未知异常等）
 """
 
@@ -97,6 +98,10 @@ class ErrorCode:
     QUIZ_GRADE_FAILED      = ("E-QUIZ-003", "判分失败，请稍后重试")
     QUIZ_NOT_FOUND         = ("E-QUIZ-004", "题目不存在")
     QUIZ_INVALID_TYPE      = ("E-QUIZ-005", "不支持的题型")
+
+    # ── 资源采集模块 (E-COLL) ──
+    COLL_TASK_NOT_FOUND = ("E-COLL-001", "采集任务不存在")
+    COLL_TASK_FAILED    = ("E-COLL-002", "采集任务创建失败，请稍后重试")
 
     # ── 通用/系统层 (E-SYS) ──
     # 仅保留纯系统级错误（文件 I/O、未知异常等）

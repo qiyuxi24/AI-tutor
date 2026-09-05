@@ -153,7 +153,7 @@ watch(renderedContent, () => {
 }
 
 .user-bubble {
-  background: var(--color-accent);
+  background: var(--color-chat-bubble-user, var(--color-accent));
   color: var(--color-text-inverse);
   border-bottom-right-radius: 4px;
 }

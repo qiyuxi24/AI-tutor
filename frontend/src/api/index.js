@@ -45,18 +45,30 @@ apiClient.interceptors.response.use(
 // 健康检查
 export const healthCheck = () => apiClient.get('/api/health')
 
-// ═══ 用户画像 ═══
+// ═══ 用户画像（结构化 v2）═══
 
-/** 获取用户画像（Markdown 格式） */
+/** 获取用户画像（渲染 Markdown + 结构化数据 + 完整度） */
 export const getProfile = () => apiClient.get('/api/v1/profile')
 
-/** 更新用户画像（全量替换） */
-export const updateProfile = (content) =>
-  apiClient.put('/api/v1/profile', { content, op: 'replace' })
+/** 兼容旧接口：以 Markdown 文本更新画像（全量替换 / 追加） */
+export const updateProfile = (content, op = 'replace') =>
+  apiClient.put('/api/v1/profile', { content, op })
 
-/** 追加内容到用户画像 */
+/** 追加内容到用户画像（解析合并，只补空缺字段 + 追加观察笔记） */
 export const appendProfile = (content) =>
   apiClient.put('/api/v1/profile', { content, op: 'append' })
+
+/** 结构化全量更新画像（表单编辑提交） */
+export const saveProfileData = (data) =>
+  apiClient.patch('/api/v1/profile', { data })
+
+/** 添加 AI 观察笔记（结构化，带时间戳） */
+export const addProfileNote = (content) =>
+  apiClient.post('/api/v1/profile/notes', { content })
+
+/** 删除观察笔记 */
+export const deleteProfileNote = (noteId) =>
+  apiClient.delete(`/api/v1/profile/notes/${noteId}`)
 
 /**
  * 流式发送对话消息（两阶段分离）

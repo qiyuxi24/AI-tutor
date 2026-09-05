@@ -125,11 +125,11 @@ KG_TOOLS = [
         "type": "function",
         "function": {
             "name": "update_user_profile",
-            "description": "更新学生用户画像。当你在教学中观察到学生的性格特点、学习习惯、知识薄弱点等新信息时，应主动更新用户画像，以便后续更好地个性化教学。",
+            "description": "更新学生用户画像。当你在教学中观察到学生的性格特点、学习习惯、知识薄弱点等新信息时，应主动更新用户画像，以便后续更好地个性化教学。每次调用会作为一条带时间戳的观察笔记记录到画像的「AI 教学笔记」部分；若本次观察与已有笔记内容重复，则无需再次记录。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "content": {"type": "string", "description": "要追加的用户画像内容（Markdown 格式）。应包含你观察到的学生信息，如：学习风格、知识薄弱点、性格特点、偏好等。会追加到现有画像的「AI 教学笔记」部分。"},
+                    "content": {"type": "string", "description": "本次观察到的学生信息（一句话到一小段均可），如：学习风格、知识薄弱点、性格特点、偏好等。避免重复记录已有内容。"},
                 },
                 "required": ["content"]
             }
@@ -323,8 +323,8 @@ def execute_kg_tool(tool_call, kg) -> str:
             from app.core.user_profile import UserProfile
             content = args["content"]
             profile = UserProfile(user_id=kg.user_id)
-            profile.update(content=content, mode="append")
-            return f"已更新用户画像"
+            note_id = profile.add_note(content, source="ai")
+            return f"已为用户画像新增观察笔记（{note_id}）"
 
         elif name == "fetch_webpage":
             url = args["url"]
@@ -407,6 +407,15 @@ def rag_search(query: str, source: str = "all",
     source = (source or "all").lower()
 
     from app.core.rag_pipeline import pipeline, RagContext
+
+    # 商用模式过滤同样作用于 agent 工具检索（读 user_profile，缺省 personal）
+    mode = "personal"
+    try:
+        from app.core.user_profile import UserProfile
+        mode = UserProfile(user_id=user_id).get_usage_mode()
+    except Exception:
+        mode = "personal"
+
     kb = None
     if source == "kb":
         # 仅检索知识库但用户未指定范围：需要全部上传文档（node_ids=None 表示全部）
@@ -415,7 +424,7 @@ def rag_search(query: str, source: str = "all",
         # 仅图谱：构造一个不触发 kb 源的 context（无 kb 则 KbRagSource.should_query=False）
         kb = None
 
-    ctx = RagContext(user_id=user_id, query=query, top_k=top_k, kb=kb)
+    ctx = RagContext(user_id=user_id, query=query, top_k=top_k, kb=kb, mode=mode)
     hits = _run_async(pipeline.run(ctx))
 
     # 按来源过滤（source=all 时保留全部）

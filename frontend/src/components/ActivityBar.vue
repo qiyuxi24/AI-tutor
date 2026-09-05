@@ -26,9 +26,11 @@ const showUserMenu = ref(false)
 
 const items = [
   { id: 'chat', title: '对话', icon: 'chat' },
+  { id: 'dashboard', title: '学习进度', icon: 'dashboard' },
   { id: 'graph', title: '知识图谱', icon: 'graph' },
   { id: 'knowledge', title: '知识库', icon: 'folder' },
   { id: 'quiz', title: '出题', icon: 'quiz' },
+  { id: 'resources', title: '资源采集', icon: 'resources' },
 ]
 
 function handleSelect(id) {
@@ -65,6 +67,11 @@ function handleUserMenu(action) {
         <svg v-if="item.icon === 'chat'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
         </svg>
+        <!-- 仪表盘图标（gauge） -->
+        <svg v-else-if="item.icon === 'dashboard'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m12 14 4-4" />
+          <path d="M3.34 19a10 10 0 1 1 17.32 0" />
+        </svg>
         <!-- 图谱图标 -->
         <svg v-else-if="item.icon === 'graph'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="6" cy="5" r="2.5" />
@@ -82,6 +89,12 @@ function handleUserMenu(action) {
         <svg v-else-if="item.icon === 'quiz'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M9 11l3 3L22 4" />
           <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+        </svg>
+        <!-- 资源采集图标（下载收集） -->
+        <svg v-else-if="item.icon === 'resources'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
         </svg>
       </button>
     </nav>

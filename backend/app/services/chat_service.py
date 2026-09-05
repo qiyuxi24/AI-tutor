@@ -180,8 +180,16 @@ async def _build_retrieval_context(student_message: str, user_id: int,
     """
     from app.core.rag_pipeline import pipeline, RagContext
 
+    # 商用/个人用途模式（读 user_profile.preferences.usage_mode，缺省 personal）
+    usage_mode = "personal"
+    try:
+        usage_mode = UserProfile(user_id=user_id).get_usage_mode()
+    except Exception as e:
+        logger.warning(f"读取用途模式失败，按 personal 处理: {e}")
+
     hits = await pipeline.run(RagContext(
         user_id=user_id, query=student_message, top_k=5, kb=kb,
+        mode=usage_mode,
     ))
 
     graph_hits = [h for h in hits if h.source == "graph"]

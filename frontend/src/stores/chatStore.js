@@ -79,6 +79,14 @@ export const useChatStore = defineStore('chat', () => {
   const boards = ref([])           // 当前学科的板块列表 [{board, node_count, ...}]
   const currentBoard = ref(null)   // 当前查看的板块名；null = 整学科
 
+  // 学习进度维度：科技树联动数据（拓扑排序路径 + 下一步推荐）
+  const learningPath = ref([])     // 按学习顺序排列的节点 [{id, name, mastery, difficulty, ...}]
+  const nextToLearn = ref(null)    // 下一步推荐节点 {node_id, name, mastery, reason}
+
+  // 学习进度统计（仪表盘）：聚合自图谱 mastery，单一数据源
+  const stats = ref(null)          // {overall, by_subject, weak_points, next_to_learn, total_nodes}
+  const statsLoading = ref(false)
+
   // CRUD 操作后 3 秒内忽略 SSE 的 graph_updated 事件，避免双重刷新
   let sseSuppressTimer = null
 
@@ -199,8 +207,59 @@ export const useChatStore = defineStore('chat', () => {
       }))
       graphLoaded.value = true
       graphError.value = ''
+      // 图谱变更 → 学习路径/下一步推荐/统计随之刷新（单一数据源 = 图谱）
+      fetchLearningPath()
+      fetchNextToLearn()
+      fetchStats(currentSubject.value)
     } catch (e) {
       graphError.value = clientError('GRAPH_LOAD')
+    }
+  }
+
+  /**
+   * 获取按学习顺序排列的拓扑路径（后端 Kahn 算法，mastery<50 优先）。
+   * 用于图谱"显示学习路径"高亮 + 仪表盘"下一步学什么"。
+   */
+  async function fetchLearningPath() {
+    try {
+      const { data } = await apiClient.get('/api/v1/knowledge/learning-path')
+      learningPath.value = data.nodes_detail && data.nodes_detail.length
+        ? data.nodes_detail
+        : (data.ordered_nodes || []).map(id => ({ id }))
+    } catch {
+      // 学习路径失败不影响图谱使用，静默降级
+      learningPath.value = []
+    }
+  }
+
+  /**
+   * 获取当前最应该学习的下一个知识点（后端拓扑排序 + 掌握度推荐）。
+   */
+  async function fetchNextToLearn() {
+    try {
+      const { data } = await apiClient.get('/api/v1/knowledge/next-to-learn')
+      nextToLearn.value = data
+    } catch {
+      nextToLearn.value = null
+    }
+  }
+
+  /**
+   * 获取学习进度聚合统计（仪表盘数据源）。
+   * 数据从图谱 mastery 聚合而来；图谱变更后应调用此方法刷新仪表盘。
+   * @param {string|null} subject - 学科名；null = 全局统计
+   */
+  async function fetchStats(subject = null) {
+    statsLoading.value = true
+    try {
+      const { data } = await apiClient.get('/api/v1/knowledge/stats', {
+        params: subject ? { subject } : {},
+      })
+      stats.value = data
+    } catch {
+      stats.value = null
+    } finally {
+      statsLoading.value = false
     }
   }
 
@@ -716,12 +775,25 @@ export const useChatStore = defineStore('chat', () => {
     graphError,
     subjects,
     currentSubject,
+    boards,
+    currentBoard,
+    setBoard,
+    fetchBoards,
     fetchGraph,
     refreshGraph,
     fetchNodeDetail,
     fetchSubjects,
     setSubject,
     generateSubjectGraph,
+    // 学习进度（科技树联动）
+    learningPath,
+    nextToLearn,
+    fetchLearningPath,
+    fetchNextToLearn,
+    // 学习进度统计（仪表盘）
+    stats,
+    statsLoading,
+    fetchStats,
     // 图谱 CRUD（统一入口）
     createNode,
     updateNodeInfo,

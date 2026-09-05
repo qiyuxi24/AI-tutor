@@ -98,18 +98,73 @@ class CreateEdgeRawRequest(BaseModel):
 
 
 # ================================================================
-# 用户画像相关
+# 用户画像相关（结构化 v2）
 # ================================================================
 
+class ProfileBasic(BaseModel):
+    """基本信息"""
+    name: str = ""                      # 姓名/昵称
+    age: str = ""                       # 年龄
+    stage: str = ""                     # 年级/阶段
+
+
+class ProfileLearning(BaseModel):
+    """学习状态"""
+    pace: str = ""                      # 学习节奏偏好
+    weekly_hours: str = ""              # 每周学习时间
+
+
+class ProfilePreferences(BaseModel):
+    """性格与偏好"""
+    personality: str = ""               # 性格特点
+    teaching_style_like: str = ""       # 喜欢的教学方式
+    teaching_style_avoid: str = ""      # 需要避免的方式
+    usage_mode: Literal["personal", "commercial"] = "personal"  # 版权使用模式（采集合规，personal=个人/commercial=商用）
+
+
+class ProfileNote(BaseModel):
+    """AI 观察笔记条目"""
+    id: str = ""                        # 笔记 ID
+    content: str = ""                   # 笔记内容
+    created_at: str = ""                # 创建时间 ISO
+    source: str = "ai"                  # 来源（ai / human）
+
+
+class ProfileData(BaseModel):
+    """完整结构化用户画像"""
+    version: int = 2
+    user_id: Optional[int] = None
+    created_at: str = ""
+    updated_at: str = ""
+    basic: ProfileBasic = Field(default_factory=ProfileBasic)
+    goals: List[str] = []               # 学习目标列表
+    knowledge_background: str = ""      # 知识背景
+    learning: ProfileLearning = Field(default_factory=ProfileLearning)
+    preferences: ProfilePreferences = Field(default_factory=ProfilePreferences)
+    ai_notes: List[ProfileNote] = []    # AI 观察笔记（带时间戳）
+
+
 class ProfileResponse(BaseModel):
-    """用户画像响应"""
-    content: str                        # Markdown 格式的画像内容
+    """用户画像响应（Markdown 渲染 + 结构化数据 + 完整度）"""
+    content: str                        # 渲染后的 Markdown 画像
+    data: ProfileData                   # 结构化画像数据
+    completeness: dict                  # {percent, filled, total, fields}
 
 
 class ProfileUpdateRequest(BaseModel):
-    """更新用户画像的请求体"""
-    content: str                        # 新的画像内容（Markdown）
+    """更新用户画像的请求体（兼容旧接口：Markdown 文本）"""
+    content: Optional[str] = None       # Markdown 内容
     op: Literal['replace', 'append'] = 'replace'  # 操作类型
+
+
+class ProfileDataUpdateRequest(BaseModel):
+    """结构化更新用户画像的请求体（PATCH）"""
+    data: ProfileData                   # 完整结构化画像数据
+
+
+class ProfileNoteCreateRequest(BaseModel):
+    """添加 AI 观察笔记的请求体"""
+    content: str                        # 笔记内容
 
 
 # ================================================================

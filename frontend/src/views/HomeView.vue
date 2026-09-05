@@ -30,7 +30,9 @@ import GraphSearch from '../components/GraphSearch.vue'
 import OnboardingGuide from '../components/OnboardingGuide.vue'
 import KnowledgeView from './KnowledgeView.vue'
 import QuizView from './QuizView.vue'
+import CollectorView from './CollectorView.vue'
 import SettingsView from './SettingsView.vue'
+import DashboardView from './DashboardView.vue'
 
 const store = useChatStore()
 const { currentSubject: currentSubjectSelect } = storeToRefs(store)
@@ -183,6 +185,25 @@ async function handleGraphSearchSelect(nodeId) {
   forceGraphRef.value?.focusNode(nodeId)
 }
 
+// ════════════════════════════════════════════════════════════════
+//  仪表盘联动：点击学科/薄弱点/推荐节点 → 切图谱并聚焦
+// ════════════════════════════════════════════════════════════════
+
+/** 仪表盘点击学科 → 切换学科并进入图谱视图 */
+async function handleDashboardGoGraph(subject) {
+  await handleSubjectChange(subject || null)
+}
+
+/** 仪表盘点击节点（薄弱点/推荐）→ 进入图谱并聚焦该节点 */
+async function handleDashboardGoNode(nodeId) {
+  if (viewMode.value !== 'graph') {
+    viewMode.value = 'graph'
+    // 切视图后等待布局/渲染完成再聚焦
+    await new Promise(r => setTimeout(r, 450))
+  }
+  forceGraphRef.value?.focusNode(nodeId)
+}
+
 /**
  * NodeDetail 中点击前置知识/相关节点 → 关闭弹窗并聚焦目标节点
  */
@@ -315,6 +336,8 @@ const slideTransition = {
             :edges="store.knowledgeEdges"
             :loading="!store.graphLoaded"
             :error="store.graphError"
+            :learning-path="store.learningPath"
+            :next-node-id="store.nextToLearn?.node_id || ''"
             @node-dblclick="handleNodeDblClick"
             @graph-action="handleGraphAction"
           />
@@ -326,6 +349,16 @@ const slideTransition = {
 
       <!-- 出题页 -->
       <QuizView v-if="viewMode === 'quiz'" />
+
+      <!-- 资源采集页 -->
+      <CollectorView v-if="viewMode === 'resources'" />
+
+      <!-- 学习进度仪表盘 -->
+      <DashboardView
+        v-if="viewMode === 'dashboard'"
+        @go-graph="handleDashboardGoGraph"
+        @go-node="handleDashboardGoNode"
+      />
 
       <!-- 设置页 -->
       <SettingsView
@@ -402,8 +435,7 @@ const slideTransition = {
   width: 22px;
   height: 52px;
   border: 1px solid var(--color-border);
-  border-left: none;
-  border-radius: 0 7px 7px 0;
+  border-radius: 7px;
   background: var(--color-bg-primary);
   color: var(--color-text-tertiary);
   cursor: pointer;
@@ -417,12 +449,9 @@ const slideTransition = {
 .conv-toggle-btn {
   left: 260px;
 }
-/* 收起态：按钮移到内容区左边缘，圆角镜像 */
+/* 收起态：按钮移到内容区左边缘，形状保持不变，仅内部箭头翻转 */
 .conv-toggle-btn.collapsed {
   left: 0;
-  border-left: 1px solid var(--color-border);
-  border-right: none;
-  border-radius: 7px 0 0 7px;
 }
 .conv-toggle-btn:hover {
   background: var(--color-bg-surface);

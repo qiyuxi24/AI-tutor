@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,7 @@ from app.api.v1.profile import router as profile_router
 from app.api.v1.rag import router as rag_router
 from app.api.v1.kb import router as kb_router
 from app.api.v1.quiz import router as quiz_router
+from app.api.v1.collector import router as collector_router
 from app.core.config import settings
 from app.core.error_codes import ErrorCode, log_error
 
@@ -42,6 +44,7 @@ app.include_router(profile_router, prefix="/api/v1")
 app.include_router(rag_router, prefix="/api/v1")
 app.include_router(kb_router, prefix="/api/v1")
 app.include_router(quiz_router, prefix="/api/v1")
+app.include_router(collector_router, prefix="/api/v1")
 
 
 # ════════════════════════════════════════════

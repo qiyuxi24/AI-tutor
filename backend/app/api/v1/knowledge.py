@@ -622,6 +622,27 @@ async def get_next_to_learn(user_id: int = Depends(get_current_user)):
         kg.close()
 
 
+@router.get("/knowledge/stats")
+async def get_stats(subject: str | None = Query(None, description="可选：只统计指定学科，如'数据结构'"),
+                    user_id: int = Depends(get_current_user)):
+    """
+    学习进度聚合统计（仪表盘数据源）。
+
+    数据全部从图谱 mastery 聚合而来（单一数据源），不建独立进度表：
+        - overall:        全局（或指定学科）聚合
+        - by_subject:     按学科分组（subject=None 时返回）
+        - weak_points:    薄弱点 Top3（mastery=0，按难度降序）
+        - next_to_learn:  下一步学习推荐（复用已有逻辑）
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        return graph_middleware.compute_stats(kg, subject=subject or None)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取学习进度统计失败：{str(e)}")
+    finally:
+        kg.close()
+
+
 def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
                         tags: list | None = None, summary: str = "",
                         difficulty: int = 3, estimated_minutes: int = 15,

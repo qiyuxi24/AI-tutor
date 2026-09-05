@@ -97,6 +97,18 @@ class KbRagSource:
             file_node_ids.extend(collected)
         file_node_ids = list(set(file_node_ids))
 
+        # 商用模式白名单（决策 #23）：排除 自动采集/L2 子树文件后再检索。
+        # None = 无限制，保持现有 node_ids 语义；白名单为空 → 无可商用资料，跳过该源。
+        allowed = kb_manager.allowed_node_ids(ctx.user_id, ctx.mode)
+        if allowed is not None:
+            allowed_set = set(allowed)
+            file_node_ids = (
+                [f for f in file_node_ids if f in allowed_set]
+                if file_node_ids else allowed
+            )
+            if not file_node_ids:
+                return []
+
         results = await kb_manager.search(
             ctx.user_id, ctx.query,
             node_ids=file_node_ids or None,

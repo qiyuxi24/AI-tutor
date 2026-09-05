@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <!-- 主节点（AI 导师 / 目标知识点）径向渐变 -->
+    <radialGradient id="coreGrad" cx="0.38" cy="0.3" r="0.9">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="0.45" stop-color="#7c3aed"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </radialGradient>
+    <!-- 顶部高光 -->
+    <radialGradient id="glowGrad" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#ede9fe"/>
+    </radialGradient>
+    <!-- 连线渐变 -->
+    <linearGradient id="edgeGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#4338ca"/>
+    </linearGradient>
+    <!-- 基座节点渐变 -->
+    <linearGradient id="baseGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#312e81"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 图谱连线：上升三角形骨架（底边 + 两腰） -->
+  <path d="M 256 120 L 150 380 L 362 380 Z"
+        fill="none" stroke="url(#edgeGrad)"
+        stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 主节点：AI 导师 / 进阶目标（高亮渐变圆） -->
+  <circle cx="256" cy="120" r="104" fill="url(#coreGrad)"/>
+  <!-- 主节点高光 -->
+  <circle cx="228" cy="92" r="26" fill="url(#glowGrad)" opacity="0.75"/>
+
+  <!-- 主节点内：白色向上箭头 —— 导学/成长方向 -->
+  <path d="M 256 178 L 256 80 M 256 80 L 224 112 M 256 80 L 288 112"
+        fill="none" stroke="#ffffff" stroke-width="28"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 基座两个知识节点 -->
+  <circle cx="150" cy="380" r="60" fill="url(#baseGrad)"/>
+  <circle cx="362" cy="380" r="60" fill="url(#baseGrad)"/>
+</svg>

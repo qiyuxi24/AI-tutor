@@ -45,13 +45,13 @@ html.dark {
   --color-orange:         #fb923c;
   --color-purple:         #8b5cf6;
 
-  /* 对话区域 */
-  --color-chat-bg:        #ffffff;
-  --color-chat-bubble-ai: #f1f5f9;
-  --color-chat-bubble-user: #4f46e5;
-  --color-chat-text:      #1e293b;
-  --color-chat-subtle:    #94a3b8;
-  --color-chat-border:    #e5e7eb;
+  /* 对话区域（暗色系：气泡/输入区贴合暗底，用户气泡用柔和的紫） */
+  --color-chat-bg:          #1e1e2e;
+  --color-chat-bubble-ai:   #313244;
+  --color-chat-bubble-user: #7c3aed;
+  --color-chat-text:        #cdd6f4;
+  --color-chat-subtle:      #a6adc8;
+  --color-chat-border:      #313244;
 
   /* 图谱 */
   --color-graph-node:     #9ca3af;
@@ -111,7 +111,8 @@ html.dark {
   --color-text-secondary:  #495057;
   --color-text-tertiary:   #868e96;
   --color-text-muted:      rgba(33, 37, 41, 0.35);
-  --color-text-inverse:    #212529;
+  /* 强调色背景上的反色文字：无论主题如何，置于紫色背景上的文字恒为白色 */
+  --color-text-inverse:    #ffffff;
 
   --color-border:         #dee2e6;
   --color-border-light:   rgba(0, 0, 0, 0.12);
@@ -131,12 +132,13 @@ html.dark {
   --color-orange:         #f97316;
   --color-purple:         #7c3aed;
 
-  --color-chat-bg:        #ffffff;
-  --color-chat-bubble-ai: #f1f5f9;
-  --color-chat-bubble-user: #4f46e5;
-  --color-chat-text:      #1e293b;
-  --color-chat-subtle:    #94a3b8;
-  --color-chat-border:    #e2e8f0;
+  /* 对话区域（亮色系：用户气泡用更鲜艳的紫，与浅底区分明显） */
+  --color-chat-bg:          #ffffff;
+  --color-chat-bubble-ai:   #f1f5f9;
+  --color-chat-bubble-user: #6d28d9;
+  --color-chat-text:        #1e293b;
+  --color-chat-subtle:      #94a3b8;
+  --color-chat-border:      #e2e8f0;
 
   --color-graph-node:     #94a3b8;
   --color-graph-edge:     #cbd5e1;

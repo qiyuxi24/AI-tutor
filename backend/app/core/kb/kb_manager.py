@@ -470,10 +470,70 @@ class KbManager:
     def create_folder(self, user_id: int, name: str, parent_id: Optional[int]) -> int:
         return self._get_store(user_id).create_folder(user_id, name, parent_id)
 
+    def ensure_folder(self, user_id: int, parts: list[str]) -> int:
+        """
+        从根目录按 parts 逐级定位文件夹，不存在则创建，返回末级节点 ID。
+
+        供采集模块入库使用（目录树表达「自动采集/L{level}/{subject}」，零迁移）。
+        """
+        store = self._get_store(user_id)
+        parent: Optional[int] = None
+        for name in parts:
+            target = None
+            for ch in store.get_children(user_id, parent):
+                if ch["type"] == "folder" and ch["name"] == name:
+                    target = ch["id"]
+                    break
+            if target is None:
+                target = store.create_folder(user_id, name, parent)
+            parent = target
+        return parent
+
     def collect_files(self, user_id: int, node_id: int,
                       max_depth: Optional[int] = None) -> list[int]:
         """收集目录范围下的所有文件节点 ID（递归，可选深度限制）"""
         return self._get_store(user_id).collect_descendant_files(user_id, node_id, max_depth)
+
+    def allowed_node_ids(self, user_id: int, mode: str = "personal") -> Optional[list[int]]:
+        """
+        商用模式检索白名单（文件节点 ID 列表）；None = 不限制（保持现有全库语义）。
+
+        零迁移目录前缀过滤（决策 #23）：采集内容统一落 自动采集/L{level}/... 目录，
+        商用模式（仅 L0 开放授权可商用）把「自动采集/L2」（合理使用级，禁止商用）
+        整棵子树从检索范围排除；手动上传内容（目录树其余部分）不受影响。
+        该用户无任何 L2 内容时返回 None，检索方保持原路径零开销。
+        """
+        if mode != "commercial":
+            return None
+        excluded = self._license_excluded_files(user_id)
+        if not excluded:
+            return None
+        return [f for f in self._all_files(user_id) if f not in excluded]
+
+    def _license_excluded_files(self, user_id: int,
+                                root_name: str = "自动采集",
+                                level_names: tuple[str, ...] = ("L2",)) -> list[int]:
+        """收集 自动采集/{level_names} 目录链下的全部文件节点 ID（商用模式排除集）。"""
+        store = self._get_store(user_id)
+        excluded: set[int] = set()
+        for root in store.get_children(user_id, None):
+            if root["type"] != "folder" or root["name"] != root_name:
+                continue
+            for child in store.get_children(user_id, root["id"]):
+                if child["type"] == "folder" and child["name"] in level_names:
+                    excluded.update(store.collect_descendant_files(user_id, child["id"]))
+        return sorted(excluded)
+
+    def _all_files(self, user_id: int) -> list[int]:
+        """列出该用户 KB 全部文件节点 ID（含根目录直挂文件）。"""
+        store = self._get_store(user_id)
+        files: set[int] = set()
+        for node in store.get_children(user_id, None):
+            if node["type"] == "file":
+                files.add(node["id"])
+            else:
+                files.update(store.collect_descendant_files(user_id, node["id"]))
+        return sorted(files)
 
     def get_node(self, user_id: int, node_id: int) -> Optional[dict]:
         return self._get_store(user_id).get_node(node_id)

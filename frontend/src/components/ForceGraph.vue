@@ -10,7 +10,7 @@
  *   Store.knowledgeNodes/Edges → (props) → ForceGraph → (emit: graph-action) → HomeView
  */
 
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import * as d3 from 'd3'
 import ContextMenu from './ContextMenu.vue'
 import EditDialog from './EditDialog.vue'
@@ -26,6 +26,13 @@ const props = defineProps({
   error: { type: String, default: '' },
   autoRefresh: { type: Boolean, default: false },
   refreshInterval: { type: Number, default: 30000 },
+  // ── 科技树联动（学习进度） ──
+  // 按学习顺序排列的节点（拓扑路径），用于"显示学习路径"高亮
+  learningPath: { type: Array, default: () => [] },
+  // 下一步推荐节点 id（薄弱点脉冲标记）
+  nextNodeId: { type: String, default: '' },
+  // 外部强制显示学习路径（仪表盘联动用）
+  showPath: { type: Boolean, default: false },
 })
 
 /* ================================================================
@@ -61,6 +68,11 @@ const drawingEdgeMode = ref(false)
 const drawingSourceId = ref(null)
 let drawingWatchStop = null   // 跟踪 handleDrawingTarget 中创建的 watch，防止竞态泄漏
 
+// ── 科技树联动状态 ──
+// 本地"显示学习路径"开关；最终生效值 = 本地开关 OR 外部 props.showPath
+const pathVisible = ref(false)
+const pathVisibleFinal = computed(() => pathVisible.value || props.showPath)
+
 /* ================================================================
    D3 核心对象引用（不响应式）
    ================================================================ */
@@ -71,18 +83,33 @@ let zoomContainer = null
 let edgeHitLines = null
 let drawingTempLine = null
 let drawingMouseMoveHandler = null
+let nodeSelection = null   // 当前渲染的节点 group（路径高亮 / hover 恢复用）
+let linkSelection = null   // 当前渲染的边（路径高亮 / hover 恢复用）
 
 /* ================================================================
    工具函数
    ================================================================ */
 
 /**
- * 节点颜色：统一使用主题色系，根据掌握度微调透明度
- * 0% → 默认灰色（未学习），>0% → 主题色（已学习）
+ * 节点颜色：掌握度四档（科技树语义）
+ *   0      → 灰色  未开始（科技树暗色节点）
+ *   1-29   → 红色  薄弱（刚开始学）
+ *   30-69  → 黄色  学习中
+ *   70-100 → 绿色  已掌握
  */
 const NODE_RADIUS = 16
-const NODE_COLOR_DEFAULT = 'var(--color-graph-node)'
-const NODE_COLOR_LEARNED = 'var(--color-accent)'
+const NODE_COLOR_UNSTARTED = 'var(--color-graph-node)'
+const NODE_COLOR_WEAK = 'var(--color-red)'
+const NODE_COLOR_LEARNING = 'var(--color-yellow)'
+const NODE_COLOR_MASTERED = 'var(--color-green)'
+
+/** 掌握度分档：0 未开始 / 1 薄弱 / 2 学习中 / 3 已掌握 */
+function masteryLevel(mastery) {
+  if (mastery == null || mastery === 0) return 0
+  if (mastery < 30) return 1
+  if (mastery < 70) return 2
+  return 3
+}
 
 /**
  * 关系类型 → 中文短标签
@@ -113,8 +140,70 @@ function edgeDisplayColor(relation) {
 }
 
 function nodeFill(mastery) {
-  if (mastery == null || mastery === 0) return NODE_COLOR_DEFAULT
-  return NODE_COLOR_LEARNED
+  const level = masteryLevel(mastery)
+  if (level === 0) return NODE_COLOR_UNSTARTED
+  if (level === 1) return NODE_COLOR_WEAK
+  if (level === 2) return NODE_COLOR_LEARNING
+  return NODE_COLOR_MASTERED
+}
+
+/* ── 学习路径（科技树）辅助函数 ──
+   props.learningPath 支持两种形态：字符串 id 数组 或 节点对象数组
+   isPathEdge 要求边的 source→target 与路径顺序一致（前置在前）才高亮 */
+function getPathOrder(id) {
+  const lp = props.learningPath || []
+  for (let i = 0; i < lp.length; i++) {
+    const item = lp[i]
+    if (item === id || (item && item.id === id)) return i
+  }
+  return -1
+}
+
+function isPathNode(id) {
+  return getPathOrder(id) >= 0
+}
+
+function isPathEdge(edge) {
+  const s = edge.source?.id ?? edge.source
+  const t = edge.target?.id ?? edge.target
+  const si = getPathOrder(s)
+  const ti = getPathOrder(t)
+  // 与路径方向一致（前置 → 后置）的边才属于"该走的路"
+  return si >= 0 && ti >= 0 && si < ti
+}
+
+/** 路径边/节点默认样式（供初始渲染与 hover 恢复共用） */
+function linkDefaultColor(l) {
+  return pathVisibleFinal.value && isPathEdge(l) ? 'var(--color-accent)' : 'var(--color-graph-edge)'
+}
+function linkDefaultWidth(l) {
+  return pathVisibleFinal.value && isPathEdge(l) ? 2.6 : 1.2
+}
+function linkDefaultOpacity(l) {
+  return pathVisibleFinal.value && isPathEdge(l) ? 0.9 : 0.4
+}
+function nodeBodyStroke(d) {
+  if (pathVisibleFinal.value && isPathNode(d.id)) return 'var(--color-accent)'
+  return nodeFill(d.mastery)
+}
+function nodeBodyStrokeWidth(d) {
+  return pathVisibleFinal.value && isPathNode(d.id) ? 2.6 : 1
+}
+function nodeBodyStrokeOpacity(d) {
+  return pathVisibleFinal.value && isPathNode(d.id) ? 0.95 : 0.3
+}
+
+/** 按当前路径状态统一刷新边与节点样式（初始渲染 / 开关切换 / hover 恢复均走这里） */
+function applyPathHighlight() {
+  if (!nodeSelection || !linkSelection) return
+  linkSelection
+    .attr('stroke', linkDefaultColor)
+    .attr('stroke-width', linkDefaultWidth)
+    .attr('stroke-opacity', linkDefaultOpacity)
+  nodeSelection.select('.node-body')
+    .attr('stroke', nodeBodyStroke)
+    .attr('stroke-width', nodeBodyStrokeWidth)
+    .attr('stroke-opacity', nodeBodyStrokeOpacity)
 }
 
 function nodeOpacity(mastery) {
@@ -236,11 +325,13 @@ function initForceGraph(nodes, links) {
     .data(links)
     .enter()
     .append('line')
-    .attr('stroke', 'var(--color-graph-edge)')
-    .attr('stroke-width', 1.2)
-    .attr('stroke-opacity', 0.4)
+    .attr('stroke', linkDefaultColor)
+    .attr('stroke-width', linkDefaultWidth)
+    .attr('stroke-opacity', linkDefaultOpacity)
     .attr('marker-end', 'url(#arrowhead)')
     .style('pointer-events', 'none')
+
+  linkSelection = link
 
   // ── 连线（透明击中区） ──
   const hitGroup = zoomContainer.append('g')
@@ -290,15 +381,27 @@ function initForceGraph(nodes, links) {
     .filter((event) => event.button === 0)
   )
 
-  // ── 节点圆形（极简：纯色填充 + 细描边） ──
+  // ── 节点圆形（科技树四档配色 + 路径描边） ──
   node.append('circle')
     .attr('class', 'node-body')
     .attr('r', NODE_RADIUS)
     .attr('fill', d => nodeFill(d.mastery))
     .attr('opacity', d => nodeOpacity(d.mastery))
-    .attr('stroke', d => nodeFill(d.mastery))
-    .attr('stroke-width', 1)
-    .attr('stroke-opacity', 0.3)
+    .attr('stroke', nodeBodyStroke)
+    .attr('stroke-width', nodeBodyStrokeWidth)
+    .attr('stroke-opacity', nodeBodyStrokeOpacity)
+
+  // ── 薄弱点脉冲环（下一步推荐节点，扩散动画提示"从这里学起"） ──
+  node.append('circle')
+    .attr('class', 'node-pulse')
+    .attr('r', NODE_RADIUS)
+    .attr('fill', 'none')
+    .attr('stroke', 'var(--color-accent)')
+    .attr('stroke-width', 2)
+    .style('pointer-events', 'none')
+    .style('display', d => (d.id === props.nextNodeId ? null : 'none'))
+
+  nodeSelection = node
 
   // ── 节点名称（标签在节点右侧，Obsidian 风格） ──
   node.append('text')
@@ -365,27 +468,28 @@ function initForceGraph(nodes, links) {
       })
   })
 
-  node.on('mouseout', function () {
+  node.on('mouseout', function (event, d) {
     d3.select(this).select('.node-body')
       .transition().duration(200)
       .attr('r', NODE_RADIUS)
-      .attr('stroke-width', 1)
-      .attr('stroke-opacity', 0.3)
-      .attr('stroke', function () { return d3.select(this).attr('fill') })
+      .attr('stroke', nodeBodyStroke(d))
+      .attr('stroke-width', nodeBodyStrokeWidth(d))
+      .attr('stroke-opacity', nodeBodyStrokeOpacity(d))
 
     d3.select(this).select('.node-label')
       .transition().duration(200)
       .attr('font-weight', '500')
 
-    link.transition().duration(200)
-      .attr('stroke', 'var(--color-graph-edge)')
-      .attr('stroke-width', 1.2)
-      .attr('stroke-opacity', 0.4)
-
     node.select('.node-body').transition().duration(200)
       .attr('opacity', n => nodeOpacity(n.mastery))
     node.select('.node-label').transition().duration(200)
       .attr('opacity', 1)
+
+    // hover 结束后恢复"学习路径"高亮（若已开启），避免被 hover 效果覆盖
+    link.transition().duration(200)
+      .attr('stroke', linkDefaultColor)
+      .attr('stroke-width', linkDefaultWidth)
+      .attr('stroke-opacity', linkDefaultOpacity)
   })
 
   // ── 点击 / 双击 ──
@@ -463,13 +567,19 @@ function initForceGraph(nodes, links) {
 function renderGraph() {
   try {
     const nodes = (props.nodes || []).map(n => ({ ...n }))
-    const links = (props.edges || []).map((e) => ({
-      source: e.source || e.from_node || e.from,
-      target: e.target || e.to_node || e.to,
-      label: e.label || '',
-      relation: e.relation || '',
-      edgeId: e.edgeId,
-    }))
+    const nodeIdSet = new Set(nodes.map(n => n.id))
+    // 过滤悬空边：d3.forceLink 要求边两端节点必须存在，否则初始化直接抛
+    // "node not found"。按学科/板块切片时后端会保留跨学科边（保证子图连通
+    // 性可见），其中一端节点不在当前节点集中，必须在此丢弃。
+    const links = (props.edges || [])
+      .map((e) => ({
+        source: e.source || e.from_node || e.from,
+        target: e.target || e.to_node || e.to,
+        label: e.label || '',
+        relation: e.relation || '',
+        edgeId: e.edgeId,
+      }))
+      .filter(l => nodeIdSet.has(l.source) && nodeIdSet.has(l.target))
     if (nodes.length > 0 && containerRef.value) {
       initForceGraph(nodes, links)
     }
@@ -481,9 +591,10 @@ function renderGraph() {
 let lastGraphFingerprint = ''
 
 function graphFingerprint(nodes, edges) {
-  const nodeIds = (nodes || []).map(n => n.id).sort().join(',')
+  // 纳入 mastery / relation：掌握度或边类型变化也必须触发重绘（科技树四色依赖）
+  const nodeIds = (nodes || []).map(n => `${n.id}:${n.mastery}`).sort().join(',')
   const edgeKeys = (edges || []).map(e =>
-    `${e.source || e.from_node || e.from}->${e.target || e.to_node || e.to}`
+    `${e.source || e.from_node || e.from}->${e.target || e.to_node || e.to}:${e.relation || ''}`
   ).sort().join(',')
   return `${nodeIds}|${edgeKeys}`
 }
@@ -495,6 +606,15 @@ watch(() => [props.nodes, props.edges], () => {
     renderGraph()
   }
 }, { deep: true })
+
+// ── 科技树联动：路径开关 / 路径数据 / 推荐节点变化时增量刷新样式（不重建布局） ──
+watch(pathVisible, () => applyPathHighlight())
+watch(() => props.showPath, () => applyPathHighlight())
+watch(() => props.learningPath, () => applyPathHighlight())
+watch(() => props.nextNodeId, () => {
+  svgSelection?.selectAll('.node-pulse')
+    .style('display', d => (d.id === props.nextNodeId ? null : 'none'))
+})
 
 /* ================================================================
    右键菜单控制
@@ -829,6 +949,23 @@ defineExpose({ focusNode })
       <button class="zoom-btn zoom-reset" title="重置视图" @click="zoomReset">↺</button>
     </div>
 
+    <!-- 科技树图例 + 学习路径开关（底部中央） -->
+    <div v-if="props.nodes.length > 0" class="graph-legend">
+      <span class="legend-item"><span class="legend-dot dot-unstarted"></span>未开始</span>
+      <span class="legend-item"><span class="legend-dot dot-weak"></span>薄弱</span>
+      <span class="legend-item"><span class="legend-dot dot-learning"></span>学习中</span>
+      <span class="legend-item"><span class="legend-dot dot-mastered"></span>已掌握</span>
+      <span class="legend-divider"></span>
+      <button
+        class="path-toggle"
+        :class="{ active: pathVisibleFinal }"
+        :title="pathVisibleFinal ? '隐藏学习路径' : '显示学习路径（该走的路）'"
+        @click="pathVisible = !pathVisible"
+      >
+        <span class="path-toggle-dot"></span>学习路径
+      </button>
+    </div>
+
     <!-- 图谱更新提示 -->
     <transition name="fade">
       <div v-if="graphChanged" class="update-toast">
@@ -959,6 +1096,56 @@ defineExpose({ focusNode })
 .zoom-btn:hover { background: var(--color-bg-surface); color: var(--color-text-primary); border-color: var(--color-border); }
 .zoom-reset { font-size: 12px; margin-top: 4px; border-top: 1px solid var(--color-border-subtle); padding-top: 8px; }
 .zoom-level { font-size: 10px; color: var(--color-text-muted); user-select: none; padding: 2px 0; }
+
+/* ================================================================
+   科技树图例 + 学习路径开关（左下角）
+   ================================================================ */
+.graph-legend {
+  position: absolute; bottom: 16px; left: 16px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 12px;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  z-index: 20;
+  user-select: none;
+}
+.legend-item { display: flex; align-items: center; gap: 5px; }
+.legend-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.dot-unstarted { background: var(--color-graph-node); }
+.dot-weak { background: var(--color-red); }
+.dot-learning { background: var(--color-yellow); }
+.dot-mastered { background: var(--color-green); }
+.legend-divider { width: 1px; height: 14px; background: var(--color-border-subtle); }
+.path-toggle {
+  display: flex; align-items: center; gap: 6px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.path-toggle:hover { border-color: var(--color-accent); color: var(--color-text-primary); }
+.path-toggle.active {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-bg-primary);
+}
+.path-toggle-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-graph-edge); }
+.path-toggle.active .path-toggle-dot { background: var(--color-bg-primary); }
+
+/* 薄弱点脉冲环：推荐节点扩散动画 */
+.node-pulse { transform-origin: center; transform-box: fill-box; animation: nodePulse 2.2s ease-out infinite; }
+@keyframes nodePulse {
+  0%   { transform: scale(1);    opacity: 0.85; }
+  65%  { transform: scale(1.9);  opacity: 0; }
+  100% { transform: scale(1.9);  opacity: 0; }
+}
 
 /* ================================================================
    更新提示
