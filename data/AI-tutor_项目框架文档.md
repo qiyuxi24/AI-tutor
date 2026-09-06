@@ -1,6 +1,6 @@
-# AI-tutor 项目框架文档
+# TutorAgent 项目框架文档
 
-> 本文档由代码 review 自动生成，记录 AI-tutor 项目的完整架构、核心设计决策、API 清单和 Review 报告。
+> 本文档由代码 review 自动生成，记录 TutorAgent 项目的完整架构、核心设计决策、API 清单和 Review 报告。
 
 ---
 

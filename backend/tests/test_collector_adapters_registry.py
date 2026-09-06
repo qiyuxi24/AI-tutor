@@ -67,13 +67,15 @@ def test_builtin_adapters_registered():
     reg = get_registry()
     assert "wikipedia" in reg.names()
     assert "wikibooks" in reg.names()
+    assert "oiwiki" in reg.names()
     assert get_adapter("wikipedia") is reg.get("wikipedia")
-    assert {a.name for a in reg.all()} == {"wikipedia", "wikibooks"}
+    assert {a.name for a in reg.all()} == {"wikipedia", "wikibooks", "oiwiki"}
 
 
 def test_builtin_license_level_l0():
     assert get_adapter("wikipedia").license_level == "L0"
     assert get_adapter("wikibooks").license_level == "L0"
+    assert get_adapter("oiwiki").license_level == "L0"
 
 
 def test_abstract_adapter_raises():

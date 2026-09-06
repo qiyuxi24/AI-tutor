@@ -89,27 +89,30 @@
 ## Batch 2 — 切片整理（OI-wiki + 整书规则切章 + BM25-only 支持）
 
 ### B2.1 OI-wiki 适配器 [新文件] `adapters/oiwiki.py`
-- [ ] 按站点内置目录清单（`/ds`、`/math` 等）抓正文 → 转 MD 入库
-- [ ] 测试 mock：`test_oiwiki_adapter.py`
+- [x] 按站点内置目录清单（`/ds`、`/math` 等板块，源=mkdocs.yml 导航，含中文标题）抓正文 → 转 MD 入库（正文取仓库 raw .md，天然 MD，仅清理 `=== "C++"` 代码页签 / `???+` admonition / 相对图片后入库）
+- [x] 测试 mock：`test_oiwiki_adapter.py`（导航分板块发现/多词学科并集/单页命中/无关词空/断网空/fetch 清理断言；注册表内置断言更新为 3 源）；17 passed 全绿
+- [ ] **[需API] 真网联调**：`search("数据结构与算法")` 应返回 OI-wiki 数据结构/算法基础板块候选，fetch 首页正文入库无 MkDocs 残留语法（2026-09-05 已转 TODO.md P0 待议，暂缓）
 
-### B2.2 整书/长文规则切章 [新文件] `backend/app/core/collector/chapterizer.py`
-- [ ] 输入解析后长文本 + 目录锚点 → 按章节标题规则（`第X章`/`^\d+[.、]`）切块为独立文档
-- [ ] **不做 LLM 知识卡片**（决策 #22）：仅切章保留原文切片，总结由对话期 RAG 动态生成
-- [ ] 测试：`test_chapterizer.py`（中文多级编号、无目录兜底整段、越界防护）
+### B2.2 整书/长文规则切章 [新文件] `backend/app/core/collector/chapterizer.py` ✅ 2026-09-05
+- [x] 输入解析后长文本 + 目录锚点 → 按章节标题规则（`第X章`/`^\d+[.、]`）切块为独立文档
+- [x] **不做 LLM 知识卡片**（决策 #22）：仅切章保留原文切片，总结由对话期 RAG 动态生成
+- [x] 测试：`test_chapterizer.py`（中文多级编号、无目录兜底整段、越界防护）—— 13 passed 全绿
 
-### B2.3 入库文本质量下限 [改]
-- [ ] `[改] backend/app/core/kb/parsers/pdf.py` 或 `kb_manager.upload_and_index`：解析文本 < 200 字符 → warning「图片型/不可解析」，不入库（审查⑥边缘增强）
-- [ ] 测试：`test_low_text_reject.py`
+### B2.3 入库文本质量下限 [改] ✅ 2026-09-05
+- [x] `[改] backend/app/core/kb/kb_manager.py`：模块级 `MIN_PARSE_TEXT_LEN = 200` + `IMAGE_EXTS` 常量；`upload_and_index` 解析文本 `< 200` 字符 → `logger.warning`「图片型/不可解析」+ `ValueError` 不入库（放公共入库入口，覆盖 PDF/图片/md 全格式，审查⑥边缘增强；图片分支单独报「未识别到足够文字」）
+- [x] 测试：`backend/tests/test_low_text_reject.py`（3 用例：短文本拒绝且零落库 / 199 拒·200 收边界 / 空文档回归）
+- [x] `[改] backend/tests/test_collector_manager.py`：mock 正文加长 >200（原 195 字符低于新下限被拒，仅测试数据适配，非逻辑回归）
 
 ### B2.4 doc_chunks.embedding 可空（BM25-only）[改]
-- [ ] `[改] backend/app/core/kb/doc_vector_store.py`：`embedding` 列改 NULL 允许；`search` 只对非空向量行算相似度
-- [ ] `[改] kb_manager._index_document`：支持 `vectorize=False`（短文/题目只写 whoosh，不 embedding）
-- [ ] 迁移：`backend/scripts/migrate_embedding_nullable.py`（幂等 ALTER，不破坏现网数据）
-- [ ] 测试：`test_bm25_only_index.py`（短文档只进 whoosh、向量检索不报错、混合检索仍工作）
+- [x] `[改] backend/app/core/kb/doc_vector_store.py`：`embedding` 列改 NULL 允许；`search` 只对非空向量行算相似度
+- [x] `[改] kb_manager._index_document`：支持 `vectorize=False`（短文/题目只写 whoosh，不 embedding）
+- [x] 迁移：`backend/scripts/migrate_embedding_nullable.py`（幂等 ALTER，不破坏现网数据）
+- [x] 测试：`test_bm25_only_index.py`（短文档只进 whoosh、向量检索不报错、混合检索仍工作）
 
-### B2.5 切章入库管线 [新文件] `collector/pipeline_ingest.py`
-- [ ] 采集大文件 → chapterizer 切章 → 逐章 `upload_and_index(vectorize=True 或 False 按长度)` → 目录层级 `自动采集/L0/{subject}/{书名}/{章节}`
-- [ ] 测试：mock 全链路（`test_pipeline_ingest.py`）
+### B2.5 切章入库管线 [新文件] `collector/pipeline_ingest.py` ✅ 2026-09-05
+- [x] 采集大文件 → chapterizer 切章 → 逐章 `upload_and_index(vectorize=True 或 False 按长度)` → 目录层级 `自动采集/L0/{subject}/{书名}/{章节}`
+  - `ingest_book_chapters(user_id, subject, book_title, text, toc=(), license_level="L0", kb=)`：无章节边界整书退化单文档入 `{学科}` 目录（对齐 B1.3 路径）；有章则建 `{书名}` 子目录逐章入库；vectorize 按 `VECTORIZE_MIN_CHARS = CHUNK_SIZE(500)` 判定；残章（< MIN_PARSE_TEXT_LEN=200）跳过不落库；文件名 `_safe_name` 净化 + 冲突加序号
+- [x] 测试：`test_pipeline_ingest.py`（6 用例：逐章入书目录+长章向量化/短章 BM25-only、混合检索命中短章+纯向量不含短章、文件名净化、无边界退化单文档、超短/空安全、toc 精确切分）—— **238 passed 全绿**（9/5 实测）
 
 **Batch 2 验收**：PDF 教材 → 切章 → 分章入库可检索；短文不向量化但 BM25 命中。
 

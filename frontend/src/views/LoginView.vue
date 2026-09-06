@@ -131,8 +131,8 @@ async function handleSkipLogin() {
   <div class="login-page">
     <div class="login-card">
       <div class="login-header">
-        <h1 class="brand-title">AI Tutor</h1>
-        <p class="brand-subtitle">智能学习助手</p>
+        <h1 class="brand-title">TutorAgent</h1>
+        <p class="brand-subtitle">知识图谱驱动的自适应导学 Agent</p>
       </div>
 
       <h2 class="form-title">{{ isRegister ? '创建账号' : '登录账号' }}</h2>

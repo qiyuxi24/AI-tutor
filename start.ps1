@@ -1,5 +1,5 @@
 # ============================================================
-# AI Tutor 一键启动脚本 (PowerShell)
+# TutorAgent 一键启动脚本 (PowerShell)
 # 同时启动后端 (FastAPI) 和前端 (Vite Dev Server)
 # ============================================================
 
@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = $PSScriptRoot
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "   AI Tutor - 一键启动" -ForegroundColor Cyan
+Write-Host "   TutorAgent - 一键启动" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 

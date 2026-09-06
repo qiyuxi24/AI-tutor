@@ -38,10 +38,11 @@ def _cand(url: str, title: str = "", license_level: str = "L0") -> CollectCandid
 
 
 def _content(url: str) -> str:
-    """多段落正文，保证分块/向量化有意义"""
+    """多段落正文（>200 字符，满足 B2.3 入库文本质量下限），保证分块/向量化有意义"""
     paras = [f"# {url}", f"第一段：{url} 涉及的主题知识点说明。",
              f"第二段：补充示例与推导过程，帮助理解核心概念。",
-             f"第三段：总结要点与常见考点。" * 10]
+             f"第三段：总结要点与常见考点，如理解栈的后进先出特性、掌握入栈出栈等操作。"
+             * 10]
     return "\n\n".join(paras)
 
 

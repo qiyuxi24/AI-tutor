@@ -1,5 +1,5 @@
 # ============================================================
-# AI Tutor 一键安装依赖脚本 (PowerShell)
+# TutorAgent 一键安装依赖脚本 (PowerShell)
 # 安装所有后端 (Python) 和前端 (Node.js) 依赖
 # ============================================================
 
@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = $PSScriptRoot
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "   AI Tutor - 一键安装依赖" -ForegroundColor Cyan
+Write-Host "   TutorAgent - 一键安装依赖" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 

@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "user_id": 5,
+  "created_at": "2026-09-05T20:39:25",
+  "updated_at": "2026-09-05T20:40:01",
+  "basic": {
+    "name": "",
+    "age": "",
+    "stage": ""
+  },
+  "goals": [
+    "明确希望学习 Agent（智能体）开发。"
+  ],
+  "knowledge_background": "",
+  "learning": {
+    "pace": "",
+    "weekly_hours": ""
+  },
+  "preferences": {
+    "personality": "",
+    "teaching_style_like": "",
+    "teaching_style_avoid": "",
+    "usage_mode": "commercial"
+  },
+  "ai_notes": [
+    {
+      "id": "n_d77925f1cb",
+      "content": "学生表达了强烈的语言交流意愿（与外国人自由对话）。在教学过程中，我将尝试将枯燥的技术概念与其实际应用场景（如自动翻译、语音识别）建立联系，以提高其学习兴趣。",
+      "created_at": "2026-09-05T20:39:25",
+      "source": "ai"
+    }
+  ]
+}

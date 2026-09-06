@@ -1,4 +1,4 @@
-# AI Tutor Docker 部署指南
+# TutorAgent Docker 部署指南
 
 本项目已内置 Docker 化部署，一条命令即可在服务器上跑起来。
 

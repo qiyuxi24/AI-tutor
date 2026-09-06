@@ -10,6 +10,8 @@
 - doc_chunks: id, doc_id, node_id(文件夹节点), chunk_index, content,
               heading, embedding, user_id
   其中 node_id 是目录树中文件节点的 id（即 KbStore 的 nodes.id）
+  embedding 允许 NULL：短文/题目可只进 whoosh 稀疏索引（BM25-only），
+  此时向量检索跳过该行、混合检索仍经 BM25 命中（B2.4）。
 """
 
 import json
@@ -40,7 +42,7 @@ class DocVectorStore:
                     chunk_index INTEGER DEFAULT 0,
                     content    TEXT NOT NULL,
                     heading    TEXT DEFAULT '',
-                    embedding  TEXT NOT NULL,
+                    embedding  TEXT,              -- 可空：BM25-only 块置 NULL
                     user_id    INTEGER NOT NULL,
                     created_at TEXT DEFAULT (datetime('now'))
                 )
@@ -62,20 +64,22 @@ class DocVectorStore:
 
     def upsert_chunk(self, user_id: int, node_id: int, doc_id: int,
                      chunk_index: int, content: str, heading: str,
-                     embedding: list[float]) -> int:
+                     embedding: list[float] | None) -> int:
         """
-        插入片段及其向量。
+        插入片段；embedding 为 None 时写入 NULL（BM25-only，不进向量检索）。
 
         返回:
             新插入片段的 id（doc_chunks.id，即混合检索的统一主键 chunk_id）
         """
+        emb_json = None if embedding is None \
+            else json.dumps(embedding, ensure_ascii=False)
         with self._conn:
             cur = self._conn.execute("""
                 INSERT INTO doc_chunks (node_id, doc_id, chunk_index, content,
                                         heading, embedding, user_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (node_id, doc_id, chunk_index, content, heading,
-                  json.dumps(embedding, ensure_ascii=False), user_id))
+                  emb_json, user_id))
             return cur.lastrowid
 
     def delete_node_chunks(self, user_id: int, node_id: int) -> int:
@@ -143,6 +147,8 @@ class DocVectorStore:
 
         scored = []
         for row in rows:
+            if not row["embedding"]:
+                continue  # embedding 为 NULL（BM25-only 块）：向量检索跳过
             try:
                 vec = np.asarray(json.loads(row["embedding"]), dtype=np.float32)
             except (json.JSONDecodeError, TypeError):

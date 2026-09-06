@@ -36,6 +36,9 @@ logger = logging.getLogger("ai-tutor")
 EMBEDDING_MODEL = "text-embedding-v4"
 MAX_EMBED_CHARS = 6000
 MIN_SCORE = 0.25
+# B2.3 入库文本质量下限：解析文本低于该长度视为「图片型/扫描件/不可解析」，拒绝入库
+MIN_PARSE_TEXT_LEN = 200
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".gif")
 # 宽召回候选池大小：向量/BM25 各取多少进融合（业界标准 30~50，取 30 较保守）
 RECALL_TOP_K = 30
 # 通用分块参数
@@ -165,7 +168,8 @@ class KbManager:
     # ────────────────────────────────────────────
 
     async def upload_and_index(self, user_id: int, filename: str, content: bytes,
-                                parent_id: Optional[int]) -> int:
+                                parent_id: Optional[int],
+                                vectorize: bool = True) -> int:
         """
         上传文件并完成解析 + 向量化索引。
 
@@ -174,6 +178,7 @@ class KbManager:
             filename:  原始文件名
             content:   文件二进制内容
             parent_id: 上传到哪个文件夹（None=根目录）
+            vectorize: 是否向量化。False=短文/题目只写 whoosh（BM25-only，省 embedding）
 
         返回:
             文件节点 ID（在 KbStore 中的 nodes.id）
@@ -188,11 +193,18 @@ class KbManager:
             )
 
         text, _ = parse_document(filename, content)
-        if not text.strip():
-            # 区分"未识别到文字"（如图片无文字）与"解析为空"
-            if ext in (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".gif"):
-                raise ValueError("图片中未识别到文字，可能是纯图片/图表，无法提取文本")
-            raise ValueError("文档解析为空，可能是不支持的格式或空文件")
+        # B2.3 入库文本质量下限：解析文本过短（< 200 字符）视为「图片型/不可解析」，不入库
+        if len(text.strip()) < MIN_PARSE_TEXT_LEN:
+            logger.warning(
+                f"文档 {filename} 解析文本仅 {len(text.strip())} 字符"
+                f"（< {MIN_PARSE_TEXT_LEN}），疑似图片型/扫描件/不可解析，拒绝入库"
+            )
+            if ext in IMAGE_EXTS:
+                raise ValueError("图片中未识别到足够文字（纯图片/图表/清晰度不足），无法入库")
+            raise ValueError(
+                f"文档可提取文本过短（< {MIN_PARSE_TEXT_LEN} 字符），"
+                "疑似图片型/扫描件/不可解析，未入库"
+            )
 
         store = self._get_store(user_id)
         node_id = store.add_file(
@@ -205,12 +217,17 @@ class KbManager:
         )
 
         # 分块 + 向量化 + 入库
-        await self._index_document(user_id, node_id, text)
+        await self._index_document(user_id, node_id, text, vectorize=vectorize)
         return node_id
 
-    async def _index_document(self, user_id: int, node_id: int, text: str) -> int:
+    async def _index_document(self, user_id: int, node_id: int, text: str,
+                              vectorize: bool = True) -> int:
         """
-        将解析好的文档分块并向量化入库。返回分块数。
+        将解析好的文档分块并入库（向量库 + whoosh 稀疏索引）。返回分块数。
+
+        vectorize=True（默认）：块带向量入库；embedding 调用失败时自动退化为
+        BM25-only（embedding 写 NULL），不阻塞入库，保证关键词仍可检索。
+        vectorize=False：短文/题目只写 whoosh，不调用 embedding。
         """
         chunks = chunk_text(text)
         if not chunks:
@@ -221,16 +238,19 @@ class KbManager:
         # 同步清理 whoosh 稀疏索引
         self._get_sparse(user_id).delete_node_chunks(node_id)
 
-        texts = [c["content"] for c in chunks]
-        embeddings = await self._embed(texts)
-        if not embeddings:
-            return 0
+        embeddings: list[list[float]] = []
+        if vectorize:
+            embeddings = await self._embed([c["content"] for c in chunks])
+            if len(embeddings) != len(chunks):
+                # 嵌入结果与文本无法一一对齐（部分/全部失败）：整批退化 BM25-only，避免错位
+                embeddings = []
 
         doc_id = node_id  # 用节点 ID 作为 doc_id（一个文件一个 doc）
         sparse = self._get_sparse(user_id)
         # 先全部写入向量库（拿 chunk_id），再批量写 whoosh（一次 commit，避免逐条段合并开销）
         sparse_docs = []
-        for chunk, emb in zip(chunks, embeddings):
+        for i, chunk in enumerate(chunks):
+            emb = embeddings[i] if embeddings else None
             chunk_id = vec_store.upsert_chunk(
                 user_id=user_id,
                 node_id=node_id,

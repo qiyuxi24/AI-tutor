@@ -43,7 +43,7 @@ const currentStep = ref(0)
 const steps = [
   {
     icon: '✦',
-    title: '欢迎使用 AI Tutor',
+    title: '欢迎使用 TutorAgent',
     description: '你的专属 AI 学习伙伴，基于知识图谱的自适应学习系统。',
     features: [
       '对话式学习 — 像聊天一样探索知识',
