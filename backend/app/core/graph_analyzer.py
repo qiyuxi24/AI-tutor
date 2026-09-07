@@ -246,7 +246,6 @@ AI导师：{ai_reply}
             raw_response = await call_llm(
                 full_system_prompt,
                 analysis_messages,
-                enable_tools=False  # ← 关键：禁用 function calling，只要纯 JSON
             )
         except Exception as e:
             # LLM 调用失败时，记录错误并发布事件，返回空建议
@@ -384,7 +383,6 @@ AI导师：{ai_reply}
             raw_response = await call_llm(
                 self.DECOMPOSE_SYSTEM_PROMPT,
                 [{"role": "user", "content": decompose_prompt}],
-                enable_tools=False,
             )
         except Exception as e:
             logger.warning(f"问题拆解 LLM 调用失败: {e}")

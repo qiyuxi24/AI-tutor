@@ -133,7 +133,7 @@ class ApiEmbedder(BaseEmbedder):
             from openai import OpenAI
             self._client = OpenAI(
                 api_key=settings.dashscope_api_key,
-                base_url=settings.llm_base_url,
+                base_url=settings.embed_base_url,
             )
         return self._client
 

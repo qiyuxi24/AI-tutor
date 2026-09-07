@@ -80,6 +80,11 @@ export const deleteProfileNote = (noteId) =>
  * @param {string} mode - 引导模式
  * @param {Object} callbacks - 回调函数集合
  * @param {Function} callbacks.onToken - 收到新 token 时调用 (token: string)
+ * @param {Function} callbacks.onThinking - AI 思考过程 (text: string)
+ * @param {Function} callbacks.onToolStart - 工具开始执行 (data: {tool, args_head, round})
+ * @param {Function} callbacks.onToolResult - 工具执行完毕 (data: {tool, ok, summary, duration_ms, round})
+ * @param {Function} callbacks.onAgentStart - Agent 循环开始 (data: {max_rounds})
+ * @param {Function} callbacks.onAgentDone - Agent 循环结束 (data: {rounds, total_llm_calls})
  * @param {Function} callbacks.onDone - 流式完成时调用 (fullReply: string)
  * @param {Function} callbacks.onError - 出错时调用 (error: string)
  * @param {string} currentNode - 递归模式当前节点 ID
@@ -88,7 +93,7 @@ export const deleteProfileNote = (noteId) =>
  */
 export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = '', kb = null) => {
   const controller = new AbortController()
-  const { onToken, onDone, onError } = callbacks
+  const { onToken, onThinking, onToolStart, onToolResult, onAgentStart, onAgentDone, onDone, onError } = callbacks
 
   const token = localStorage.getItem('ai_tutor_token')
 
@@ -149,11 +154,31 @@ export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = 
 
           try {
             const parsed = JSON.parse(data)
+            // 旧兼容：token 事件（text_delta 转 token 格式）
             if (parsed.token) {
               fullReply += parsed.token
               onToken?.(parsed.token)
-            } else if (parsed.error) {
-              // 后端 SSE 推送的错误已带错误码，直接透传
+            }
+            // 新事件类型：按 type 字段路由
+            else if (parsed.type === 'thinking') {
+              onThinking?.(parsed.text || '')
+            }
+            else if (parsed.type === 'tool_start') {
+              onToolStart?.(parsed)
+            }
+            else if (parsed.type === 'tool_result') {
+              onToolResult?.(parsed)
+            }
+            else if (parsed.type === 'agent_start') {
+              onAgentStart?.(parsed)
+            }
+            else if (parsed.type === 'agent_done') {
+              onAgentDone?.(parsed)
+            }
+            else if (parsed.type === 'graph_updated') {
+              // 图谱更新：前端知识树刷新由 knowledgeStore 独立 SSE 处理，此处忽略
+            }
+            else if (parsed.error) {
               onError?.(parsed.error)
               return
             }

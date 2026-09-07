@@ -25,7 +25,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from app.core.llm_client import client
+from app.core.llm_client import embed_client as client  # 嵌入固定走阿里 text-embedding-v4
 from app.core.kb.kb_store import KbStore
 from app.core.kb.doc_vector_store import DocVectorStore
 from app.core.hybrid_search.whoosh_index import SparseIndex

@@ -10,8 +10,44 @@ const props = defineProps({
 const emit = defineEmits(['navigate-to-node'])
 
 const isUser = computed(() => props.message.role === 'user')
-const isStreaming = computed(() => !isUser.value && !props.message.content)
+const isStreaming = computed(() => !isUser.value && !props.message.content
+  && !(props.message.tools?.length) && !(props.message.thinking?.length))
 const bubbleRef = ref(null)
+
+// 工具/思考状态
+const hasTools = computed(() => !isUser.value && props.message.tools?.length > 0)
+const hasThinking = computed(() => !isUser.value && props.message.thinking?.length > 0)
+const showThinking = ref(false)
+
+// 工具图标映射
+const toolIcons = {
+  add_knowledge_node: '🔗',
+  update_node_content: '✏️',
+  update_mastery: '📊',
+  add_edge: '🔗',
+  delete_node: '🗑️',
+  update_user_profile: '👤',
+  fetch_webpage: '🌐',
+  rag_search: '🔍',
+}
+
+function getToolIcon(name) {
+  return toolIcons[name] || '🔧'
+}
+
+function getToolDisplayName(name) {
+  const names = {
+    add_knowledge_node: '添加节点',
+    update_node_content: '更新内容',
+    update_mastery: '更新掌握度',
+    add_edge: '添加关联',
+    delete_node: '删除节点',
+    update_user_profile: '更新画像',
+    fetch_webpage: '抓取网页',
+    rag_search: '知识检索',
+  }
+  return names[name] || name
+}
 
 const renderedContent = computed(() => {
   if (isUser.value) return props.message.content
@@ -27,7 +63,6 @@ function linkifyKnowledgeNodes() {
   const nodes = props.knowledgeNodes || []
   if (nodes.length === 0) return
 
-  // 收集所有节点名称，按长度降序（优先匹配长名称）
   const nodeNames = nodes
     .map(n => n.name)
     .filter(Boolean)
@@ -35,11 +70,9 @@ function linkifyKnowledgeNodes() {
 
   if (nodeNames.length === 0) return
 
-  // 构建正则：匹配任意一个节点名（全字匹配边界）
   const escaped = nodeNames.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
   const pattern = new RegExp(`(${escaped.join('|')})`, 'g')
 
-  // 在 body 的文本节点中查找替换
   const body = bubbleRef.value.querySelector('.markdown-body')
   if (!body) return
 
@@ -60,11 +93,9 @@ function linkifyKnowledgeNodes() {
     let match
 
     while ((match = pattern.exec(text)) !== null) {
-      // 前面的文本
       if (match.index > lastIndex) {
         fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)))
       }
-      // 可点击链接
       const span = document.createElement('span')
       span.className = 'kg-link'
       span.textContent = match[0]
@@ -77,7 +108,6 @@ function linkifyKnowledgeNodes() {
       lastIndex = pattern.lastIndex
     }
 
-    // 剩余文本
     if (lastIndex < text.length) {
       fragment.appendChild(document.createTextNode(text.slice(lastIndex)))
     }
@@ -86,7 +116,6 @@ function linkifyKnowledgeNodes() {
   }
 }
 
-// 当内容渲染完成后执行链接化
 watch(renderedContent, () => {
   nextTick(() => linkifyKnowledgeNodes())
 })
@@ -99,12 +128,49 @@ watch(renderedContent, () => {
     </div>
     <div class="bubble" :class="{ 'user-bubble': isUser, 'ai-bubble': !isUser }" ref="bubbleRef">
       <div v-if="isUser" class="text">{{ message.content }}</div>
-      <!-- 流式填充中：显示打字动画 -->
-      <div v-else-if="isStreaming" class="typing-indicator">
-        <span></span><span></span><span></span>
-      </div>
-      <!-- 流式内容渲染（完成后自动注入知识节点链接） -->
-      <div v-else class="markdown-body" v-html="renderedContent"></div>
+      <template v-else>
+        <!-- 工具活动区 -->
+        <div v-if="hasTools" class="tool-area">
+          <div
+            v-for="(tool, idx) in message.tools"
+            :key="idx"
+            class="tool-chip"
+            :class="{
+              'tool-running': tool.status === 'running',
+              'tool-done': tool.status === 'done',
+              'tool-error': tool.status === 'error',
+            }"
+          >
+            <span class="tool-icon">{{ getToolIcon(tool.tool) }}</span>
+            <span class="tool-name">{{ getToolDisplayName(tool.tool) }}</span>
+            <span v-if="tool.status === 'running'" class="tool-spinner"></span>
+            <span v-else-if="tool.status === 'done'" class="tool-status">✓ {{ tool.result?.duration_ms }}ms</span>
+            <span v-else-if="tool.status === 'error'" class="tool-status tool-status-error">✗</span>
+          </div>
+        </div>
+
+        <!-- 思考折叠面板 -->
+        <div v-if="hasThinking" class="thinking-panel">
+          <button class="thinking-toggle" @click="showThinking = !showThinking">
+            <span class="thinking-icon">💭</span>
+            <span class="thinking-label">AI 思考过程</span>
+            <span class="thinking-count">{{ message.thinking.length }} 段</span>
+            <span class="thinking-arrow" :class="{ expanded: showThinking }">▾</span>
+          </button>
+          <div v-show="showThinking" class="thinking-content">
+            <div v-for="(think, idx) in message.thinking" :key="idx" class="thinking-block">
+              {{ think }}
+            </div>
+          </div>
+        </div>
+
+        <!-- 流式填充中：显示打字动画 -->
+        <div v-if="isStreaming" class="typing-indicator">
+          <span></span><span></span><span></span>
+        </div>
+        <!-- 流式内容渲染 -->
+        <div v-else-if="message.content" class="markdown-body" v-html="renderedContent"></div>
+      </template>
     </div>
   </div>
 </template>
@@ -166,6 +232,148 @@ watch(renderedContent, () => {
 
 .text {
   white-space: pre-wrap;
+}
+
+/* ─── 工具活动区 ─── */
+.tool-area {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  animation: chipFadeIn 0.25s ease;
+}
+
+@keyframes chipFadeIn {
+  from { opacity: 0; transform: scale(0.85); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.tool-running {
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+  border: 1px solid var(--color-accent);
+}
+
+.tool-done {
+  background: rgba(16, 185, 129, 0.1);
+  color: rgb(5, 150, 105);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.tool-error {
+  background: rgba(239, 68, 68, 0.1);
+  color: rgb(220, 38, 38);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.tool-icon {
+  font-size: 13px;
+}
+
+.tool-name {
+  white-space: nowrap;
+}
+
+.tool-status {
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.tool-status-error {
+  font-weight: 700;
+}
+
+.tool-spinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── 思考折叠面板 ─── */
+.thinking-panel {
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  overflow: hidden;
+}
+
+.thinking-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  transition: background 0.15s;
+}
+
+.thinking-toggle:hover {
+  background: var(--color-bg-hover);
+}
+
+.thinking-icon {
+  font-size: 13px;
+}
+
+.thinking-label {
+  font-weight: 500;
+}
+
+.thinking-count {
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+.thinking-arrow {
+  margin-left: auto;
+  transition: transform 0.2s;
+  font-size: 10px;
+}
+
+.thinking-arrow.expanded {
+  transform: rotate(180deg);
+}
+
+.thinking-content {
+  padding: 8px 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.thinking-block {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  padding: 4px 0;
+  border-left: 2px solid var(--color-accent-light);
+  padding-left: 8px;
+  margin-bottom: 4px;
+  font-style: italic;
+}
+
+.thinking-block:last-child {
+  margin-bottom: 0;
 }
 
 /* Markdown 渲染样式 */
@@ -235,7 +443,6 @@ watch(renderedContent, () => {
   text-decoration: underline;
 }
 
-/* 知识节点可点击链接 */
 .markdown-body :deep(.kg-link) {
   color: var(--color-accent);
   font-weight: 500;

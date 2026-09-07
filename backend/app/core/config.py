@@ -12,8 +12,8 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 
-# 项目根目录（backend/.env），确保无论从哪个目录启动都能找到
-_ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
+# 唯一真值文件 = 项目根 .env（本地与 Docker 共源），确保无论从哪个目录启动都能找到
+_ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
 load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
 
@@ -35,11 +35,16 @@ def _parse_bool(value: str | None, default: bool = False) -> bool:
 class Settings:
     """应用全局配置。字段名与 .env 环境变量一一对应。"""
 
-    # ─── LLM 服务 ───
+    # ─── LLM 服务（对话/Agent 主模型，OpenAI 兼容）───
+    # dashscope_api_key 语义收紧为「阿里云 Key」：仅用于 text-embedding-v4 嵌入
     dashscope_api_key: str = ""
+    # 对话主模型专用 Key（接 MiniMax 等其它 OpenAI 兼容服务时填写；缺省回退 dashscope_api_key）
+    llm_api_key: str = ""
     model_name: str = "qwen-plus"
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_timeout: float = 120.0
+    # 嵌入服务地址（默认阿里云；与对话 base 分离，切换对话模型不影响嵌入）
+    embed_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     # ─── 认证 ───
     secret_key: str = ""
@@ -65,11 +70,15 @@ class Settings:
         """从环境变量构建配置（统一在此读取，含类型转换）。"""
         return cls(
             dashscope_api_key=os.getenv("DASHSCOPE_API_KEY", ""),
+            llm_api_key=os.getenv("LLM_API_KEY", ""),
             model_name=os.getenv("MODEL_NAME", "qwen-plus"),
             llm_base_url=os.getenv(
                 "LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
             ),
             llm_timeout=float(os.getenv("LLM_TIMEOUT", "120")),
+            embed_base_url=os.getenv(
+                "EMBED_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            ),
             secret_key=os.getenv("SECRET_KEY", ""),
             jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
             access_token_expire_minutes=int(

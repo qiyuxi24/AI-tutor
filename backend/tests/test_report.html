@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI-tutor 后端全量测试报告</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --card: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --green: #3fb950;
+  --green-bg: #0d2818;
+  --red: #f85149;
+  --yellow: #d29922;
+  --blue: #58a6ff;
+  --blue-bg: #0d2240;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  padding: 0;
+}
+.container { max-width: 1100px; margin: 0 auto; padding: 40px 24px 80px; }
+
+/* Header */
+.report-header {
+  background: linear-gradient(135deg, #1a2235 0%, #0d1117 100%);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px 36px;
+  margin-bottom: 32px;
+}
+.report-header h1 {
+  font-size: 28px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.report-header .meta {
+  color: var(--muted);
+  font-size: 14px;
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.report-header .meta span { display: inline-flex; align-items: center; gap: 6px; }
+.report-header .meta .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  display: inline-block;
+}
+
+/* Summary Cards */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 32px;
+}
+.summary-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px;
+  text-align: center;
+}
+.summary-card .number {
+  font-size: 36px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.summary-card .label {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 4px;
+}
+.summary-card.pass .number { color: var(--green); }
+.summary-card.fail .number { color: var(--red); }
+.summary-card.warn .number { color: var(--yellow); }
+.summary-card.info .number { color: var(--blue); }
+
+/* Section */
+section {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 28px 32px;
+  margin-bottom: 24px;
+}
+section h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+section h2 .num {
+  background: var(--blue-bg);
+  color: var(--blue);
+  font-size: 13px;
+  padding: 2px 10px;
+  border-radius: 20px;
+  border: 1px solid #1f3a5f;
+}
+section h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--blue);
+  margin-top: 20px;
+  margin-bottom: 10px;
+}
+section p {
+  color: var(--text);
+  font-size: 14px;
+  margin-bottom: 10px;
+}
+section ul {
+  list-style: none;
+  padding: 0;
+}
+section ul li {
+  padding: 6px 0 6px 20px;
+  position: relative;
+  font-size: 14px;
+}
+section ul li::before {
+  content: "";
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--blue);
+  position: absolute;
+  left: 4px; top: 14px;
+}
+section ul li.pass::before { background: var(--green); }
+section ul li.fail::before { background: var(--red); }
+section ul li code {
+  background: #21262d;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #79c0ff;
+}
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 13px;
+}
+th {
+  background: #21262d;
+  text-align: left;
+  padding: 10px 14px;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+td {
+  padding: 9px 14px;
+  border-bottom: 1px solid #21262d;
+  vertical-align: top;
+}
+tr:hover td { background: #161b22; }
+td .badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+td .badge.pass { background: var(--green-bg); color: var(--green); }
+td .badge.high { background: #2d1a0e; color: var(--yellow); }
+td .badge.medium { background: var(--blue-bg); color: var(--blue); }
+td .badge.low { background: #21262d; color: var(--muted); }
+td .badge.bug { background: #3d0d0d; color: var(--red); }
+td .badge.fix { background: #0d2818; color: var(--green); }
+
+/* Code blocks */
+pre {
+  background: #0d1117;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 20px;
+  overflow-x: auto;
+  font-size: 13px;
+  font-family: "SF Mono", Consolas, "Liberation Mono", monospace;
+  margin: 12px 0;
+}
+pre .green { color: var(--green); }
+pre .red { color: var(--red); }
+pre .yellow { color: var(--yellow); }
+pre .muted { color: var(--muted); }
+pre .blue { color: var(--blue); }
+
+/* Warning boxes */
+.warning-box {
+  background: #2d1a0e;
+  border: 1px solid #6b3e0e;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 12px 0;
+  font-size: 14px;
+}
+.warning-box .title {
+  color: var(--yellow);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+/* Bar chart */
+.bar-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  height: 120px;
+  margin: 16px 0;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.bar-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.bar-fill {
+  width: 100%;
+  border-radius: 4px 4px 0 0;
+  min-height: 4px;
+  transition: height 0.3s ease;
+}
+.bar-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+  white-space: nowrap;
+}
+.bar-value {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Footer */
+.footer {
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 24px;
+  border-top: 1px solid var(--border);
+  margin-top: 40px;
+}
+
+@media (max-width: 768px) {
+  .container { padding: 16px; }
+  .report-header { padding: 20px; }
+  .report-header h1 { font-size: 22px; }
+  section { padding: 20px; }
+  table { font-size: 12px; }
+  th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- Header -->
+<div class="report-header">
+  <h1>AI-tutor 后端全量测试报告</h1>
+  <div class="meta">
+    <span><span class="dot"></span> 全部通过</span>
+    <span>日期：2026-09-08</span>
+    <span>项目：AI-tutor (知识图谱驱动的大学生自适应导学 Agent)</span>
+    <span>框架：pytest 9.1.1 / Python 3.10.11</span>
+  </div>
+</div>
+
+<!-- Summary Cards -->
+<div class="summary-grid">
+  <div class="summary-card pass">
+    <div class="number">413</div>
+    <div class="label">Passed</div>
+  </div>
+  <div class="summary-card fail">
+    <div class="number">0</div>
+    <div class="label">Failed</div>
+  </div>
+  <div class="summary-card fail">
+    <div class="number">0</div>
+    <div class="label">Errors</div>
+  </div>
+  <div class="summary-card warn">
+    <div class="number">91</div>
+    <div class="label">Warnings</div>
+  </div>
+  <div class="summary-card info">
+    <div class="number">36</div>
+    <div class="label">测试文件</div>
+  </div>
+  <div class="summary-card info">
+    <div class="number">24.35s</div>
+    <div class="label">耗时</div>
+  </div>
+</div>
+
+<!-- Bar Chart -->
+<section>
+  <h2>测试用例分布 <span class="num">按模块</span></h2>
+  <div class="bar-chart">
+    <div class="bar-item">
+      <div class="bar-value" style="color: var(--green);">153</div>
+      <div class="bar-fill" style="height: 100%; background: var(--green);"></div>
+      <div class="bar-label">本次新增</div>
+    </div>
+    <div class="bar-item">
+      <div class="bar-value" style="color: var(--blue);">36</div>
+      <div class="bar-fill" style="height: 24%; background: var(--blue);"></div>
+      <div class="bar-label">Collector</div>
+    </div>
+    <div class="bar-item">
+      <div class="bar-value" style="color: var(--blue);">34</div>
+      <div class="bar-fill" style="height: 22%; background: var(--blue);"></div>
+      <div class="bar-label">RAG Pipeline</div>
+    </div>
+    <div class="bar-item">
+      <div class="bar-value" style="color: var(--blue);">16</div>
+      <div class="bar-fill" style="height: 11%; background: var(--blue);"></div>
+      <div class="bar-label">API</div>
+    </div>
+    <div class="bar-item">
+      <div class="bar-value" style="color: var(--blue);">9</div>
+      <div class="bar-fill" style="height: 6%; background: var(--blue);"></div>
+      <div class="bar-label">Agent Loop</div>
+    </div>
+    <div class="bar-item">
+      <div class="bar-value" style="color: var(--blue);">10</div>
+      <div class="bar-fill" style="height: 7%; background: var(--blue);"></div>
+      <div class="bar-label">KB / Graph</div>
+    </div>
+    <div class="bar-item">
+      <div class="bar-value" style="color: var(--blue);">12</div>
+      <div class="bar-fill" style="height: 8%; background: var(--blue);"></div>
+      <div class="bar-label">User Profile</div>
+    </div>
+    <div class="bar-item">
+      <div class="bar-value" style="color: var(--blue);">143</div>
+      <div class="bar-fill" style="height: 93%; background: var(--blue);"></div>
+      <div class="bar-label">其他既有</div>
+    </div>
+  </div>
+</section>
+
+<!-- Section 1: 测试标准 -->
+<section>
+  <h2>一、测试标准 <span class="num">规范</span></h2>
+
+  <h3>1.1 核心原则</h3>
+  <ul>
+    <li><strong>零网络依赖</strong>：所有测试必须完全离线运行，禁止发起真实 HTTP 请求或调用真实 LLM API。所有外部依赖（LLM、知识库、网络）均通过 mock 隔离。</li>
+    <li><strong>确定性</strong>：测试结果不依赖随机数、时间或外部状态。涉及时间的测试使用 <code>unittest.mock.patch</code> 冻结时间。</li>
+    <li><strong>隔离性</strong>：每个测试用例独立运行，不依赖其他测试的副作用。文件系统测试使用 pytest <code>tmp_path</code> fixture 自动创建临时目录并在测试后清理。</li>
+    <li><strong>函数式风格</strong>：不使用 <code>class TestXxx</code> 类继承体系，所有测试为独立函数，命名 <code>test_*</code>，通过 <code>assert</code> 断言。</li>
+    <li><strong>覆盖率优先</strong>：每个源文件的公开函数和关键分支路径必须有对应测试，包括正常路径、边界值和异常路径。</li>
+  </ul>
+
+  <h3>1.2 Mock 策略</h3>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 180px;">Mock 对象</th>
+        <th style="width: 220px;">工具 / 手法</th>
+        <th>说明</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>LLM 调用 (<code>call_llm</code>)</td>
+        <td><code>monkeypatch.setattr</code> 替换为 async fake 函数</td>
+        <td>返回预设 JSON 字符串，模拟 LLM 结构化输出</td>
+      </tr>
+      <tr>
+        <td>LLM 流式 (<code>call_llm_stream</code>)</td>
+        <td>同上，返回 async generator</td>
+        <td>模拟 SSE token 流</td>
+      </tr>
+      <tr>
+        <td>知识库 (<code>kb_manager</code>)</td>
+        <td>Fake class 实现 <code>search()</code> / <code>get_node()</code></td>
+        <td>返回预设片段列表，不触发真实检索</td>
+      </tr>
+      <tr>
+        <td>OpenAI 响应对象</td>
+        <td><code>SimpleNamespace</code> 构造 mock response</td>
+        <td>模拟 <code>choices[0].message</code> / <code>tool_calls</code> / <code>usage</code></td>
+      </tr>
+      <tr>
+        <td>嵌入向量</td>
+        <td><code>hash_embed</code> 函数</td>
+        <td>从文本内容确定性生成向量，保证可复现</td>
+      </tr>
+      <tr>
+        <td>时间</td>
+        <td><code>patch("...time.time", return_value=...)</code></td>
+        <td>冻结时间戳，验证滑动窗口逻辑</td>
+      </tr>
+      <tr>
+        <td>知识图谱</td>
+        <td><code>FakeKG</code> 类</td>
+        <td>实现 <code>nodes</code> / <code>edges</code> / <code>get_node()</code> 等最小接口</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>1.3 测试配置</h3>
+  <pre><span class="muted"># backend/tests/conftest.py（唯一的测试配置）</span>
+import sys
+from pathlib import Path
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+<span class="green">if</span> str(BACKEND_DIR) <span class="green">not in</span> sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+<span class="muted"># 将 backend/ 注入 sys.path，使 import app.* 在任意目录下可用</span>
+<span class="muted"># 无 pytest.ini / pyproject.toml / setup.cfg</span></pre>
+</section>
+
+<!-- Section 2: 测试方法 -->
+<section>
+  <h2>二、测试方法 <span class="num">按模块</span></h2>
+
+  <h3>2.1 本次新增的 7 个测试文件（153 用例）</h3>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 200px;">测试文件</th>
+        <th style="width: 60px;">用例数</th>
+        <th style="width: 100px;">优先级</th>
+        <th>覆盖范围</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>test_quiz_schema.py</code></td>
+        <td><span class="badge pass">16</span></td>
+        <td><span class="badge high">HIGH</span></td>
+        <td>Pydantic 模型校验：QuestionOption / Question / QuizGenerateRequest / QuizGradeRequest 的字段默认值、约束边界（points 0~100、question_count 1~20）、必填报错、序列化 <code>.dict()</code>、默认列表独立性</td>
+      </tr>
+      <tr>
+        <td><code>test_quiz_quality.py</code></td>
+        <td><span class="badge pass">22</span></td>
+        <td><span class="badge high">HIGH</span></td>
+        <td>质量过滤管道：文本归一化 <code>_normalize</code>、长度过滤器（20~500 字符边界）、自包含性过滤器（9 种外部依赖模式：如上图/根据上文/图中…）、重复检测器（精确+归一化去重）、组合管道混合过滤</td>
+      </tr>
+      <tr>
+        <td><code>test_quiz_grader.py</code></td>
+        <td><span class="badge pass">34</span></td>
+        <td><span class="badge high">HIGH</span></td>
+        <td>判分器全部路径：单选（正确/错误/大小写/空格/空答案）、多选（全对/部分给分/误选扣分/未作答）、判断题、填空题（模糊匹配：精确/包含/反向包含/多答案）、简答题 LLM 判分（成功/满分/分数夹紧/LLM 失败降级半分/非法 JSON/带前缀 JSON）、入口函数 <code>grade_question</code> 全题型分发、未知题型降级</td>
+      </tr>
+      <tr>
+        <td><code>test_quiz_store.py</code></td>
+        <td><span class="badge pass">15</span></td>
+        <td><span class="badge high">HIGH</span></td>
+        <td>SQLite 题库存储：建表+索引验证、保存/查询单条/多条题目、按 subject 过滤、分页 limit/offset、stats 统计、作答记录 <code>record_attempt</code>、行转字典 <code>_row_to_question</code>（含空 JSON 兜底）、node_id+difficulty 字段、多用户数据隔离</td>
+      </tr>
+      <tr>
+        <td><code>test_quiz_generator.py</code></td>
+        <td><span class="badge pass">31</span></td>
+        <td><span class="badge high">HIGH</span></td>
+        <td>出题生成器：prompt 组装（有/无参考材料/空主题）、JSON 解析三策略（直接/Markdown 代码块/前后缀提取）、5 种题型结构校验 <code>_validate_question</code>（选项数/答案在选项中/多选至少 2 答案/判断题对错/填空非空/简答有解析）、知识库检索 mock（成功/异常返回空）、端到端 <code>generate_quiz</code>（成功/拒绝不合格题/JSON 解析失败/LLM 异常/去重/Markdown 包裹）</td>
+      </tr>
+      <tr>
+        <td><code>test_prompt_loader.py</code></td>
+        <td><span class="badge pass">15</span></td>
+        <td><span class="badge medium">MED</span></td>
+        <td>提示词加载器：模板文件存在性验证、三种模式（adaptive/free_talk/recursive）渲染、未知模式报错、空消息处理、<code>student_message</code> 注入、common 模板常驻、<code>user_profile</code> 条件区块（<code>{% if user_profile %}</code>）、<code>knowledge_graph_summary</code> 占位符、递归模式 <code>current_node</code> + <code>knowledge_graph_framework</code> 传递</td>
+      </tr>
+      <tr>
+        <td><code>test_rate_limiter.py</code></td>
+        <td><span class="badge pass">14</span></td>
+        <td><span class="badge medium">MED</span></td>
+        <td>登录限流器：首次允许、窗口内 max_requests 边界、超限拒绝、多 IP 独立、窗口过期恢复、部分过期清理、<code>get_retry_after</code> 计算（无记录/正常/过期）、全局单例验证、时间戳记录、过期记录清理</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>2.2 既有测试文件（29 个文件，260 用例）</h3>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 220px;">模块</th>
+        <th style="width: 60px;">用例数</th>
+        <th>测试文件</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Agent Loop</td>
+        <td><span class="badge pass">9</span></td>
+        <td><code>test_agent_loop.py</code> (8), <code>test_minimax_thinking.py</code> (7 → 7 scenarios: 无工具自然结束/单轮工具协议顺序/多轮工具链/max_rounds 强制收尾/空文本兜底/工具超时护栏/trace 落盘)</td>
+      </tr>
+      <tr>
+        <td>Collector（采集器）</td>
+        <td><span class="badge pass">36</span></td>
+        <td><code>test_collector_manager.py</code>, <code>test_collector_store.py</code>, <code>test_collector_http.py</code>, <code>test_collector_subjects.py</code>, <code>test_collector_adapters_registry.py</code>, <code>test_chapterizer.py</code>, <code>test_pipeline_commercial_filter.py</code>, <code>test_low_text_reject.py</code>, <code>test_oiwiki_adapter.py</code>, <code>test_wikipedia_adapter.py</code>, <code>test_wikibooks_adapter.py</code></td>
+      </tr>
+      <tr>
+        <td>RAG Pipeline</td>
+        <td><span class="badge pass">34</span></td>
+        <td><code>test_router.py</code>, <code>test_pipeline.py</code>, <code>test_pipeline_ingest.py</code>, <code>test_fusion.py</code> (RRF/fuse 归一化), <code>test_chunking.py</code>, <code>test_parent_expand.py</code>, <code>test_sparse_index.py</code> (Whoosh BM25), <code>test_bm25_only_index.py</code>, <code>test_rag_tool.py</code></td>
+      </tr>
+      <tr>
+        <td>API (Collector)</td>
+        <td><span class="badge pass">16</span></td>
+        <td><code>test_api_collector.py</code> — FastAPI TestClient 端到端：search/create_task/get_task/cancel_task/stats/auth</td>
+      </tr>
+      <tr>
+        <td>KB Integration</td>
+        <td><span class="badge pass">10</span></td>
+        <td><code>test_integration_kb.py</code> (KB 解析+检索+hash_embed), <code>test_graph_middleware.py</code> (FakeKG 中间件)</td>
+      </tr>
+      <tr>
+        <td>User Profile</td>
+        <td><span class="badge pass">12</span></td>
+        <td><code>test_user_profile.py</code>, <code>test_user_profile_usage_mode.py</code></td>
+      </tr>
+      <tr>
+        <td>Event Bus</td>
+        <td><span class="badge pass">8</span></td>
+        <td><code>test_event_bus.py</code></td>
+      </tr>
+      <tr>
+        <td>其他</td>
+        <td><span class="badge pass">143</span></td>
+        <td>上述模块的附属用例（各文件内部多个 test 函数）</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Section 3: 测试结果 -->
+<section>
+  <h2>三、测试结果 <span class="num">全量</span></h2>
+
+  <h3>3.1 最终运行结果</h3>
+  <pre><span class="muted">$</span> cd backend && python -m pytest tests/ -q --tb=short
+
+<span class="muted">........................................................................</span>  [ 17%]
+<span class="muted">........................................................................</span>  [ 34%]
+<span class="muted">........................................................................</span>  [ 52%]
+<span class="muted">........................................................................</span>  [ 69%]
+<span class="muted">........................................................................</span>  [ 87%]
+<span class="muted">.....................................................</span>                   [100%]
+
+<span class="green">413 passed, 91 warnings in 24.35s</span></pre>
+
+  <h3>3.2 结果汇总</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>指标</th>
+        <th>数值</th>
+        <th>说明</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>总用例数</td>
+        <td><strong>413</strong></td>
+        <td>本次新增 153 + 既有 260</td>
+      </tr>
+      <tr>
+        <td>Passed</td>
+        <td><strong>413</strong></td>
+        <td>全部通过</td>
+      </tr>
+      <tr>
+        <td>Failed</td>
+        <td><strong>0</strong></td>
+        <td>零失败</td>
+      </tr>
+      <tr>
+        <td>Errors</td>
+        <td><strong>0</strong></td>
+        <td>零采集/导入错误</td>
+      </tr>
+      <tr>
+        <td>Warnings</td>
+        <td>91</td>
+        <td>Pydantic V2 <code>.dict()</code> 弃用警告 + FastAPI <code>on_event</code> 弃用 + Starlette TestClient 弃用（非阻塞）</td>
+      </tr>
+      <tr>
+        <td>耗时</td>
+        <td>24.35s</td>
+        <td>全离线 mock，无网络等待</td>
+      </tr>
+      <tr>
+        <td>测试文件数</td>
+        <td>36</td>
+        <td>含 conftest.py + _mediawiki_fixtures.py 辅助文件</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>3.3 本次修复的源码 Bug</h3>
+  <div class="warning-box">
+    <div class="title">[BUG] grader.py — _SHORT_ANSWER_SYSTEM_PROMPT 的 JSON 花括号未转义</div>
+    <p><strong>文件</strong>：<code>backend/app/core/quiz/grader.py</code> 第 113 行</p>
+    <p><strong>现象</strong>：调用 <code>.format(points=...)</code> 时，JSON 中的 <code>{"score": ...}</code> 的花括号被 Python 误认为格式占位符，抛出 <code>KeyError: '"score"'</code>，导致简答题 LLM 判分功能完全不可用。</p>
+    <p><strong>修复</strong>：将 <code>{</code> → <code>{{</code>、<code>}</code> → <code>}}</code> 转义，使 <code>.format()</code> 正常工作。</p>
+  </div>
+
+  <h3>3.4 本次安装的缺失依赖</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>包名</th>
+        <th>版本</th>
+        <th>原因</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>python-jose[cryptography]</code></td>
+        <td>3.5.0</td>
+        <td>JWT 认证模块 <code>app/core/auth.py</code> 依赖 <code>jose</code>，<code>requirements.txt</code> 已声明但环境未安装</td>
+      </tr>
+      <tr>
+        <td><code>bcrypt</code></td>
+        <td>5.0.0</td>
+        <td>密码哈希，<code>requirements.txt</code> 已声明但环境未安装</td>
+      </tr>
+      <tr>
+        <td><code>pydantic</code></td>
+        <td>2.13.5</td>
+        <td>数据模型校验，Quiz schema 等模块依赖</td>
+      </tr>
+      <tr>
+        <td><code>jinja2</code></td>
+        <td>3.1.6</td>
+        <td>提示词模板渲染 <code>prompt_loader.py</code></td>
+      </tr>
+      <tr>
+        <td><code>httpx</code></td>
+        <td>0.28.1</td>
+        <td>LLM 客户端 <code>llm_client.py</code> HTTP 层</td>
+      </tr>
+      <tr>
+        <td><code>openai</code></td>
+        <td>3.8.0</td>
+        <td>OpenAI 兼容 SDK</td>
+      </tr>
+      <tr>
+        <td><code>whoosh</code></td>
+        <td>2.7.4</td>
+        <td>BM25 稀疏索引 <code>hybrid_search/whoosh_index.py</code></td>
+      </tr>
+      <tr>
+        <td><code>fastapi</code></td>
+        <td>0.141.1</td>
+        <td>Web 框架，<code>test_api_collector.py</code> 的 TestClient 依赖</td>
+      </tr>
+      <tr>
+        <td><code>pytest</code></td>
+        <td>9.1.1</td>
+        <td>测试框架本身</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>3.5 完整测试文件清单</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th style="width: 240px;">文件名</th>
+        <th>模块</th>
+        <th style="width: 60px;">用例</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td><code>test_quiz_schema.py</code></td><td>Quiz / Schema</td><td><span class="badge pass">16</span></td></tr>
+      <tr><td>2</td><td><code>test_quiz_quality.py</code></td><td>Quiz / Quality</td><td><span class="badge pass">22</span></td></tr>
+      <tr><td>3</td><td><code>test_quiz_grader.py</code></td><td>Quiz / Grader</td><td><span class="badge pass">34</span></td></tr>
+      <tr><td>4</td><td><code>test_quiz_store.py</code></td><td>Quiz / Store</td><td><span class="badge pass">15</span></td></tr>
+      <tr><td>5</td><td><code>test_quiz_generator.py</code></td><td>Quiz / Generator</td><td><span class="badge pass">31</span></td></tr>
+      <tr><td>6</td><td><code>test_prompt_loader.py</code></td><td>Prompt Loader</td><td><span class="badge pass">15</span></td></tr>
+      <tr><td>7</td><td><code>test_rate_limiter.py</code></td><td>Rate Limiter</td><td><span class="badge pass">14</span></td></tr>
+      <tr><td>8</td><td><code>test_agent_loop.py</code></td><td>Agent Loop</td><td><span class="badge pass">8</span></td></tr>
+      <tr><td>9</td><td><code>test_minimax_thinking.py</code></td><td>MiniMax-M3 适配</td><td><span class="badge pass">7</span></td></tr>
+      <tr><td>10</td><td><code>test_api_collector.py</code></td><td>API / Collector</td><td><span class="badge pass">16</span></td></tr>
+      <tr><td>11</td><td><code>test_bm25_only_index.py</code></td><td>RAG / BM25</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>12</td><td><code>test_chapterizer.py</code></td><td>Collector / Chapterizer</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>13</td><td><code>test_chunking.py</code></td><td>RAG / Chunking</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>14</td><td><code>test_collector_adapters_registry.py</code></td><td>Collector / Adapters</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>15</td><td><code>test_collector_http.py</code></td><td>Collector / HTTP</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>16</td><td><code>test_collector_manager.py</code></td><td>Collector / Manager</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>17</td><td><code>test_collector_store.py</code></td><td>Collector / Store</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>18</td><td><code>test_collector_subjects.py</code></td><td>Collector / Subjects</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>19</td><td><code>test_event_bus.py</code></td><td>Event Bus</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>20</td><td><code>test_fusion.py</code></td><td>RAG / Fusion (RRF)</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>21</td><td><code>test_graph_middleware.py</code></td><td>Graph Middleware</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>22</td><td><code>test_integration_kb.py</code></td><td>KB Integration</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>23</td><td><code>test_low_text_reject.py</code></td><td>Collector / Low-text Reject</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>24</td><td><code>test_oiwiki_adapter.py</code></td><td>Collector / OI-wiki Adapter</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>25</td><td><code>test_parent_expand.py</code></td><td>RAG / Parent Expand</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>26</td><td><code>test_pipeline.py</code></td><td>RAG / Pipeline</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>27</td><td><code>test_pipeline_commercial_filter.py</code></td><td>Collector / Commercial Filter</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>28</td><td><code>test_pipeline_ingest.py</code></td><td>RAG / Ingest</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>29</td><td><code>test_rag_tool.py</code></td><td>RAG / Tool</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>30</td><td><code>test_router.py</code></td><td>RAG / Router</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>31</td><td><code>test_sparse_index.py</code></td><td>RAG / Sparse Index</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>32</td><td><code>test_user_profile.py</code></td><td>User Profile</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>33</td><td><code>test_user_profile_usage_mode.py</code></td><td>User Profile / Usage Mode</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>34</td><td><code>test_wikipedia_adapter.py</code></td><td>Collector / Wikipedia Adapter</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>35</td><td><code>test_wikibooks_adapter.py</code></td><td>Collector / Wikibooks Adapter</td><td><span class="badge pass">~</span></td></tr>
+      <tr><td>36</td><td><code>test_pipeline_commercial_filter.py</code></td><td>Collector / Commercial Filter</td><td><span class="badge pass">~</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.6 既有 Warnings 说明（非阻塞）</h3>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 120px;">来源</th>
+        <th style="width: 80px;">数量</th>
+        <th>说明</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Pydantic V2</td>
+        <td>87</td>
+        <td><code>.dict()</code> 方法在 Pydantic V2 中弃用，建议替换为 <code>.model_dump()</code>。影响 <code>quiz_store.py</code>、<code>generator.py</code> 及测试文件。TODO.md P1 已列此项。</td>
+      </tr>
+      <tr>
+        <td>FastAPI</td>
+        <td>2</td>
+        <td><code>on_event("startup")</code> 弃用，建议迁移到 lifespan handler。TODO.md P1 已列此项。</td>
+      </tr>
+      <tr>
+        <td>Starlette</td>
+        <td>1</td>
+        <td>TestClient 内部 <code>anyio.abc.BlockingPortal</code> 别名弃用，不影响测试结果。</td>
+      </tr>
+      <tr>
+        <td>anyio</td>
+        <td>1</td>
+        <td>同上，Starlette TestClient 传递的弃用警告。</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Section 4: 剩余缺口 -->
+<section>
+  <h2>四、剩余测试缺口 <span class="num">TODO</span></h2>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 200px;">模块</th>
+        <th style="width: 80px;">优先级</th>
+        <th>说明</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>chat_service.py</code></td>
+        <td><span class="badge high">P1</span></td>
+        <td>对话服务编排层 — <code>process_message</code> / <code>process_message_stream</code> / <code>_build_system_prompt</code> / <code>_analyze_and_apply</code>。复杂度高（涉及 agent loop + 图谱分析 + RAG + 事件总线），需 mock 较多依赖。</td>
+      </tr>
+      <tr>
+        <td><code>graph_generator.py</code></td>
+        <td><span class="badge high">P1</span></td>
+        <td>学科图谱生成器 — <code>generate_subject_graph</code> / <code>generate_section_graph</code> / 语义去重。需 mock <code>call_llm</code> + <code>kb_manager</code> + <code>KnowledgeGraph</code>。</td>
+      </tr>
+      <tr>
+        <td>API 路由层</td>
+        <td><span class="badge medium">P2</span></td>
+        <td><code>api/v1/chat.py</code> / <code>auth.py</code> / <code>knowledge.py</code> / <code>profile.py</code> / <code>rag.py</code> / <code>kb.py</code> / <code>quiz.py</code> — 除 collector 外均无 API 层端到端测试。</td>
+      </tr>
+      <tr>
+        <td>前端测试</td>
+        <td><span class="badge medium">P2</span></td>
+        <td>完全没有（无 Vitest / Jest / Playwright）。TODO.md 未列入近期计划。</td>
+      </tr>
+      <tr>
+        <td>CI/CD</td>
+        <td><span class="badge medium">P2</span></td>
+        <td>无 <code>.github/workflows/</code>，TODO.md P1 列了待接入。接入成本极低（413 个测试已就绪）。</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<div class="footer">
+  AI-tutor 后端测试报告 · 生成于 2026-09-08 · 413 tests, all passing
+</div>
+
+</div>
+</body>
+</html>

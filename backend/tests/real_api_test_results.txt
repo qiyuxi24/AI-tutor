@@ -1,0 +1,23 @@
+============================= test session starts =============================
+platform win32 -- Python 3.10.11, pytest-9.1.1, pluggy-1.6.0 -- C:\Users\34239\AppData\Roaming\TRAE SOLO CN\ModularData\ai-agent\vm\tools\python\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\34239\Documents\GitHub\AI-tutor\backend
+configfile: pytest.ini
+plugins: anyio-4.15.1, asyncio-1.4.0, timeout-2.4.0
+asyncio: mode=strict, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 600.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 7 items
+
+tests/test_agent_loop_real_api.py::test_L1_tool_selection_add_node PASSED
+tests/test_agent_loop_real_api.py::test_L2_argument_extraction_add_node PASSED
+tests/test_agent_loop_real_api.py::test_L3_result_utilization PASSED
+tests/test_agent_loop_real_api.py::test_L4_natural_termination PASSED
+tests/test_agent_loop_real_api.py::test_L4_multi_tool_chain PASSED
+tests/test_agent_loop_real_api.py::test_token_usage_recorded   [INFO] context_tokens = 6948
+PASSED
+tests/test_agent_loop_real_api.py::test_trace_file_persisted   [INFO] trace 文件: C:\Users\34239\Documents\GitHub\AI-tutor\data\traces\80007\a9434a2aec5a4e77964bf2850143f9f6.jsonl (1 行)
+PASSED
+
+======================== 7 passed in 127.65s (0:02:07) ========================

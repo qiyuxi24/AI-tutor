@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "user_id": 80001,
+  "created_at": "2026-09-07T18:06:53",
+  "updated_at": "2026-09-07T18:06:53",
+  "basic": {
+    "name": "",
+    "age": "",
+    "stage": ""
+  },
+  "goals": [],
+  "knowledge_background": "",
+  "learning": {
+    "pace": "",
+    "weekly_hours": ""
+  },
+  "preferences": {
+    "personality": "",
+    "teaching_style_like": "",
+    "teaching_style_avoid": "",
+    "usage_mode": "personal"
+  },
+  "ai_notes": [
+    {
+      "id": "n_3358c3932b",
+      "content": "学生主动要求向图谱中添加「快速排序」，表现出对经典排序算法的兴趣，学习风格偏系统性、愿意建立结构化的知识体系。",
+      "created_at": "2026-09-07T18:06:53",
+      "source": "ai"
+    }
+  ]
+}

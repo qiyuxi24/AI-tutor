@@ -110,7 +110,7 @@ def _grade_fill(user: str, answers: list[str], points: int) -> dict:
 
 _SHORT_ANSWER_SYSTEM_PROMPT = """你是一位专业的教育评估专家。请根据题目和学生答案进行评分并给出简短评语。
 必须以如下 JSON 格式回复（不要包含其他内容）：
-{"score": <0到{points}的整数>, "comment": "<一两句评语>"}"""
+{{"score": <0到{points}的整数>, "comment": "<一两句评语>"}}"""
 
 
 async def _grade_short_answer(
@@ -130,7 +130,6 @@ async def _grade_short_answer(
         raw = await call_llm(
             system_prompt,
             [{"role": "user", "content": user_prompt}],
-            enable_tools=False,
         )
         # 提取 JSON
         m = re.search(r"\{[\s\S]*\}", raw or "")

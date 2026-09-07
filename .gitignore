@@ -74,6 +74,8 @@ backend/eval_data/prof_writer/
 # .codebuddy 与 .workbuddy 的工作记忆、Agent 配置全队共享；
 # 仅排除第三方插件、本机配置与个人日志
 # ════════════════════════════════════════════
+.trae/
+
 .playwright-cli/
 # Playwright 页面快照（根目录临时文件）
 /init.yaml

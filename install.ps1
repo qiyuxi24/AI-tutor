@@ -143,16 +143,16 @@ Write-Host ""
 
 Write-Host "[5/5] 检查环境变量配置..." -ForegroundColor Yellow
 
-$envFile = Join-Path $backendDir ".env"
-$envExample = Join-Path $backendDir ".env.example"
+$envFile = Join-Path $projectRoot ".env"
+$envExample = Join-Path $projectRoot ".env.example"
 
 if (-not (Test-Path $envFile)) {
     if (Test-Path $envExample) {
         Copy-Item $envExample $envFile
         Write-Host "  [OK] 已从 .env.example 创建 .env 文件" -ForegroundColor Green
-        Write-Host "  [WARN] 请编辑 backend/.env 填入你的 DASHSCOPE_API_KEY" -ForegroundColor Yellow
+        Write-Host "  [WARN] 请编辑根目录 .env 填入 LLM_API_KEY / DASHSCOPE_API_KEY" -ForegroundColor Yellow
     } else {
-        Write-Host "  [WARN] 未找到 .env.example，请手动创建 backend/.env" -ForegroundColor Yellow
+        Write-Host "  [WARN] 未找到 .env.example，请手动创建根目录 .env" -ForegroundColor Yellow
     }
 } else {
     Write-Host "  [OK] .env 文件已存在" -ForegroundColor Green
@@ -160,7 +160,7 @@ if (-not (Test-Path $envFile)) {
     # 快速检查关键变量是否已配置
     $envContent = Get-Content $envFile -Raw
     if ($envContent -match "DASHSCOPE_API_KEY\s*=\s*(your_api_key_here|$|#)") {
-        Write-Host "  [WARN] DASHSCOPE_API_KEY 似乎未配置，请检查 backend/.env" -ForegroundColor Yellow
+        Write-Host "  [WARN] DASHSCOPE_API_KEY 似乎未配置，请检查根目录 .env" -ForegroundColor Yellow
     }
 }
 
@@ -245,7 +245,7 @@ if ($allOk) {
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  下一步：" -ForegroundColor White
-Write-Host "    1. 编辑 backend/.env 填入 DASHSCOPE_API_KEY" -ForegroundColor Gray
+Write-Host "    1. 编辑根目录 .env 填入 LLM_API_KEY / DASHSCOPE_API_KEY" -ForegroundColor Gray
 Write-Host "    2. 运行 .\start.ps1 启动应用" -ForegroundColor Gray
 Write-Host "    3. 访问 http://localhost:5173" -ForegroundColor Gray
 Write-Host ""

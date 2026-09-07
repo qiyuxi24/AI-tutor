@@ -21,5 +21,7 @@ Pillow>=10.0.0
 # 注意：清华 PyPI 镜像最高同步到 1.2.3，故放宽下限（API 一致）
 rapidocr-onnxruntime>=1.2.3
 onnxruntime>=1.16.0
+# Token 计数：本地预计数（o200k_base 编码，Qwen 官方推荐，对中文友好）
+tiktoken>=0.7.0
 # 可选：语义去重本地离线嵌入（不装则回退到 text-embedding-v4 API 或内置哈希嵌入）
 # sentence-transformers>=2.2.0

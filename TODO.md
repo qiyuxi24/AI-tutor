@@ -20,7 +20,7 @@
 | 健壮性 | A- | LLM 重试(指数退避+抖动) / 全局异常处理 / 错误码 / 单源超时隔离 / SSRF 防护 |
 | 文档同步 | **C+** | ✅ 2026-09-05 已重写 README + 全面品牌改名；仍缺结构化日志/CI（见 P1） |
 | 运维/CI | D+ | 仅控制台日志、无 .github CI、无结构化日志 |
-| 致命阻塞 | — | DASHSCOPE qwen-plus 聊天 403 + embedding 欠费 → 真实链路无法端到端验证 |
+| 致命阻塞 | — | ~~qwen 聊天 403~~ **2026-09-06 已切 MiniMax-M3（国内站 api.minimaxi.com），chat/流式/工具调用端到端全通**；残余依赖：阿里 embedding（text-embedding-v4）额度用于真实向量灌库 |
 
 ---
 
@@ -44,6 +44,14 @@
 
 ## P1 — 工程化补强（约 1 周，评委可问项）
 
+- [x] **MiniMax-M3 推理内容（`ϩ` 思考/thinking）适配 — 上下文工程**（2026-09-07 完成）
+  - 现象：M3 默认把思考过程以 `ϩ…ϩ` 特殊标签裹进 `message.content`（chat 与流式增量均是）→ ① 前端当正文显示；② 会话持久化 + Agent Loop 多轮回填会累积思考、白白烧 token
+  - 方案（候选 B + A 双保险）：请求统一带 `extra_body={"reasoning_split": True}`（思考拆到 reasoning_details，content 保持纯正文）+ `_strip_think_tags` 剥离兜底
+    - `call_llm_stream`：只 yield 纯正文 → 前端正文干净 + chat.py 持久化干净
+    - `call_llm`：判分/出题/图谱分析不再受 thinking 污染
+    - `agent_loop._chat_once`：带 reasoning_split；`_assistant_snapshot` 回填 reasoning_details 保思维链连续
+  - 测试：新增 `tests/test_minimax_thinking.py`（7 例）+ 全库 254 passed 零网络
+  - 前端：无需改动（reasoningSplit 已在后端剥离，token 已达纯正文）
 - [ ] **FastAPI `on_event` → lifespan**（消除 2 个 DeprecationWarning）
 - [ ] **聊天接口限流**（现有限流只覆盖 auth）
 - [ ] **结构化日志**（文件输出/轮转，可观测性）

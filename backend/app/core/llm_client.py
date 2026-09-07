@@ -1,8 +1,9 @@
 """大模型API客户端 —— 接入阿里云千问 + 知识图谱编辑工具
 
-调用策略（两阶段分离）：
-  阶段1 call_llm_stream():  流式输出文本给用户 → 不等待工具调用
-  阶段2 call_llm_tools():   后台判断是否需要调用工具 → 执行工具 → 可选的流式补充输出
+职责划分（去耦合，2026-09-06）：
+  - 本模块：OpenAI 兼容客户端 / 工具定义 KG_TOOLS / 工具执行 execute_kg_tool / 纯文本调用
+  - agent_loop.py：标准 agent 循环（LLM ↔ 工具 多轮串联），复用本模块 client/KG_TOOLS/execute_kg_tool
+  - call_llm_stream(): 阶段1 流式输出文本（不带工具，Batch3 合并可见回答前保留过渡）
 """
 import asyncio
 import json
@@ -18,18 +19,45 @@ import httpx
 from openai import AsyncOpenAI, APIStatusError, APITimeoutError, APIConnectionError, AuthenticationError, RateLimitError
 from app.core.config import settings
 from app.core.error_codes import ErrorCode, log_error
+from app.core.token_counter import extract_usage, count_messages_tokens
 
 logger = logging.getLogger("ai-tutor")
 
-# 使用 AsyncOpenAI 实现真正的异步 I/O，不阻塞 FastAPI 事件循环
-# timeout 设为 120s：阿里云百炼 qwen-plus 模型在 function calling 多轮调用场景下可能需要较长时间
+# 对话主模型客户端（OpenAI 兼容）：默认阿里云百炼；
+# 经 LLM_API_KEY / LLM_BASE_URL / MODEL_NAME 可整体切到 MiniMax 等兼容服务。
 client = AsyncOpenAI(
-    api_key=settings.dashscope_api_key,
+    api_key=settings.llm_api_key or settings.dashscope_api_key,
     base_url=settings.llm_base_url,
     timeout=settings.llm_timeout,
 )
 
+# 嵌入专用客户端：固定阿里云 text-embedding-v4（key/base 与对话解耦，
+# 见 config.embed_base_url / DASHSCOPE_API_KEY），供 rag/kb 向量化调用。
+embed_client = AsyncOpenAI(
+    api_key=settings.dashscope_api_key,
+    base_url=settings.embed_base_url,
+    timeout=settings.llm_timeout,
+)
+
 MODEL_NAME = settings.model_name
+
+# ─── MiniMax-M3 思考内容处理（2026-09-07 适配）───
+# M3 默认把思考过程以特殊字符标签（`ϩ...ϩ`，渲染后形如 `ϩhink...ϩhink`）裹进 content。
+# 若不处理：① 前端把思考当正文显示；② 会话持久化 + agent_loop 多轮回填累积思考、白烧 token。
+# 方案（官方推荐展示格式）：请求带 `reasoning_split=True`，思考拆到 reasoning_content/reasoning_details，
+# message.content 保持纯净正文，出流/回填/持久化直接取 content 即可。
+_LLM_EXTRA_BODY = {"reasoning_split": True}
+
+# 兜底剥离：极少数网关/切回默认格式时 content 仍可能带 `ϩ…ϩ` 思考块。
+# 非贪婪匹配配对标签并删除；reasoning_split 生效时正文不含该特殊字符，不会误触发。
+_THINK_TAG_RE = re.compile(r'\u03e9[\s\S]*?\u03e9')
+
+
+def _strip_think_tags(text: str) -> str:
+    """剥离 MiniMax 思考标签块，返回纯正文（防御性兜底）。"""
+    if not text:
+        return text
+    return _THINK_TAG_RE.sub("", text)
 
 # ─── 知识图谱编辑工具定义（千问 function calling）───
 KG_TOOLS = [
@@ -366,8 +394,8 @@ def _run_async(coro) -> object:
     """
     在同步上下文里运行 async 协程（用于 RAG 检索等 async 操作）。
 
-    背景：execute_kg_tool 是同步函数，被 async 的 call_llm_tools 同步调用，
-    此时当前线程已有运行中的事件循环，不能直接 asyncio.run / new_event_loop。
+    背景：execute_kg_tool 是同步函数，被 agent_loop 在 asyncio.to_thread 线程中调用，
+    该线程无运行中的事件循环，不能直接 asyncio.run / new_event_loop。
     方案：把协程提交到线程池，在新线程里用 asyncio.run 创建独立事件循环运行。
     RAG 检索是独立无共享状态的，跨线程安全。
 
@@ -580,22 +608,20 @@ def fetch_webpage(url: str, max_chars: int = 3000) -> str:
         return f"抓取网页出错：{str(e)}"
 
 
-async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True,
-                  kg=None) -> str:
+async def call_llm(system_prompt: str, messages: list) -> str:
     """
-    调用千问API
-    
+    调用千问 API —— 纯文本/JSON 分析场景（不带工具）。
+
+    对话场景的工具调用统一收敛到 agent_loop.run_agent_loop（真循环，多轮串联）；
+    本函数仅服务一次性文本生成：出题 / 判分 / GraphAnalyzer / 图谱生成。
+
     参数:
         system_prompt: 系统提示词
         messages: 完整对话历史 [{role, content}, ...] 或 Pydantic ChatMessage 列表
-        enable_tools: 是否启用 function calling 编辑知识图谱。
-                      True  → 带 KG_TOOLS，支持工具调用（对话场景）
-                      False → 不带 tools，纯文本返回（分析/生成场景）
-        kg:           KnowledgeGraph 实例（enable_tools=True 时需传入）
-    
+
     返回:
-        AI的回复文本
-    
+        AI 的回复文本
+
     异常:
         所有异常都会附加错误码信息后向上抛出:
         - APITimeoutError      → E-LLM-001
@@ -605,72 +631,34 @@ async def call_llm(system_prompt: str, messages: list, enable_tools: bool = True
         - APIStatusError (5xx) → E-LLM-005
         - 其他未知异常          → E-SYS-002
     """
-    # 1. 构造 API 消息列表
     api_messages = _build_api_messages(system_prompt, messages)
-
-    # 2. 构建请求参数
-    create_kwargs = {
-        "model": MODEL_NAME,
-        "messages": api_messages,
-        "temperature": 0.7,
-        "max_tokens": 2000,
-    }
-    # 根据 enable_tools 决定是否注入 function calling 工具定义
-    if enable_tools:
-        create_kwargs["tools"] = KG_TOOLS
-
-    # 3. 异步调用千问 API（真正的非阻塞 I/O，带瞬时错误重试）
     try:
-        response = await _with_retry(client.chat.completions.create, **create_kwargs)
+        response = await _with_retry(
+            client.chat.completions.create,
+            model=MODEL_NAME,
+            messages=api_messages,
+            temperature=0.7,
+            max_tokens=2000,
+            extra_body=_LLM_EXTRA_BODY,
+        )
     except Exception as e:
         raise _map_api_error(e) from e
 
     message = response.choices[0].message
-
-    # 空回复检查
-    if not message.content and not message.tool_calls:
+    text = _strip_think_tags(message.content or "")
+    if not text:
         user_msg = log_error(ErrorCode.LLM_RESPONSE_EMPTY, detail="AI返回空内容")
         raise RuntimeError(user_msg)
 
-    # 4. 如果启用了工具且千问请求了工具调用
-    if enable_tools and message.tool_calls:
-        # 先把 assistant 的消息加入历史（含 tool_calls）
-        api_messages.append({
-            "role": "assistant",
-            "content": message.content or "",
-            "tool_calls": [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                for tc in message.tool_calls
-            ]
-        })
+    # token 使用量日志（可观测性）
+    usage = extract_usage(response)
+    if usage.total_tokens > 0:
+        logger.info(
+            f"call_llm token usage: prompt={usage.prompt_tokens} "
+            f"completion={usage.completion_tokens} total={usage.total_tokens}"
+        )
 
-        # 执行每一个工具，把结果加回消息
-        # 注意：execute_kg_tool 是同步函数（本地文件 I/O），不阻塞事件循环太久
-        for tc in message.tool_calls:
-            result = execute_kg_tool(tc, kg)
-            api_messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result
-            })
-
-        # 异步调用千问第二次，让它基于工具结果生成回复（带瞬时错误重试）
-        try:
-            response2 = await _with_retry(
-                client.chat.completions.create,
-                model=MODEL_NAME,
-                messages=api_messages,
-                temperature=0.7,
-                max_tokens=2000,
-            )
-        except Exception as e:
-            raise _map_api_error(e, prefix="第二次调用: ") from e
-
-        return response2.choices[0].message.content
-
-    # 5. 没有工具调用，直接返回
-    return message.content
+    return text
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -684,8 +672,8 @@ async def call_llm_stream(
     """
     流式调用千问 API，逐 token yield 给前端。
     
-    关键设计：不带 tools，只做纯文本回复。
-    工具调用在 call_llm_tools() 中单独处理（后台）。
+    关键设计：不带 tools，只做纯文本回复（阶段1 过渡行为）。
+    工具调用统一走 agent_loop.run_agent_loop（见 agent_loop.py）。
     
     参数:
         system_prompt: 系统提示词（含图谱上下文，但不含工具能力说明）
@@ -708,103 +696,32 @@ async def call_llm_stream(
             temperature=0.7,
             max_tokens=2000,
             stream=True,
+            stream_options={"include_usage": True},  # 流式响应返回 usage（最后 chunk）
+            extra_body=_LLM_EXTRA_BODY,
         )
     except Exception as e:
         raise _map_api_error(e) from e
 
-    # 逐 chunk yield 文本内容
+    # 逐 chunk yield 文本内容 + 捕获最后 chunk 的 usage
+    last_usage = None
     async for chunk in response:
         delta = chunk.choices[0].delta if chunk.choices else None
         if delta and delta.content:
-            yield delta.content
+            token = _strip_think_tags(delta.content)
+            if token:
+                yield token
+        # 流式 usage 在最后一个 chunk 返回（choices 为空或含 usage 字段）
+        chunk_usage = extract_usage(chunk)
+        if chunk_usage.total_tokens > 0:
+            last_usage = chunk_usage
+
+    if last_usage and last_usage.total_tokens > 0:
+        logger.info(
+            f"call_llm_stream token usage: prompt={last_usage.prompt_tokens} "
+            f"completion={last_usage.completion_tokens} total={last_usage.total_tokens}"
+        )
 
 
 # ══════════════════════════════════════════════════════════════════
-#  阶段2：后台工具调用（带 function calling）
+#  （旧 call_llm_tools 已删除：后台工具判断收敛到 agent_loop.run_agent_loop，见 agent_loop.py）
 # ══════════════════════════════════════════════════════════════════
-
-async def call_llm_tools(
-    system_prompt: str,
-    messages: list,
-    kg=None,
-) -> Optional[str]:
-    """
-    后台调用千问 API，判断是否需要执行知识图谱工具。
-    
-    关键设计：
-    - 带 KG_TOOLS，允许 function calling
-    - 如果有 tool_calls → 执行工具 → 再次调用 LLM 生成确认回复
-    - 返回的确认回复通过 SSE 的 graph_update 事件推送给前端（而非流式输出）
-    
-    参数:
-        system_prompt: 系统提示词（含工具能力说明）
-        messages:      完整对话历史
-        kg:            KnowledgeGraph 实例
-    
-    返回:
-        工具执行后的确认消息（如"已创建节点 xxx"），无 tool_calls 时返回 None
-    
-    异常:
-        不向上抛出，所有错误内部消化（后台任务不应影响主流程）
-    """
-    # 构造 API 消息列表
-    api_messages = _build_api_messages(system_prompt, messages)
-
-    try:
-        response = await _with_retry(
-            client.chat.completions.create,
-            model=MODEL_NAME,
-            messages=api_messages,
-            temperature=0.3,  # 工具调用用低温度，更确定性
-            max_tokens=2000,
-            tools=KG_TOOLS,
-        )
-    except Exception as e:
-        # 后台任务失败不影响主流程，只记日志
-        log_error(ErrorCode.LLM_API_SERVER_ERROR, detail=f"后台工具调用失败: {str(e)}", exception=e)
-        return None
-
-    message = response.choices[0].message
-
-    # 没有工具调用 → 无需处理
-    if not message.tool_calls:
-        return None
-
-    # 有工具调用 → 执行工具
-    api_messages.append({
-        "role": "assistant",
-        "content": message.content or "",
-        "tool_calls": [
-            {"id": tc.id, "type": "function",
-             "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-            for tc in message.tool_calls
-        ]
-    })
-
-    tool_results = []
-    for tc in message.tool_calls:
-        try:
-            result = execute_kg_tool(tc, kg)
-            tool_results.append(result)
-        except Exception as e:
-            tool_results.append(f"工具 {tc.function.name} 执行失败: {str(e)}")
-        api_messages.append({
-            "role": "tool",
-            "tool_call_id": tc.id,
-            "content": tool_results[-1]
-        })
-
-    # 第二次调用 LLM，让 AI 基于工具结果生成确认回复（带瞬时错误重试）
-    try:
-        response2 = await _with_retry(
-            client.chat.completions.create,
-            model=MODEL_NAME,
-            messages=api_messages,
-            temperature=0.7,
-            max_tokens=500,
-        )
-        return response2.choices[0].message.content
-    except Exception as e:
-        log_error(ErrorCode.LLM_API_SERVER_ERROR, detail=f"工具确认回复失败: {str(e)}", exception=e)
-        # 即使第二次调用失败，工具已执行，返回简单汇总
-        return "已自动完成图谱更新：" + "; ".join(tool_results)

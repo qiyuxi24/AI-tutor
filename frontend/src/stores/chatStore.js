@@ -701,8 +701,8 @@ export const useChatStore = defineStore('chat', () => {
       conv.title = text.length > 20 ? text.slice(0, 20) + '…' : text
     }
 
-    // 添加占位 AI 消息（流式填充）
-    conv.messages.push({ role: 'assistant', content: '' })
+    // 添加占位 AI 消息（流式填充 + 工具/思考事件挂载）
+    conv.messages.push({ role: 'assistant', content: '', tools: [], thinking: [] })
     loading.value = true
     // 对话已有内容，持久化（persist 内部会过滤空对话，此对话现在不会被过滤）
     persist()
@@ -717,11 +717,43 @@ export const useChatStore = defineStore('chat', () => {
           const lastIdx = conv.messages.length - 1
           const lastMsg = conv.messages[lastIdx]
           if (lastMsg.role === 'assistant') {
-            // 用 splice 替换元素强制触发 Vue 响应式更新
             conv.messages.splice(lastIdx, 1, {
               ...lastMsg,
               content: lastMsg.content + token,
             })
+          }
+        },
+        // AI 思考过程
+        onThinking: (text) => {
+          const lastIdx = conv.messages.length - 1
+          const lastMsg = conv.messages[lastIdx]
+          if (lastMsg.role === 'assistant') {
+            const thinking = lastMsg.thinking || []
+            thinking.push(text)
+            conv.messages.splice(lastIdx, 1, { ...lastMsg, thinking })
+          }
+        },
+        // 工具开始执行
+        onToolStart: (data) => {
+          const lastIdx = conv.messages.length - 1
+          const lastMsg = conv.messages[lastIdx]
+          if (lastMsg.role === 'assistant') {
+            const tools = lastMsg.tools || []
+            tools.push({ ...data, status: 'running', result: null })
+            conv.messages.splice(lastIdx, 1, { ...lastMsg, tools })
+          }
+        },
+        // 工具执行完毕
+        onToolResult: (data) => {
+          const lastIdx = conv.messages.length - 1
+          const lastMsg = conv.messages[lastIdx]
+          if (lastMsg.role === 'assistant') {
+            const tools = (lastMsg.tools || []).map(t =>
+              t.tool === data.tool && t.round === data.round && t.status === 'running'
+                ? { ...t, status: data.ok ? 'done' : 'error', result: data }
+                : t
+            )
+            conv.messages.splice(lastIdx, 1, { ...lastMsg, tools })
           }
         },
         // 流式完成

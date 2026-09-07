@@ -67,9 +67,9 @@
 # 1. 安装依赖（后端 venv + 前端 node_modules）
 .\install.ps1
 
-# 2. 配置密钥（必填 DASHSCOPE_API_KEY / SECRET_KEY）
-copy backend\.env.example backend\.env
-notepad backend\.env
+# 2. 配置环境（根 .env 是唯一真值文件，本地与 Docker 共源）
+copy .env.example .env
+notepad .env        # 填 LLM_API_KEY(MiniMax) / DASHSCOPE_API_KEY / SECRET_KEY
 
 # 3. 启动前后端
 .\start.ps1
@@ -87,11 +87,11 @@ docker compose up -d --build
 
 ### 手动开发
 ```bash
-# 后端
+# 后端（环境变量自动读根目录 .env，无需在 backend 下再建）
 cd backend
 python -m venv venv && venv\Scripts\activate   # Windows；Linux/mac: source venv/bin/activate
 pip install -r requirements.txt
-copy .env.example .env                          # Linux/mac: cp
+copy ..\.env.example ..\.env                     # Linux/mac: cp ../.env.example ../.env
 uvicorn app.main:app --reload --port 8000
 
 # 前端（另开终端）
@@ -145,14 +145,16 @@ npm run dev
 └── docs/                     # 调研与设计文档（RAG/出题/Collector/Docker/BP 等）
 ```
 
-## 环境变量（backend/.env）
+## 环境变量（根目录 .env，本地与 Docker 共源；模板见 .env.example）
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `DASHSCOPE_API_KEY` | ✅ | 阿里云百炼 API Key（也可配其他 OpenAI 兼容网关） |
+| `LLM_API_KEY` | ✅* | 对话/Agent 主模型 Key。默认切 MiniMax 国内站；留空则回退用 `DASHSCOPE_API_KEY`（即阿里 qwen 场景） |
+| `LLM_BASE_URL` | ❌ | 默认 `https://api.minimaxi.com/v1`（MiniMax 国内站）；用阿里时改百炼兼容地址 |
+| `MODEL_NAME` | ❌ | 默认 `MiniMax-M3`（最新，1M 上下文/多模态）；备选 `MiniMax-M2.7` / `M2.5` |
+| `DASHSCOPE_API_KEY` | ✅ | 阿里云百炼 Key：text-embedding-v4 **嵌入**必需（独立于对话模型） |
+| `EMBED_BASE_URL` / `LLM_TIMEOUT` | ❌ | 嵌入端点（默认百炼）/ 请求超时（默认 120s） |
 | `SECRET_KEY` | ✅ | JWT 签名密钥，缺失拒绝启动 |
-| `MODEL_NAME` | ❌ | 默认 `qwen-plus` |
-| `LLM_BASE_URL` / `LLM_TIMEOUT` | ❌ | 兼容网关地址（默认百炼）/ 超时（默认 120s） |
 | `CORS_ALLOW_ORIGINS` | ❌ | 逗号分隔白名单，默认仅本地 5173 |
 | `DEFAULT_ADMIN_PASSWORD` | ❌ | 设置后首次启动自动建 admin |
 

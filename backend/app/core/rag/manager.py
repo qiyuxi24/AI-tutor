@@ -25,7 +25,7 @@ from typing import Optional
 
 from app.core.rag.chunker import chunk_markdown
 from app.core.rag.vector_store import VectorStore
-from app.core.llm_client import client
+from app.core.llm_client import embed_client as client  # 嵌入固定走阿里 text-embedding-v4
 
 logger = logging.getLogger("ai-tutor")
 

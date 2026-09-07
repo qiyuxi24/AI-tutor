@@ -1,34 +1,92 @@
 """
-知识图谱事件总线
+事件总线（Event Hub）
 
-职责：只处理知识图谱数据变更的发布-订阅。
-- 后端 API/function calling 写入数据后 → publish("graph_updated")
-- 前端 SSE 端点 → subscribe() → 收到事件后自动刷新图谱
+职责：进程内异步事件的发布-订阅，支持 per-user 路由。
 
-不依赖任何外部中间件，同一进程内异步队列通信。
-解耦原则：所有调用者只需 import publish，不依赖其他模块。
+事件类型注册表：
+  - text_delta    — AI 文本增量（兼容旧 "token"）
+  - thinking      — AI 思考过程（MiniMax reasoning_details）
+  - tool_start    — 工具开始执行 {tool, args_head}
+  - tool_result   — 工具执行完毕 {tool, ok, summary, duration_ms}
+  - agent_start   — Agent 循环开始 {max_rounds}
+  - agent_done    — Agent 循环结束 {rounds, total_llm_calls}
+  - graph_updated — 知识图谱数据变更（向后兼容）
+  - error         — 后端错误 {code, message, module, detail}
+
+路由模式：
+  - publish(type, data, user_id=None) → user_id 存在时只投递到该用户队列
+  - publish(type, data)               → 全局广播（兼容旧调用）
+  - subscribe(user_id=None)           → user_id 存在时只收自己的事件 + 全局事件
+  - subscribe()                       → 全局队列（兼容旧 /knowledge/events 端点）
+
+不依赖任何外部中间件，同一进程内 asyncio.Queue 通信。
 """
 
 import asyncio
 import json
+import logging
+import time
 from typing import AsyncGenerator, Optional
+
+logger = logging.getLogger("ai-tutor")
+
+# ── 事件类型常量 ──
+
+TEXT_DELTA = "text_delta"
+THINKING = "thinking"
+TOOL_START = "tool_start"
+TOOL_RESULT = "tool_result"
+AGENT_START = "agent_start"
+AGENT_DONE = "agent_done"
+GRAPH_UPDATED = "graph_updated"
+ERROR = "error"
+
+# 向后兼容：旧 "token" 事件 → text_delta
+TOKEN = "token"
 
 # ── 全局状态 ──
 
-# 事件队列：所有 SSE 订阅者共享同一个队列实例
-_event_queue: "Optional[asyncio.Queue]" = None
+# 全局事件队列（兼容旧 subscribe() 无参数调用 + 广播事件）
+_global_queue: "Optional[asyncio.Queue]" = None
 
-# 在模块加载时保存事件循环引用
-# 这样即使在同步上下文中调用 publish()，也能安全地 enqueue
+# per-user 队列 {user_id → Queue}（惰性创建）
+_user_queues: dict[int, "asyncio.Queue"] = {}
+
+# 事件循环引用（保证同步上下文也能安全 enqueue）
 _loop: asyncio.AbstractEventLoop | None = None
 
+# 用户队列 TTL（秒）：空闲超时自动清理，避免内存泄漏
+_USER_QUEUE_TTL = 300  # 5 分钟
+_user_queue_last_access: dict[int, float] = {}
 
-def _get_queue() -> asyncio.Queue[dict]:
-    """获取或创建全局事件队列（惰性初始化）"""
-    global _event_queue
-    if _event_queue is None:
-        _event_queue = asyncio.Queue()
-    return _event_queue
+
+def _get_global_queue() -> asyncio.Queue:
+    """获取或创建全局事件队列（惰性初始化）。"""
+    global _global_queue
+    if _global_queue is None:
+        _global_queue = asyncio.Queue()
+    return _global_queue
+
+
+def _get_user_queue(user_id: int) -> asyncio.Queue:
+    """获取或创建指定用户的专属事件队列（惰性创建）。"""
+    q = _user_queues.get(user_id)
+    if q is None:
+        q = asyncio.Queue()
+        _user_queues[user_id] = q
+    _user_queue_last_access[user_id] = time.monotonic()
+    _cleanup_stale_queues()
+    return q
+
+
+def _cleanup_stale_queues():
+    """清理超时未访问的用户队列，避免内存泄漏。"""
+    now = time.monotonic()
+    stale = [uid for uid, t in _user_queue_last_access.items()
+             if now - t > _USER_QUEUE_TTL]
+    for uid in stale:
+        _user_queues.pop(uid, None)
+        _user_queue_last_access.pop(uid, None)
 
 
 def _ensure_loop() -> asyncio.AbstractEventLoop:
@@ -49,41 +107,70 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
 
 # ── 公开 API ──
 
-def publish(event_type: str, data: dict | None = None) -> None:
+def publish(event_type: str, data: dict | None = None,
+            user_id: Optional[int] = None) -> None:
     """
-    发布事件到所有 SSE 订阅者。
+    发布事件到订阅者。
 
     参数:
-        event_type: 事件类型，当前支持:
-                    - "graph_updated" — 知识图谱数据（nodes/edges）有更改
-                    - "error"         — 后端模块发生错误，data 包含:
-                        { "code": "E-LLM-001", "message": "...", "module": "llm", "detail": "..." }
-        data:       可选附加数据，如 {"node_id": "xxx"},
-                    会自动合并到事件对象中。
+        event_type: 事件类型（见模块顶部常量）
+        data:       可选附加数据
+        user_id:    用户 ID。传入时只投递到该用户队列；
+                    不传时全局广播（兼容旧调用）。
 
     用法:
-        from app.core.event_bus import publish
-        publish("graph_updated")
-        publish("graph_updated", {"node_id": "recursion_def"})
-        publish("error", {"code": "E-LLM-001", "message": "超时", "module": "llm"})
+        from app.core.event_bus import publish, GRAPH_UPDATED
+        publish(GRAPH_UPDATED)                          # 全局广播
+        publish(GRAPH_UPDATED, {"node_id": "recursion"})# 全局广播 + 数据
+        publish("tool_start", {"tool": "rag_search"}, user_id=1)  # 精准路由
     """
     event: dict = {"type": event_type}
     if data:
         event.update(data)
 
     loop = _ensure_loop()
-    loop.call_soon_threadsafe(_get_queue().put_nowait, event)
+
+    # 精准路由到用户队列
+    if user_id is not None:
+        q = _user_queues.get(user_id)
+        if q is not None:
+            loop.call_soon_threadsafe(q.put_nowait, event)
+            return
+        # 用户队列不存在 = 该用户未订阅，静默丢弃（避免内存浪费）
+        logger.debug(f"publish({event_type}): user {user_id} 未订阅，事件已丢弃")
+        return
+
+    # 全局广播：同时投递到全局队列 + 所有用户队列
+    loop.call_soon_threadsafe(_get_global_queue().put_nowait, event)
+    for q in _user_queues.values():
+        loop.call_soon_threadsafe(q.put_nowait, event)
 
 
-async def subscribe() -> AsyncGenerator[str, None]:
+async def subscribe(user_id: Optional[int] = None) -> AsyncGenerator[str, None]:
     """
-    SSE 订阅生成器。前端连接到 SSE 端点时持续接收事件流。
+    SSE 订阅生成器。
 
-    用法（在 FastAPI 路由中）:
-        from fastapi.responses import StreamingResponse
+    参数:
+        user_id: 传入时订阅该用户专属队列（只收自己的事件 + 全局事件）；
+                 不传时订阅全局队列（兼容旧 /knowledge/events 端点）。
+
+    用法:
+        # 旧端点兼容
         return StreamingResponse(subscribe(), media_type="text/event-stream")
+
+        # 新端点：按用户路由
+        return StreamingResponse(subscribe(user_id=current_user.id),
+                                 media_type="text/event-stream")
     """
-    queue = _get_queue()
-    while True:
-        event_data = await queue.get()
-        yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+    if user_id is not None:
+        # 用户专属模式：订阅自己的队列
+        q = _get_user_queue(user_id)
+        while True:
+            event_data = await q.get()
+            yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+    else:
+        # 全局模式（兼容旧端点）
+        q = _get_global_queue()
+        while True:
+            event_data = await q.get()
+            yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"

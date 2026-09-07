@@ -1,0 +1,320 @@
+{
+  "total": 413,
+  "files": {
+    "test_agent_loop.py": {
+      "count": 9,
+      "statuses": {
+        "PASSED": 9,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_api_collector.py": {
+      "count": 16,
+      "statuses": {
+        "PASSED": 16,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_bm25_only_index.py": {
+      "count": 5,
+      "statuses": {
+        "PASSED": 5,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_chapterizer.py": {
+      "count": 13,
+      "statuses": {
+        "PASSED": 13,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_chunking.py": {
+      "count": 11,
+      "statuses": {
+        "PASSED": 11,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_collector_adapters_registry.py": {
+      "count": 9,
+      "statuses": {
+        "PASSED": 9,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_collector_http.py": {
+      "count": 8,
+      "statuses": {
+        "PASSED": 8,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_collector_manager.py": {
+      "count": 11,
+      "statuses": {
+        "PASSED": 11,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_collector_store.py": {
+      "count": 9,
+      "statuses": {
+        "PASSED": 9,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_collector_subjects.py": {
+      "count": 8,
+      "statuses": {
+        "PASSED": 8,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_event_bus.py": {
+      "count": 6,
+      "statuses": {
+        "PASSED": 6,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_fusion.py": {
+      "count": 15,
+      "statuses": {
+        "PASSED": 15,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_graph_middleware.py": {
+      "count": 8,
+      "statuses": {
+        "PASSED": 8,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_integration_kb.py": {
+      "count": 11,
+      "statuses": {
+        "PASSED": 11,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_low_text_reject.py": {
+      "count": 3,
+      "statuses": {
+        "PASSED": 3,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_minimax_thinking.py": {
+      "count": 7,
+      "statuses": {
+        "PASSED": 7,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_oiwiki_adapter.py": {
+      "count": 8,
+      "statuses": {
+        "PASSED": 8,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_parent_expand.py": {
+      "count": 13,
+      "statuses": {
+        "PASSED": 13,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_pipeline.py": {
+      "count": 13,
+      "statuses": {
+        "PASSED": 13,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_pipeline_commercial_filter.py": {
+      "count": 7,
+      "statuses": {
+        "PASSED": 7,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_pipeline_ingest.py": {
+      "count": 6,
+      "statuses": {
+        "PASSED": 6,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_prompt_loader.py": {
+      "count": 15,
+      "statuses": {
+        "PASSED": 15,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_quiz_generator.py": {
+      "count": 33,
+      "statuses": {
+        "PASSED": 33,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_quiz_grader.py": {
+      "count": 39,
+      "statuses": {
+        "PASSED": 39,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_quiz_quality.py": {
+      "count": 22,
+      "statuses": {
+        "PASSED": 22,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_quiz_schema.py": {
+      "count": 16,
+      "statuses": {
+        "PASSED": 16,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_quiz_store.py": {
+      "count": 14,
+      "statuses": {
+        "PASSED": 14,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_rag_tool.py": {
+      "count": 8,
+      "statuses": {
+        "PASSED": 8,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_rate_limiter.py": {
+      "count": 14,
+      "statuses": {
+        "PASSED": 14,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_router.py": {
+      "count": 10,
+      "statuses": {
+        "PASSED": 10,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_sparse_index.py": {
+      "count": 12,
+      "statuses": {
+        "PASSED": 12,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_user_profile.py": {
+      "count": 15,
+      "statuses": {
+        "PASSED": 15,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_user_profile_usage_mode.py": {
+      "count": 7,
+      "statuses": {
+        "PASSED": 7,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_wikibooks_adapter.py": {
+      "count": 3,
+      "statuses": {
+        "PASSED": 3,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    },
+    "test_wikipedia_adapter.py": {
+      "count": 9,
+      "statuses": {
+        "PASSED": 9,
+        "FAILED": 0,
+        "ERROR": 0,
+        "SKIPPED": 0
+      }
+    }
+  }
+}

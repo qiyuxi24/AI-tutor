@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "user_id": 80007,
+  "created_at": "2026-09-07T20:09:42",
+  "updated_at": "2026-09-07T20:09:42",
+  "basic": {
+    "name": "",
+    "age": "",
+    "stage": ""
+  },
+  "goals": [],
+  "knowledge_background": "",
+  "learning": {
+    "pace": "",
+    "weekly_hours": ""
+  },
+  "preferences": {
+    "personality": "",
+    "teaching_style_like": "",
+    "teaching_style_avoid": "",
+    "usage_mode": "personal"
+  },
+  "ai_notes": [
+    {
+      "id": "n_bd7599ccda",
+      "content": "学生偏好\"简要说明\"，希望新知识点以简洁、结构化的方式呈现，重点突出。",
+      "created_at": "2026-09-07T20:09:42",
+      "source": "ai"
+    }
+  ]
+}

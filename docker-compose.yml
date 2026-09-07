@@ -19,10 +19,12 @@ services:
       - "${PORT:-8080}:80"
 
     environment:
-      # LLM 服务（:? 语法：未配置直接报错，防止静默启动失败）
+      # 对话主模型 / 嵌入服务（:? 语法：未配置直接报错，防止静默启动失败）
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:?请在根目录 .env 中配置 DASHSCOPE_API_KEY}
-      - MODEL_NAME=${MODEL_NAME:-qwen-plus}
-      - LLM_BASE_URL=${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.minimaxi.com/v1}
+      - MODEL_NAME=${MODEL_NAME:-MiniMax-M3}
+      - EMBED_BASE_URL=${EMBED_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       # JWT 签名密钥
       - SECRET_KEY=${SECRET_KEY:?请在根目录 .env 中配置 SECRET_KEY}
       # CORS（同源部署不需要；直连 8000 才需要放开）

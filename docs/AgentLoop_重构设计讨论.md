@@ -1,6 +1,6 @@
 # 对话 Agent 循环（Agent Loop）重构 — 设计讨论
 
-> 状态：**讨论中（v0.1 初稿）**，文档随讨论更新，结论进入「12. 决策记录」
+> 状态：**Batch1 已实施（2026-09-06），Batch2+ 待排期**；调研与学习资料见 `docs/AgentLoop_业界调研与学习路线.md`
 > 创建：2026-09-05
 > 关联：COMPETITION.md（AIC 技术纵深叙事）、TODO.md、docs/教育资料采集模块_设计讨论.md（结构范式）
 > 一句话定位：把 TutorAgent 的"两阶段固定脚本"升级为**可观测、有边界、单循环驱动**的真 Agent 循环
@@ -218,7 +218,7 @@ GraphAnalyzer 并入（路线 C）后，其"输出必须是合法 JSON"的脆弱
 
 | 批次 | 内容 | 工作量估 | 产出物 |
 |:---:|------|:---:|------|
-| Batch1 | 路线 A：`run_agent_loop` + 薄壳委托 + 单元测试 + 全库回归 | ~1-2 天 | 真循环落地，trace 可用 |
+| Batch1 | 路线 A：`run_agent_loop` + 薄壳委托 + 单元测试 + 全库回归 | ✅ 2026-09-06 | `agent_loop.py` 真循环落地，trace 可用；全库 245 passed |
 | Batch2 | 附带工程：图谱按需注入（先 L1 后 L2）+ messages 裁剪 | ~1 天 | context 收敛 |
 | Batch3 | 路线 B：SSE 事件扩展 + 前端活动展示 + qwen 流式 tools 能力验证 | ~2 天 | 演示可见 agent 过程 |
 | Batch4 | `eval_agent_loop.py` 评测脚本 | ~1 天 | AIC 量化素材 |
@@ -249,6 +249,80 @@ Agent 循环解决的是"**怎么把一次任务跑对**"，不解决"**这一�
 
 ## 12. 决策记录
 
-（讨论后按序追加，风格参照采集模块文档的「决策 #N」）
+- **决策 #1（2026-09-06，范围节奏）**：先调研后实现。产出 `docs/AgentLoop_业界调研与学习路线.md`（业界共识骨架 + 逐家拆解 + 六事实对照 + Batch1 增量建议）。实施范围选 **Batch1（路线 A）**；Batch3 依赖 qwen 流式 tools 真网验证（DASHSCOPE 403 未恢复）暂缓，Batch2/Batch4 后置。
+- **决策 #2（循环语义）**：`run_agent_loop` = LLM↔工具多轮串联，二次 tool_calls 不再丢弃。`max_rounds=5`（工具执行轮上限）；达上限**不再执行新工具**，追加"立即停止调用工具"的 user 指令 + 空 tools 强制模型自然收尾（参考 Votek agent_loop）；强制轮空文本/LLM 失败时兜底友好文案。
+- **决策 #3（参数/护栏）**：循环内统一 `temperature=0.3`（放弃旧"后台 0.3/文本 0.7"两档）；单工具 `asyncio.wait_for` 超时 60s（to_thread 执行，不阻塞事件循环）；单工具异常/超时隔离为错误文案回填，循环不炸。
+- **决策 #4（观测/trace）**：rounds 随循环长出（round/tool/args_head/ok/duration_ms/result_head）；`context_tokens` 取各轮 `usage.prompt_tokens` **真值累加**；`save_trace` 落 `backend/data/traces/{user_id}/{run_id}.jsonl`（无工具动作不落盘；落盘失败仅 warning）。
+- **决策 #5（去耦合/改动面）**：新建 `app/core/agent_loop.py` 纯编排层（只复用 llm_client 的 client/KG_TOOLS/execute_kg_tool/重试）；`call_llm` 简化回纯文本（删 `enable_tools`/`kg`，原 6 处 `enable_tools=False` 调用点同步清理）；删除死代码 `call_llm_tools`；chat_service 两个入口（`/chat` legacy `process_message` 与 `/chat/stream` 后台 `process_background_tools`）均改走 `run_agent_loop`。GraphAnalyzer 暂保留原触发（中间态/并入留 Batch5）。
+- **决策 #6（2026-09-06，真实联调前稳健性修正）**：① 自然终止但模型返回空 content → 兜底引导文案（不返回空白）；② `force_finish` 的停止指令改以 **user 消息**追加（规避兼容网关对多条 system 的不确定性），且该次调用包 try，失败退化为固定汇总文案；③ 测试增至 9 用例（补自然终止空文本兜底 / 强制收尾 LLM 异常兜底）。
+- **验收（Batch1，2026-09-06）**：新增 `tests/test_agent_loop.py` **9 用例**全绿；全库 **247 passed 零回归**（原 238 + 新 9）。
+
+---
+
+## 13. 当前架构全景（Batch1 落地后，2026-09-06）
+
+### 13.1 调用链（`/chat/stream` 主链，前端实际路径）
+
+```text
+POST /api/v1/chat/stream                          api/v1/chat.py
+ ├─ 阶段1（可见） process_message_stream()          services/chat_service.py
+ │    └─ call_llm_stream()                          llm_client.py（不带 tools，纯文本 SSE）
+ │
+ ├─ [DONE] → BackgroundTasks
+ │
+ └─ 阶段2（后台） process_background_tools()         services/chat_service.py
+      ├─ _build_system_prompt(inject_tools=True)   ← 图谱摘要 + RAG + 工具能力说明
+      ├─ run_agent_loop()  ★真循环                  core/agent_loop.py
+      │    └─ 每轮 _chat_once(tools=KG_TOOLS)       → 有 tool_calls → _execute_tool（to_thread+超时）
+      │       └─ rounds 记录（trace）               → 自然终止 / max_rounds 强制收尾
+      ├─ save_trace() → data/traces/{uid}/{run_id}.jsonl
+      ├─ _analyze_and_apply()  GraphAnalyzer        core/graph_analyzer.py（独立 LLM 判断改图谱，决策 #5 保留）
+      └─ publish("graph_updated")                   前端刷新图谱
+
+legacy /chat（兼容旧前端）: process_message() → _build_system_prompt(inject_tools=True)
+      → run_agent_loop() → text → ChatResponse（图谱分析仍异步 create_task）
+```
+
+### 13.2 模块边界与职责（去耦合现状）
+
+| 模块 | 职责 | 依赖（只读） |
+|------|------|------------|
+| `core/agent_loop.py` ★新增 | 循环编排 + 护栏 + trace 记录；**零业务** | llm_client：client / KG_TOOLS / execute_kg_tool / `_build_api_messages` / `_with_retry` |
+| `core/llm_client.py` | OpenAI 兼容客户端；KG_TOOLS 定义；execute_kg_tool（工具执行体）；`call_llm`（纯文本）/ `call_llm_stream` | —（不持循环） |
+| `services/chat_service.py` | 提示词组装 + 阶段编排 + GraphAnalyzer 触发 | agent_loop / llm_client / graph_analyzer / rag_pipeline |
+| `core/graph_analyzer.py` | 独立"要不要改图谱"分析（第二入口，待 Batch5 并入） | llm_client.call_llm / knowledge_graph |
+| rag_pipeline / kb / knowledge_graph | 纯被调（工具能力） | — |
+
+### 13.3 "loop 够用吗" — 就绪确认表
+
+**业界共识六点（调研文档 §1）全部满足** ✅
+
+| 业界共性 | 落实位置 |
+|---------|---------|
+| 工具结果回填后循环内继续请求 | `run_agent_loop` for 循环 |
+| 硬轮数上限 + 达限兜底 | `max_rounds` → `_force_finish`（user 指令 + 空 tools） |
+| 每轮 LLM 都带 tools | 每轮 `_chat_once(tools=KG_TOOLS)` |
+| 中间产物可观测 | `rounds` + `save_trace` |
+| 工具异常/超时隔离不炸循环 | `_execute_tool`（wait_for + catch） |
+| 纯编排不含业务 | 只依赖 llm_client，不碰图谱/RAG 内部 |
+
+**已知边界（非 Batch1 缺陷，属既定批次，联调时要有数）**：
+1. `/chat/stream` 仍两段（阶段1 流式文本 + 阶段2 后台 loop）——`run_agent_loop` 目前只驱动"后台工具通道"，**尚未成为主答案生成器**；阶段2 loop 无工具时是一次"探测性"调用。合并可见回答 = Batch3（依赖 qwen 流式 tool_calls 真网验证）。
+2. messages 无裁剪、图谱全量注入 system prompt → Batch2。
+3. GraphAnalyzer 独立 LLM 调用仍在（每轮可能 +1 次）→ Batch5 并入。
+4. 单条消息 LLM 调用现状：主链 = 阶段1 ×1 + 后台 loop（≥1）+ 可能 analyzer ×1。Batch3 收敛到"1 个 loop"。
+
+### 13.4 真实 API 联调检查点（Batch1 待真网验收项）
+
+| # | 验证点 | 通过标准 |
+|:-:|--------|---------|
+| 1 | 后台 loop 能真正触发 `rag_search` / `add_knowledge_node` 等多轮工具并回填协议不 400 | qwen 接受 assistant(tool_calls)+tool 一一对应；多轮串联正常 |
+| 2 | `force_finish` 的追加 user 指令路径 | 连续工具后模型停止并给出自然文本 |
+| 3 | 自然/强制收尾空 content 兜底 | 无空白回复 |
+| 4 | trace 落盘 | `data/traces/{uid}/*.jsonl` 出现、字段完整 |
+| 5 | 阶段1 流式 + 阶段2 loop 全链路 | 前端看到文本 → 图谱静默更新（现状语义） |
+| 6 | usage 真值 | trace `context_tokens > 0` |
+
+> 前置：DASHSCOPE 额度/403 需已恢复；否则 1-3 无法验证（4 需先有 3）。
 
 ---

@@ -221,7 +221,6 @@ class GraphGenerator:
             raw = await call_llm(
                 GRAPH_GENERATOR_SYSTEM_PROMPT,
                 [{"role": "user", "content": user_prompt}],
-                enable_tools=False,
             )
         except Exception as e:
             logger.error(f"学科图谱生成 LLM 调用失败: {e}")
@@ -347,7 +346,6 @@ class GraphGenerator:
             raw = await call_llm(
                 "你是一个严谨的知识图谱去重助手。判断两个知识点是否指向同一概念。",
                 [{"role": "user", "content": prompt}],
-                enable_tools=False,
             )
         except Exception as e:
             logger.warning(f"去重确认 LLM 调用失败，按相似度({similarity:.2f})降级判断: {e}")

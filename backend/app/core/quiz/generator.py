@@ -178,7 +178,7 @@ async def generate_quiz(
     )
     messages = [{"role": "user", "content": user_prompt}]
     try:
-        raw = await call_llm(system_prompt, messages, enable_tools=False)
+        raw = await call_llm(system_prompt, messages)
     except Exception as e:
         logger.error(f"出题调用 LLM 失败: {e}")
         raise

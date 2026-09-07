@@ -1,17 +1,15 @@
 """
 对话服务层：编排整个对话处理流程
 
-新流程（两阶段分离）：
-  阶段1（流式）：构建纯教学提示词 → call_llm_stream() → SSE 逐 token 推给前端
-  阶段2（后台）：构建带工具说明的提示词 → call_llm_tools() → 执行工具 → 推送结果
-
-旧流程（保留兼容）：
-  process_message() 仍可用，但 /chat/stream 是推荐接口
+新流程（2026-09-06 起，Agent Loop）：
+  run_agent_loop（app/core/agent_loop.py）= 标准 agent 循环：
+  阶段2（后台）：带工具说明的提示词 → LLM↔工具多轮串联 → 图谱更新 + trace 落盘
+  阶段1（流式过渡）：call_llm_stream() 仍先流式输出可见文本（Batch3 合并前保留）
 
 提示词组装逻辑：
   通用模板 (system_prompt_common.j2) + 模式模板 → 完整 system prompt
   流式阶段：不含工具能力说明，AI 专注于教学引导
-  后台阶段：额外注入工具能力说明，AI 可调用 function calling
+  工具阶段：额外注入工具能力说明（TOOL_CAPABILITY_PROMPT），进入 agent 循环
 
 用户隔离：
   所有函数接受 user_id（从 JWT 解析），内部创建 KnowledgeGraph(user_id) 实例
@@ -22,12 +20,13 @@ import logging
 from typing import AsyncGenerator
 from datetime import datetime
 from app.core.prompt_loader import get_system_prompt
-from app.core.llm_client import call_llm, call_llm_stream, call_llm_tools
+from app.core.llm_client import call_llm_stream
+from app.core.agent_loop import run_agent_loop, save_trace
 from app.core.graph_analyzer import GraphAnalyzer, build_graph_context
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.user_profile import UserProfile
 from app.core.error_codes import ErrorCode, log_error, publish_error_event
-from app.core.event_bus import publish
+from app.core.event_bus import publish, subscribe, TEXT_DELTA
 from app.api.v1.knowledge import _apply_suggestion, _load_suggestions, _save_suggestions
 
 logger = logging.getLogger("ai-tutor")
@@ -379,8 +378,9 @@ async def process_message(user_id: int, messages: list, mode: str,
             messages, mode, kg, inject_tools=True, current_node=current_node, kb=kb
         )
 
-        # 2. 调用 AI 获取回复
-        reply = await call_llm(system_prompt, messages, enable_tools=True, kg=kg)
+        # 2. Agent 主循环：LLM ↔ 工具 多轮串联，直到自然给出最终回复
+        result = await run_agent_loop(system_prompt, messages, kg=kg)
+        reply = result.text
 
         # 3. 图谱分析作为后台任务执行，不阻塞对话回复
         #    ★ 传入 user_id 而非 kg 实例，让 _analyze_and_apply 自己管理 kg 生命周期
@@ -412,41 +412,89 @@ async def process_message_stream(
     kb: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """
-    流式处理一条学生消息。
+    统一 SSE 流（方案 B）：run_agent_loop 为主答案生成器，
+    循环内的事件（thinking/tool_start/tool_result/text_delta）实时推到前端。
 
-    阶段1（流式）：逐 token yield 给前端，让用户立刻看到回复。
-    阶段2（后台）：在生成器结束后，通过 BackgroundTasks 触发工具调用和图谱分析。
+    架构：
+      1. 启动 agent_loop 作为 asyncio.Task（带 user_id → 事件投递到用户队列）
+      2. 同时 subscribe(user_id) 消费事件 → 转 SSE yield
+      3. agent_loop 完成后做图谱分析 + trace 落盘 + graph_updated 事件
+      4. yield [DONE]
 
-    参数:
-        messages:     完整对话历史（Pydantic ChatMessage 列表）
-        mode:         引导模式
-        user_id:      数据库用户 ID（从 JWT 解析）
-        current_node: 递归模式：当前正在教学的知识点 ID
-
-    Yields:
-        SSE 格式的字符串（"data: {...}\n\n"）
+    向后兼容：旧前端收到 {"token": "..."} 仍正常（text_delta 事件转 token 格式）。
     """
     kg = KnowledgeGraph(user_id=user_id)
     try:
-        # 阶段1：流式生成回复（纯教学，不带 tools）
-        stream_prompt, _ = await _build_system_prompt(
-            messages, mode, kg, inject_tools=False, current_node=current_node, kb=kb
+        tool_prompt, _ = await _build_system_prompt(
+            messages, mode, kg, inject_tools=True,
+            current_node=current_node, kb=kb
         )
 
-        try:
-            async for token in call_llm_stream(stream_prompt, messages):
-                yield f"data: {json.dumps({'token': token})}\n\n"
-        except Exception as e:
-            error_msg = str(e)
-            if not error_msg.startswith("[E-"):
-                error_msg = log_error(ErrorCode.CHAT_PROCESS_FAILED, detail=str(e), exception=e)
-            yield f"data: {json.dumps({'error': error_msg})}\n\n"
-            return
+        # 启动 agent loop 为后台任务（事件通过 event_bus 投递到用户队列）
+        agent_task = asyncio.create_task(
+            run_agent_loop(tool_prompt, messages, kg=kg, user_id=user_id)
+        )
 
-        # 流式结束，发送完成信号
+        # 消费用户事件队列 → SSE
+        async for sse_data in _consume_agent_events(user_id, agent_task):
+            yield sse_data
+
+        # 获取 agent 结果
+        result = await agent_task
+        save_trace(result, user_id)
+
+        # 图谱分析（复用现有逻辑）
+        user_msgs = [m for m in messages if (m.role if hasattr(m, 'role') else m['role']) == 'user']
+        if user_msgs and result.text:
+            last_user = user_msgs[-1].content if hasattr(user_msgs[-1], 'content') else user_msgs[-1]['content']
+            await _analyze_and_apply(last_user, result.text, user_id)
+
+        publish("graph_updated")
+
         yield "data: [DONE]\n\n"
+    except Exception as e:
+        error_msg = str(e)
+        if not error_msg.startswith("[E-"):
+            error_msg = log_error(ErrorCode.CHAT_PROCESS_FAILED, detail=str(e), exception=e)
+        yield f"data: {json.dumps({'error': error_msg})}\n\n"
     finally:
         kg.close()
+
+
+async def _consume_agent_events(user_id: int, agent_task: asyncio.Task) -> AsyncGenerator[str, None]:
+    """
+    消费 agent 事件队列，转为 SSE 格式 yield。
+    agent_task 完成后停止消费。
+    """
+    async for sse in subscribe(user_id):
+        if agent_task.done() and _user_queue_empty(user_id):
+            break
+
+        payload = json.loads(sse.replace("data: ", "").strip())
+        evt_type = payload.get("type")
+
+        if evt_type == TEXT_DELTA:
+            # 向后兼容：text_delta → token 格式
+            yield f"data: {json.dumps({'token': payload.get('text', '')})}\n\n"
+        elif evt_type in ("thinking", "tool_start", "tool_result", "agent_start", "agent_done"):
+            # 新事件类型：透传给前端
+            yield sse
+        elif evt_type == "graph_updated":
+            # 图谱更新事件：透传
+            yield sse
+        elif evt_type == "error":
+            yield sse
+
+        # agent 完成且队列已空 → 退出
+        if agent_task.done() and _user_queue_empty(user_id):
+            break
+
+
+def _user_queue_empty(user_id: int) -> bool:
+    """检查用户事件队列是否为空。"""
+    from app.core.event_bus import _user_queues
+    q = _user_queues.get(user_id)
+    return q is None or q.empty()
 
 
 async def process_background_tools(
@@ -470,11 +518,12 @@ async def process_background_tools(
     """
     kg = KnowledgeGraph(user_id=user_id)
     try:
-        # 1. 工具调用（function calling）—— 使用含工具说明的 prompt
+        # 1. Agent 主循环：工具判断 + 执行 + 自然收尾（替代旧 call_llm_tools 一轮脚本）
         tool_prompt, last_user_msg = await _build_system_prompt(
             messages, mode, kg, inject_tools=True, current_node=current_node, kb=kb
         )
-        tool_result = await call_llm_tools(tool_prompt, messages, kg=kg)
+        result = await run_agent_loop(tool_prompt, messages, kg=kg)
+        save_trace(result, user_id)
 
         # 2. 图谱分析（GraphAnalyzer 独立判断）
         user_msgs = [m for m in messages if (m.role if hasattr(m, 'role') else m['role']) == 'user']
