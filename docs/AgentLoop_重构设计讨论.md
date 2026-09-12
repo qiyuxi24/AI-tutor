@@ -2,7 +2,7 @@
 
 > 状态：**Batch1 已实施（2026-09-06），Batch2+ 待排期**；调研与学习资料见 `docs/AgentLoop_业界调研与学习路线.md`
 > 创建：2026-09-05
-> 关联：COMPETITION.md（AIC 技术纵深叙事）、TODO.md、docs/教育资料采集模块_设计讨论.md（结构范式）
+> 关联：docs/比赛/COMPETITION.md（AIC 技术纵深叙事）、TODO.md、docs/教育资料采集模块_设计讨论.md（结构范式）
 > 一句话定位：把 TutorAgent 的"两阶段固定脚本"升级为**可观测、有边界、单循环驱动**的真 Agent 循环
 
 ---

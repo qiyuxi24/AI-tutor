@@ -1,7 +1,7 @@
 # TutorAgent 备赛与工程化清单
 
 > 定位：知识图谱驱动的自适应导学 Agent（知识图谱 + 上传知识库 RAG + AI 出题 + 资源采集）
-> 赛道：**三赛同投**（国创 / AI+教育 OPC / AIC），总纲·时间线·注意事项见 `COMPETITION.md`；本文件只列工程化待办
+> 赛道：**三赛同投**（国创 / AI+教育 OPC / AIC），总纲·时间线·注意事项见 `docs/比赛/COMPETITION.md`；本文件只列工程化待办
 > 今日：2026-09-10（W3 第 3 天，距 10-15 双截止约 5 周）
 >
 > **⚠️ 清单状态按代码实测校准（2026-09-05 起随完成随勾），非按文档印象勾选。**
@@ -31,8 +31,8 @@
   - [x] frontend/index.html `<title>` "frontend" → TutorAgent + `lang="zh-CN"`
   - [x] LoginView / ActivityBar / OnboardingGuide / style.css 等 "AI Tutor" 文案 → TutorAgent
   - [x] backend/app/main.py `FastAPI(title="TutorAgent API")`
-  - [x] start.ps1 / install.ps1 横幅；deploy/README、error_codes.md、docs/AI-Tutor_项目概述.md 标题与文案
-  - 说明：logger 名 `ai-tutor`（30 处）与 localStorage key `ai_tutor_*` 属内部标识，改名会破坏登录态且零用户价值，保留不改；docs/bp_* 商业计划书系列品牌统一留 W5 材料期做
+  - [x] start.ps1 / install.ps1 横幅；deploy/README、error_codes.md、docs/比赛/AI-Tutor_项目概述.md 标题与文案
+  - 说明：logger 名 `ai-tutor`（30 处）与 localStorage key `ai_tutor_*` 属内部标识，改名会破坏登录态且零用户价值，保留不改；docs/比赛/bp_v2 商业计划书系列品牌统一留 W5 材料期做
 - [x] **真实 LLM 链路验证（对话/Agent 主链路）**（2026-09-06~09-08 完成）
   - ✅ MiniMax-M3 chat/流式/工具调用真网全通（scripts/test_minimax.py 自检 + smoke_agent_loop.py 冒烟）
   - ✅ Agent Loop 真网 7/7 passed（L1 工具选择/L2 参数提取/L3 结果利用/L4 协议合规/token/trace，详见 reports/real_api_test_report.md）
@@ -132,10 +132,11 @@
 - [x] **`backend/test_data.py` 遗留失效脚本**（2026-09-08 已删）：`KnowledgeGraph()` 缺 user_id 无法运行且会被误收集，无任何引用 → 直接删除。
 - [x] **向量检索维度校验**（2026-09-12 已修）：`VectorStore.search` / `DocVectorStore.search` 库内向量维度 ≠ 查询维度时跳过该行 + warning（原 `np.dot` 直接 ValueError→500，换嵌入模型未重建即触发）；新增 `tests/test_vector_store_dims.py`（2 例）。
 - [x] **维基地区词标记 `-{…}-` 未清理**（2026-09-12 已修，详见 `TODO_Collector.md` 遗留技术债 #1）。
+- [ ] **试卷拆分器 `quiz_splitter.py` 已实现但零引用（未接入上传链路）**（2026-09-12 发现，详见 `TODO_Collector.md` 遗留技术债 #2）：需先定入口形态（`/kb/upload` 自动拆 / 独立 `POST /quiz/import` / 并入 B3.1）。
 - [x] **两处 `_embed()` 合并统一门面**（2026-09-12 已修）：新增 `app/core/llm/embed.py`（`embed_texts` / `EMBEDDING_MODEL` / `MAX_EMBED_CHARS`）为嵌入唯一出口；`kb_manager._embed`、`rag/manager._embed` 收敛为薄委托（保留方法名以不破坏既有"类级 patch `_embed`"的测试与脚本遮罩缝）。顺带修根因：**部分返回（条数对不上）整批作废**，杜绝 chunk 与向量错位入库（原 rag_manager 侧 `zip(chunks, embeddings)` 会静默错位）。`kind=db|query` 参数按 YAGNI 未加（换非对称嵌入模型时再加）。测试 `tests/test_embed_texts.py`（6 例）。
 - [ ] **图谱 RAG 未接入 hybrid_search 双检索**（2026-09-11 调研发现）：图谱侧只有向量检索（`rag/manager.search`），未享 BM25 稀疏路。**评估结论：不是小改**——`hybrid_search/whoosh_index.py` 的 schema 把 `node_id` 定为 `NUMERIC`（KB 文件节点 int），图谱 node_id 是 TEXT，复用需改 schema + 老索引迁移/双 schema 兼容。收益（图谱写回 BM25 召回）与成本需先量化，暂缓。
 - [ ] **conversations 内嵌 tools/thinking 去留 + run 与会话无关联键**（9/8 起挂着，**待决策**）：需定"是否为 agent_runs 加 conversation 外键/会话 id 字段（动 schema）"，或接受现状。
-- [ ] **README 数字/路径陈旧**（2026-09-12 发现）：README 仍写"零网络用例 254 个全绿 / pytest 收集 467 项"（实为 485 passed / 收集 492），架构图与目录树里的 `llm_client.py` 已于 9/8 包化为 `core/llm/`。按 `docs/README_编写规范.md` 做一次门面同步（勿与实现混做）。
+- [x] **README 门面同步 + 双语化 + 贡献指南**（2026-09-12 完成）：① 数字/路径校准 —— 测试口径改为 `533 passed, 7 deselected`（收集 540）并附复现命令；架构图与目录树的 `llm_client.py` → `core/llm/` 原语包；目录树补 `agent_run_store.py` / `agent_tools.py`；核心功能表补"运行记录与证据回放""模型回退链"。② 新增 `README.en.md` 英文镜像（文首语言切换器 + `<!-- base -->` 注释；与中文版结构同构：H2 11 / 代码块 10 / 表格行 47 两侧一致）。③ 新增 `CONTRIBUTING.md` + `CONTRIBUTING.en.md`。④ `docs/README_编写规范.md` 升 **v3**（新增第 6 章多语言维护、第 7 章贡献指南规范、第 8 章检查清单）。CI 双语文档结构校验脚本按要求**暂未实现**（见规范 6.5 ④）。
 
 ## 进度速览（2026-09-08）
 - 代码层工程化 ~85%（架构✓ 测试✓ 部署✓ 文档✓ CI✓ 运维✓ 限流✓ 日志✓ Agent Loop✓）

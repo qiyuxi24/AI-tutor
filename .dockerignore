@@ -51,7 +51,7 @@ backend/requirements-dev.txt
 .idea/
 *.md
 deploy/
-COMPETITION.md
+docs/比赛/COMPETITION.md
 TODO.md
 
 # ─── 日志 / 临时文件 ───
