@@ -27,7 +27,7 @@ from app.core.agent_loop import run_agent_loop
 from app.core.context_guard import trim_history_to_budget
 from app.core.graph_analyzer import GraphAnalyzer, build_graph_context
 from app.core.knowledge_graph import KnowledgeGraph
-from app.core.user_profile import UserProfile
+from app.core.profile import UserProfile
 from app.core.error_codes import ErrorCode, log_error, publish_error_event
 from app.core.event_bus import publish, subscribe, get_user_queue, TEXT_DELTA
 from app.core.knowledge_writer import apply_suggestion, load_suggestions, save_suggestions
@@ -115,7 +115,7 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
     )
     graph_summary = _build_graph_summary(kg, detailed=inject_tools)
 
-    # 加载用户画像（如果存在）
+    # 加载用户画像（空画像返回 ""，不会把空模板注入提示词）
     profile = UserProfile(user_id=kg.user_id)
     profile_text = profile.get_summary()
 
@@ -151,7 +151,9 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
 
     # 注入检索上下文（RAG 是增强而非必需：检索失败或为空时不影响主提示词）
     # 去耦合：检索编排统一走 rag_pipeline，一次 run 按数据源分组生成图谱/知识库两个区块
-    retrieval = await _build_retrieval_context(last_user_msg, kg.user_id, kb)
+    # usage_mode 由上面同一个 profile 实例带下来，避免一次请求重复读画像文件
+    retrieval = await _build_retrieval_context(last_user_msg, kg.user_id, kb,
+                                              usage_mode=profile.get_usage_mode())
     if retrieval:
         system_prompt += retrieval
 
@@ -162,7 +164,8 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
 
 
 async def _build_retrieval_context(student_message: str, user_id: int,
-                                   kb: dict | None = None) -> str:
+                                   kb: dict | None = None,
+                                   usage_mode: str = "personal") -> str:
     """
     通过 RAG 管道检索相关片段，构造注入系统提示词的检索上下文。
 
@@ -170,6 +173,7 @@ async def _build_retrieval_context(student_message: str, user_id: int,
         student_message: 学生当前消息
         user_id:         用户 ID
         kb:              知识库上下文范围 {node_ids, name} | None
+        usage_mode:      版权/用途模式（调用方从画像读好后传入，缺省 personal）
 
     返回:
         格式化的检索上下文 Markdown 文本（图谱区块 + 知识库区块）；
@@ -181,13 +185,6 @@ async def _build_retrieval_context(student_message: str, user_id: int,
         鲁棒性：pipeline 内部已做按需开关 + 单源超时/异常隔离，绝不抛错。
     """
     from app.core.rag_pipeline import pipeline, RagContext
-
-    # 商用/个人用途模式（读 user_profile.preferences.usage_mode，缺省 personal）
-    usage_mode = "personal"
-    try:
-        usage_mode = UserProfile(user_id=user_id).get_usage_mode()
-    except Exception as e:
-        logger.warning(f"读取用途模式失败，按 personal 处理: {e}")
 
     hits = await pipeline.run(RagContext(
         user_id=user_id, query=student_message, top_k=5, kb=kb,

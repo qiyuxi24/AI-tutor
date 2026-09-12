@@ -57,13 +57,9 @@ def rag_search(query: str, source: str = "all",
 
     from app.core.rag_pipeline import pipeline, RagContext
 
-    # 商用模式过滤同样作用于 agent 工具检索（读 user_profile，缺省 personal）
-    mode = "personal"
-    try:
-        from app.core.user_profile import UserProfile
-        mode = UserProfile(user_id=user_id).get_usage_mode()
-    except Exception:
-        mode = "personal"
+    # 商用模式过滤同样作用于 agent 工具检索（usage_mode 唯一入口，读不到回退 personal）
+    from app.core.profile import get_usage_mode
+    mode = get_usage_mode(user_id)
 
     kb = None
     if source == "kb":
