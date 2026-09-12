@@ -100,6 +100,22 @@ whoosh_index/
 # 后端运行时数据（知识库索引、测验库等，可重建）
 backend/data/
 
+# 项目根 data/ 运行时数据（用户图谱 / 画像 / trace / KB 索引等，本地生成不入库）
+# 注意：data/prompts/*.j2 模板与 data/ 下 *.md 文档仍保留入库
+/data/knowledge/
+/data/profiles/
+/data/traces/
+/data/conversations/
+/data/quiz/
+/data/kb/
+/data/rag/
+/data/collector/
+
+# 根目录一次性比赛/调研材料（本地保留，不入库）
+/guochuang.pdf
+/guochuang*.txt
+/*.PDF
+
 # ════════════════════════════════════════════
 # 外部调研仓库（对标/借鉴用，clone 下来的第三方源码）
 # ════════════════════════════════════════════

@@ -192,8 +192,8 @@ python -m pytest tests/ -v -m "not llm_api"
 | 文件 | 说明 |
 |------|------|
 | `tests/test_agent_loop_real_api.py` | 真实 API 测试文件（7 场景） |
-| `tests/real_api_test_report.md` | 本报告（Markdown 格式） |
-| `tests/real_api_test_results.txt` | pytest -v -s 原始输出 |
+| `reports/real_api_test_report.md` | 本报告（Markdown 格式） |
+| `reports/real_api_test_results.txt` | pytest -v -s 原始输出 |
 | `pytest.ini` | pytest 配置（注册 `llm_api` marker） |
 | `app/core/agent_loop.py` | 被测源码 |
 | `app/core/llm_client.py` | LLM 客户端 + KG_TOOLS 定义 |
