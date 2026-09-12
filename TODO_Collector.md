@@ -31,7 +31,7 @@
 - [x] `base.py`：`BaseAdapter`（name/license_level）`search(query)->list[Candidate]`、`fetch(candidate)->bytes|str`；`Registry` 注册表按名路由
   - 测试：`test_collector_adapters_registry.py`（注册/同名覆盖/注销/类型校验/内置注册/L0）
 - [x] `wikipedia.py` [新文件]：MediaWiki API（zh.wikipedia.org）：`search` 按种子词搜 + 可选 `categorymembers` 递归发现；`fetch` 拉条目纯文本转 MD（**LaTeX 公式占位保留，不强行转**）
-  - 测试：`[需API]` 全链路联调标 1 条（未做）；其余 mock API 响应（`test_wikipedia_adapter.py`：分类递归翻页 continue 游标、UA、空结果、fetch 转 MD）
+  - 测试：mock API 响应（`test_wikipedia_adapter.py`：分类递归翻页 continue 游标、UA、空结果、fetch 转 MD）；`[需API]` 真网全链路联调已验（见 Batch 1 待 API 验证清单 ①）
 - [x] `wikibooks.py` [新文件]：同栈复用 wikipedia adapter 逻辑（换 host + project），URL 换参即可
   - 测试：mock 响应复用（`test_wikibooks_adapter.py`）
 - [x] `__init__.py`：注册内置 adapter
@@ -79,10 +79,10 @@
 
 **Batch 1 验收（离线优先）**：seed 灌库 → 对话引用 → 3 步演示；取消/断点续传 mock 测试过；商用过滤单测过。`[需API]` 仅联调 1-2 条。
 
-**Batch 1 待 API 验证清单**（2026-09-05 加；2026-09-05 已验 ①，其余全 mock 已绿，仅剩需 DASHSCOPE 额度）
-- [x] **B1.2 维基真网联调**：真网实测通过 —— `search("栈")` 返回 10 候选（标题/URL/snippet 正常），`fetch` 首条「堆栈」转 MD 6677 字符 / 361 行，无残留 `{{}}`/`<ref>`/`Category`。**发现小瑕疵**：wikitext_to_md 未清理 MediaWiki 地区词转换标记 `-{zh-cn:堆叠; zh-tw:堆棧;}-`（堆栈页可见），列入 Batch 2 文本质量项顺带修
-- [ ] **B1.6 真实嵌入灌库**：`venv/Scripts/python.exe scripts/seed_collector.py --user <演示账号> --embed api`（embedding 需非欠费），40 词条入库后 `stats` 正常，替换 mock 哈希向量（真向量召回质量是检索指标前提）
-- [ ] **Batch 1 端到端对话引用**：灌库后对话中挂载「自动采集」目录提问 DSA 概念 → 回答带 KB 引用（需 qwen-plus 聊天额度）
+**Batch 1 待 API 验证清单**（2026-09-05 加；① 已验，② 依赖阿里 embedding 额度，③ 主模型已切 MiniMax-M3 不再卡聊天额度）
+- [x] **B1.2 维基真网联调**：真网实测通过 —— `search("栈")` 返回 10 候选（标题/URL/snippet 正常），`fetch` 首条「堆栈」转 MD 6677 字符 / 361 行，无残留 `{{}}`/`<ref>`/`Category`。**已知小瑕疵（未修）**：wikitext_to_md 未清理 MediaWiki 地区词转换标记 `-{zh-cn:堆叠; zh-tw:堆棧;}-`（堆栈页可见）→ 已登记「遗留技术债」#1
+- [ ] **B1.6 真实嵌入灌库**：`venv/Scripts/python.exe scripts/seed_collector.py --user <演示账号> --embed api`（阿里 text-embedding-v4 需非欠费），40 词条入库后 `stats` 正常，替换 mock 哈希向量（真向量召回质量是检索指标前提）
+- [ ] **Batch 1 端到端对话引用**：灌库后对话中挂载「自动采集」目录提问 DSA 概念 → 回答带 KB 引用（先完成② 灌库，对话侧 MiniMax-M3 已可用）
 
 ---
 
@@ -154,7 +154,7 @@
 
 ### B4.3 本地 embedding 正式启用 [改]
 - [ ] 安装 sentence-transformers（可选依赖，`requirements-optional.txt` 或注释指引）
-- [ ] `[改] kb_manager._embed` 或配置项：`EMBED_MODE=local|api|auto`，auto 降级链 API→本地→hash（复用 get_embedder）
+- [ ] `[改] app/core/llm/embed.py`（2026-09-12 起嵌入唯一出口，kb_manager/rag_manager 的 `_embed` 已收敛为薄委托）：加 `EMBED_MODE=local|api|auto`，auto 降级链 API→本地→hash（复用 `kb/embedder.py` 的 `get_embedder`）
 - [ ] 大规模入库批量 embedding 性能验证；成瓶颈再评估 worker 进程（决策 #20）
 - [ ] 测试：本地未装时优雅回退已有测试覆盖，补 `test_embed_mode_config.py`
 
@@ -178,6 +178,9 @@
 | B3 | trafilatura/readability-lxml（新增 py 依赖）、开放数据集下载 | 数据集网络下载一次缓存本地 |
 | B4 | playwright/agent-browser、sentence-transformers+torch | torch 体积大，仅可选启用 |
 
-## 待确认（实现中如遇再做）
-- 商用过滤的 node 白名单用目录前缀匹配：确认 `collect_files` 语义复用方式（实现时看代码，见 B1.3）
-- 设置「usage_mode」是否需要独立 API vs 复用 PATCH /profile/{field}（B1.5 时定）
+## 遗留技术债（2026-09-08 盘点，登记未修的已知小项）
+- [x] **#1 维基地区词转换标记未清理**（2026-09-12 已修）：`wikitext_to_md` 新增 `_strip_variant()` —— `-{zh-cn:堆叠; zh-tw:堆棧;}-` 保留首选变体（`堆叠`）、`-{H|…}-` 转换规则定义整段丢弃、`-{A|B}-` 取前者（不切坏 `[[链接|文字]]`）；嵌套按 `while` 循环剥净。测试：`test_wikipedia_adapter.py::test_wikitext_variant_markup_stripped` 1 例。
+
+## 已解决（原「待确认」，实现中定案，勿重复实现）
+- [x] 商用过滤的 node 白名单用目录前缀匹配：确认 `collect_files` 语义复用方式 → **B1.8 落于 `kb_manager.allowed_node_ids()`**（见上，含单测）
+- [x] 设置「usage_mode」是否需要独立 API vs 复用 PATCH /profile/{field} → **复用 PATCH /profile**（B1.5 落地，SettingsView 先 GET 后 PATCH 全量合并）
