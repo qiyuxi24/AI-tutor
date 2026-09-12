@@ -181,6 +181,8 @@
 ## 遗留技术债（2026-09-08 盘点，登记未修的已知小项）
 - [x] **#1 维基地区词转换标记未清理**（2026-09-12 已修）：`wikitext_to_md` 新增 `_strip_variant()` —— `-{zh-cn:堆叠; zh-tw:堆棧;}-` 保留首选变体（`堆叠`）、`-{H|…}-` 转换规则定义整段丢弃、`-{A|B}-` 取前者（不切坏 `[[链接|文字]]`）；嵌套按 `while` 循环剥净。测试：`test_wikipedia_adapter.py::test_wikitext_variant_markup_stripped` 1 例。
 
+- [ ] **#2 试卷拆分器 `quiz_splitter.py` 已就绪但零引用（未接入任何链路）**（2026-09-12 发现）：`collector/quiz_splitter.py`（整卷非结构化文本 → 逐题结构：题号/大题/选项/答案回填/解析，纯函数零 LLM）已可用且有 `tests/test_quiz_splitter.py` 9 例覆盖，但**全库零调用**（只在自身 `__main__` 自检里跑），属"能用但没人用"的库。**待决策（入口形态三选一）**：① `/kb/upload` 命中试卷形态后自动拆分；② 独立 `POST /quiz/import`（上传整卷 → 拆分 → 人工校对 → 入库）；③ 与 B3.1 `dataset_quiz` 合并做（同属"题库导入"，但形态不同：B3.1=结构化 JSON，本项=非结构化试卷文本，不要混在一支适配器里）。**接入时必须注意**：`quiz_store.save_questions` 收 `Question` **对象**而非 dict（须写 `Question(**q.to_question_dict())`）；DB `id` 自增，拆分产物的 `q1/q2` 重号入库无害。
+
 ## 已解决（原「待确认」，实现中定案，勿重复实现）
 - [x] 商用过滤的 node 白名单用目录前缀匹配：确认 `collect_files` 语义复用方式 → **B1.8 落于 `kb_manager.allowed_node_ids()`**（见上，含单测）
 - [x] 设置「usage_mode」是否需要独立 API vs 复用 PATCH /profile/{field} → **复用 PATCH /profile**（B1.5 落地，SettingsView 先 GET 后 PATCH 全量合并）
