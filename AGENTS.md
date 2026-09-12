@@ -59,6 +59,7 @@ api/v1/chat.py ──► services/chat_service.py ──编排──► core/age
 | `backend/app/services/chat_service.py` | 对话编排：提示词组装 + 调 run_agent_loop + 后台图谱分析 |
 | `backend/app/core/knowledge_graph.py` | 图谱存储（SQLite + 节点 MD 文件），`KnowledgeGraph(user_id)` 实例级隔离 |
 | `backend/app/core/rag_pipeline/`、`kb/`、`rag/`、`hybrid_search/`、`quiz/` | RAG / 知识库 / 图谱索引 / 出题 |
+| `backend/app/core/collector/` | 采集链路：`adapters/`（数据源）+ `pipeline_ingest.py`（切章入库）+ `chapterizer.py`；其中 `quiz_splitter.py`（试卷整卷文本 → 逐题，纯函数零 LLM）**已就绪但尚未接入上传链路** |
 | `backend/app/api/v1/` | FastAPI 路由层（纯 HTTP 薄壳） |
 | `backend/app/models/schemas.py` | Pydantic 请求/响应模型 |
 

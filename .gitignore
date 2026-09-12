@@ -86,6 +86,9 @@ backend/eval_data/prof_writer/
 .codebuddy/settings.local.json
 # 个人求职日志（与项目无关，勿提交）
 .workbuddy/memory/2026-09-01.md
+# PPT 生成工具的工作目录：进程状态（.slidep/）、state.json、图标缓存等可重建产物。
+# 成品 PPT 若要留档，请拷到 docs/ 或根目录再提交，不要从工具目录里提交。
+/.workbuddy/ppt_workspace/
 
 # ════════════════════════════════════════════
 # 运行时数据 / 生成文件
