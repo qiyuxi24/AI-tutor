@@ -103,7 +103,8 @@ const NODE_COLOR_WEAK = 'var(--color-red)'
 const NODE_COLOR_LEARNING = 'var(--color-yellow)'
 const NODE_COLOR_MASTERED = 'var(--color-green)'
 
-/** 掌握度分档：0 未开始 / 1 薄弱 / 2 学习中 / 3 已掌握 */
+/** 掌握度分档：0 未开始 / 1 薄弱(1-29) / 2 学习中(30-69) / 3 已掌握(≥70)
+ *  阈值契约 = 后端 graph_middleware.mastery_bucket（唯一真值源）；改这里必须同步改后端 */
 function masteryLevel(mastery) {
   if (mastery == null || mastery === 0) return 0
   if (mastery < 30) return 1

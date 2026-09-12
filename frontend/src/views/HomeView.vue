@@ -15,7 +15,6 @@
 
 import { ref, onMounted } from 'vue'
 import { useChatStore } from '../stores/chatStore'
-import { storeToRefs } from 'pinia'
 import { useAuthStore } from '../stores/authStore'
 import { formatError, clientError } from '../utils/errorCodes.js'
 import { notifyError } from '../utils/feedback'
@@ -23,6 +22,7 @@ import ActivityBar from '../components/ActivityBar.vue'
 import ConversationSidebar from '../components/ConversationSidebar.vue'
 import ChatArea from '../components/ChatArea.vue'
 import ForceGraph from '../components/ForceGraph.vue'
+import GraphSubjectBar from '../components/GraphSubjectBar.vue'
 import GraphBoardSidebar from '../components/GraphBoardSidebar.vue'
 import NodeDetail from '../components/NodeDetail.vue'
 import UserProfile from '../components/UserProfile.vue'
@@ -35,10 +35,36 @@ import SettingsView from './SettingsView.vue'
 import DashboardView from './DashboardView.vue'
 
 const store = useChatStore()
-const { currentSubject: currentSubjectSelect } = storeToRefs(store)
 const authStore = useAuthStore()
 const viewMode = ref('chat')
 const sidebarCollapsed = ref(false)
+const graphNavCollapsed = ref(false)
+
+// ─── 图谱导航：宽度拖拽（手动存 localStorage，宽度不持久化的话拖了也白拖）───
+const GRAPH_PANEL_MIN = 140
+const GRAPH_PANEL_MAX = 340
+const graphPanelWidth = ref(Number(localStorage.getItem('graphPanelWidth')) || 176)
+const graphPanelResizing = ref(false)
+
+function startGraphResize(e) {
+  const startX = e.clientX
+  const startW = graphPanelWidth.value
+  graphPanelResizing.value = true
+  const onMove = (ev) => {
+    graphPanelWidth.value = Math.min(
+      GRAPH_PANEL_MAX,
+      Math.max(GRAPH_PANEL_MIN, startW + ev.clientX - startX)
+    )
+  }
+  const onUp = () => {
+    graphPanelResizing.value = false
+    localStorage.setItem('graphPanelWidth', String(graphPanelWidth.value))
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+  }
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
 const showUserProfile = ref(false)
 const graphSearchRef = ref(null)
 const forceGraphRef = ref(null)
@@ -52,18 +78,9 @@ const nodeDetailVisible = ref(false)
 const nodeDetailLoading = ref(false)
 
 onMounted(() => {
-  store.init()  // async，内部会调用 fetchGraph() + connectSSE()
-  store.fetchSubjects()  // 加载学科列表（图谱页学科选择器用）
+  // init() 内部依次：fetchSubjects() → ensureSubjectSelected() → fetchGraph() → connectSSE()
+  store.init()
 })
-
-/**
- * 切换学科视图：按学科过滤图谱（每个学科单独一张图）。
- * @param {string|null} subject - 学科名；null 表示查看全部
- */
-async function handleSubjectChange(subject) {
-  viewMode.value = 'graph'
-  await store.setSubject(subject || null)
-}
 
 function handleLogout() {
   authStore.logout()
@@ -202,19 +219,43 @@ async function handleGraphSearchSelect(nodeId) {
 //  仪表盘联动：点击学科/薄弱点/推荐节点 → 切图谱并聚焦
 // ════════════════════════════════════════════════════════════════
 
+/**
+ * 切到目标节点所在学科（若与当前不同），等待重渲染后再聚焦。
+ *
+ * 图谱一次只渲染一个学科，跨学科聚焦（仪表盘推荐/薄弱点、节点详情里的
+ * 前置与关联节点）必须先切学科，否则目标节点根本不在画布上。
+ *
+ * @param {string} nodeId
+ * @param {string} [subject] - 目标学科；空值表示未知，不切换
+ */
+async function switchSubjectAndFocus(nodeId, subject) {
+  if (subject && subject !== store.currentSubject) {
+    await store.setSubject(subject)
+    // 等新学科的力导向图完成渲染
+    await new Promise(r => setTimeout(r, 450))
+  }
+  forceGraphRef.value?.focusNode(nodeId)
+}
+
 /** 仪表盘点击学科 → 切换学科并进入图谱视图 */
 async function handleDashboardGoGraph(subject) {
-  await handleSubjectChange(subject || null)
+  viewMode.value = 'graph'
+  if (subject) {
+    await store.setSubject(subject)
+  } else {
+    // 空值 = "不指定学科"（如空状态页的"前往知识图谱"）→ 沿用/自动选中，不停在空画布
+    await store.ensureSubjectSelected()
+  }
 }
 
 /** 仪表盘点击节点（薄弱点/推荐）→ 进入图谱并聚焦该节点 */
-async function handleDashboardGoNode(nodeId) {
+async function handleDashboardGoNode(nodeId, subject) {
   if (viewMode.value !== 'graph') {
     viewMode.value = 'graph'
     // 切视图后等待布局/渲染完成再聚焦
     await new Promise(r => setTimeout(r, 450))
   }
-  forceGraphRef.value?.focusNode(nodeId)
+  await switchSubjectAndFocus(nodeId, subject)
 }
 
 /**
@@ -223,8 +264,10 @@ async function handleDashboardGoNode(nodeId) {
 async function handleNodeDetailNavigate(nodeId) {
   nodeDetailVisible.value = false
   nodeDetailLoading.value = true
+  let targetSubject = ''
   try {
     nodeDetailModal.value = await store.fetchNodeDetail(nodeId)
+    targetSubject = nodeDetailModal.value.subject || ''
     nodeDetailVisible.value = true
   } catch {
     nodeDetailModal.value = { id: nodeId, name: '加载失败', content: clientError('NODE_LOAD') }
@@ -233,8 +276,7 @@ async function handleNodeDetailNavigate(nodeId) {
     nodeDetailLoading.value = false
   }
   if (viewMode.value === 'graph') {
-    await new Promise(r => setTimeout(r, 100))
-    forceGraphRef.value?.focusNode(nodeId)
+    await switchSubjectAndFocus(nodeId, targetSubject)
   }
 }
 
@@ -314,25 +356,6 @@ const slideTransition = {
       <Transition name="view-fade" v-bind="slideTransition">
         <div v-if="viewMode === 'graph'" class="graph-layout" data-view="graph">
           <div class="graph-topbar">
-            <div class="subject-filter">
-              <span class="subject-filter-label">学科</span>
-              <el-select
-                v-model="currentSubjectSelect"
-                placeholder="全部学科"
-                clearable
-                filterable
-                size="small"
-                class="subject-select"
-                @change="handleSubjectChange"
-              >
-                <el-option
-                  v-for="s in store.subjects"
-                  :key="s"
-                  :label="s"
-                  :value="s"
-                />
-              </el-select>
-            </div>
             <div class="graph-search-bar">
               <GraphSearch
                 ref="graphSearchRef"
@@ -341,8 +364,30 @@ const slideTransition = {
               />
             </div>
           </div>
-          <!-- 板块侧栏：按需加载某学科下的局部子图 -->
-          <GraphBoardSidebar />
+          <!-- 左侧两级导航：学科收藏栏（一级）→ 知识板块（二级）
+               一次只渲染一个学科，避免图谱无限生长。
+               两级栏合并为一张卡片，右缘把手既可点击折叠、也可拖拽调宽。 -->
+          <div
+            class="graph-nav"
+            :class="{ collapsed: graphNavCollapsed, resizing: graphPanelResizing }"
+            :style="{ '--panel-w': graphPanelWidth + 'px' }"
+          >
+            <div class="graph-panel-stack">
+              <GraphSubjectBar class="graph-panel" />
+              <GraphBoardSidebar class="graph-panel" />
+              <span class="graph-resizer" @mousedown.prevent="startGraphResize"></span>
+            </div>
+            <button
+              class="graph-collapse-btn"
+              @click="graphNavCollapsed = !graphNavCollapsed"
+              :title="graphNavCollapsed ? '展开学科导航' : '收起学科导航'"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline v-if="!graphNavCollapsed" points="15 18 9 12 15 6" />
+                <polyline v-else points="9 18 15 12 9 6" />
+              </svg>
+            </button>
+          </div>
           <ForceGraph
             ref="forceGraphRef"
             :nodes="store.knowledgeNodes"
@@ -481,7 +526,7 @@ const slideTransition = {
   left: 0;
 }
 
-/* ── 图谱顶部栏（学科选择 + 搜索） ── */
+/* ── 图谱顶部栏（搜索） ── */
 .graph-topbar {
   position: absolute;
   top: 12px;
@@ -490,7 +535,7 @@ const slideTransition = {
   z-index: 25;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 12px;
   pointer-events: none;
 }
@@ -498,24 +543,112 @@ const slideTransition = {
   pointer-events: auto;
 }
 
-.subject-filter {
+/* ── 图谱左侧两级导航（学科收藏栏 + 知识板块） ──
+   布局：一张圆角卡片（两级栏用细分隔线分区）+ 右缘把手（点击折叠 / 拖拽调宽）。
+   宽度由 --panel-w 驱动（拖拽时内联更新），收起时卡片宽度归零并淡出。 */
+.graph-nav {
+  position: absolute;
+  top: 64px;
+  left: 12px;
+  bottom: 12px;
+  z-index: 20;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
+  align-items: stretch;
+}
+
+.graph-panel-stack {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: var(--panel-w, 176px);
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
+  border-radius: 12px;
+  overflow: hidden;
+  transition: width 0.28s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+}
+
+.graph-nav.collapsed .graph-panel-stack {
+  width: 0;
+  opacity: 0;
+  border-width: 0;
+  pointer-events: none;
+}
+
+/* 拖拽中禁用过渡，否则面板跟不上鼠标 */
+.graph-nav.resizing .graph-panel-stack {
+  transition: none;
+}
+
+/* 两级面板只负责内部布局，外观统一交给外层卡片。
+   选择器带 .graph-nav 前缀以覆盖子组件根元素自带的 border/圆角/宽度。 */
+.graph-nav .graph-panel {
+  width: 100%;
+  min-height: 0;
+  flex-shrink: 1; /* 子组件自带 flex-shrink:0，改纵向排布后需允许收缩才能内部滚动 */
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+.graph-nav .graph-panel + .graph-panel {
+  border-top: 1px solid var(--color-border);
+}
+
+/* 右缘拖拽热区：平时隐形，悬停才浮出一条强调色竖线 */
+.graph-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 7px;
+  z-index: 1;
+  cursor: col-resize;
+}
+.graph-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background 0.18s;
+}
+.graph-resizer:hover::after {
+  background: var(--color-accent, #5b8ff9);
+}
+
+/* 折叠把手：像抽屉拉手一样贴在卡片右缘，默认半隐、悬停浮现 */
+.graph-collapse-btn {
+  align-self: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 46px;
+  margin-left: -1px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.5;
+  transition: opacity 0.18s, background 0.18s, color 0.18s;
+}
+.graph-collapse-btn:hover {
+  opacity: 1;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+}
+
+/* 收起后卡片消失，把手脱开浮在原位，补全四边与圆角提示可展开 */
+.graph-nav.collapsed .graph-collapse-btn {
+  opacity: 0.85;
+  border-left: 1px solid var(--color-border);
   border-radius: 8px;
-}
-
-.subject-filter-label {
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  white-space: nowrap;
-}
-
-.subject-select {
-  width: 150px;
 }
 
 /* ── 图谱搜索栏 ── */
