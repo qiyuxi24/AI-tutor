@@ -1,0 +1,284 @@
+{
+  "dataset": "C:\\Users\\34239\\Documents\\GitHub\\AI-tutor\\backend\\eval_data\\prereq_sample.json",
+  "embed_mode": "mock",
+  "threshold": 0.3,
+  "max_parents": 5,
+  "rows": [
+    {
+      "subject": "数据结构",
+      "gold": 6,
+      "baseline": {
+        "tp": 4,
+        "fp": 0,
+        "fn": 2,
+        "precision": 1.0,
+        "recall": 0.6667,
+        "f1": 0.8,
+        "pred": 4
+      },
+      "added": {
+        "tp": 2,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "pred": 2
+      },
+      "merged": {
+        "tp": 6,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "pred": 6
+      },
+      "missed": [],
+      "wrong": []
+    },
+    {
+      "subject": "C语言",
+      "gold": 2,
+      "baseline": {
+        "tp": 1,
+        "fp": 1,
+        "fn": 1,
+        "precision": 0.5,
+        "recall": 0.5,
+        "f1": 0.5,
+        "pred": 2
+      },
+      "added": {
+        "tp": 1,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "pred": 1
+      },
+      "merged": {
+        "tp": 2,
+        "fp": 1,
+        "fn": 0,
+        "precision": 0.6667,
+        "recall": 1.0,
+        "f1": 0.8,
+        "pred": 3
+      },
+      "missed": [],
+      "wrong": []
+    }
+  ],
+  "micro": {
+    "baseline": {
+      "tp": 5,
+      "fp": 1,
+      "fn": 3,
+      "precision": 0.8333,
+      "recall": 0.625,
+      "f1": 0.7143
+    },
+    "added": {
+      "tp": 3,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "merged": {
+      "tp": 8,
+      "fp": 1,
+      "fn": 0,
+      "precision": 0.8889,
+      "recall": 1.0,
+      "f1": 0.9412
+    }
+  },
+  "sweep": {
+    "0.15": {
+      "baseline": {
+        "tp": 5,
+        "fp": 1,
+        "fn": 3,
+        "precision": 0.8333,
+        "recall": 0.625,
+        "f1": 0.7143
+      },
+      "added": {
+        "tp": 3,
+        "fp": 12,
+        "fn": 0,
+        "precision": 0.2,
+        "recall": 1.0,
+        "f1": 0.3333
+      },
+      "merged": {
+        "tp": 8,
+        "fp": 13,
+        "fn": 0,
+        "precision": 0.381,
+        "recall": 1.0,
+        "f1": 0.5517
+      }
+    },
+    "0.2": {
+      "baseline": {
+        "tp": 5,
+        "fp": 1,
+        "fn": 3,
+        "precision": 0.8333,
+        "recall": 0.625,
+        "f1": 0.7143
+      },
+      "added": {
+        "tp": 3,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "merged": {
+        "tp": 8,
+        "fp": 1,
+        "fn": 0,
+        "precision": 0.8889,
+        "recall": 1.0,
+        "f1": 0.9412
+      }
+    },
+    "0.25": {
+      "baseline": {
+        "tp": 5,
+        "fp": 1,
+        "fn": 3,
+        "precision": 0.8333,
+        "recall": 0.625,
+        "f1": 0.7143
+      },
+      "added": {
+        "tp": 3,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "merged": {
+        "tp": 8,
+        "fp": 1,
+        "fn": 0,
+        "precision": 0.8889,
+        "recall": 1.0,
+        "f1": 0.9412
+      }
+    },
+    "0.3": {
+      "baseline": {
+        "tp": 5,
+        "fp": 1,
+        "fn": 3,
+        "precision": 0.8333,
+        "recall": 0.625,
+        "f1": 0.7143
+      },
+      "added": {
+        "tp": 3,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "merged": {
+        "tp": 8,
+        "fp": 1,
+        "fn": 0,
+        "precision": 0.8889,
+        "recall": 1.0,
+        "f1": 0.9412
+      }
+    },
+    "0.4": {
+      "baseline": {
+        "tp": 5,
+        "fp": 1,
+        "fn": 3,
+        "precision": 0.8333,
+        "recall": 0.625,
+        "f1": 0.7143
+      },
+      "added": {
+        "tp": 3,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "merged": {
+        "tp": 8,
+        "fp": 1,
+        "fn": 0,
+        "precision": 0.8889,
+        "recall": 1.0,
+        "f1": 0.9412
+      }
+    },
+    "0.5": {
+      "baseline": {
+        "tp": 5,
+        "fp": 1,
+        "fn": 3,
+        "precision": 0.8333,
+        "recall": 0.625,
+        "f1": 0.7143
+      },
+      "added": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 3,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      "merged": {
+        "tp": 5,
+        "fp": 1,
+        "fn": 3,
+        "precision": 0.8333,
+        "recall": 0.625,
+        "f1": 0.7143
+      }
+    },
+    "0.6": {
+      "baseline": {
+        "tp": 5,
+        "fp": 1,
+        "fn": 3,
+        "precision": 0.8333,
+        "recall": 0.625,
+        "f1": 0.7143
+      },
+      "added": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 3,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      "merged": {
+        "tp": 5,
+        "fp": 1,
+        "fn": 3,
+        "precision": 0.8333,
+        "recall": 0.625,
+        "f1": 0.7143
+      }
+    }
+  }
+}

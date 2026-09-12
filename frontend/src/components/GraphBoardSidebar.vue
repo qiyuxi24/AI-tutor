@@ -75,18 +75,17 @@ function boardCountText(b) {
 </template>
 
 <style scoped>
+/* 定位交由父容器 .graph-nav（HomeView）统一管理，本组件只负责自身尺寸 */
 .graph-board-sidebar {
-  position: absolute;
-  top: 64px;
-  left: 12px;
-  bottom: 12px;
-  width: 200px;
-  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  width: 168px;
+  flex-shrink: 0;
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  overflow-y: auto;
   padding: 8px 6px;
+  overflow: hidden;
 }
 
 .board-sidebar-header {
@@ -101,6 +100,14 @@ function boardCountText(b) {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.board-list::-webkit-scrollbar { width: 4px; }
+.board-list::-webkit-scrollbar-thumb {
+  background: var(--color-border-light);
+  border-radius: 2px;
 }
 
 .board-item {

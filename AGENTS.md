@@ -56,6 +56,7 @@ api/v1/chat.py ──► services/chat_service.py ──编排──► core/age
 | `backend/app/core/event_bus.py` | 进程内 per-user 发布订阅 → SSE |
 | `backend/app/core/token_counter.py` | `TokenUsage` / `count_messages_tokens` / `extract_usage`（token 计量唯一事实） |
 | `backend/app/core/token_estimator.py` | 发送前预估（历史=agent_runs） |
+| `backend/app/core/profile/` | 用户画像分层包：schema(结构/字段权重) + store(原子写/旧MD迁移) + markdown(渲染/解析) + manager(门面)。外部只 import `UserProfile` 与 `get_usage_mode(user_id)` |
 | `backend/app/services/chat_service.py` | 对话编排：提示词组装 + 调 run_agent_loop + 后台图谱分析 |
 | `backend/app/core/knowledge_graph.py` | 图谱存储（SQLite + 节点 MD 文件），`KnowledgeGraph(user_id)` 实例级隔离 |
 | `backend/app/core/rag_pipeline/`、`kb/`、`rag/`、`hybrid_search/`、`quiz/` | RAG / 知识库 / 图谱索引 / 出题 |
@@ -89,7 +90,7 @@ api/v1/chat.py ──► services/chat_service.py ──编排──► core/age
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/knowledge/events` | SSE 全局事件（旧端点；新前端走 /chat/stream） |
-| GET | `/knowledge/graph?subject=` | 图谱数据（可按学科过滤） |
+| GET | `/knowledge/graph?subject=&board=` | 图谱数据（按需切片：全量 / 整学科 / 学科+板块）。`subject=未分类`（常量 `graph_middleware.SUBJECT_UNCLASSIFIED`）返回无学科归属节点，前端收藏栏一次只渲染一个学科 |
 | GET | `/knowledge/subjects` / `/knowledge/boards?subject=` | 学科 / 板块两级分组 |
 | GET | `/knowledge/node-ids` | 全部节点 ID |
 | GET/PUT/DELETE | `/knowledge/node/{node_id}` | 节点 CRUD |

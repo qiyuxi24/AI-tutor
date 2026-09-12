@@ -69,7 +69,7 @@ def _h_delete_node(args, kg) -> str:
 
 
 def _h_update_profile(args, kg) -> str:
-    from app.core.user_profile import UserProfile
+    from app.core.profile import UserProfile
     note_id = UserProfile(user_id=kg.user_id).add_note(args["content"], source="ai")
     return f"已为用户画像新增观察笔记（{note_id}）"
 

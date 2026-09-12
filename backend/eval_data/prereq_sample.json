@@ -1,0 +1,57 @@
+{
+  "source": "人工构造的教学常识样本（离线自检 / 回归基线用）",
+  "note": "gold = 该学科公认的先修关系（A→B 表示学 B 前应先掌握 A）。existing_edges 模拟当前 LLM 生成图谱时直接给出的 prerequisite 边，用于对比基线。",
+  "schema": {
+    "subjects[].subject": "学科名（仅用于报告展示）",
+    "subjects[].order": "权威教材次序（C3 文档族准则的输入；缺省时退回节点 created_at 近似）",
+    "subjects[].concepts[]": "{id, name, difficulty, summary}，summary 参与嵌入签名",
+    "subjects[].contents": "{concept_id: 正文文本}（C1 正文引用准则的输入）",
+    "subjects[].existing_edges": "已有 prerequisite 边 [[from_id, to_id]]（作为基线 + 避免重复推断）",
+    "subjects[].gold": "标注真值 [[from_id, to_id]]"
+  },
+  "subjects": [
+    {
+      "subject": "数据结构",
+      "order": ["array", "list", "stack", "queue", "btree", "bst", "graph", "dfs"],
+      "concepts": [
+        {"id": "array", "name": "数组", "difficulty": 1, "summary": "连续内存存放同类型元素的线性结构"},
+        {"id": "list", "name": "链表", "difficulty": 2, "summary": "用指针串联离散结点的线性结构"},
+        {"id": "stack", "name": "栈", "difficulty": 2, "summary": "后进先出的线性表"},
+        {"id": "queue", "name": "队列", "difficulty": 2, "summary": "先进先出的线性表"},
+        {"id": "btree", "name": "二叉树", "difficulty": 3, "summary": "每个结点最多两个孩子的树"},
+        {"id": "bst", "name": "二叉搜索树", "difficulty": 4, "summary": "左小右大的有序二叉树"},
+        {"id": "graph", "name": "图", "difficulty": 4, "summary": "由顶点和边构成的数据结构"},
+        {"id": "dfs", "name": "深度优先搜索", "difficulty": 5, "summary": "沿路径走到底再回溯的遍历策略"}
+      ],
+      "contents": {
+        "array": "数组用连续内存存放同类型元素，支持下标随机访问。",
+        "list": "链表用指针把离散的结点串起来，插入删除只需改指针。",
+        "stack": "栈是后进先出的线性表，既可用数组实现（顺序栈），也可用链表实现（链栈）。",
+        "queue": "队列是先进先出的线性表，常用数组配合两个下标实现循环队列。",
+        "btree": "二叉树每个结点最多两个孩子，有前序、中序、后序三种遍历。",
+        "bst": "二叉搜索树在二叉树的基础上要求左小右大，查找效率为 O(log n)。",
+        "graph": "图由顶点和边构成，分有向图和无向图，可用邻接表存储。",
+        "dfs": "深度优先搜索沿一条路走到底再回溯，需要栈保存现场；在图中搜索时要标记已访问顶点，图可能不连通。它也常用于二叉树的遍历。"
+      },
+      "existing_edges": [["array", "stack"], ["array", "queue"], ["list", "stack"], ["btree", "bst"]],
+      "gold": [["array", "stack"], ["array", "queue"], ["list", "stack"],
+               ["btree", "bst"], ["btree", "dfs"], ["graph", "dfs"]]
+    },
+    {
+      "subject": "C语言",
+      "order": ["var", "ptr", "malloc"],
+      "concepts": [
+        {"id": "var", "name": "变量", "difficulty": 1, "summary": "内存中带名字的存储单元"},
+        {"id": "ptr", "name": "指针", "difficulty": 3, "summary": "保存变量地址的类型"},
+        {"id": "malloc", "name": "动态内存", "difficulty": 4, "summary": "运行时在堆上申请内存"}
+      ],
+      "contents": {
+        "var": "变量是内存中带名字的存储单元，有类型和值。",
+        "ptr": "指针保存变量的地址，通过指针可以间接读写变量。",
+        "malloc": "动态内存用 malloc 申请堆空间，返回指针，用完要 free。"
+      },
+      "existing_edges": [["var", "ptr"], ["var", "malloc"]],
+      "gold": [["var", "ptr"], ["ptr", "malloc"]]
+    }
+  ]
+}

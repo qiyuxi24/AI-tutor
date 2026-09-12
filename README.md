@@ -1,5 +1,7 @@
 # TutorAgent — 知识图谱驱动的自适应导学 Agent
 
+**简体中文** ｜ [English](README.en.md)
+
 > 面向大学生的 AI 学习伙伴：不止是问答，而是**有地图（知识图谱）、有路径（学习规划）、有记忆（学情画像）、有反馈（AI 出题 + 进度仪表盘）**的主动学习系统。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -40,7 +42,7 @@ TutorAgent 把「对话式 AI 家教」与「知识图谱」「个人学情画�
 │    rag_pipeline（RagSource 协议，多源并行检索融合）                      │
 │    hybrid_search（向量 + Whoosh BM25 + RRF）＋ kb/parsers + graph_gen   │
 │    quiz 出题 │ collector 资源采集 │ user_profile 画像 │ conversation    │
-│  横切：event_bus │ error_codes │ rate_limiter │ llm_client │ config     │
+│  横切：event_bus │ error_codes │ rate_limiter │ llm/ 原语包 │ config   │
 └────────┬──────────────────────────┬────────────────────────┬───────────┘
    SQLite（图谱/对话/题库/采集）   节点 Markdown 文件        学情画像 JSON
 ```
@@ -72,6 +74,8 @@ TutorAgent 把「对话式 AI 家教」与「知识图谱」「个人学情画�
 | **教材→图谱生成** | graph_generator 从学科教材自动生成图谱节点并语义去重 | ✅ |
 | **AI 出题** | 依据教材 KB 混合检索出题（单选/多选/判断/填空/简答），规则/LLM 判分 | ✅ |
 | **资源采集 (Collector)** | 从 Wikipedia/Wikibooks 等发现并入库学科资料（断点续传 + 版权双模式） | ✅ |
+| **运行记录与证据回放** | 每次运行落 `agent_runs`（thinking 全文 / 完整工具参数与返回 / 最终回答），事件带 `run_id` 可回源复核 | ✅ |
+| **模型回退链** | 主模型额度耗尽 / 认证失效 / 持续异常时静默降级到备用服务，教学对话不中断 | ✅ |
 | **版权双模式** | 个人模式（合理使用）/ 商用模式（仅 L0 开放许可），检索层过滤 L2 | ✅ |
 
 ## 技术栈
@@ -185,13 +189,17 @@ npm run dev
 │       ├── services/         # chat_service（流式 + 后台 Agent Loop 编排）
 │       └── core/
 │           ├── agent_loop.py            # Agent 多轮循环（LLM ↔ 工具）
+│           ├── agent_run_store.py       # 运行记录（唯一事实源，证据级 JSON）
+│           ├── agent_tools.py           # 工具注册表（KG_TOOLS 与分发表自动生成）
 │           ├── knowledge_graph.py / graph_middleware.py / graph_analyzer.py
 │           ├── rag_pipeline/            # RagSource 协议 + 路由 + 多源融合
 │           ├── hybrid_search/           # 向量 + Whoosh BM25 + RRF/加权融合
 │           ├── kb/                      # 目录树知识库 + parsers + graph_generator
 │           ├── rag/  quiz/  collector/  # 图谱RAG / AI出题 / 资源采集
-│           └── user_profile.py / event_bus.py / error_codes.py /
-│               llm_client.py / rate_limiter.py / config.py / prompt_loader.py
+│           ├── profile/                 # 用户画像（结构 / 存储 / 渲染 / 门面）
+│           ├── llm/                     # LLM 原语包：clients / embed / messages / retry / fallback / call
+│           └── event_bus.py / error_codes.py / rate_limiter.py /
+│               config.py / prompt_loader.py / token_counter.py
 │
 ├── data/                     # 运行时数据（不入库，按用户隔离）
 │   ├── knowledge/            # 图谱 db + 节点 MD
@@ -199,13 +207,22 @@ npm run dev
 │   └── collector/
 ├── Dockerfile / docker-compose.yml / nginx.conf / entrypoint.sh   # 生产部署
 ├── install.ps1 / start.ps1   # Windows 一键安装/启动
-├── docs/                     # 调研、设计文档与 README 编写规范
-└── COMPETITION.md            # 参赛规划总纲（工程清单见仓库 TODO.md）
+├── README.md / README.en.md  # 中文主文档 + 英文镜像（文首可切换）
+├── CONTRIBUTING.md           # 贡献指南：环境、测试命令、提交规范
+├── AGENTS.md                 # 架构契约索引（AI 编码 Agent 与开发者）
+└── docs/                     # 调研、设计文档与 README 编写规范
 ```
 
 ## 质量与测试
 
-- **零网络用例 254 个全绿**（mock 掉 LLM/embedding，无外网依赖；`pytest` 收集 467 项）：分块/融合/父级扩展/路由/pipeline 异常隔离/稀疏索引/图谱切片/rag_search 工具/上传检索全链路/用户隔离/采集注册表/商用过滤/各模块。
+- **零网络用例 533 通过**（mock 掉 LLM / embedding 网络调用，无外网依赖；共收集 540 项，其中 7 个真实 API 用例按 `llm_api` 标记排除）：
+  分块 / 融合 / 父级扩展 / 路由 / pipeline 异常隔离 / 稀疏索引 / 图谱切片 / 先修关系推断 / 掌握度分档 / rag_search 工具 / 上传检索全链路 / 用户隔离 / 采集注册表 / 商用过滤 / Agent Loop 与运行记录等各模块。
+  复现命令（cwd = `backend`）：
+
+  ```bash
+  backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"   # → 533 passed, 7 deselected
+  ```
+
 - **离线评测集**（复用 CMRC2018，256 文档/1000 查询）：`backend/scripts/eval_rag.py`
   mock 基线：vector R@1=0.470 / BM25 0.964 / hybrid(RRF) 0.766 / fuse(加权 α=0.6) 0.818（真实 text-embedding-v4 额度恢复后 `--embed api` 复跑）。
 - **编码准则**：YAGNI 最小实现 + 提示词模板外置（Jinja2）+ 单一配置源（根 .env）+ 统一错误码。
@@ -215,15 +232,18 @@ npm run dev
 
 ## 文档索引
 
-- [README 编写规范](docs/README_编写规范.md) ｜ [参赛总纲（三赛同投）](COMPETITION.md)
+- [README 编写规范](docs/README_编写规范.md)（v3：门面模板 / 双语维护 / 贡献指南规范） ｜ [贡献指南](CONTRIBUTING.md) ｜ [English README](README.en.md)
+- [开发参考手册 AGENTS.md](AGENTS.md) — 架构契约、模块职责与新增工具/端点的接入点
 - [RAG 去耦合与目录检索调研](docs/RAG_去耦合与目录检索调研.md) ｜ [RAG 召回与重排优化调研](docs/RAG_召回与重排优化调研.md) ｜ [Agentic RAG 调研](docs/RAG_参考资料与学习路线.md)
 - [Agent Loop 重构设计](docs/AgentLoop_重构设计讨论.md) ｜ [Agent Loop 业界调研](docs/AgentLoop_业界调研与学习路线.md)
+- [知识图谱参照系契约](docs/知识图谱_参照系契约.md) ｜ [知识图谱模块结构调研](docs/知识图谱_模块结构与封装调研.md)
 - [AI 出题逻辑调研](docs/QUIZ_出题逻辑调研.md) ｜ [资源采集设计讨论](docs/教育资料采集模块_设计讨论.md)
 - [Docker 学习路径与工程化部署](docs/Docker_学习路径与工程化部署.md) ｜ [标杆项目对标分析](docs/标杆项目对标分析.md)
 
 ## 贡献
 
-欢迎 Issue 与 PR：bug 报告、文档修正、新学科图谱数据、检索评测复跑等，请通过 GitHub Issues 提交。提交代码前请先跑通 `backend` 测试套件并遵循 YAGNI 最小实现原则。
+欢迎 Issue 与 PR：bug 报告、文档修正、双语同步、新学科图谱数据、检索评测复跑等。
+动手前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)（环境准备、测试命令与提交规范）；提交前请跑通 `-m "not llm_api"` 测试套件，并遵循项目既有的分层与 YAGNI 最小实现约定。若改动了架构、命令或量化数字，请**同步更新中英文两份 README**。
 
 ## License
 

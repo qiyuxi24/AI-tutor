@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from app.core.user_profile import UserProfile, FIELD_WEIGHTS
+from app.core.profile import UserProfile, FIELD_WEIGHTS
 
 
 @pytest.fixture

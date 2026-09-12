@@ -25,9 +25,14 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
 """
 
 import logging
+from urllib.parse import quote
+
 from fastapi import APIRouter, HTTPException, Depends, Body, Query
 from fastapi.responses import StreamingResponse
 from app.core.knowledge_graph import KnowledgeGraph
+from app.core.prerequisite import (
+    DEFAULT_MAX_PARENTS, DEFAULT_THRESHOLD, apply_candidates, infer_prerequisites,
+)
 from app.core import graph_middleware
 from app.core.auth import get_current_user, get_current_user_from_token
 from app.core.event_bus import publish, subscribe
@@ -143,6 +148,8 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
         return {
             "id": node["id"],
             "name": node["name"],
+            # 所属学科：前端据此切到对应学科再聚焦（图谱一次只渲染一个学科）
+            "subject": kg.node_subject(node) or graph_middleware.SUBJECT_UNCLASSIFIED,
             "content": content,
             "tags": node.get("tags", []),
             "prerequisites": prerequisites,
@@ -643,7 +650,9 @@ async def export_knowledge(subject: str | None = Query(None, description="可选
         edges = kg.edges
 
         if subject:
-            nodes = [n for n in nodes if n.get("subject") == subject]
+            # 学科归属只能由 node_subject 从 tags 推导：nodes 表没有 subject 列，
+            # 节点 dict 里也不存在 "subject" 键（旧实现用 n.get("subject") 过滤，恒空）
+            nodes = [n for n in nodes if kg.node_subject(n) == subject]
             node_ids = {n["id"] for n in nodes}
             edges = [e for e in edges
                      if e["from_node"] in node_ids or e["to_node"] in node_ids]
@@ -692,7 +701,73 @@ async def export_knowledge(subject: str | None = Query(None, description="可选
         return StreamingResponse(
             iter([content.encode("utf-8")]),
             media_type="text/markdown; charset=utf-8",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
+            # 学科名是中文 → HTTP 头只能 latin-1，必须用 RFC 5987 的 filename* 百分号编码，
+            # 否则 StreamingResponse 构造时就抛 UnicodeEncodeError（带学科导出 500）
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
         )
+    finally:
+        kg.close()
+
+
+# ══════════════════════════════════════════════════════════════════
+#  先修关系推断（P0-3：多准则无监督投票）
+# ══════════════════════════════════════════════════════════════════
+
+@router.post("/knowledge/prerequisite/infer")
+async def infer_prerequisites_api(payload: dict = Body(...),
+                                  user_id: int = Depends(get_current_user)):
+    """
+    推断学科内的先修关系（算法与准则说明见 core/prerequisite.py）。
+
+    与「LLM 直接给 prerequisite 边」的区别：本接口的每条候选边都带**逐准则证据**，
+    结果可复现、可解释、可量化（配套评测脚本 backend/scripts/eval_prerequisite.py）。
+
+    请求体:
+        subject:     必填，学科名（如"数据结构"）
+        threshold:   可选，认定阈值，默认 0.30（越大越保守，直接控制召回/精度）
+        max_parents: 可选，单节点最大入边数，默认 5
+        apply:       可选，默认 false。true = 把候选写库（AI 权限护栏仍生效：
+                     两端都是人类创建的节点之间的先修边会被跳过并记录原因）
+
+    返回:
+        {subject, node_count, candidate_count, candidates: [{from, to, from_name,
+         to_name, score, votes}], applied?}
+    """
+    subject = (payload.get("subject") or "").strip()
+    if not subject:
+        raise HTTPException(status_code=400, detail="缺少 subject 参数")
+
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        nodes = kg.get_nodes_by_subject(subject)
+        if len(nodes) < 2:
+            return {"subject": subject, "node_count": len(nodes),
+                    "candidate_count": 0, "candidates": [],
+                    "message": "该学科节点不足 2 个，无法推断先修关系"}
+
+        edges = kg.get_edges_by_subject(subject)
+        # C1 正文引用准则需要节点正文；走 KG 的带缓存读取，不要绕过它直读 MD
+        content = {n["id"]: kg.get_node_content_preview(n["id"], max_lines=200, max_chars=4000)
+                   for n in nodes}
+
+        from app.core.kb.embedder import get_embedder  # 延迟导入：避免拖慢 API 启动
+        embedder = get_embedder()
+
+        candidates = infer_prerequisites(
+            nodes, edges, content=content, embedder=embedder,
+            threshold=float(payload.get("threshold", DEFAULT_THRESHOLD)),
+            max_parents_per_node=int(payload.get("max_parents", DEFAULT_MAX_PARENTS)),
+        )
+
+        names = {n["id"]: n.get("name", "") for n in nodes}
+        result = {
+            "subject": subject,
+            "node_count": len(nodes),
+            "candidate_count": len(candidates),
+            "candidates": [c.to_dict(names) for c in candidates],
+        }
+        if payload.get("apply"):
+            result["applied"] = apply_candidates(kg, candidates)
+        return result
     finally:
         kg.close()

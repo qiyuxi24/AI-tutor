@@ -41,6 +41,11 @@ const STORAGE_KEY_CONVERSATIONS = `ai_tutor_conversations_${_uid}`
 const STORAGE_KEY_CURRENT = `ai_tutor_current_${_uid}`
 const STORAGE_KEY_MODE = `ai_tutor_mode_${_uid}`
 
+// 后端 graph_middleware.SUBJECT_UNCLASSIFIED 的对应值。
+// 「未分类」= 无学科归属节点的合成分组名，不是真实学科（不出现在学科列表里，
+// 但作为一个可选分组出现在 subjectSummaries 中）。
+const UNCLASSIFIED_SUBJECT = '未分类'
+
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
@@ -72,9 +77,11 @@ export const useChatStore = defineStore('chat', () => {
   const knowledgeEdges = ref([])
   const graphLoaded = ref(false)
   const graphError = ref('')
-  // 学科维度：每个学科单独一张图，currentSubject=null 表示查看全部
-  const subjects = ref([])
-  const currentSubject = ref(null)
+  // 学科维度：每个学科单独一张图。一次只渲染一个学科（按选中渲染），
+  // 不再提供"全量"视图——全量会让图谱随学习不断生长、最终压垮画布与提示词。
+  const subjects = ref([])           // 真实学科名列表（不含「未分类」）
+  const subjectSummaries = ref([])   // 学科 + 分量统计 [{subject, node_count, mastered_count, mastery_avg}]
+  const currentSubject = ref(null)   // 当前选中学科；null = 未选（画布空态，不拉全量）
   // 知识板块维度：学科之下的一级分组，currentBoard=null 表示查看整学科
   const boards = ref([])           // 当前学科的板块列表 [{board, node_count, ...}]
   const currentBoard = ref(null)   // 当前查看的板块名；null = 整学科
@@ -175,7 +182,7 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 从后端按需获取图谱数据，统一做字段映射。
    * 请求粒度由当前学科/板块状态决定（middleware 按需切片）：
-   *   - 未选学科   → 全量
+   *   - 未选学科   → 清空画布（不再拉全量，见下方注释）
    *   - 仅学科     → 整学科图
    *   - 学科+板块  → 板块局部子图
    *
@@ -185,11 +192,20 @@ export const useChatStore = defineStore('chat', () => {
    */
   async function fetchGraph(force = false) {
     if (!force && graphLoaded.value) return
+    // 一次只渲染一个学科：未选中学科时不请求全量图（避免图谱无限生长），直接清空画布。
+    // 选中动作由 ensureSubjectSelected() 在学科列表就绪后自动完成。
+    if (!currentSubject.value) {
+      knowledgeNodes.value = []
+      knowledgeEdges.value = []
+      boards.value = []
+      graphError.value = ''
+      graphLoaded.value = true
+      return
+    }
     try {
-      const params = {}
-      if (currentSubject.value) params.subject = currentSubject.value
-      // 板块按需切片：仅当已选学科且指定了板块才传 board
-      if (currentSubject.value && currentBoard.value) params.board = currentBoard.value
+      const params = { subject: currentSubject.value }
+      // 板块按需切片：仅当指定了板块才传 board
+      if (currentBoard.value) params.board = currentBoard.value
       const { data } = await apiClient.get('/api/v1/knowledge/graph', { params })
       knowledgeNodes.value = (data.nodes || []).map(n => ({
         ...n,
@@ -264,14 +280,49 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 获取当前用户已有的所有学科列表。
+   * 获取学科列表 + 每个学科的分量统计（学科收藏栏数据源）。
+   *
+   * 单请求来源：/knowledge/stats 的 by_subject 已含全部学科及聚合，
+   * 与 /knowledge/subjects 同源（graph_middleware.compute_stats），
+   * 因此不再另打一次 subjects 接口。
+   *
+   * by_subject 可能含「未分类」（无学科归属节点的合成项）：保留在
+   * subjectSummaries 供收藏栏渲染，但从 subjects 剔除——subjects 的契约是
+   * "真实学科名列表"，DashboardView 等下拉框直接消费。
    */
   async function fetchSubjects() {
     try {
-      const { data } = await apiClient.get('/api/v1/knowledge/subjects')
-      subjects.value = data.subjects || []
+      const { data } = await apiClient.get('/api/v1/knowledge/stats')
+      // unclassified 标记「未分类」合成项，供收藏栏做差异化渲染（无需组件再认字符串）
+      subjectSummaries.value = (data.by_subject || []).map(s => ({
+        ...s,
+        unclassified: s.subject === UNCLASSIFIED_SUBJECT,
+      }))
+      subjects.value = subjectSummaries.value
+        .map(s => s.subject)
+        .filter(s => s && s !== UNCLASSIFIED_SUBJECT)
     } catch {
       // 静默失败
+    }
+  }
+
+  /**
+   * 保证「当前选中学科」始终有效——一次只渲染一个学科，不允许停在全量视图。
+   *
+   * 三种情况：
+   *   - 已选且仍存在            → 不动
+   *   - 已选但已消失（学科被删或改名）→ 回退到第一个学科
+   *   - 未选（首次进入/图从空变非空）→ 自动选中第一个学科
+   * 学科列表为空（新用户、图空）→ 保持 null，画布空态由 fetchGraph 处理。
+   */
+  async function ensureSubjectSelected() {
+    const names = subjectSummaries.value.map(s => s.subject)
+    if (currentSubject.value && names.includes(currentSubject.value)) return
+    currentSubject.value = null   // 置空，避免 setSubject 因"值未变"提前返回
+    if (names.length) {
+      await setSubject(names[0])
+    } else {
+      await fetchGraph(true)      // 无学科 → 清空画布
     }
   }
 
@@ -294,7 +345,7 @@ export const useChatStore = defineStore('chat', () => {
 
   /**
    * 切换当前查看的学科（每个学科单独一张图），并重置板块到"整学科"。
-   * @param {string|null} subject - 学科名；null 表示查看全部
+   * @param {string|null} subject - 学科名（含「未分类」）；null = 未选中（画布空态）
    */
   async function setSubject(subject) {
     if (currentSubject.value === subject) return
@@ -347,6 +398,10 @@ export const useChatStore = defineStore('chat', () => {
    * @param {boolean} fromUserAction - 是否由用户操作（CRUD）触发
    */
   async function refreshGraph(fromUserAction = false) {
+    // 学科列表与分量统计可能因 CRUD 变化（新增学科、节点数变动）→ 刷新收藏栏
+    await fetchSubjects()
+    // 图从空变非空（如对话中新建首个节点）时自动选中学科，否则会停在空态
+    await ensureSubjectSelected()
     graphLoaded.value = false
     // 板块计数可能因 CRUD 变化，一并刷新（仅当已选学科时）
     if (currentSubject.value) await fetchBoards(currentSubject.value)
@@ -531,8 +586,11 @@ export const useChatStore = defineStore('chat', () => {
     } catch {
       // ignore
     }
-    // 一次性加载知识图谱
-    fetchGraph()
+    // 一次性加载知识图谱：先取学科列表并自动选中一个
+    // （一次只渲染一个学科，不再默认拉全量）
+    await fetchSubjects()
+    await ensureSubjectSelected()
+    await fetchGraph()
     // 连接 SSE，后端数据变更时自动刷新图谱
     connectSSE()
   }
@@ -816,10 +874,12 @@ export const useChatStore = defineStore('chat', () => {
     graphLoaded,
     graphError,
     subjects,
+    subjectSummaries,
     currentSubject,
     boards,
     currentBoard,
     setBoard,
+    ensureSubjectSelected,
     fetchBoards,
     fetchGraph,
     refreshGraph,

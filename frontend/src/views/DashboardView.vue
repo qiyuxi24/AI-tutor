@@ -38,13 +38,15 @@ function pct(num, denom) {
   return Math.round((num / denom) * 100)
 }
 
-/** 掌握度分布条：mastered / learning / unstarted 三色堆叠宽度 */
+/** 掌握度分布条：mastered / learning / weak / unstarted 四色堆叠宽度
+ *  （四档阈值是后端 graph_middleware.mastery_bucket 的唯一口径：0 / 1~29 / 30~69 / ≥70） */
 const dist = computed(() => {
   const o = overall.value
-  if (!o) return { mastered: 0, learning: 0, unstarted: 0 }
+  if (!o) return { mastered: 0, learning: 0, weak: 0, unstarted: 0 }
   return {
     mastered: pct(o.mastered_count, o.node_count),
     learning: pct(o.learning_count, o.node_count),
+    weak: pct(o.weak_count, o.node_count),
     unstarted: pct(o.unstarted_count, o.node_count),
   }
 })
@@ -114,9 +116,13 @@ watch(
         </div>
         <div class="dash-stat-card dash-stat-yellow">
           <span class="dash-stat-value">{{ overall.learning_count }}</span>
-          <span class="dash-stat-label">学习中</span>
+          <span class="dash-stat-label">学习中 30-69</span>
         </div>
         <div class="dash-stat-card dash-stat-red">
+          <span class="dash-stat-value">{{ overall.weak_count }}</span>
+          <span class="dash-stat-label">薄弱 1-29</span>
+        </div>
+        <div class="dash-stat-card dash-stat-muted">
           <span class="dash-stat-value">{{ overall.unstarted_count }}</span>
           <span class="dash-stat-label">未开始</span>
         </div>
@@ -131,11 +137,13 @@ watch(
             <div class="dash-dist-bar">
               <span class="dash-dist-seg seg-mastered" :style="{ width: dist.mastered + '%' }" :title="`已掌握 ${dist.mastered}%`"></span>
               <span class="dash-dist-seg seg-learning" :style="{ width: dist.learning + '%' }" :title="`学习中 ${dist.learning}%`"></span>
+              <span class="dash-dist-seg seg-weak" :style="{ width: dist.weak + '%' }" :title="`薄弱 ${dist.weak}%`"></span>
               <span class="dash-dist-seg seg-unstarted" :style="{ width: dist.unstarted + '%' }" :title="`未开始 ${dist.unstarted}%`"></span>
             </div>
             <div class="dash-dist-legend">
               <span><i class="legend-dot" style="background: var(--color-green)"></i>已掌握 {{ dist.mastered }}%</span>
               <span><i class="legend-dot" style="background: var(--color-yellow)"></i>学习中 {{ dist.learning }}%</span>
+              <span><i class="legend-dot" style="background: var(--color-red)"></i>薄弱 {{ dist.weak }}%</span>
               <span><i class="legend-dot" style="background: var(--color-graph-node)"></i>未开始 {{ dist.unstarted }}%</span>
             </div>
             <div class="dash-meta-row">
@@ -165,7 +173,7 @@ watch(
               </div>
               <div class="dash-subject-sub">
                 <span>共 {{ s.node_count }} 个知识点</span>
-                <span>已掌握 {{ s.mastered_count }} · 学习中 {{ s.learning_count }} · 未开始 {{ s.unstarted_count }}</span>
+                <span>已掌握 {{ s.mastered_count }} · 学习中 {{ s.learning_count }} · 薄弱 {{ s.weak_count }} · 未开始 {{ s.unstarted_count }}</span>
               </div>
             </div>
           </section>
@@ -180,7 +188,7 @@ watch(
               <div class="dash-next-card">
                 <div class="dash-next-name">{{ nextToLearn.name }}</div>
                 <div class="dash-next-reason">{{ nextToLearn.reason }}</div>
-                <button class="dash-go-btn" @click="emit('go-node', nextToLearn.node_id)">去图谱学习</button>
+                <button class="dash-go-btn" @click="emit('go-node', nextToLearn.node_id, nextToLearn.subject)">去图谱学习</button>
               </div>
             </template>
             <div v-else class="dash-panel-empty">所有知识点已掌握，太棒了！🎉</div>
@@ -195,7 +203,7 @@ watch(
               :key="w.id"
               class="dash-weak-row"
               :title="`点击进入「${w.name}」`"
-              @click="emit('go-node', w.id)"
+              @click="emit('go-node', w.id, w.subject)"
             >
               <span class="dash-weak-rank">{{ i + 1 }}</span>
               <div class="dash-weak-info">
@@ -277,6 +285,7 @@ watch(
 .dash-stat-green .dash-stat-value { color: var(--color-green); }
 .dash-stat-yellow .dash-stat-value { color: var(--color-yellow); }
 .dash-stat-red .dash-stat-value { color: var(--color-red); }
+.dash-stat-muted .dash-stat-value { color: var(--color-text-tertiary); }
 
 /* ─── 双列布局 ─── */
 .dash-grid {
@@ -311,6 +320,7 @@ watch(
 .dash-dist-seg { height: 100%; transition: width 0.5s ease; }
 .seg-mastered { background: var(--color-green); }
 .seg-learning { background: var(--color-yellow); }
+.seg-weak { background: var(--color-red); }
 .seg-unstarted { background: var(--color-graph-node); }
 .dash-dist-legend { display: flex; gap: 16px; font-size: 12px; color: var(--color-text-secondary); margin-bottom: 12px; }
 .dash-dist-legend span { display: flex; align-items: center; gap: 5px; }

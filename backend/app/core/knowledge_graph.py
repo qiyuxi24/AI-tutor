@@ -379,6 +379,8 @@ class KnowledgeGraph:
             "name": node["name"],
             "mastery": node.get("mastery", 0),
             "reason": reason,
+            # 所属学科：前端据此切到对应学科再聚焦（图谱一次只渲染一个学科）
+            "subject": self.node_subject(node),
         }
 
     def _has_path(self, from_id: str, to_id: str) -> bool:

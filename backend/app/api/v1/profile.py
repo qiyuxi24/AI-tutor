@@ -10,7 +10,7 @@
 """
 
 from fastapi import APIRouter, Depends, HTTPException
-from app.core.user_profile import UserProfile
+from app.core.profile import UserProfile
 from app.core.auth import get_current_user
 from app.models.schemas import (
     ProfileResponse,
@@ -26,7 +26,7 @@ def _build_response(profile: UserProfile) -> ProfileResponse:
     """组装统一响应：渲染 MD + 结构化数据 + 完整度"""
     return ProfileResponse(
         content=profile.to_markdown(),
-        data=profile.to_dict(),
+        data=profile.get(),
         completeness=profile.get_completeness(),
     )
 
@@ -67,11 +67,11 @@ async def update_profile_data(
     user_id: int = Depends(get_current_user),
 ):
     """
-    结构化全量更新画像（前端表单编辑提交）。
-    仅覆盖提交的非空字段，AI 观察笔记始终保留。
+    结构化更新画像（前端表单编辑提交）。
+    只覆盖请求中显式提交的字段（exclude_unset），未提交字段保持原值；AI 观察笔记默认保留。
     """
     profile = UserProfile(user_id=user_id)
-    profile.update_data(body.data.model_dump())
+    profile.update_data(body.data.model_dump(exclude_unset=True))
     return _build_response(profile)
 
 

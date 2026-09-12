@@ -5,7 +5,7 @@ AI 观察笔记增删、完整度统计、兼容旧接口（replace/append）。
 """
 import pytest
 
-from app.core.user_profile import (
+from app.core.profile import (
     UserProfile,
     default_profile_data,
     parse_markdown_to_data,
@@ -57,7 +57,8 @@ def test_default_data(profile):
     assert data["basic"] == {"name": "", "age": "", "stage": ""}
     assert data["goals"] == []
     assert data["ai_notes"] == []
-    assert profile.json_path.exists()
+    # 纯读不落盘：无实质内容前不产生画像文件
+    assert not profile.json_path.exists()
 
 
 def test_default_summary_empty(profile):
@@ -138,6 +139,30 @@ def test_update_field(profile):
     assert profile.get()["basic"]["name"] == "小明"
     profile.update_field("goals", "第一行\n第二行")
     assert profile.get()["goals"] == ["第一行", "第二行"]
+
+
+def test_update_data_partial_merge_keeps_other_fields(profile):
+    """PATCH 只提交部分字段（exclude_unset）时，未提交的字段与笔记都要保留"""
+    profile.update_data({
+        "basic": {"name": "小明", "age": "20"},
+        "learning": {"pace": "慢"},
+        "knowledge_background": "有 JS 基础",
+    })
+    profile.add_note("做题容易粗心")
+    profile.update_data({"basic": {"name": "小红"}})   # 只改姓名
+    data = profile.get()
+    assert data["basic"] == {"name": "小红", "age": "20", "stage": ""}
+    assert data["learning"]["pace"] == "慢"
+    assert data["knowledge_background"] == "有 JS 基础"
+    assert len(data["ai_notes"]) == 1
+
+
+def test_empty_profile_summary_is_blank(profile):
+    """空画像不注入系统提示词（预览仍可渲染待填写模板）"""
+    assert profile.to_markdown().startswith("# 用户画像")
+    assert profile.get_summary() == ""
+    profile.update_field("basic.name", "小明")
+    assert "小明" in profile.get_summary()
 
 
 def test_update_field_unknown(profile):
