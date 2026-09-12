@@ -115,6 +115,19 @@ async function handleNodeDetailSave({ nodeId, content, onResult }) {
 }
 
 /**
+ * NodeDetail 掌握度滑块：通过 Store.updateMastery() 执行。
+ */
+async function handleNodeDetailMastery({ nodeId, mastery, onResult }) {
+  try {
+    await store.updateMastery(nodeId, mastery)
+    if (onResult) onResult(null)
+  } catch (e) {
+    const msg = formatError(e, { action: '更新掌握度' })
+    if (onResult) onResult(msg)
+  }
+}
+
+/**
  * 刷新图谱 + 同步更新节点详情弹窗（如果打开着）
  */
 async function refreshGraph() {
@@ -375,6 +388,7 @@ const slideTransition = {
       @close="closeNodeDetail"
       @refresh="refreshGraph"
       @save-content="handleNodeDetailSave"
+      @update-mastery="handleNodeDetailMastery"
       @navigate-to-node="handleNodeDetailNavigate"
     />
 

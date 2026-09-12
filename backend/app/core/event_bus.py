@@ -89,20 +89,34 @@ def _cleanup_stale_queues():
         _user_queue_last_access.pop(uid, None)
 
 
-def _ensure_loop() -> asyncio.AbstractEventLoop:
+def _ensure_loop() -> "asyncio.AbstractEventLoop | None":
     """
-    获取当前可用的循环引用。
-    优先用已保存的 loop，找不到则尝试获取运行中的循环。
-    保证在任何上下文（async def / 同步函数 / 线程池）中都能拿到循环。
+    获取当前可用的循环引用，用于跨线程安全投递事件。
+
+    策略：
+    1. 已保存的 loop 且未关闭 → 直接返回（线程池场景复用主线程 loop）
+    2. 当前线程有运行中 loop → 保存并返回（首次从 async 上下文调用）
+    3. 都不可用 → 返回 None（publish 静默丢弃，不创建幽灵 loop）
+
+    旧实现的致命缺陷：线程池上下文中 get_running_loop() 抛 RuntimeError →
+    new_event_loop() 创建一个无人运行的幽灵 loop → call_soon_threadsafe
+    调度到幽灵 loop 上，消费者永远收不到事件。改为返回 None 让 publish
+    静默跳过，杜绝幽灵 loop。
     """
     global _loop
-    if _loop is None or _loop.is_closed():
-        try:
-            _loop = asyncio.get_running_loop()
-        except RuntimeError:
-            _loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(_loop)
+    if _loop is not None and not _loop.is_closed():
+        return _loop
+    _loop = None
+    try:
+        _loop = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
     return _loop
+
+
+def get_user_queue(user_id: int) -> asyncio.Queue:
+    """获取或创建指定用户的事件队列（公开接口，供调用方预创建队列消除竞态）。"""
+    return _get_user_queue(user_id)
 
 
 # ── 公开 API ──
@@ -129,6 +143,9 @@ def publish(event_type: str, data: dict | None = None,
         event.update(data)
 
     loop = _ensure_loop()
+    if loop is None:
+        logger.debug(f"publish({event_type}): 无可用事件循环，事件已丢弃")
+        return
 
     # 精准路由到用户队列
     if user_id is not None:

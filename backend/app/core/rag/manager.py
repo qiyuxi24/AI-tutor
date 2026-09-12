@@ -9,7 +9,7 @@ RAG 管理器：编排文档索引与语义检索
 依赖关系：
 - core/rag/chunker.py       Markdown 分块
 - core/rag/vector_store.py  SQLite 向量存储
-- core/llm_client.py 的 AsyncOpenAI client（复用同一客户端，保证 embedding 可用）
+- core/llm 包的 AsyncOpenAI client（复用同一客户端，保证 embedding 可用）
 - core/knowledge_graph.py   读取节点内容
 
 设计：
@@ -25,14 +25,9 @@ from typing import Optional
 
 from app.core.rag.chunker import chunk_markdown
 from app.core.rag.vector_store import VectorStore
-from app.core.llm_client import embed_client as client  # 嵌入固定走阿里 text-embedding-v4
+from app.core.llm import embed_texts    # 嵌入唯一出口：llm/embed.py（与 kb_manager 同一实现）
 
 logger = logging.getLogger("ai-tutor")
-
-# 阿里云 text-embedding-v4
-EMBEDDING_MODEL = "text-embedding-v4"
-# text-embedding-v4 支持最长 8192 token，这里设安全字符数
-MAX_EMBED_CHARS = 6000
 
 # 检索默认参数
 DEFAULT_TOP_K = 5
@@ -41,11 +36,6 @@ MIN_SCORE = 0.25
 
 # 数据目录：data/rag
 _RAG_DIR = Path(__file__).parent.parent.parent.parent / "data" / "rag"
-
-
-def _truncate(text: str, max_chars: int = MAX_EMBED_CHARS) -> str:
-    """截断过长的文本（embedding 模型有长度限制）"""
-    return text[:max_chars]
 
 
 def _extract_node_content(kg, node) -> str:
@@ -76,25 +66,12 @@ class RagManager:
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
         """
-        批量生成嵌入向量（阿里云 text-embedding-v4）
-        失败时返回空列表
+        统一走 `llm.embed.embed_texts`（与 kb_manager 同一实现）。
+
+        保留本方法只为不破坏既有"类级 patch `_embed`"的遮罩缝
+        （tests/*、scripts/eval_rag.py 以它替换嵌入实现）。
         """
-        if not texts:
-            return []
-        texts = [_truncate(t) for t in texts]
-        try:
-            resp = await client.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=texts,
-            )
-            # 按输入顺序排序返回
-            vectors = [None] * len(texts)
-            for item in resp.data:
-                vectors[item.index] = item.embedding
-            return [v for v in vectors if v is not None]
-        except Exception as e:
-            logger.error(f"RAG 嵌入调用失败: {e}")
-            return []
+        return await embed_texts(texts)
 
     # ────────────────────────────────────────────
     #  索引

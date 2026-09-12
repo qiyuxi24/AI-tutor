@@ -8,7 +8,7 @@
 - 返回结构化的建议列表
 
 文件关系：
-- 依赖 core/llm_client.py 的 call_llm()（enable_tools=False 模式）
+- 依赖 core/llm 包的 call_llm()（不带工具的一次性文本模式）
 - 依赖 core/knowledge_graph.py 的 KnowledgeGraph 获取当前图谱信息
 """
 
@@ -16,7 +16,7 @@ import json
 import re
 import logging
 from typing import Optional
-from app.core.llm_client import call_llm
+from app.core.llm import call_llm
 from app.core.error_codes import ErrorCode, log_error, log_info, publish_error_event
 
 logger = logging.getLogger("ai-tutor")

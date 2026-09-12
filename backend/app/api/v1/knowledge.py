@@ -24,9 +24,7 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
   GET    /knowledge/next-to-learn            - 获取下一步学习推荐
 """
 
-import json
 import logging
-from pathlib import Path
 from fastapi import APIRouter, HTTPException, Depends, Body, Query
 from fastapi.responses import StreamingResponse
 from app.core.knowledge_graph import KnowledgeGraph
@@ -455,29 +453,6 @@ async def ai_edit_graph(data: dict = Body(...), user_id: int = Depends(get_curre
 
 
 # ══════════════════════════════════════════════════════════════════
-#  AI 建议执行（公共函数，供 llm_client 和 chat_service 共用）
-# ══════════════════════════════════════════════════════════════════
-
-def _load_suggestions(data_dir: Path) -> list:
-    """加载待审核建议文件，文件不存在时返回空列表"""
-    suggestions_path = data_dir / "ai_suggestions.json"
-    if not suggestions_path.exists():
-        return []
-    try:
-        with open(suggestions_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, FileNotFoundError):
-        return []
-
-
-def _save_suggestions(data_dir: Path, suggestions: list) -> None:
-    """保存待审核建议到文件"""
-    suggestions_path = data_dir / "ai_suggestions.json"
-    with open(suggestions_path, "w", encoding="utf-8") as f:
-        json.dump(suggestions, f, ensure_ascii=False, indent=2)
-
-
-# ══════════════════════════════════════════════════════════════════
 #  学习路径推荐
 # ══════════════════════════════════════════════════════════════════
 
@@ -643,147 +618,81 @@ async def get_stats(subject: str | None = Query(None, description="可选：只�
         kg.close()
 
 
-def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
-                        tags: list | None = None, summary: str = "",
-                        difficulty: int = 3, estimated_minutes: int = 15,
-                        content: str = "", from_nodes: list | None = None,
-                        confidence: float | None = None) -> str:
+# ══════════════════════════════════════════════════════════════════
+#  知识图谱导出（合并 Markdown 下载）
+# ══════════════════════════════════════════════════════════════════
+
+@router.get("/knowledge/export")
+async def export_knowledge(subject: str | None = Query(None, description="可选：只导出指定学科"),
+                           user_id: int = Depends(get_current_user)):
     """
-    公共函数：创建一个 AI 生成的节点（写图谱 + 写 MD 文件 + 建前置边）。
-    供 execute_kg_tool() 和 _apply_suggestion() 共用，消除重复代码。
+    导出知识图谱为合并的 Markdown 文件（供前端下载）。
 
-    参数:
-        kg:               KnowledgeGraph 实例（已绑定 user_id）
-        node_id:          节点英文 ID
-        node_name:        节点中文名
-        tags:             标签列表
-        summary:          一句话摘要
-        difficulty:       难度 1-5
-        estimated_minutes: 预估学习分钟数
-        content:          Markdown 正文（空则生成默认模板）
-        from_nodes:       前置节点 ID 列表，自动创建 prerequisite 边
-        confidence:       AI 置信度
-
-    返回:
-        操作结果描述字符串
+    格式：
+      # {学科名} 知识图谱
+      > 导出时间 / 节点数 / 边数
+      ## 节点列表（按难度排序）
+      ### 节点名 (ID, 掌握度, 难度)
+      节点 MD 正文…
+      ## 依赖关系
+      A → B (前置)
     """
-    node_data = {
-        "id": node_id,
-        "name": node_name,
-        "file": f"nodes/{node_id}.md",
-        "tags": tags or [],
-        "summary": summary,
-        "mastery": 0,
-        "difficulty": difficulty,
-        "estimated_minutes": estimated_minutes,
-        "added_by": "ai",
-        "confidence": confidence,
-        # 不传 created_at，让 add_node() 使用默认值 datetime.now().isoformat()
-    }
-    kg.add_node(node_data)
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        nodes = kg.nodes
+        edges = kg.edges
 
-    # 写 MD 文件
-    md_path = kg.nodes_dir / f"{node_id}.md"
-    if content.strip():
-        md_content = content if content.strip().startswith("#") else \
-                     f"# {node_name}\n\n> 由 AI 自动创建\n\n{content}"
-    else:
-        summary_line = f"\n> {summary}" if summary else ""
-        md_content = f"# {node_name}\n> 由 AI 自动创建{summary_line}\n\n## 概述\n\n待完善...\n"
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
+        if subject:
+            nodes = [n for n in nodes if n.get("subject") == subject]
+            node_ids = {n["id"] for n in nodes}
+            edges = [e for e in edges
+                     if e["from_node"] in node_ids or e["to_node"] in node_ids]
 
-    # 创建前置边
-    edge_count = 0
-    for pid in (from_nodes or []):
-        if kg.get_node(pid):
-            try:
-                kg.add_edge({
-                    "from": pid, "to": node_id,
-                    "relation": "prerequisite",
-                    "label": f"是学习 {node_name} 的前置知识",
-                    "added_by": "ai",
-                }, caller="ai")
-                edge_count += 1
-            except ValueError:
-                pass
-            except PermissionError:
-                pass
+        nodes.sort(key=lambda n: (n.get("difficulty", 3), n.get("mastery", 0)))
 
-    return f"已创建节点「{node_name}」(ID: {node_id})，关联 {edge_count} 条边"
+        lines: list[str] = []
+        title = f"{subject} 知识图谱" if subject else "知识图谱导出"
+        lines.append(f"# {title}")
+        lines.append(f"> 导出时间：{__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        lines.append(f"> 节点数：{len(nodes)} | 依赖关系：{len(edges)}")
+        lines.append("")
 
+        lines.append("## 节点列表")
+        for n in nodes:
+            mastery_label = {0: "未学", 1: "入门", 26: "熟悉", 51: "熟练", 76: "精通"}
+            ml = next((v for k, v in sorted(mastery_label.items(), reverse=True)
+                       if n.get("mastery", 0) >= k), "未学")
+            lines.append(f"### {n['name']} (ID: {n['id']}, 掌握度: {n.get('mastery', 0)}/{ml}, 难度: {n.get('difficulty', 3)})")
+            if n.get("summary"):
+                lines.append(f"> {n['summary']}")
+            lines.append("")
 
-def _apply_suggestion(kg: KnowledgeGraph, suggestion: dict) -> str:
-    """
-    执行单条图谱分析建议（来自 GraphAnalyzer），返回结果描述字符串。
-    注意：与 execute_kg_tool() 不同，suggestion 数据结构来自分析 LLM 的 JSON。
-    """
-    action = suggestion.get("action")
+            md_path = kg.nodes_dir / f"{n['id']}.md"
+            if md_path.exists():
+                md_content = md_path.read_text(encoding="utf-8").strip()
+                if md_content.startswith("#"):
+                    md_content = "\n".join(md_content.split("\n")[1:]).strip()
+                lines.append(md_content)
+            else:
+                lines.append("（无内容）")
+            lines.append("")
 
-    if action == "add_node":
-        node = suggestion.get("node", {})
-        new_node_id = node.get("id", "")
-        # recommended_edges 可能包含多种关系类型：
-        # - prerequisite（已有节点→新节点）：加入 from_nodes
-        # - related/confusion/extension（已有节点↔新节点）：创建独立边
-        from_nodes = []
-        extra_edges = []
-        for e in suggestion.get("recommended_edges", []):
-            relation = e.get("relation", "related")
-            if e.get("to") == new_node_id:
-                if relation == "prerequisite":
-                    # 已有节点 → 新节点：已有节点是前置
-                    from_nodes.append(e["from"])
-                else:
-                    # 非 prerequisite 边，稍后单独创建
-                    extra_edges.append(e)
-            elif e.get("from") == new_node_id:
-                # 新节点 → 已有节点：独立边
-                extra_edges.append(e)
+        prereq_edges = [e for e in edges if e.get("relation") == "prerequisite"]
+        if prereq_edges:
+            lines.append("## 依赖关系")
+            for e in prereq_edges:
+                from_name = next((n["name"] for n in nodes if n["id"] == e["from_node"]), e["from_node"])
+                to_name = next((n["name"] for n in nodes if n["id"] == e["to_node"]), e["to_node"])
+                lines.append(f"- {from_name} → {to_name} (前置)")
+            lines.append("")
 
-        result = create_node_from_ai(
-            kg=kg,
-            node_id=new_node_id,
-            node_name=node.get("name", ""),
-            tags=node.get("tags"),
-            summary=node.get("summary", ""),
-            difficulty=int(node.get("difficulty", 3)),
-            estimated_minutes=int(node.get("estimated_minutes", 15)),
-            content=node.get("content", ""),
-            from_nodes=from_nodes,
-            confidence=suggestion.get("confidence"),
+        content = "\n".join(lines)
+        filename = f"{subject or 'knowledge'}-export.md"
+
+        return StreamingResponse(
+            iter([content.encode("utf-8")]),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
-
-        # 创建非 prerequisite 的额外边
-        for e in extra_edges:
-            try:
-                kg.add_edge({
-                    "from": e["from"], "to": e["to"],
-                    "relation": e.get("relation", "related"),
-                    "label": e.get("label", ""),
-                    "added_by": "ai",
-                    "confidence": e.get("confidence", suggestion.get("confidence")),
-                }, caller="ai")
-            except (ValueError, PermissionError):
-                pass
-
-        return result
-
-    elif action == "add_edge":
-        edge = suggestion["edge"]
-        kg.add_edge({
-            "from": edge["from"], "to": edge["to"],
-            "relation": edge.get("relation", "related"),
-            "label": edge.get("label", ""),
-            "added_by": "ai", "confidence": suggestion.get("confidence"),
-        }, caller="ai")
-        return f"已创建边: {edge['from']} → {edge['to']} ({edge.get('relation', 'related')})"
-
-    elif action == "update_content":
-        kg.update_node_content(suggestion["node_id"],
-                               suggestion.get("content_snippet", ""), mode="append",
-                               caller="ai")
-        return f"已更新节点 {suggestion['node_id']} 的内容"
-
-    else:
-        raise ValueError(f"不支持的操作：{action}")
+    finally:
+        kg.close()

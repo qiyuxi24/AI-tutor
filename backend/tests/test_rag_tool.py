@@ -36,7 +36,7 @@ def fake_pipeline(monkeypatch):
 # ── rag_search ──────────────────────────────────────────────
 
 def test_rag_search_sync_context(fake_pipeline):
-    from app.core.llm_client import rag_search
+    from app.core.rag_tool import rag_search
     r = rag_search("什么是栈", source="all", top_k=3, user_id=1)
     assert "栈是后进先出" in r          # graph 结果
     assert "队列先进先出" in r          # kb 结果
@@ -46,7 +46,7 @@ def test_rag_search_sync_context(fake_pipeline):
 
 def test_rag_search_inside_event_loop(fake_pipeline):
     """已有运行中事件循环时走线程池路径（_run_async 双路径之一）。"""
-    from app.core.llm_client import rag_search
+    from app.core.rag_tool import rag_search
 
     async def inner():
         return rag_search("什么是栈", source="graph", top_k=2, user_id=1)
@@ -56,13 +56,13 @@ def test_rag_search_inside_event_loop(fake_pipeline):
 
 
 def test_rag_search_no_user_id(fake_pipeline):
-    from app.core.llm_client import rag_search
+    from app.core.rag_tool import rag_search
     r = rag_search("什么是栈", source="all", user_id=None)
     assert "无法确定用户上下文" in r
 
 
 def test_rag_search_top_k_clamped(fake_pipeline):
-    from app.core.llm_client import rag_search
+    from app.core.rag_tool import rag_search
     r = rag_search("测试", source="all", top_k=99, user_id=1)
     assert r  # 钳制到 5 后仍走 fake_run，不抛错
 
@@ -90,27 +90,27 @@ class _FakeKg:
 
 
 def test_kg_tools_registers_rag_search():
-    from app.core.llm_client import KG_TOOLS
+    from app.core.agent_tools import KG_TOOLS
     names = [t["function"]["name"] for t in KG_TOOLS]
     assert "rag_search" in names
 
 
 def test_execute_kg_tool_rag_search_branch(fake_pipeline):
-    from app.core.llm_client import execute_kg_tool
+    from app.core.agent_tools import execute_kg_tool
     tc = _FakeToolCall("rag_search", '{"query": "什么是队列", "source": "kb", "top_k": 2}')
     result = execute_kg_tool(tc, _FakeKg())
     assert "队列先进先出" in result
 
 
 def test_execute_kg_tool_top_k_clamped(fake_pipeline):
-    from app.core.llm_client import execute_kg_tool
+    from app.core.agent_tools import execute_kg_tool
     tc = _FakeToolCall("rag_search", '{"query": "测试", "top_k": 99}')
     result = execute_kg_tool(tc, _FakeKg())
     assert result  # 不抛错
 
 
 def test_execute_kg_tool_missing_query_no_crash(fake_pipeline):
-    from app.core.llm_client import execute_kg_tool
+    from app.core.agent_tools import execute_kg_tool
     tc = _FakeToolCall("rag_search", '{"source": "kb"}')
     result = execute_kg_tool(tc, _FakeKg())
     assert "工具执行出错" in result or "操作失败" in result

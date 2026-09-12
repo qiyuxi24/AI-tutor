@@ -14,7 +14,7 @@ import argparse
 import asyncio
 import json
 
-from app.core.agent_loop import run_agent_loop, save_trace, default_trace_dir
+from app.core.agent_loop import run_agent_loop
 from app.core.knowledge_graph import KnowledgeGraph
 
 # 轻量系统提示：引导模型在需要时调用知识图谱工具（与 chat_service 的工具说明同源）
@@ -46,8 +46,8 @@ async def _run(user_id: int, prompt: str):
         print(f"WARN: 自备 users 行失败（可忽略）: {e}")
     try:
         messages = [{"role": "user", "content": prompt}]
-        result = await run_agent_loop(_SYSTEM, messages, kg=kg)
-        path = save_trace(result, user_id, default_trace_dir())
+        # 传 user_id：运行记录（证据级）自动写入 agent_runs 表，无需再 save_trace
+        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=user_id)
         print("=== RESULT ===")
         print(json.dumps({
             "user_id": user_id,
@@ -55,7 +55,7 @@ async def _run(user_id: int, prompt: str):
             "context_tokens": result.context_tokens,
             "rounds": result.rounds,
             "final_text": result.text,
-            "trace_file": str(path) if path else None,
+            "note": "运行记录已写入 agent_runs 表，可 GET /api/v1/agent/runs 查看",
         }, ensure_ascii=False, indent=2))
         return result
     finally:

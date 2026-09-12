@@ -10,10 +10,13 @@
 """
 
 import json
+import logging
 import sqlite3
 import numpy as np
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class VectorStore:
@@ -120,10 +123,14 @@ class VectorStore:
             return []
 
         scored = []
+        skipped = 0
         for row in rows:
             try:
                 vec = np.asarray(json.loads(row["embedding"]), dtype=np.float32)
             except (json.JSONDecodeError, TypeError):
+                continue
+            if vec.shape != q.shape:      # 维度不符（换嵌入模型未重建）→ 跳过，不抛错
+                skipped += 1
                 continue
             norm = np.linalg.norm(vec)
             if norm == 0:
@@ -136,6 +143,12 @@ class VectorStore:
                 "content": row["content"],
                 "score": round(score, 4),
             })
+
+        if skipped:
+            logger.warning(
+                "向量检索跳过 %d/%d 条维度不符的向量（查询 %d 维）：疑似换过嵌入模型，需重建索引",
+                skipped, len(rows), q.shape[0],
+            )
 
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:top_k]

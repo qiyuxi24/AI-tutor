@@ -27,6 +27,17 @@ def _strip_html(text: str) -> str:
     return out.replace("&nbsp;", " ").replace("&amp;", "&").strip()
 
 
+def _strip_variant(match) -> str:
+    """-{zh-cn:堆叠; zh-tw:堆棧;}- → 首选变体文字；-{H|…}- 转换规则定义整段丢弃"""
+    inner = match.group(1).strip()
+    if inner[:2].upper() == "H|":
+        return ""
+    inner = inner.split(";")[0]                   # 多变体取第一个（zh-cn/zh-hans 优先）
+    if "[[" not in inner and "|" in inner:        # -{A|B}- 二选一取前者（不切坏链接）
+        inner = inner.split("|")[0]
+    return inner.split(":", 1)[-1].strip()        # "zh-cn:堆叠" → "堆叠"；无冒号原样
+
+
 def wikitext_to_md(text: str) -> str:
     """把 MediaWiki wikitext 转成可入库的 Markdown（面向教材爬取的最小集）"""
     text = text or ""
@@ -41,6 +52,12 @@ def wikitext_to_md(text: str) -> str:
     # <math>…</math> 行内/行间公式 → $…$（含可选 display 属性）
     text = re.sub(r"<math[^>]*>(.*?)</math>", lambda m: f"${m.group(1)}$",
                   text, flags=re.S)
+
+    # 地区词/变体标记 -{…}-：规则定义整段丢弃，其余保留首选变体（嵌套最多剥两层）
+    while "-{" in text:
+        text, replaced = re.subn(r"-\{(.*?)\}-", _strip_variant, text, flags=re.S)
+        if not replaced:
+            break
 
     # 丢弃整个模板 {{…}}（含嵌套，简单括号计数）
     def _drop_templates(s):

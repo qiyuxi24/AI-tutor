@@ -2,8 +2,11 @@
 
 三层预估策略（按可用性自动选择）：
   Phase 1（max_tokens 上限）：prompt 预计数 + max_tokens → 成本上限
-  Phase 2（历史中位数）  ：从 trace JSONL 提取该用户历史 completion_tokens 中位数
+  Phase 2（历史中位数）  ：从 agent_runs 表提取该用户历史 completion_tokens 中位数
   Phase 3（关键词规则）  ：基于 prompt 内容特征（"详细"/"简短"等）调整预估
+
+历史数据源（2026-09-08 迁移）：旧 jsonl trace 已退役，统一从 agent_run_store 的
+  agent_runs 表读取（run_agent_loop 内部落库）。
 
 设计依据：docs/token_consumption_prediction_research.md
 
@@ -12,13 +15,13 @@
   est = estimate_token_consumption(messages, model="MiniMax-M3", max_tokens=2000, user_id=42)
   print(f"预估消耗 {est.total_estimated} tokens（上限 {est.total_max}），约 ${est.estimated_cost_usd:.4f}")
 """
-import json
 import logging
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.token_counter import count_messages_tokens
+from app.core import agent_run_store as run_store
 
 logger = logging.getLogger("ai-tutor")
 
@@ -104,63 +107,25 @@ def _calc_cost(prompt_tokens: int, completion_tokens: int, model: str) -> float:
     return (prompt_tokens * pricing["input"] + completion_tokens * pricing["output"]) / 1_000_000
 
 
-def _default_trace_dir() -> Path:
-    """trace 根目录（与 agent_loop.default_trace_dir 一致）。"""
-    return Path(__file__).resolve().parent.parent.parent.parent / "data" / "traces"
-
-
-def load_user_traces(user_id: int, trace_dir: Path | None = None) -> list[dict]:
-    """加载某用户的所有 trace JSONL 记录。
-
-    参数:
-        user_id:   用户 ID
-        trace_dir: trace 根目录（默认 backend/data/traces）
-
-    返回:
-        trace dict 列表，按时间正序（旧 → 新）
-    """
-    base = trace_dir or _default_trace_dir()
-    user_dir = base / str(user_id)
-    if not user_dir.exists():
-        return []
-
-    traces = []
-    for f in sorted(user_dir.glob("*.jsonl")):
-        try:
-            data = json.loads(f.read_text(encoding="utf-8").strip())
-            traces.append(data)
-        except (json.JSONDecodeError, OSError):
-            continue
-
-    return traces
-
-
 def _predict_completion_historical(
     user_id: int,
-    trace_dir: Path | None = None,
+    db_dir: Path | None = None,
 ) -> int | None:
-    """Phase 2：从历史 trace 提取 completion_tokens 中位数。
+    """Phase 2：从 agent_runs 表提取历史 completion_tokens 中位数。
 
     参数:
         user_id: 用户 ID
+        db_dir:  agent_runs 库所在目录（默认 backend/data/agent_runs）
 
     返回:
-        中位数 completion_tokens；trace 不足时返回 None
+        中位数 completion_tokens；历史不足时返回 None
     """
-    traces = load_user_traces(user_id, trace_dir)
-    completions = []
-    for t in traces:
-        usage = t.get("token_usage", {})
-        ct = usage.get("completion_tokens", 0)
-        if ct > 0:
-            completions.append(ct)
-
+    completions = run_store.recent_completion_tokens(
+        user_id, n=_HISTORY_WINDOW, db_dir=db_dir,
+    )
     if len(completions) < _MIN_TRACES_FOR_HISTORY:
         return None
-
-    # 取最近 N 条的中位数（比均值更抗异常值）
-    recent = completions[-_HISTORY_WINDOW:]
-    return int(statistics.median(recent))
+    return int(statistics.median(completions[-_HISTORY_WINDOW:]))
 
 
 def _predict_completion_features(messages: list[dict], prompt_tokens: int) -> int:
@@ -203,12 +168,12 @@ def estimate_token_consumption(
     model: str,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
     user_id: int | None = None,
-    trace_dir: Path | None = None,
+    db_dir: Path | None = None,
 ) -> TokenEstimate:
     """Token 消耗预估主入口：三层策略自动选择最优预估。
 
     策略优先级：
-      1. 有历史 trace（≥5 条）→ Phase 2 历史中位数
+      1. 有历史运行记录（≥5 条）→ Phase 2 历史中位数
       2. 无历史但有 prompt 特征 → Phase 3 关键词规则
       3. 兜底 → Phase 1 max_tokens 上限
 
@@ -216,8 +181,8 @@ def estimate_token_consumption(
         messages:  对话消息列表 [{"role": ..., "content": ...}, ...]
         model:     模型名（用于校准系数 + 定价）
         max_tokens: 输出 token 上限（默认 2000）
-        user_id:   用户 ID（用于读取历史 trace；None 时跳过 Phase 2）
-        trace_dir: trace 根目录（默认 backend/data/traces）
+        user_id:   用户 ID（用于读取历史 agent_runs；None 时跳过 Phase 2）
+        db_dir:    agent_runs 库所在目录（默认 backend/data/agent_runs）
 
     返回:
         TokenEstimate dataclass
@@ -229,7 +194,7 @@ def estimate_token_consumption(
     method = "max_tokens"
 
     if user_id is not None:
-        historical = _predict_completion_historical(user_id, trace_dir)
+        historical = _predict_completion_historical(user_id, db_dir)
         if historical is not None:
             completion_predicted = historical
             method = "historical"
@@ -263,7 +228,7 @@ def estimate_single_call(
     model: str,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
     user_id: int | None = None,
-    trace_dir: Path | None = None,
+    db_dir: Path | None = None,
 ) -> TokenEstimate:
     """便捷入口：从 system_prompt + messages 构造完整消息列表后预估。
 
@@ -273,7 +238,7 @@ def estimate_single_call(
         model:         模型名
         max_tokens:    输出上限
         user_id:       用户 ID（历史预估用）
-        trace_dir:     trace 目录
+        db_dir:        agent_runs 库所在目录
 
     返回:
         TokenEstimate
@@ -286,5 +251,5 @@ def estimate_single_call(
 
     return estimate_token_consumption(
         api_messages, model=model, max_tokens=max_tokens,
-        user_id=user_id, trace_dir=trace_dir,
+        user_id=user_id, db_dir=db_dir,
     )

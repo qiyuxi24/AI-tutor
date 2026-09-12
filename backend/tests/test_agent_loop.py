@@ -6,7 +6,7 @@ Agent Loop 单元测试（全部离线，mock _chat_once 与 execute_kg_tool）�
 - 协议顺序：assistant(含 tool_calls) 快照 → tool 一一对应回填
 - 二次 tool_calls 不丢（两轮以上工具链）
 - 工具超时护栏触发
-- trace 结构完整 + save_trace 落盘
+- trace 结构完整 + 传 user_id 自动落库 agent_runs（证据级）
 """
 import asyncio
 import copy
@@ -14,8 +14,14 @@ import json
 import time
 from types import SimpleNamespace
 
-from app.core import agent_loop
-from app.core.agent_loop import run_agent_loop, save_trace
+from app.core import agent_loop, agent_run_store as run_store
+from app.core.agent_events import (
+    AgentEventEmitter,
+    AGENT_START, AGENT_DONE,
+    TOOL_START, TOOL_RESULT,
+    THINKING, TEXT_DELTA,
+)
+from app.core.agent_loop import run_agent_loop
 
 
 # ─── 构造假响应 ──────────────────────────────────────────────
@@ -180,8 +186,9 @@ def test_tool_timeout_guardrail(monkeypatch):
     assert "超时" in received[1]["messages"][-1]["content"]
 
 
-def test_save_trace_writes_and_empty_skips(tmp_path, monkeypatch):
-    """有工具动作的 run 落盘 JSONL；无工具动作不落盘。"""
+def test_run_persists_to_agent_runs_evidence(tmp_path, monkeypatch):
+    """传 user_id 的 run 自动写入 agent_runs 表（证据级：thinking 全文/完整 args/完整结果）；
+    纯文本 run 同样落库（status=ok，evidence 仅 final_text）。"""
     received = []
     _install_fake_chat(monkeypatch, [
         _resp(_msg(tool_calls=[_tc("add_edge", {"from": "a", "to": "b", "relation": "related"}, tc_id="c1")])),
@@ -189,22 +196,40 @@ def test_save_trace_writes_and_empty_skips(tmp_path, monkeypatch):
     ], received)
     _install_fake_execute(monkeypatch)
 
-    result = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "连边"}], kg=object()))
-    path = save_trace(result, user_id=7, trace_dir=tmp_path)
-    assert path is not None and path.exists()
+    result = asyncio.run(run_agent_loop(
+        "sys", [{"role": "user", "content": "连边"}], kg=object(), user_id=7, db_dir=tmp_path,
+    ))
+    assert result.total_llm_calls == 2
+    assert len(result.evidence) == 3  # tool_call + tool_result + final_text
 
-    run = json.loads(path.read_text(encoding="utf-8"))
-    assert run["user_id"] == 7
-    assert run["total_llm_calls"] == 2
-    assert run["context_tokens"] == 240
-    assert len(run["rounds"]) == 1
-    assert run["rounds"][0]["tool"] == "add_edge"
-    assert run["final_text_head"] == "已添加关联。"
+    runs = run_store.list_runs(7, db_dir=tmp_path)
+    assert len(runs) == 1
+    assert runs[0]["status"] == "ok"
+    assert runs[0]["total_llm_calls"] == 2
+    assert runs[0]["context_tokens"] == 240
+    assert runs[0]["final_text"] == "已添加关联。"
 
-    # 无工具动作：不落盘
+    run = run_store.get_run(7, runs[0]["run_id"], db_dir=tmp_path)
+    kinds = [s["kind"] for s in run["evidence"]]
+    assert kinds == ["tool_call", "tool_result", "final_text"]
+    # 证据级：工具参数与结果完整保留（不截断）
+    tc_step = run["evidence"][0]
+    assert json.loads(tc_step["arguments"]) == {"from": "a", "to": "b", "relation": "related"}
+    assert tc_step["tool_call_id"] == "c1"
+    assert run["evidence"][1]["content"] == "已执行 add_edge"
+    # 工具参数出现在 evidence 而不仅是截断的 rounds
+    assert result.rounds[0]["args_head"] == '{"from": "a", "to": "b", "relation": "related"}'
+
+    # 纯文本 run：同样落库，无工具证据
     _install_fake_chat(monkeypatch, [_resp(_msg(content="纯回答"))], received)
-    plain = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "hi"}], kg=object()))
-    assert save_trace(plain, user_id=7, trace_dir=tmp_path) is None
+    asyncio.run(run_agent_loop(
+        "sys", [{"role": "user", "content": "hi"}], kg=object(), user_id=7, db_dir=tmp_path,
+    ))
+    runs = run_store.list_runs(7, db_dir=tmp_path)
+    assert len(runs) == 2
+    plain = run_store.get_run(7, runs[0]["run_id"], db_dir=tmp_path)
+    assert plain["status"] == "ok"
+    assert [s["kind"] for s in plain["evidence"]] == ["final_text"]
 
 
 def test_natural_finish_empty_content_fallback(monkeypatch):
@@ -238,3 +263,57 @@ def test_force_finish_llm_error_fallback(monkeypatch):
 
     assert "已达上限" in result.text
     assert result.total_llm_calls == 2
+
+
+# ─── 消息发射中间件（app/core/agent_events.py）───
+
+class _CollectEmitter:
+    """注入用哑发射器：只收集事件序列，不触 event_bus。"""
+
+    def __init__(self):
+        self.events = []
+
+    def emit(self, event_type, **data):
+        self.events.append((event_type, data))
+
+
+def test_agent_emitter_injects_run_id_and_routes(monkeypatch):
+    """AgentEventEmitter.emit 自动注入 run_id 并精准路由 user_id。"""
+    calls = []
+    monkeypatch.setattr("app.core.agent_events.publish",
+                        lambda t, d, user_id: calls.append((t, d, user_id)))
+    AgentEventEmitter("run-abc", user_id=9).emit(TEXT_DELTA, text="hi")
+    AgentEventEmitter("run-abc", user_id=9).emit(AGENT_DONE, rounds=1, total_llm_calls=2)
+    assert calls == [
+        (TEXT_DELTA, {"run_id": "run-abc", "text": "hi"}, 9),
+        (AGENT_DONE, {"run_id": "run-abc", "rounds": 1, "total_llm_calls": 2}, 9),
+    ]
+
+
+def test_agent_emitter_silent_without_user(monkeypatch):
+    """无 user 的 run 静默不发布（不污染全局广播/订阅者）。"""
+    calls = []
+    monkeypatch.setattr("app.core.agent_events.publish", lambda *a, **k: calls.append(a))
+    AgentEventEmitter("run-abc").emit(THINKING, text="x")
+    AgentEventEmitter("run-abc").emit(TEXT_DELTA, text="y")
+    assert calls == []
+
+
+def test_loop_events_flow_through_emitter(monkeypatch):
+    """注入 emitter：一轮工具的 run 事件顺序 = start → tool_start/result → text_delta → done。"""
+    received = []
+    _install_fake_chat(monkeypatch, [
+        _resp(_msg(tool_calls=[_tc("update_mastery", {"node_id": "a", "mastery": 1}, tc_id="c1")])),
+        _resp(_msg(content="已更新。")),
+    ], received)
+    _install_fake_execute(monkeypatch)
+    fake = _CollectEmitter()
+
+    asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}],
+                               kg=object(), emitter=fake))
+
+    kinds = [t for t, _ in fake.events]
+    assert kinds == [AGENT_START, TOOL_START, TOOL_RESULT, TEXT_DELTA, AGENT_DONE]
+    assert fake.events[0][1]["max_rounds"] == 5
+    assert fake.events[-1][1]["rounds"] == 1
+    assert fake.events[-1][1]["total_llm_calls"] == 2

@@ -29,20 +29,25 @@ const props = defineProps({
   visible: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node'])
+const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node', 'update-mastery'])
 
 const mode = ref('view')        // 'view' | 'edit'
 const editContent = ref('')
 const saving = ref(false)
 const saveError = ref('')
+const masterySlider = ref(0)
+const masterySaving = ref(false)
 
 const htmlContent = computed(() => renderMarkdown(props.nodeInfo?.content))
+// 编辑模式右侧实时预览（与阅读模式共用同一渲染管线）
+const previewHtml = computed(() => renderMarkdown(editContent.value))
 
 watch(() => props.nodeInfo, (val) => {
   if (val) {
     mode.value = 'view'
     editContent.value = val.content || ''
     saveError.value = ''
+    masterySlider.value = val.mastery || 0
   }
 })
 
@@ -94,6 +99,20 @@ function masteryLabel(m) {
 function masteryBarWidth(m) {
   return Math.min(100, Math.max(0, m || 0)) + '%'
 }
+
+async function handleMasteryChange() {
+  masterySaving.value = true
+  emit('update-mastery', {
+    nodeId: props.nodeInfo.id,
+    mastery: masterySlider.value,
+    onResult: (error) => {
+      masterySaving.value = false
+      if (!error) {
+        emit('refresh')
+      }
+    },
+  })
+}
 </script>
 
 <template>
@@ -140,15 +159,27 @@ function masteryBarWidth(m) {
           </div>
         </div>
 
-        <!-- 掌握程度条 -->
+        <!-- 掌握程度条 + 滑块调整 -->
         <div class="mastery-section">
           <div class="mastery-label">
             <span>掌握程度</span>
-            <span class="mastery-value">{{ masteryLabel(nodeInfo.mastery) }}</span>
+            <span class="mastery-value">{{ masteryLabel(masterySlider) }}{{ masterySaving ? ' (保存中...)' : '' }}</span>
           </div>
           <div class="mastery-bar-bg">
-            <div class="mastery-bar-fill" :style="{ width: masteryBarWidth(nodeInfo.mastery) }"></div>
+            <div class="mastery-bar-fill" :style="{ width: masteryBarWidth(masterySlider) }"></div>
           </div>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            :value="masterySlider"
+            @input="masterySlider = Number($event.target.value)"
+            @change="handleMasteryChange"
+            class="mastery-slider"
+            :disabled="masterySaving"
+            title="拖动调整掌握程度"
+          />
         </div>
 
         <!-- 标签 -->
@@ -158,9 +189,15 @@ function masteryBarWidth(m) {
           <span v-if="nodeInfo.estimated_minutes" class="tag time-tag">约 {{ nodeInfo.estimated_minutes }} 分钟</span>
         </div>
 
-        <!-- 编辑模式：textarea -->
+        <!-- 编辑模式：Markdown 源码 + 实时预览（分屏） -->
         <div v-if="mode === 'edit'" class="edit-area">
-          <textarea v-model="editContent" class="edit-textarea"></textarea>
+          <textarea
+            v-model="editContent"
+            class="edit-textarea"
+            placeholder="Markdown 格式内容，右侧实时预览..."
+          ></textarea>
+          <div class="markdown-body edit-preview" v-html="previewHtml"></div>
+          <!-- ponytail: 独立成行，故 grid-column 铺满两列 -->
           <p v-if="saveError" class="save-error">{{ saveError }}</p>
         </div>
 
@@ -254,22 +291,52 @@ function masteryBarWidth(m) {
 .mastery-bar-bg { height: 6px; background: var(--color-border); border-radius: 3px; overflow: hidden; }
 .mastery-bar-fill { height: 100%; background: linear-gradient(90deg, var(--color-green-light), var(--color-green)); border-radius: 3px; transition: width 0.3s ease; }
 
+.mastery-slider {
+  width: 100%; margin-top: 8px; height: 4px;
+  -webkit-appearance: none; appearance: none;
+  background: var(--color-border); border-radius: 2px; outline: none; cursor: pointer;
+}
+.mastery-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--color-green); cursor: pointer; border: 2px solid var(--color-bg-primary);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.mastery-slider::-moz-range-thumb {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--color-green); cursor: pointer; border: 2px solid var(--color-bg-primary);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.mastery-slider:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .tags-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 24px; flex-shrink: 0; }
 .tag { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; background: var(--color-accent-light); color: var(--color-accent); }
 .diff-tag { background: rgba(245, 158, 11, 0.12); color: var(--color-orange); }
 .time-tag { background: var(--color-green-light); color: var(--color-green); }
 
-/* 编辑区 */
-.edit-area { flex: 1; overflow-y: auto; padding: 16px 24px; }
+/* 编辑区：左源码 / 右实时预览 */
+.edit-area {
+  flex: 1; min-height: 0; display: grid;
+  grid-template-columns: 1fr 1fr; gap: 12px;
+  padding: 16px 24px;
+}
 .edit-textarea {
-  width: 100%; min-height: 300px; padding: 14px;
+  width: 100%; height: 100%; min-height: 320px; padding: 14px;
   border: 1px solid var(--color-border); border-radius: 10px;
   font-family: 'Consolas', 'Courier New', monospace;
   font-size: 14px; line-height: 1.6; resize: vertical;
   color: var(--color-text-primary); background: var(--color-bg-secondary);
 }
 .edit-textarea:focus { outline: none; border-color: var(--color-accent); }
-.save-error { color: var(--color-red); font-size: 13px; margin-top: 8px; }
+.edit-preview {
+  min-height: 320px; padding: 14px; overflow-y: auto;
+  border: 1px solid var(--color-border); border-radius: 10px;
+  background: var(--color-bg-secondary);
+}
+@media (max-width: 760px) {
+  .edit-area { grid-template-columns: 1fr; }
+}
+.save-error { grid-column: 1 / -1; color: var(--color-red); font-size: 13px; margin: 0; }
 
 /* Markdown */
 .markdown-body {

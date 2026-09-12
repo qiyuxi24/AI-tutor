@@ -19,7 +19,7 @@ import logging
 import re
 from typing import Optional
 
-from app.core.llm_client import call_llm
+from app.core.llm import call_llm
 from app.core.kb.kb_manager import kb_manager
 from app.core.quiz.schema import Question
 from app.core.quiz.quality import filter_questions

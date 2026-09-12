@@ -12,24 +12,38 @@
 import json
 import asyncio
 from fastapi import APIRouter, Request, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from app.models.schemas import ChatRequest, ChatResponse
 from app.core.auth import get_current_user
+from app.core.rate_limiter import chat_rate_limiter
 from app.services.chat_service import process_message, process_message_stream
 
 router = APIRouter()
 
 
+def _check_chat_rate_limit(request: Request) -> bool:
+    """检查聊天接口频率限制，超限返回 429。"""
+    client_ip = request.client.host if request.client else "unknown"
+    if not chat_rate_limiter.is_allowed(client_ip):
+        retry_after = chat_rate_limiter.get_retry_after(client_ip)
+        return JSONResponse(
+            status_code=429,
+            content={"detail": f"请求过于频繁，请 {retry_after} 秒后重试"},
+            headers={"Retry-After": str(retry_after)},
+        )
+    return None
+
+
 @router.post("/chat", response_model=ChatResponse)
-async def handle_chat(request: ChatRequest, user_id: int = Depends(get_current_user)):
+async def handle_chat(request: ChatRequest, raw_request: Request,
+                      user_id: int = Depends(get_current_user)):
     """
     处理对话请求（一次性回复，兼容旧版前端）
-
-    process_message 现在返回三个值：
-    - reply: AI 回复文本
-    - mode: 当前引导模式
-    - graph_analysis: 图谱分析结果（含 applied/pending 建议）
     """
+    rate_limit_resp = _check_chat_rate_limit(raw_request)
+    if rate_limit_resp:
+        return rate_limit_resp
+
     kb = {"node_ids": request.kb_node_ids or [], "name": request.kb_node_name} \
         if request.kb_node_ids else None
     reply, mode, graph_analysis = await process_message(
@@ -43,16 +57,15 @@ async def handle_chat(request: ChatRequest, user_id: int = Depends(get_current_u
 
 
 @router.post("/chat/stream")
-async def handle_chat_stream(request: ChatRequest,
+async def handle_chat_stream(request: ChatRequest, raw_request: Request,
                              user_id: int = Depends(get_current_user)):
     """
     统一流式对话端点（方案 B）
-
-    agent_loop 为唯一答案生成器：
-    - 循环内事件（thinking/tool_start/tool_result/text_delta）实时 SSE 推送
-    - 图谱分析 + trace 落盘在流内完成
-    - 旧前端兼容：text_delta 事件转为 {"token": "..."} 格式
     """
+    rate_limit_resp = _check_chat_rate_limit(raw_request)
+    if rate_limit_resp:
+        return rate_limit_resp
+
     async def event_stream():
         kb = {"node_ids": request.kb_node_ids or [], "name": request.kb_node_name} \
             if request.kb_node_ids else None
@@ -72,6 +85,6 @@ async def handle_chat_stream(request: ChatRequest,
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # 禁用 nginx 缓冲
+            "X-Accel-Buffering": "no",
         }
     )

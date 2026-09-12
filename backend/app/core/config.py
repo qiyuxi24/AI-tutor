@@ -43,6 +43,13 @@ class Settings:
     model_name: str = "qwen-plus"
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_timeout: float = 120.0
+    # 对话发送预算（tokens）：system_prompt + 历史超预算时自动裁掉最旧轮次（见 core/context_guard.py）
+    llm_ctx_budget: int = 32_000
+    # 备用对话服务（可选，模型回退链）：主模型配额耗尽/认证失败/持续异常时自动静默降级。
+    # 三件套缺任一即不启用（留空=保持单模型旧行为）。key 缺省回退 DASHSCOPE_API_KEY。
+    fallback_llm_api_key: str = ""
+    fallback_llm_base_url: str = ""
+    fallback_model_name: str = ""
     # 嵌入服务地址（默认阿里云；与对话 base 分离，切换对话模型不影响嵌入）
     embed_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
@@ -65,6 +72,12 @@ class Settings:
     # ─── 启动 / 管理员 ───
     default_admin_password: str = ""
 
+    # ─── 日志 ───
+    log_level: str = "INFO"
+    log_dir: str = "logs"
+    log_max_bytes: int = 10 * 1024 * 1024  # 10 MB
+    log_backup_count: int = 5
+
     @classmethod
     def from_env(cls) -> "Settings":
         """从环境变量构建配置（统一在此读取，含类型转换）。"""
@@ -76,6 +89,10 @@ class Settings:
                 "LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
             ),
             llm_timeout=float(os.getenv("LLM_TIMEOUT", "120")),
+            llm_ctx_budget=int(os.getenv("LLM_CTX_BUDGET", str(32_000))),
+            fallback_llm_api_key=os.getenv("FALLBACK_LLM_API_KEY", ""),
+            fallback_llm_base_url=os.getenv("FALLBACK_LLM_BASE_URL", ""),
+            fallback_model_name=os.getenv("FALLBACK_MODEL_NAME", ""),
             embed_base_url=os.getenv(
                 "EMBED_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
             ),
@@ -90,6 +107,10 @@ class Settings:
             cors_allow_methods=_parse_list(os.getenv("CORS_ALLOW_METHODS"), ["*"]),
             cors_allow_headers=_parse_list(os.getenv("CORS_ALLOW_HEADERS"), ["*"]),
             default_admin_password=os.getenv("DEFAULT_ADMIN_PASSWORD", ""),
+            log_level=os.getenv("LOG_LEVEL", "INFO"),
+            log_dir=os.getenv("LOG_DIR", "logs"),
+            log_max_bytes=int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024))),
+            log_backup_count=int(os.getenv("LOG_BACKUP_COUNT", "5")),
         )
 
     def require_secret_key(self) -> None:

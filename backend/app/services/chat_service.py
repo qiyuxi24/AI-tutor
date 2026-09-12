@@ -1,15 +1,18 @@
 """
 对话服务层：编排整个对话处理流程
 
-新流程（2026-09-06 起，Agent Loop）：
-  run_agent_loop（app/core/agent_loop.py）= 标准 agent 循环：
-  阶段2（后台）：带工具说明的提示词 → LLM↔工具多轮串联 → 图谱更新 + trace 落盘
-  阶段1（流式过渡）：call_llm_stream() 仍先流式输出可见文本（Batch3 合并前保留）
+流程（Agent Loop，2026-09-06 起，已全面收敛）：
+  统一调用 run_agent_loop（app/core/agent_loop.py）标准 agent 循环：
+  带工具说明的提示词 → LLM↔工具多轮串联 → 最终回答；运行记录自动落 agent_runs，
+  循环内事件（thinking/tool_start/tool_result/text_delta）经 event_bus 实时推送
+  （/chat/stream 消费转发 SSE，每事件带 run_id 便于前端回源）。
 
 提示词组装逻辑：
   通用模板 (system_prompt_common.j2) + 模式模板 → 完整 system prompt
-  流式阶段：不含工具能力说明，AI 专注于教学引导
-  工具阶段：额外注入工具能力说明（TOOL_CAPABILITY_PROMPT），进入 agent 循环
+  统一注入工具能力说明（TOOL_CAPABILITY_PROMPT），进入 agent 循环
+
+图谱分析（后台异步）：
+  _analyze_and_apply 分析对话 → 高置信度建议自动应用 / 其余入待审核；失败不影响回复
 
 用户隔离：
   所有函数接受 user_id（从 JWT 解析），内部创建 KnowledgeGraph(user_id) 实例
@@ -20,14 +23,14 @@ import logging
 from typing import AsyncGenerator
 from datetime import datetime
 from app.core.prompt_loader import get_system_prompt
-from app.core.llm_client import call_llm_stream
-from app.core.agent_loop import run_agent_loop, save_trace
+from app.core.agent_loop import run_agent_loop
+from app.core.context_guard import trim_history_to_budget
 from app.core.graph_analyzer import GraphAnalyzer, build_graph_context
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.user_profile import UserProfile
 from app.core.error_codes import ErrorCode, log_error, publish_error_event
-from app.core.event_bus import publish, subscribe, TEXT_DELTA
-from app.api.v1.knowledge import _apply_suggestion, _load_suggestions, _save_suggestions
+from app.core.event_bus import publish, subscribe, get_user_queue, TEXT_DELTA
+from app.core.knowledge_writer import apply_suggestion, load_suggestions, save_suggestions
 
 logger = logging.getLogger("ai-tutor")
 
@@ -262,7 +265,7 @@ async def _analyze_and_apply(user_message: str, ai_reply: str,
             confidence = s.get("confidence", 0)
             if confidence >= threshold:
                 try:
-                    apply_result = _apply_suggestion(kg, s)
+                    apply_result = apply_suggestion(kg, s)
                     if apply_result:
                         applied_list.append({**s, "apply_result": apply_result})
                 except PermissionError as e:
@@ -278,11 +281,11 @@ async def _analyze_and_apply(user_message: str, ai_reply: str,
 
         # 持久化待审核建议
         if pending_list:
-            existing = _load_suggestions(kg.nodes_dir)
+            existing = load_suggestions(kg.nodes_dir)
             for p in pending_list:
                 p["submitted_at"] = datetime.now().isoformat()
             existing.extend(pending_list)
-            _save_suggestions(kg.nodes_dir, existing)
+            save_suggestions(kg.nodes_dir, existing)
 
         # 如果有自动应用的变更，发布 graph_updated 事件通知前端刷新
         if applied_list:
@@ -378,11 +381,15 @@ async def process_message(user_id: int, messages: list, mode: str,
             messages, mode, kg, inject_tools=True, current_node=current_node, kb=kb
         )
 
-        # 2. Agent 主循环：LLM ↔ 工具 多轮串联，直到自然给出最终回复
-        result = await run_agent_loop(system_prompt, messages, kg=kg)
+        # 2. 发送前守卫：历史超预算时裁掉最旧轮次（裁剪统计由守卫内部记日志）
+        messages, _ = trim_history_to_budget(system_prompt, messages)
+
+        # 3. Agent 主循环：LLM ↔ 工具 多轮串联，直到自然给出最终回复
+        #    ★ 传 user_id：即使无 SSE 订阅，运行记录也写入 agent_runs（默认可观测）
+        result = await run_agent_loop(system_prompt, messages, kg=kg, user_id=user_id)
         reply = result.text
 
-        # 3. 图谱分析作为后台任务执行，不阻塞对话回复
+        # 4. 图谱分析作为后台任务执行，不阻塞对话回复
         #    ★ 传入 user_id 而非 kg 实例，让 _analyze_and_apply 自己管理 kg 生命周期
         asyncio.create_task(_analyze_and_apply(last_user_msg, reply, user_id))
 
@@ -395,7 +402,7 @@ async def process_message(user_id: int, messages: list, mode: str,
         return error_msg, mode, {"suggestions": [], "applied": [], "pending": []}
 
     # ★ 修复：_analyze_and_apply 传入 user_id，让它自己管理 kg 生命周期。
-    # 此处的 kg 在 call_llm 工具调用完成后已无后续操作，可安全关闭。
+    # 此处的 kg 在 run_agent_loop 结束后已无后续操作，可安全关闭。
     kg.close()
     return reply, mode, {"suggestions": [], "applied": [], "pending": []}
 
@@ -430,6 +437,13 @@ async def process_message_stream(
             current_node=current_node, kb=kb
         )
 
+        # 预创建用户事件队列，确保 agent 发出的第一个事件不丢失
+        # （旧实现先启动 agent 再 subscribe，agent 可能在队列创建前就发了事件 → 静默丢弃）
+        get_user_queue(user_id)
+
+        # 发送前守卫：历史超预算时裁掉最旧轮次（裁剪统计由守卫内部记日志）
+        messages, _ = trim_history_to_budget(tool_prompt, messages)
+
         # 启动 agent loop 为后台任务（事件通过 event_bus 投递到用户队列）
         agent_task = asyncio.create_task(
             run_agent_loop(tool_prompt, messages, kg=kg, user_id=user_id)
@@ -439,9 +453,8 @@ async def process_message_stream(
         async for sse_data in _consume_agent_events(user_id, agent_task):
             yield sse_data
 
-        # 获取 agent 结果
+        # 获取 agent 结果（运行记录已由 run_agent_loop 内部写入 agent_runs，无需再 save_trace）
         result = await agent_task
-        save_trace(result, user_id)
 
         # 图谱分析（复用现有逻辑）
         user_msgs = [m for m in messages if (m.role if hasattr(m, 'role') else m['role']) == 'user']
@@ -464,81 +477,57 @@ async def process_message_stream(
 async def _consume_agent_events(user_id: int, agent_task: asyncio.Task) -> AsyncGenerator[str, None]:
     """
     消费 agent 事件队列，转为 SSE 格式 yield。
-    agent_task 完成后停止消费。
+
+    旧实现的致命缺陷：用 `async for sse in subscribe(user_id)` 消费，
+    而 subscribe 内部是 `while True: await q.get()`。当 agent_task 完成
+    且队列排空后，下一次 q.get() 会永久阻塞——break 检查在循环体内，
+    要 q.get() 返回后才能执行到，但队列已空永远不会返回。
+
+    新实现用 asyncio.wait 竞争 q.get() 与 agent_task 完成信号：
+      - 事件先到 → 处理事件，继续循环
+      - agent 先完成 → 排空剩余事件后退出
+      - 同时完成 → 处理当前事件，排空剩余后退出
     """
-    async for sse in subscribe(user_id):
-        if agent_task.done() and _user_queue_empty(user_id):
-            break
+    q = get_user_queue(user_id)
 
-        payload = json.loads(sse.replace("data: ", "").strip())
-        evt_type = payload.get("type")
+    while True:
+        get_task = asyncio.ensure_future(q.get())
 
-        if evt_type == TEXT_DELTA:
-            # 向后兼容：text_delta → token 格式
-            yield f"data: {json.dumps({'token': payload.get('text', '')})}\n\n"
-        elif evt_type in ("thinking", "tool_start", "tool_result", "agent_start", "agent_done"):
-            # 新事件类型：透传给前端
-            yield sse
-        elif evt_type == "graph_updated":
-            # 图谱更新事件：透传
-            yield sse
-        elif evt_type == "error":
-            yield sse
-
-        # agent 完成且队列已空 → 退出
-        if agent_task.done() and _user_queue_empty(user_id):
-            break
-
-
-def _user_queue_empty(user_id: int) -> bool:
-    """检查用户事件队列是否为空。"""
-    from app.core.event_bus import _user_queues
-    q = _user_queues.get(user_id)
-    return q is None or q.empty()
-
-
-async def process_background_tools(
-    messages: list,
-    mode: str,
-    user_id: int,
-    current_node: str = "",
-    kb: dict | None = None,
-) -> None:
-    """
-    后台任务：调用 LLM 判断是否需要执行工具 + 图谱分析。
-
-    此函数在流式回复完成后由 BackgroundTasks 触发，
-    失败不影响主对话流程。
-
-    参数:
-        messages:     完整对话历史
-        mode:         引导模式
-        user_id:      数据库用户 ID（从 JWT 解析）
-        current_node: 递归模式：当前正在教学的知识点 ID
-    """
-    kg = KnowledgeGraph(user_id=user_id)
-    try:
-        # 1. Agent 主循环：工具判断 + 执行 + 自然收尾（替代旧 call_llm_tools 一轮脚本）
-        tool_prompt, last_user_msg = await _build_system_prompt(
-            messages, mode, kg, inject_tools=True, current_node=current_node, kb=kb
+        done, _ = await asyncio.wait(
+            {get_task, agent_task},
+            return_when=asyncio.FIRST_COMPLETED,
         )
-        result = await run_agent_loop(tool_prompt, messages, kg=kg)
-        save_trace(result, user_id)
 
-        # 2. 图谱分析（GraphAnalyzer 独立判断）
-        user_msgs = [m for m in messages if (m.role if hasattr(m, 'role') else m['role']) == 'user']
-        assistant_msgs = [m for m in messages if (m.role if hasattr(m, 'role') else m['role']) == 'assistant']
-        last_user = user_msgs[-1].content if hasattr(user_msgs[-1], 'content') else user_msgs[-1]['content'] if user_msgs else ''
-        last_ai = assistant_msgs[-1].content if hasattr(assistant_msgs[-1], 'content') else assistant_msgs[-1]['content'] if assistant_msgs else ''
+        # 事件已到达 → 格式化 yield
+        if get_task in done:
+            sse = _format_agent_sse(get_task.result())
+            if sse is not None:
+                yield sse
+        else:
+            get_task.cancel()
+            try:
+                await get_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
-        if last_user and last_ai:
-            await _analyze_and_apply(last_user, last_ai, user_id)
+        # agent 完成 → 让 call_soon_threadsafe 回调落地后排空剩余事件
+        if agent_task in done:
+            await asyncio.sleep(0)
+            while not q.empty():
+                sse = _format_agent_sse(q.get_nowait())
+                if sse is not None:
+                    yield sse
+            break
 
-        # 3. 如果工具有结果或图谱有更新，通过 SSE 推送通知
-        publish("graph_updated")
 
-    except Exception as e:
-        # 后台任务静默失败，只记日志
-        log_error(ErrorCode.CHAT_PROCESS_FAILED, detail=f"后台工具分析失败: {str(e)}", exception=e)
-    finally:
-        kg.close()
+def _format_agent_sse(event: dict) -> str | None:
+    """把事件 dict 格式化为 SSE data 行；未知类型返回 None（静默丢弃）。"""
+    evt_type = event.get("type")
+
+    if evt_type == TEXT_DELTA:
+        return f"data: {json.dumps({'token': event.get('text', '')})}\n\n"
+    if evt_type in ("thinking", "tool_start", "tool_result",
+                    "agent_start", "agent_done", "graph_updated", "error"):
+        return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+    logger.debug(f"未知事件类型已丢弃: {evt_type}")
+    return None

@@ -3,7 +3,7 @@ MiniMax-M3 思考内容适配测试（全离线）。
 
 覆盖（对齐 TODO.md P1「MiniMax 推理内容适配」，2026-09-07）：
 - 请求统一携带 `reasoning_split=True`（extra_body），让 content 保持纯净正文
-- 兜底剥离函数 `_strip_think_tags` 能删掉 `…` 思考块
+- 兜底剥离函数 `strip_think_tags` 能删掉 `…` 思考块
 - 多轮工具调用快照保留 reasoning_details（官方思维链连续最佳实践）
 - 自然终止文本仍会剥离 thinking 兜底
 """
@@ -12,7 +12,9 @@ import copy
 import json
 from types import SimpleNamespace
 
-from app.core import agent_loop, llm_client
+from app.core import agent_loop
+from app.core.agent_context import assistant_snapshot
+from app.core.llm.thinking import strip_think_tags
 
 
 # ─── 构造响应 helper（与 test_agent_loop 对齐）───
@@ -58,11 +60,12 @@ def test_extra_body_reasoning_split_passed(monkeypatch):
     """所有 LLM 调用透传 reasoning_split=True（含 chat_once）。"""
     captured = {}
 
-    async def fake_with_retry(fn, **kwargs):
+    async def fake_chat_create(**kwargs):
         captured.update(kwargs)
         return _resp(_msg(content="ok"))
 
-    monkeypatch.setattr(agent_loop, "_with_retry", fake_with_retry)
+    # _chat_once 已收敛到 llm.fallback.chat_create（瞬时重试 + 模型回退统一入口）
+    monkeypatch.setattr(agent_loop, "_chat_create", fake_chat_create)
     asyncio.run(agent_loop._chat_once([{"role": "user", "content": "hi"}], temperature=0.3))
     assert captured.get("extra_body") == {"reasoning_split": True}
 
@@ -70,14 +73,14 @@ def test_extra_body_reasoning_split_passed(monkeypatch):
 def test_strip_think_tags_removes_block():
     """剥离函数删掉 MiniMax `…` 思考块，保留正文。"""
     txt = "\u03e9我需要先分析用户意图，判断该调用哪个工具\n然后构造参数。\u03e9已为你添加汉诺塔节点。"
-    assert llm_client._strip_think_tags(txt) == "已为你添加汉诺塔节点。"
+    assert strip_think_tags(txt) == "已为你添加汉诺塔节点。"
 
 
 def test_strip_think_tags_noop_when_clean():
     """正文不含思考标签时剥离函数为无操作。"""
-    assert llm_client._strip_think_tags("正常的教学正文") == "正常的教学正文"
-    assert llm_client._strip_think_tags(None) is None
-    assert llm_client._strip_think_tags("") == ""
+    assert strip_think_tags("正常的教学正文") == "正常的教学正文"
+    assert strip_think_tags(None) is None
+    assert strip_think_tags("") == ""
 
 
 def test_assistant_snapshot_keeps_reasoning_details():
@@ -87,7 +90,7 @@ def test_assistant_snapshot_keeps_reasoning_details():
         tool_calls=[_tc("add_knowledge_node", {"id": "hanoi", "name": "汉诺塔", "content": "..."})],
         reasoning_details=[{"type": "reasoning.text", "text": "用户想建汉诺塔节点"}],
     )
-    snap = agent_loop._assistant_snapshot(msg)
+    snap = assistant_snapshot(msg)
     assert snap["reasoning_details"] == [{"type": "reasoning.text", "text": "用户想建汉诺塔节点"}]
     assert snap["tool_calls"][0]["function"]["name"] == "add_knowledge_node"
 
@@ -95,7 +98,7 @@ def test_assistant_snapshot_keeps_reasoning_details():
 def test_assistant_snapshot_without_reasoning():
     """reasoning_split 未返回思考时快照不冗余。"""
     msg = _msg(content="", tool_calls=[_tc("update_mastery", {"node_id": "a", "mastery": 10})])
-    snap = agent_loop._assistant_snapshot(msg)
+    snap = assistant_snapshot(msg)
     assert "reasoning_details" not in snap
 
 

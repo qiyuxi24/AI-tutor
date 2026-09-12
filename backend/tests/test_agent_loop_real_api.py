@@ -22,7 +22,8 @@ import re
 
 import pytest
 
-from app.core.agent_loop import run_agent_loop, save_trace, default_trace_dir
+from app.core.agent_loop import run_agent_loop
+from app.core import agent_run_store as run_store
 from app.core.knowledge_graph import KnowledgeGraph
 
 pytestmark = [pytest.mark.llm_api, pytest.mark.asyncio]
@@ -267,34 +268,30 @@ async def test_token_usage_recorded(tmp_path):
 # ─── 可观测性: Trace 落盘 ────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_trace_file_persisted(tmp_path):
-    """可观测性：trace 应落盘为 JSONL 文件且内容合法。"""
+async def test_trace_persisted_to_agent_runs(tmp_path):
+    """可观测性：传 user_id 的 run 自动写入 agent_runs 表（证据级），可列表/详情读取。"""
     uid = _UID_BASE + 7
     kg = _make_kg(uid, tmp_path)
-    trace_path = None
     try:
         messages = [{"role": "user", "content":
             "请添加一个新知识点：二叉树，简要说明。"}]
-        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid)
+        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid,
+                                      db_dir=tmp_path / "agent_runs")
 
-        # 落盘
-        trace_path = save_trace(result, uid, default_trace_dir())
-        assert trace_path is not None, "save_trace 返回 None"
-        assert trace_path.exists(), f"trace 文件不存在: {trace_path}"
+        # 落库为一条 status=ok 的运行
+        runs = run_store.list_runs(uid, db_dir=tmp_path / "agent_runs")
+        assert len(runs) == 1, "agent_runs 表应有 1 条记录"
+        assert runs[0]["status"] == "ok"
+        assert runs[0]["total_llm_calls"] >= 1
 
-        # 读取并验证 JSONL
-        lines = trace_path.read_text(encoding="utf-8").strip().split("\n")
-        assert len(lines) >= 1, "trace 文件为空"
-
-        for line in lines:
-            entry = json.loads(line)  # 每行必须是合法 JSON
-            assert "text" in entry or "rounds" in entry or "total_llm_calls" in entry, (
-                f"trace 条目缺少关键字段: {entry}"
-            )
-
-        print(f"  [INFO] trace 文件: {trace_path} ({len(lines)} 行)")
+        # 详情：evidence 证据序列可合法读取（至少 final_text 一步）
+        run = run_store.get_run(uid, runs[0]["run_id"], db_dir=tmp_path / "agent_runs")
+        assert run is not None
+        assert len(run["evidence"]) >= 1
+        assert run["evidence"][-1]["kind"] == "final_text"
+        assert run["evidence"][-1]["text"]
+        # rounds 摘要仍保留（向后兼容）
+        assert run["final_text"] == result.text
+        print(f"  [INFO] run={run['run_id']}  rounds={len(run['evidence'])} 步证据")
     finally:
         kg.close()
-        # 清理 trace 文件
-        if trace_path and trace_path.exists():
-            trace_path.unlink()

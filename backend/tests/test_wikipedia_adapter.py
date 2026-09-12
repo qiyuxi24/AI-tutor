@@ -7,7 +7,7 @@ import asyncio
 import httpx
 
 from app.core.collector.http import CollectorHttp, DEFAULT_UA
-from app.core.collector.adapters.wikipedia import WikipediaAdapter
+from app.core.collector.adapters.wikipedia import WikipediaAdapter, wikitext_to_md
 from app.core.collector.types import CollectCandidate
 from tests._mediawiki_fixtures import (
     SEARCH_OK, SEARCH_EMPTY, CAT_PAGE1, CAT_PAGE2, CAT_EMPTY,
@@ -179,6 +179,21 @@ def test_fetch_falls_back_to_url_title():
             await http.close()
 
     assert "基本操作" in _run(go())
+
+
+def test_wikitext_variant_markup_stripped():
+    """地区词/变体标记 -{…}- 不残留（2026-09-05 真网「堆栈」页遗留债 #1）"""
+    md = wikitext_to_md(
+        "'''堆栈'''（-{zh-cn:堆叠; zh-tw:堆棧;}-）是一种数据结构。\n"
+        "-{H|zh-cn:栈;zh-tw:棧;}-\n"
+        "常用-{zh-hans:数组}-或-{链表|数组}-实现。-{}-\n"
+    )
+    assert "-{" not in md and "}-" not in md
+    assert "堆叠" in md                 # 多语言变体取首选（zh-cn）
+    assert "zh-cn" not in md and "zh-tw" not in md and "zh-hans" not in md
+    assert "H|" not in md               # 转换规则定义整行丢弃
+    assert "数组" in md                 # 二选一取前者，且无残留分隔符
+    assert "链表|数组" not in md
 
 
 def test_fetch_fail_returns_empty_string():

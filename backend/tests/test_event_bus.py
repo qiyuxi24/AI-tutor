@@ -13,7 +13,7 @@ import json
 
 from app.core import event_bus
 from app.core.event_bus import (
-    publish, subscribe,
+    publish, subscribe, get_user_queue,
     GRAPH_UPDATED, ERROR, TOOL_START, TOOL_RESULT,
     THINKING, TEXT_DELTA, AGENT_START, AGENT_DONE,
 )
@@ -149,6 +149,150 @@ def test_event_type_constants():
     assert TEXT_DELTA == "text_delta"
     assert AGENT_START == "agent_start"
     assert AGENT_DONE == "agent_done"
+
+
+# ── 新增：公开接口 + 线程安全 + 消费者排空模式 ──
+
+
+def test_get_user_queue_returns_same_instance():
+    """get_user_queue 返回的队列与 subscribe 内部使用的队列是同一实例。"""
+    _reset_state()
+    q1 = get_user_queue(42)
+    q2 = get_user_queue(42)
+    assert q1 is q2
+    assert 42 in event_bus._user_queues
+    _reset_state()
+
+
+def test_get_user_queue_pre_creation_eliminates_race():
+    """先 get_user_queue 再 publish → 事件不丢失（消除旧竞态）。"""
+    _reset_state()
+    collected = []
+
+    async def _run():
+        q = get_user_queue(1)  # 预创建
+        get_task = asyncio.ensure_future(q.get())
+        await asyncio.sleep(0.01)  # 让 get_task 挂起在 q.get() 上
+        publish(TEXT_DELTA, {"text": "hello", "run_id": "r1"}, user_id=1)
+        event = await asyncio.wait_for(get_task, timeout=1.0)
+        collected.append(event)
+
+    asyncio.run(_run())
+    assert len(collected) == 1
+    assert collected[0]["type"] == TEXT_DELTA
+    assert collected[0]["text"] == "hello"
+    _reset_state()
+
+
+def test_ensure_loop_no_ghost_creation():
+    """线程上下文无 running loop → _ensure_loop 返回 None，不创建幽灵 loop。"""
+    import threading
+
+    _reset_state()
+    result_holder = {}
+
+    def _from_thread():
+        result_holder["loop"] = event_bus._ensure_loop()
+
+    t = threading.Thread(target=_from_thread)
+    t.start()
+    t.join(timeout=2.0)
+    assert result_holder["loop"] is None
+    assert event_bus._loop is None  # 没有创建幽灵 loop
+    _reset_state()
+
+
+def test_publish_no_loop_silently_drops():
+    """无 loop 时 publish 不崩溃，静默丢弃事件。"""
+    _reset_state()
+    # 不在 async 上下文，不设置 _loop → publish 应静默跳过
+    publish(TEXT_DELTA, {"text": "ghost"}, user_id=1)  # 不抛异常
+    _reset_state()
+
+
+def test_consumer_drain_after_task_completion():
+    """消费者在 agent_task 完成后排空剩余事件，不永久阻塞（复刻 _consume_agent_events 核心逻辑）。"""
+    _reset_state()
+    collected = []
+
+    async def _run():
+        q = get_user_queue(1)
+
+        async def fake_agent():
+            await asyncio.sleep(0.01)  # 让消费者先挂起在 q.get()
+            publish(TEXT_DELTA, {"text": "hello", "run_id": "r1"}, user_id=1)
+            publish(AGENT_DONE, {"rounds": 1, "total_llm_calls": 1, "run_id": "r1"}, user_id=1)
+
+        agent_task = asyncio.ensure_future(fake_agent())
+
+        while True:
+            get_task = asyncio.ensure_future(q.get())
+            done, _ = await asyncio.wait(
+                {get_task, agent_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if get_task in done:
+                collected.append(get_task.result())
+            else:
+                get_task.cancel()
+                try:
+                    await get_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if agent_task in done:
+                await asyncio.sleep(0)
+                while not q.empty():
+                    collected.append(q.get_nowait())
+                break
+
+    asyncio.run(asyncio.wait_for(_run(), timeout=2.0))
+    assert len(collected) == 2
+    assert collected[0]["type"] == TEXT_DELTA
+    assert collected[0]["text"] == "hello"
+    assert collected[1]["type"] == AGENT_DONE
+    _reset_state()
+
+
+def test_consumer_handles_agent_exception():
+    """agent_task 抛异常时消费者仍能正常退出，不阻塞。"""
+    _reset_state()
+    collected = []
+
+    async def _run():
+        q = get_user_queue(1)
+
+        async def crashing_agent():
+            await asyncio.sleep(0.01)
+            publish(TEXT_DELTA, {"text": "partial", "run_id": "r1"}, user_id=1)
+            raise RuntimeError("agent crashed")
+
+        agent_task = asyncio.ensure_future(crashing_agent())
+
+        while True:
+            get_task = asyncio.ensure_future(q.get())
+            done, _ = await asyncio.wait(
+                {get_task, agent_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if get_task in done:
+                collected.append(get_task.result())
+            else:
+                get_task.cancel()
+                try:
+                    await get_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if agent_task in done:
+                await asyncio.sleep(0)
+                while not q.empty():
+                    collected.append(q.get_nowait())
+                break
+
+    asyncio.run(asyncio.wait_for(_run(), timeout=2.0))
+    assert len(collected) == 1
+    assert collected[0]["type"] == TEXT_DELTA
+    assert collected[0]["text"] == "partial"
+    _reset_state()
 
 
 # ── helpers ──

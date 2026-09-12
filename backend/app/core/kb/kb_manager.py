@@ -25,7 +25,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from app.core.llm_client import embed_client as client  # 嵌入固定走阿里 text-embedding-v4
+from app.core.llm import embed_texts    # 嵌入唯一出口：llm/embed.py（模型名/截断/失败兜底集中一处）
 from app.core.kb.kb_store import KbStore
 from app.core.kb.doc_vector_store import DocVectorStore
 from app.core.hybrid_search.whoosh_index import SparseIndex
@@ -33,8 +33,6 @@ from app.core.hybrid_search.fusion import rrf_fuse
 
 logger = logging.getLogger("ai-tutor")
 
-EMBEDDING_MODEL = "text-embedding-v4"
-MAX_EMBED_CHARS = 6000
 MIN_SCORE = 0.25
 # B2.3 入库文本质量下限：解析文本低于该长度视为「图片型/扫描件/不可解析」，拒绝入库
 MIN_PARSE_TEXT_LEN = 200
@@ -51,10 +49,6 @@ PARENT_MAX_BLOCKS = 8        # 最多拼接的相邻块数（防止极端长文�
 
 # 数据目录：data/kb
 _KB_DIR = Path(__file__).parent.parent.parent.parent / "data" / "kb"
-
-
-def _truncate(text: str, max_chars: int = MAX_EMBED_CHARS) -> str:
-    return text[:max_chars]
 
 
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE,
@@ -147,21 +141,14 @@ class KbManager:
     # ────────────────────────────────────────────
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
-        texts = [_truncate(t) for t in texts]
-        try:
-            resp = await client.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=texts,
-            )
-            vectors = [None] * len(texts)
-            for item in resp.data:
-                vectors[item.index] = item.embedding
-            return [v for v in vectors if v is not None]
-        except Exception as e:
-            logger.error(f"知识库嵌入调用失败: {e}")
-            return []
+        """
+        统一走 `llm.embed.embed_texts`（与 rag_manager 同一实现）。
+
+        保留本方法只为不破坏既有"类级 patch `_embed`"的遮罩缝：
+        tests/test_pipeline_ingest.py、test_bm25_only_index.py 等与
+        scripts/eval_rag.py、scripts/seed_collector.py 均以它替换嵌入实现。
+        """
+        return await embed_texts(texts)
 
     # ────────────────────────────────────────────
     #  上传 + 索引

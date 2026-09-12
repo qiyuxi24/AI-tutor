@@ -124,7 +124,8 @@ def count_messages_tokens(messages: list[dict], model: str | None = None) -> int
         if enc is not None:
             raw_tokens = len(enc.encode(content))
         else:
-            raw_tokens = max(1, len(content) // 3)
+            # 与 count_tokens 空文本=0 语义一致（空 content 不给保底 1）
+            raw_tokens = max(1, len(content) // 3) if content else 0
 
         total += int(raw_tokens * factor) + _MESSAGE_OVERHEAD
 
