@@ -71,13 +71,15 @@ class QuizStore:
         self._conn.close()
 
     # ── 保存题目 ──
-    def save_questions(self, questions: list[Question],
+    def save_questions(self, questions: list[Question | dict],
                        subject: str = "", node_id: Optional[int] = None,
                        difficulty: str = "medium") -> list[int]:
-        """批量保存题目，返回题目 id 列表"""
+        """批量保存题目，返回题目 id 列表（兼容 Question 对象或 dict）"""
         ids = []
         with self._conn:
             for q in questions:
+                if isinstance(q, dict):
+                    q = Question(**q)
                 cur = self._conn.execute("""
                     INSERT INTO questions
                         (node_id, subject, type, question, options_json, answer_json,
