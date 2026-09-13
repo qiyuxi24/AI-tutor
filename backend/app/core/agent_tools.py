@@ -11,12 +11,14 @@
 
 重型实现已拆到领域模块（本文件仅薄壳 handler + 注册表）：
 - fetch_webpage      → web_tool.py（SSRF 防护 + HTML→文本）
+- download_resource  → download_tool.py（下载文档入库知识库，SSRF 复用 web_tool）
 - rag_search         → rag_tool.py（RAG 检索 + 同步/异步适配）
 - add_knowledge_node → knowledge_writer.py（AI 建节点/更新节点，纯业务，2026-09-08 下沉）
 """
 
 import json
 
+from app.core.download_tool import download_resource
 from app.core.error_codes import ErrorCode, log_error
 from app.core.knowledge_writer import create_node_from_ai
 from app.core.mcp_host import mcp_tool_specs
@@ -80,6 +82,11 @@ def _h_update_profile(args, kg) -> str:
 
 def _h_fetch_webpage(args, kg) -> str:
     return fetch_webpage(args["url"], max_chars=int(args.get("max_chars", 3000)))
+
+
+def _h_download_resource(args, kg) -> str:
+    return download_resource(args["url"], title=args.get("title", ""),
+                             subject=args.get("subject", ""), user_id=kg.user_id)
 
 
 def _h_rag_search(args, kg) -> str:
@@ -184,6 +191,18 @@ _TOOL_SPECS = [
          },
          "required": ["url"]},
         _h_fetch_webpage,
+    ),
+    _spec(
+        "download_resource",
+        "把一个 URL 指向的文档/电子书（PDF、EPUB、DOCX、PPTX、TXT 等）下载并存入学生的知识库，之后可用 rag_search 检索到其内容。当学生说『帮我下载/收藏/存到知识库』某份资料、或你在联网搜索中发现一份值得长期留存的学习资料（教材、电子书、讲义、论文）时调用。⚠️ 只想临时看一眼网页正文请用 fetch_webpage，不要用它下载；URL 必须是可直接下载文件的公网地址（指向文件本身，而非网页页面）。",
+        {"type": "object",
+         "properties": {
+             "url": {"type": "string", "description": "资源的可直接下载地址（http/https，指向文件本身）"},
+             "title": {"type": "string", "description": "存入知识库时的显示名（可选），如『傲慢与偏见』；不填则用 URL 中的文件名"},
+             "subject": {"type": "string", "description": "学科名（可选），会存入知识库『AI 下载/{学科}』子目录便于归类"},
+         },
+         "required": ["url"]},
+        _h_download_resource,
     ),
     _spec(
         "rag_search",

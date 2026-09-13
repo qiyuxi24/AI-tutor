@@ -6,29 +6,29 @@
 - 调用 LLM 从书本内容中提取知识点（节点）并建立知识点之间的联系（边）
 - 将结果写入知识图谱（复用 KnowledgeGraph.add_node / add_edge）
 
-两种模式：
-1. generate_subject_graph — 整学科一键生成：收集该学科所有选中书籍文本，
-   分批喂给 LLM，批量生成完整学科图谱（节点 + 边 + 节点内容）。
-2. generate_section_graph — 按章节增量生成：只分析指定文件/文件夹内容，
-   在已有学科图谱基础上增量补充新节点和新边（跳过已存在节点）。
+对外只有两个入口，共用同一条执行路径（`_generate`）：
+1. generate_subject_graph — 整学科一键生成（选中的文件夹会展开为文件）。
+2. generate_section_graph — 按章节增量生成：在已有学科图谱基础上补充新节点/边，
+   并把选中的文件夹名作为「知识板块」归属新节点。
+
+两者区别只有两点：section 记板块名；其它（收集文本 → 分块 → 逐块抽图谱 → 写库）完全一致。
 
 学科建模：复用 tags 标签，节点 tags 中第一个非难度标签即学科名
 （如 "数据结构"），实现"每个学科单独一张图"。
 
 设计：
 - 数据来源：KbStore.get_document_text(node_id) 读取解析后的纯文本
-- LLM：call_llm(enable_tools=False)，纯 JSON 输出
+- 分块：复用 kb_manager.chunk_text（按标题/段落边界切，自动剥离页标记）
+- LLM：call_llm(纯 JSON 输出)，max_tokens 必须调大——每节点要写完整 Markdown 讲解
 - 写库：直接调用 KnowledgeGraph，caller="ai"（AI 直接写库，不经人审）
 - 去重：节点按 id/name 全局去重；边由 add_edge 自动去重
 """
 
-import json
 import logging
-import re
 from typing import Optional
 
-from app.core.llm import call_llm
-from app.core.kb.kb_manager import kb_manager
+from app.core.llm import call_llm, extract_json
+from app.core.kb.kb_manager import chunk_text, kb_manager
 from app.core.kb.embedder import get_embedder
 
 logger = logging.getLogger("ai-tutor")
@@ -39,6 +39,12 @@ DEDUP_CANDIDATE_THRESHOLD = 0.78
 # LLM 二次确认失败时（如额度耗尽）的保守合并阈值：
 # 相似度 >= 此值才自动合并，宁可不合并也不误合并。
 DEDUP_FALLBACK_THRESHOLD = 0.90
+
+# 单次喂给 LLM 的文本块字符数。块越大 → 模型一次要吐的节点越多 → 越容易撞输出上限。
+GRAPH_CHUNK_CHARS = 3000
+# 单次生成的输出 token 上限。每个节点要写完整 Markdown 讲解（数百 token），
+# call_llm 的默认 2000 会在几个节点后硬截断 → JSON 解析必然失败。
+GRAPH_MAX_TOKENS = 8000
 
 # 学科图谱生成专用系统提示词（从书籍内容批量提取知识点 + 建立关系）
 GRAPH_GENERATOR_SYSTEM_PROMPT = """你是一个「学科知识图谱构建专家」。你的任务是从给定的学科书籍内容中，提取该学科的核心知识点，并分析知识点之间的联系，构建一份结构化的知识图谱。
@@ -125,62 +131,31 @@ class GraphGenerator:
                 logger.warning(f"读取文档 {nid} 失败: {e}")
         return results
 
-    @staticmethod
-    def _split_text(text: str, max_chars: int = 5000) -> list[str]:
-        """将长文本按字符数切分（尽量在段落边界切）"""
-        text = text.strip()
-        if not text:
-            return []
-        if len(text) <= max_chars:
-            return [text]
-        chunks = []
-        start = 0
-        while start < len(text):
-            end = min(start + max_chars, len(text))
-            # 尽量回退到段落边界（\n\n）
-            if end < len(text):
-                boundary = text.rfind("\n\n", start + 1, end)
-                if boundary > start + max_chars // 2:
-                    end = boundary
-            chunks.append(text[start:end])
-            start = end
-        return chunks
+    def _resolve_files(self, kb_node_ids: list[int]) -> tuple[list[int], str]:
+        """
+        KB 节点（文件/文件夹）→ 文件 ID 列表。文件夹自动展开，
+        其名字作为知识板块名（只取第一个文件夹名）。
+
+        返回: (file_ids, board)
+        """
+        file_ids: list[int] = []
+        board = ""
+        for nid in kb_node_ids:
+            node = kb_manager.get_node(self.user_id, nid)
+            if not node:
+                continue
+            if node.get("type") == "file":
+                file_ids.append(nid)
+                continue
+            folder_name = (node.get("name") or "").strip()
+            if folder_name and not board:
+                board = folder_name
+            file_ids.extend(kb_manager.collect_files(self.user_id, nid))
+        return file_ids, board
 
     # ────────────────────────────────────────────
     #  LLM 调用与解析
     # ────────────────────────────────────────────
-
-    @staticmethod
-    def _parse_json(raw: str) -> Optional[dict]:
-        """从 LLM 原始响应中提取 JSON 对象（三策略）"""
-        result = raw.strip()
-        # 策略1：直接解析
-        try:
-            return json.loads(result)
-        except json.JSONDecodeError:
-            pass
-        # 策略2：Markdown json 代码块
-        m = re.search(r'```(?:json)?\s*([\s\S]*?)```', result)
-        if m:
-            try:
-                return json.loads(m.group(1).strip())
-            except json.JSONDecodeError:
-                pass
-        # 策略3：第一个 { ... } 对象
-        first = result.find('{')
-        if first != -1:
-            depth = 0
-            for i, ch in enumerate(result[first:], first):
-                if ch == '{':
-                    depth += 1
-                elif ch == '}':
-                    depth -= 1
-                    if depth == 0:
-                        try:
-                            return json.loads(result[first:i + 1])
-                        except json.JSONDecodeError:
-                            break
-        return None
 
     async def _call_generator_llm(self, subject: str, book_content: str,
                                   existing_nodes: list[dict]) -> Optional[dict]:
@@ -221,13 +196,14 @@ class GraphGenerator:
             raw = await call_llm(
                 GRAPH_GENERATOR_SYSTEM_PROMPT,
                 [{"role": "user", "content": user_prompt}],
+                max_tokens=GRAPH_MAX_TOKENS,
             )
         except Exception as e:
             logger.error(f"学科图谱生成 LLM 调用失败: {e}")
             return None
 
-        data = self._parse_json(raw)
-        if data is None or not isinstance(data, dict):
+        data = extract_json(raw)
+        if data is None:
             logger.warning(f"学科图谱生成 LLM 返回无法解析的 JSON: {str(raw)[:200]}")
             return None
 
@@ -490,94 +466,38 @@ class GraphGenerator:
     #  对外接口
     # ────────────────────────────────────────────
 
-    async def generate_subject_graph(self, kg, subject: str,
-                                     book_node_ids: list[int]) -> dict:
+    async def _generate(self, kg, subject: str, file_ids: list[int],
+                        board: str = "") -> dict:
         """
-        整学科一键生成：从选中书籍生成学科知识图谱。
-
-        流程：读取选中书籍文本 → 分批喂 LLM → 逐步写入图谱。
-
-        返回:
-            {
-                "subject": subject,
-                "processed_books": n,       # 实际处理的书籍数
-                "created_nodes": [...],
-                "created_edges": n,
-                "skipped_nodes": [...],
-            }
-        """
-        books = self._load_book_texts(self.user_id, book_node_ids)
-        if not books:
-            return {"subject": subject, "error": "没有可处理的书籍文本，请先上传并解析书籍"}
-
-        existing = kg.get_nodes_by_subject(subject)
-        aggregate = {
-            "processed_books": len(books),
-            "created_nodes": [],
-            "created_edges": 0,
-            "skipped_nodes": [],
-            "merged_nodes": [],
-        }
-
-        for book in books:
-            chunks = self._split_text(book["text"])
-            for chunk in chunks:
-                result = await self._call_generator_llm(subject, chunk, existing)
-                if not result:
-                    continue
-                stats = await self._write_to_graph(kg, subject, result,
-                                                   existing_nodes=existing)
-                aggregate["created_nodes"].extend(stats["created_nodes"])
-                aggregate["created_edges"] += stats["created_edges"]
-                aggregate["skipped_nodes"].extend(stats["skipped_nodes"])
-                aggregate["merged_nodes"].extend(stats["merged_nodes"])
-                # 更新已存在节点，供后续批次引用与去重
-                existing = kg.get_nodes_by_subject(subject)
-
-        return aggregate
-
-    async def generate_section_graph(self, kg, subject: str,
-                                     kb_node_ids: list[int]) -> dict:
-        """
-        按章节/文件夹增量生成：只分析指定范围（文件或文件夹）内容，
-        在已有学科图谱基础上补充新节点和新边。
+        执行路径（两种模式共用）：读取文本 → 分块 → 逐块抽图谱 → 写库。
 
         参数:
-            kb_node_ids: KB 中的文件/文件夹节点 ID 列表（文件夹自动展开）
+            file_ids: KB 中的**文件**节点 ID（文件夹已由 _resolve_files 展开）
+            board:    知识板块名，非空时新节点归属该板块
         """
-        # 展开文件夹为文件；若选了文件夹，则用其名作为知识板块名（板块 = 学科下分组）
-        file_ids = []
-        board = ""
-        for nid in kb_node_ids:
-            node = kb_manager.get_node(self.user_id, nid)
-            if not node:
-                continue
-            if node.get("type") == "file":
-                file_ids.append(nid)
-            else:
-                folder_name = (node.get("name") or "").strip()
-                if folder_name and not board:
-                    board = folder_name  # 取第一个文件夹名作为板块
-                file_ids.extend(kb_manager.collect_files(self.user_id, nid))
-
         books = self._load_book_texts(self.user_id, file_ids)
         if not books:
-            return {"subject": subject, "error": "没有可处理的书籍文本，请先选择包含文件的范围"}
+            return {"subject": subject,
+                    "error": "没有可处理的书籍文本，请先上传并解析书籍"}
 
         existing = kg.get_nodes_by_subject(subject)
         aggregate = {
+            "subject": subject,
+            "board": board,
             "processed_books": len(books),
             "created_nodes": [],
             "created_edges": 0,
             "skipped_nodes": [],
             "merged_nodes": [],
+            "failed_chunks": 0,
         }
 
         for book in books:
-            chunks = self._split_text(book["text"])
-            for chunk in chunks:
-                result = await self._call_generator_llm(subject, chunk, existing)
+            for chunk in chunk_text(book["text"], chunk_size=GRAPH_CHUNK_CHARS):
+                result = await self._call_generator_llm(subject, chunk["content"], existing)
                 if not result:
+                    # 单块失败（LLM 报错/JSON 解析失败）不中断整本，但计数返回给前端
+                    aggregate["failed_chunks"] += 1
                     continue
                 stats = await self._write_to_graph(kg, subject, result,
                                                    existing_nodes=existing,
@@ -586,12 +506,38 @@ class GraphGenerator:
                 aggregate["created_edges"] += stats["created_edges"]
                 aggregate["skipped_nodes"].extend(stats["skipped_nodes"])
                 aggregate["merged_nodes"].extend(stats["merged_nodes"])
+                # 更新已存在节点，供后续批次引用与去重
                 existing = kg.get_nodes_by_subject(subject)
 
-        # 携带板块名返回，便于前端切换到该板块视图
-        aggregate["board"] = board
-
+        if aggregate["failed_chunks"]:
+            logger.warning(
+                f"学科图谱生成（{subject}）：{aggregate['failed_chunks']} 个文本块"
+                f"未能生成图谱（已跳过，其余块正常写入）"
+            )
         return aggregate
+
+    async def generate_subject_graph(self, kg, subject: str,
+                                     book_node_ids: list[int]) -> dict:
+        """
+        整学科一键生成：从选中书籍（或文件夹，自动展开）生成学科知识图谱。
+
+        返回: {subject, processed_books, created_nodes, created_edges,
+               skipped_nodes, merged_nodes}
+        """
+        file_ids, _ = self._resolve_files(book_node_ids)
+        return await self._generate(kg, subject, file_ids)
+
+    async def generate_section_graph(self, kg, subject: str,
+                                     kb_node_ids: list[int]) -> dict:
+        """
+        按章节/文件夹增量生成：在已有学科图谱基础上补充新节点和新边，
+        并把选中的文件夹名作为「知识板块」归属新节点（供前端切到该板块视图）。
+
+        参数:
+            kb_node_ids: KB 中的文件/文件夹节点 ID 列表（文件夹自动展开）
+        """
+        file_ids, board = self._resolve_files(kb_node_ids)
+        return await self._generate(kg, subject, file_ids, board=board)
 
 
 # 便捷函数：从 API 层调用

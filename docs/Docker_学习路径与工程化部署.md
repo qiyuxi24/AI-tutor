@@ -1,7 +1,7 @@
 # Docker 完整学习路径与工程化部署指南
 
 > 适用对象：已具备 Linux 基础、正在学习云原生 / K8s / Agent 工程化的同学
-> 编写日期：2026-08-31
+> 编写日期：2026-08-31（2026-09-13 更新：新增排障/瘦身/Windows/AI 工程四章，版本与镜像加速同步至 2026-09）
 > 本项目（AI-tutor）本身就是一套完整的 Docker 化工程，文档中所有「实战注解」均对应仓库内的真实文件，可对照学习。
 
 ---
@@ -13,12 +13,17 @@
 3. [镜像为什么分层](#三镜像为什么分层)
 4. [核心命令速查](#四核心命令速查)
 5. [Dockerfile 工程化写法](#五dockerfile-工程化写法)
-6. [Docker Compose 多容器编排](#六docker-compose-多容器编排)
-7. [部署到服务器：完整可操作流程](#七部署到服务器完整可操作流程)
-8. [生产环境工程方法](#八生产环境工程方法)
-9. [完整学习路径（分阶段 + 验收标准）](#九完整学习路径分阶段--验收标准)
-10. [学生服务器资源推荐（2026-09）](#十学生服务器资源推荐2026-09)
-11. [学习资源与官方文档链接](#十一学习资源与官方文档链接)
+6. [Dockerfile 关键指令对比与易错点](#六dockerfile-关键指令对比与易错点)
+7. [Docker Compose 多容器编排](#七docker-compose-多容器编排)
+8. [容器排障实战](#八容器排障实战)
+9. [磁盘清理与镜像瘦身](#九磁盘清理与镜像瘦身)
+10. [部署到服务器：完整可操作流程](#十部署到服务器完整可操作流程)
+11. [生产环境工程方法](#十一生产环境工程方法)
+12. [Windows / WSL2 本地开发](#十二windows--wsl2-本地开发)
+13. [AI / Agent 工程 Docker 实践](#十三ai--agent-工程-docker-实践)
+14. [完整学习路径（分阶段 + 验收标准）](#十四完整学习路径分阶段--验收标准)
+15. [学生服务器资源推荐（2026-09）](#十五学生服务器资源推荐2026-09)
+16. [学习资源与官方文档链接](#十六学习资源与官方文档链接)
 
 ---
 
@@ -213,7 +218,69 @@ docker run -d --name app -p 8000:8000 --restart unless-stopped myapp:1.0.0
 
 ---
 
-## 六、Docker Compose 多容器编排
+## 六、Dockerfile 关键指令对比与易错点
+
+> 写 Dockerfile 时最容易混、面试也最爱考的四组对比。先记区别，再对照本项目 `Dockerfile` 找实例。
+
+### 6.1 ENTRYPOINT vs CMD（谁才是主程序）
+
+| 指令 | 作用 | 能被 `docker run` 参数覆盖？ |
+|---|---|---|
+| `ENTRYPOINT` | 固定主程序 / 入口 | ❌ 只有 `--entrypoint` 能换 |
+| `CMD` | 默认启动命令 / 默认参数 | ✅ `docker run img <args>` 直接覆盖 |
+
+**标准组合**：`ENTRYPOINT` 定程序，`CMD` 给默认参数。
+
+```dockerfile
+ENTRYPOINT ["python", "app.py"]
+CMD ["--host", "0.0.0.0"]        # docker run img --port 8080 可覆盖
+```
+
+### 6.2 shell form vs exec form（生产必须用 exec）
+
+| 写法 | 示例 | 后果 |
+|---|---|---|
+| shell form | `CMD python app.py` | 实际由 `/bin/sh -c` 执行，**PID 1 是 sh**，SIGTERM 被 sh 吞掉 → `docker stop` 等不到优雅退出，可能丢数据 |
+| exec form | `CMD ["python", "app.py"]` | 程序直接是 PID 1，信号直达，能优雅停机 |
+
+> 本项目 `entrypoint.sh` 的思路就是 exec/前台思维：主进程必须**前台运行**（`nginx -g "daemon off;"`），容器才不会起完就 `Exited (0)`。
+
+### 6.3 ARG vs ENV（构建期 vs 运行期）
+
+| | `ARG` | `ENV` |
+|---|---|---|
+| 作用时期 | 仅构建期（`docker build --build-arg` 传入） | 构建期 + 运行期 |
+| 容器内可见 | ❌ | ✅（`printenv` 能查到） |
+| 泄露风险 | 无 | `docker history` 能看到值，**别放密钥** |
+
+```dockerfile
+ARG PYTHON_VERSION=3.13          # 构建期参数，FROM 里可用
+FROM python:${PYTHON_VERSION}-slim
+ENV APP_ENV=prod                 # 运行期环境变量，进容器
+```
+
+### 6.4 COPY vs ADD（默认只用 COPY）
+
+- `COPY`：只复制文件/目录。
+- `ADD`：额外支持**自动解压本地 tar** 和 **URL 下载**（URL 下载不推荐，构建不可复现、难缓存）。
+- 规则：**默认 COPY**；只有"要把本地 tar 包解压进镜像"这一种场景才用 ADD。
+
+### 6.5 层与缓存：让重建快 10 倍的顺序
+
+每条指令产生一层，**层缓存命中规则**：某层内容没变，该层及之后直接复用。所以把"变化频率低"的放前面：
+
+```dockerfile
+COPY requirements.txt .     # ① 先拷依赖清单（低频变化）
+RUN pip install ...         # ② 装依赖 → 只要①没变就命中缓存
+COPY . .                    # ③ 最后拷源码（高频变化）
+```
+
+> 本项目 `Dockerfile` 正是这个顺序（依赖清单在前、源码在后），改一行代码重建只重跑 ③ 之后，几秒完成。
+> 减层技巧：`RUN apt-get update && apt-get install ... && rm -rf /var/lib/apt/lists/*` 用 `&&` 串成**一层**并在同层清理缓存（本项目 Stage 2 就是实例）。
+
+---
+
+## 七、Docker Compose 多容器编排
 
 单容器用 `docker run` 就够了；一旦有 **"应用 + 数据库 + 缓存"** 这种多服务架构，就用 Compose——一个文件定义全部服务，一条命令启动整个系统。
 
@@ -270,11 +337,114 @@ healthcheck:
 - `start_period: 30s` 给首次启动的宽限期，期间失败不计入 retries。
 - `entrypoint.sh` 里还做了"两个进程任一退出则整个容器退出"的逻辑，配合 `restart: unless-stopped` 实现自动恢复——这是多进程容器的标准做法。
 
-> 版本说明（2026-08 时点）：Docker Engine 最新稳定版为 29.7.x，Compose CLI 演进到 v5（引入官方 Go SDK），但 **compose 文件格式（compose.yaml）依然是 v2/v3 语法**，网上绝大多数 compose 示例仍然适用。
+> 版本说明（2026-09 时点）：Docker Engine 最新稳定版为 **29.8.0**（2026-09-03 发布），Compose CLI 为 **v5.5.x**（v5 于 2025 年发布，引入官方 Go SDK，命令仍是 `docker compose`）。**compose 文件格式（compose.yaml）依然是 v2/v3 语法**，网上绝大多数示例仍然适用。
+> 安全提醒：Docker Engine **≥ 29.4.3** 才修复 CVE-2026-31431（"Copy Fail"），生产环境务必升级或打内核补丁。
+
+### 7.4 Compose 进阶（先记住，用到再查）
+
+```bash
+docker compose config                       # 校验 + 查看变量替换后的最终配置（写错键会在这里报错）
+docker compose ps                           # 只看本 compose 的容器
+docker compose top                          # 容器内进程
+docker compose events                       # 实时事件
+docker compose -f base.yml -f override.yml up -d   # 多文件覆盖（dev/prod 差异）
+docker compose watch                        # 开发模式：代码变更自动同步/重建
+```
+
+- **profiles**：给服务打标签、按需启动——`docker compose --profile dev up` 只起标了 `profiles: [dev]` 的服务，适合"开发要 redis、生产不要"的场景。
+- **depends_on**：compose 只保证**启动顺序**，要真正"等就绪"必须配合 `condition: service_healthy`（见本节开头示例里 db 服务的写法）。
 
 ---
 
-## 七、部署到服务器：完整可操作流程
+## 八、容器排障实战
+
+> 学 Docker 最常遇到的不是"不会写"，而是"起不来"。记住**排障四板斧**，90% 的问题 5 分钟内定位。
+
+### 8.1 排障四板斧
+
+```bash
+docker ps -a                       # ① 看状态：Exited / Restarting / Up(unhealthy)
+docker logs --tail 100 <容器名>    # ② 看日志：程序真正报错的地方（-f 实时跟随）
+docker inspect <容器名>            # ③ 看配置：State.ExitCode / State.Error / Mounts / Ports
+docker stats <容器名>              # ④ 看资源：CPU / 内存是否被打满
+```
+
+### 8.2 常见症状速查表
+
+| 症状 | 常见原因 | 处理 |
+|---|---|---|
+| `Exited (0)` | 主进程退出了（典型：CMD 写了后台命令 `&`，进程跑完就退） | `docker logs` 看输出；主进程必须前台运行（见 6.2） |
+| `Exited (1)` | 程序启动即崩：缺依赖 / 密钥 / 配置错误 | `docker logs` 看 traceback；对照 `.env` 检查环境变量 |
+| `Restarting (…)` | 崩溃→重启循环（restart 策略生效中） | `docker logs` 看退出原因；`docker inspect` 看 ExitCode |
+| `Up (unhealthy)` | 健康检查失败 | 进容器手动 `curl 127.0.0.1:8000/api/health`；检查 start_period 是否给够 |
+| 端口冲突 `bind: address already in use` | 宿主机端口被占 | `docker ps` 看谁占了；换 `${PORT}` |
+| 容器内 404 | 静态文件路径 / 反代配置不对 | `docker exec -it <名> sh` 进去 `ls` 验证文件在不在 |
+| 日志刷不出来 | 程序输出被缓冲 | 设 `PYTHONUNBUFFERED=1`（本项目已内置） |
+
+### 8.3 进阶调试手法
+
+```bash
+docker exec -it <容器名> sh        # 进容器手动验证（ps / curl / ls）
+docker cp a.txt <容器名>:/app/     # 拷文件进出容器
+docker diff <容器名>               # 对比容器与镜像的文件差异（排查运行时改动）
+docker top <容器名>                # 看容器内进程
+docker events                      # 实时事件流（start / die / health_status）
+```
+
+> 实战：本项目容器 `Restarting` 时，先 `docker compose logs ai-tutor`，再 `docker inspect ai-tutor | grep -A2 ExitCode`——十有八九是 `SECRET_KEY` 没配或 `DASHSCOPE_API_KEY` 为空（compose 里 `:?` 语法会直接拦截）。
+
+---
+
+## 九、磁盘清理与镜像瘦身
+
+> 用 Docker 半年后最痛的问题：C 盘 / 服务器磁盘莫名爆满。90% 是**镜像层 + 构建缓存 + 悬空卷**。
+
+### 9.1 先看谁占的空间
+
+```bash
+docker system df                    # 镜像 / 容器 / 卷 / 构建缓存 四大类占用一览
+docker system df -v                 # 明细到每个镜像、每个卷
+docker image ls --format "{{.Repository}}:{{.Tag}} {{.Size}}"   # 只看镜像大小
+```
+
+### 9.2 清理命令（从温和到激进）
+
+```bash
+docker container prune              # 删所有已停止的容器
+docker image prune                  # 删悬空镜像（dangling，即 <none>）
+docker image prune -a               # 删所有未被容器使用的镜像
+docker builder prune                # 清构建缓存（经常几十 GB！）
+docker volume prune                 # 删未被引用的卷（⚠️ 数据没了，先确认）
+docker system prune -a --volumes    # 大扫除（= 上面全做，⚠️ 慎用）
+```
+
+> 建议习惯：每月跑一次 `docker system df`；构建完顺手 `docker builder prune`。
+
+### 9.3 镜像体积对比（选对基础镜像省一半）
+
+| 基础镜像 | 压缩后约 | 特点 |
+|---|---|---|
+| `ubuntu:24.04` | ~80 MB | 完整工具链，适合装系统包 |
+| `python:3.13-slim` | ~120 MB | Debian slim，**本项目在用**，体积/兼容平衡 |
+| `python:3.13-alpine` | ~50 MB | 极小，但 musl 偶有二进制兼容坑 |
+| `gcr.io/distroless` | ~30 MB | 无 shell 无包管理器，最安全，但调试难 |
+
+> 体积为压缩后近似值，`docker image ls` 看到的是解压后大小，会更大。
+
+### 9.4 buildx 多架构构建（Mac/Windows 构建 → 服务器直接拉）
+
+```bash
+docker buildx create --use
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t yourname/myapp:1.0.0 --push .
+# 本地一次构建两种架构 → 推仓库 → 服务器（amd64）直接 pull 运行，免服务器编译
+```
+
+> 场景：你 Windows/Mac 本地构建，云服务器通常是 amd64，多架构镜像让两边免编译直接跑。
+
+---
+
+## 十、部署到服务器：完整可操作流程
 
 下面以一台 **Ubuntu 云服务器** 为例，从零到 HTTPS 上线。
 
@@ -297,13 +467,17 @@ sudo tee /etc/docker/daemon.json <<'EOF'
 {
   "log-driver": "json-file",
   "log-opts": { "max-size": "10m", "max-file": "3" },
-  "registry-mirrors": ["https://docker.1ms.run"]
+  "registry-mirrors": [
+    "https://docker.1ms.run",
+    "https://docker.m.daocloud.io",
+    "https://docker.nju.edu.cn"
+  ]
 }
 EOF
 sudo systemctl restart docker
 ```
 
-> `max-size` 限制单容器日志大小——这是生产最常踩的坑：**日志无限增长撑爆磁盘**。
+> 加速器说明：`docker.1ms.run`（2026-09 实测成功率最高的商业加速）为主用，`docker.m.daocloud.io`（DaoCloud）、`docker.nju.edu.cn`（南京大学，也加速 GCR/GHCR/Quay）为备选；加速器地址变化快，失效就换；腾讯云 `mirror.ccs.tencentyun.com` 仅腾讯云内网可用。注意 **JSON 不支持注释**，直接照抄上面的块即可。
 
 ### 步骤 3：本地构建 → 推送仓库 → 服务器拉取
 
@@ -383,9 +557,9 @@ docker compose -f /opt/monitoring/docker-compose.yml up -d
 
 ---
 
-## 八、生产环境工程方法
+## 十一、生产环境工程方法
 
-### 8.1 安全清单（对照自查）
+### 11.1 安全清单（对照自查）
 
 | 检查项 | 做法 | 为什么 |
 |---|---|---|
@@ -397,7 +571,7 @@ docker compose -f /opt/monitoring/docker-compose.yml up -d
 | 镜像扫描 | CI 里跑 `trivy image myapp:1.0.0` | 发现已知漏洞 |
 | 资源限制 | `--memory 512m --cpus 1.0` | 防止单容器吃光机器 |
 
-### 8.2 CI/CD 自动化（一次配置，永远省心）
+### 11.2 CI/CD 自动化（一次配置，永远省心）
 
 GitHub Actions 流程：**push → 构建镜像 → 扫描 → 推送仓库 → SSH 到服务器滚动部署**
 
@@ -426,7 +600,7 @@ jobs:
             cd /opt/myapp && docker compose up -d
 ```
 
-### 8.3 零停机更新（关键技巧）
+### 11.3 零停机更新（关键技巧）
 
 不要"停旧起新"（中间有流量空白），而是**新容器起来并通过健康检查后，再切换**：
 
@@ -438,33 +612,135 @@ docker compose pull && docker compose up -d --no-deps --scale web=2
 
 ---
 
-## 九、完整学习路径（分阶段 + 验收标准）
+## 十二、Windows / WSL2 本地开发（你的开发机实战）
+
+> 本项目就是 Windows 下开发的（Dockerfile 里专门有 CRLF 兜底），这节讲 Windows 上跑 Docker 的 4 个坑。
+
+### 12.1 Docker Desktop = WSL2 后端
+
+Windows 上 Docker Desktop 用 **WSL2** 跑 Linux 容器（不是虚拟机）。装好后 `docker version` 能看到 Server 端跑在 WSL 里，Linux 容器在 Windows 上原生运行。
+
+### 12.2 坑 1：bind mount 性能慢
+
+Windows 目录（`C:\...`）和 WSL 之间是跨文件系统读写，大项目把代码挂载进容器会明显卡顿。对策：
+
+- 代码放 **WSL 内**（`~/projects/...`），别放 `/mnt/c/` 下
+- 依赖、数据用 **named volume**（存在 WSL 虚拟磁盘里，快）
+
+### 12.3 坑 2：路径与换行
+
+- Windows 路径 `C:\Users\34239\...` → WSL 里是 `/mnt/c/Users/34239/...`
+- Windows 编辑的文件常带 CRLF，Linux 容器里执行会报 `$'\r': command not found` —— 本项目 Dockerfile 的 `sed -i 's/\r$//'` 就是为此加的
+
+### 12.4 坑 3：WSL2 吃内存
+
+Docker Desktop 默认吃 WSL2 可用内存。限制：用户目录下建 `.wslconfig`：
+
+```ini
+[wsl2]
+memory=4GB
+swap=2GB
+```
+
+改完 `wsl --shutdown` 重启 WSL 生效。
+
+### 12.5 本项目的一键脚本
+
+仓库根目录 `start-docker.ps1` 已封装日常操作（自动判断是否重建、等健康检查、打印访问地址）：
+
+```powershell
+.\start-docker.ps1            # 日常启动（源码比镜像新才重建）
+.\start-docker.ps1 -Force     # 强制重建
+.\start-docker.ps1 -Port 8081 # 换端口
+```
+
+---
+
+## 十三、AI / Agent 工程 Docker 实践（你的方向）
+
+### 13.1 GPU 容器（跑模型推理）
+
+宿主机装好 NVIDIA Container Toolkit 后，容器直接透传 GPU：
+
+```bash
+docker run --gpus all -it --rm nvidia/cuda:12.4.1-runtime-ubuntu22.04 nvidia-smi
+# 指定卡：docker run --gpus '"device=0,1"' ...
+```
+
+> vLLM / Ollama / text-generation-webui 等官方镜像都支持 `--gpus all`。以后做本地模型服务 / Agent 评测环境必用。
+
+### 13.2 LLM 应用的典型编排（app + 向量库 + 模型）
+
+```yaml
+services:
+  app:                        # 你的 Agent / FastAPI 服务
+    build: .
+    depends_on:
+      qdrant: { condition: service_healthy }
+    volumes:
+      - ./data:/app/data       # 知识库 / 对话数据持久化
+  qdrant:                     # 向量数据库
+    image: qdrant/qdrant
+    volumes: [ qdrant_data:/qdrant/storage ]
+  ollama:                     # 本地模型服务（GPU）
+    image: ollama/ollama
+    volumes: [ ollama_models:/root/.ollama ]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+volumes:
+  qdrant_data:
+  ollama_models:
+```
+
+要点：**模型权重、向量库数据、应用数据全部用卷持久化**，镜像只装代码和依赖——否则镜像膨胀到几十 GB，重建一次半小时。
+
+### 13.3 本地开发热更新
+
+```bash
+docker compose watch          # 代码变更自动同步/重建（Compose 2.23+）
+# 传统做法：卷挂载源码 + uvicorn --reload，改完即生效
+```
+
+### 13.4 多阶段构建在 Agent 工程的价值
+
+Agent 工程典型是"前端 + Python 后端 + Nginx"混合栈，多阶段构建（本项目已示范）能做到：**构建产物只有几十 MB 的单镜像**，层缓存让改一行代码秒级重建。
+
+---
+
+## 十四、完整学习路径（分阶段 + 验收标准）
 
 ### 阶段 0：前置（0.5 周）
 Linux 基础：目录结构、文件权限、进程、端口、systemd。不用精通，会看日志、会用 vim、懂基本网络概念即可。
+Windows 用户先看第十二章（WSL2 环境与坑），把本地环境配好再开始。
 
 ### 阶段 1：核心概念与命令（1 周）
 目标：彻底搞懂镜像/容器/仓库，熟练常用命令。
-练习：把 nginx、mysql 分别跑起来，学会端口映射、进入容器、看日志。
-验收：能不看文档完成"拉镜像→运行→进容器→看日志→删容器"全流程。
+练习：把 nginx、mysql 分别跑起来，学会端口映射、进入容器、看日志；故意删掉容器再 `run` 回来体会"容器无状态"。
+验收：能不看文档完成"拉镜像→运行→进容器→看日志→删容器"全流程；会用 `docker ps -a` + `logs` 排查"起不来"的问题（对照第八章）。
 
 ### 阶段 2：Dockerfile 与镜像优化（1 周）
 目标：写规范 Dockerfile，理解分层缓存。
-练习：把一个自己的小项目（Python 脚本/网页）容器化，逐步加多阶段构建，对比镜像体积。
-验收：镜像体积优化到合理范围，重建时缓存生效。
+练习：把一个自己的小项目（Python 脚本/网页）容器化，逐步加多阶段构建，对比镜像体积；对照第六章梳理 ENTRYPOINT/CMD、ARG/ENV、COPY/ADD 区别。
+验收：镜像体积优化到合理范围，重建时缓存生效；会用 `docker system df` / `prune` 清理磁盘（对照第九章）。
 
 ### 阶段 3：数据卷与网络（0.5 周）
 目标：理解容器无状态设计、数据持久化、容器间通信。
 练习：MySQL 数据存命名卷，删容器数据不丢；两个容器通过自定义网络互通。
+验收：说得出 named volume 与 bind mount 的区别、什么时候用哪个。
 
 ### 阶段 4：Compose 多容器编排（1 周）
 目标：学会编排多服务。
-练习：搭一个 `web + postgres + redis` 的完整栈，配置 healthcheck、依赖顺序、环境变量。
-验收：`docker compose up -d` 一条命令起整套系统。
+练习：搭一个 `web + postgres + redis` 的完整栈，配置 healthcheck、依赖顺序、环境变量；用 `docker compose config` 校验配置。
+验收：`docker compose up -d` 一条命令起整套系统，容器异常时能按第八章流程定位。
 
 ### 阶段 5：部署上云（1 周）★ 最优先落地
 目标：把项目真正部署到一台云服务器，域名 + HTTPS 访问。
-练习：按上文第七节的 7 个步骤走一遍；本项目可直接照 `deploy/README.md` 实操。
+练习：按上文第十节的 7 个步骤走一遍；本项目可直接照 `deploy/README.md` 实操。
 验收：浏览器通过 `https://你的域名` 稳定访问你的应用，重启服务器后服务自动恢复。
 
 ### 阶段 6：生产化（1-2 周）
@@ -473,6 +749,8 @@ Linux 基础：目录结构、文件权限、进程、端口、systemd。不用�
 验收：push 代码后全自动上线；模拟容器崩溃能自动恢复。
 
 ### 阶段 7：进阶（按需）
+- **多架构构建**：buildx（见 9.4）——本地构建、多平台分发
+- **GPU 容器**：`--gpus` + NVIDIA Container Toolkit（见 13.1）——AI 推理环境必备
 - **编排器**：Kubernetes（衔接云原生）
 - **服务网格**：Istio
 - **Serverless 容器**：Fargate / K8s 上的 Knative
@@ -493,11 +771,11 @@ Linux 基础：目录结构、文件权限、进程、端口、systemd。不用�
 
 ---
 
-## 十、学生服务器资源推荐（2026-09）
+## 十五、学生服务器资源推荐（2026-09）
 
 > 说明：价格与活动为 2026-09 检索结果，**以各平台官网活动页为准**；学生活动通常需学生认证（学信网 / 高校邮箱），且每年政策可能调整。
 
-### 10.1 主流平台对比
+### 15.1 主流平台对比
 
 | 平台 | 学生活动 | 典型配置 | 参考价格 | 认证门槛 | 备注 |
 |---|---|---|---|---|---|
@@ -506,16 +784,16 @@ Linux 基础：目录结构、文件权限、进程、端口、systemd。不用�
 | **华为云** | 沃土计划 / 新客活动 | Flexus 2核2G | 新客 36 元/年起 | 学生活动门槛不一 | 学生专属活动不如前两者明确，需按当期活动确认 |
 | **GitHub Student Developer Pack** | DigitalOcean / Azure / Heroku | Droplet 基础款 | DigitalOcean $100–$200 额度（约够跑 4–6 个月）；Azure $100 额度 | 需 GitHub Education 学生认证（edu 邮箱） | 海外节点，国内访问延迟高，适合练手 + 学海外部署 |
 
-### 10.2 直接推荐（结合你的场景）
+### 15.2 直接推荐（结合你的场景）
 
 你学 Docker 部署 + 部署 AI-tutor，**单容器、Nginx + Uvicorn、SQLite**，2核2G 完全够用，不要买高配：
 
 - **首选：腾讯云「云+校园」轻量应用服务器 2核2G**（约 120 元/年）。25 岁以下免学生证认证，国内节点访问快；以后学 K8s 还能在单机上跑 minikube / k3s 练手。
 - **预算极致方案：阿里云学生机 99 元/年**（ECS，续费同价）。先完成学信网认证、领「云工开物」300 元无门槛券。
 - **白嫖方案：GitHub Student Pack** → 用 edu 邮箱认证 GitHub Education → 领 DigitalOcean / Azure 额度。适合体验海外云 + 学英文运维文档，但国内访问慢，不建议做主生产机。
-- **免费练手（不买服务器也能练）**：Play with Docker / Killercoda（见第十一章），浏览器里直接跑 Docker 命令，学习阶段完全够用。
+- **免费练手（不买服务器也能练）**：Play with Docker / Killercoda（见第十六章），浏览器里直接跑 Docker 命令，学习阶段完全够用。
 
-### 10.3 域名提示
+### 15.3 域名提示
 
 部署 HTTPS 需要域名：
 
@@ -524,11 +802,11 @@ Linux 基础：目录结构、文件权限、进程、端口、systemd。不用�
 
 ---
 
-## 十一、学习资源与官方文档链接
+## 十六、学习资源与官方文档链接
 
 > 原则：优先官方文档与可动手的在线练习，少看二手总结帖。
 
-### 11.1 官方文档（第一手资料，必收藏）
+### 16.1 官方文档（第一手资料，必收藏）
 
 | 资源 | 链接 | 说明 |
 |---|---|---|
@@ -540,7 +818,7 @@ Linux 基础：目录结构、文件权限、进程、端口、systemd。不用�
 | Docker 命令参考 | https://docs.docker.com/reference/ | CLI 全命令速查 |
 | Docker Hub | https://hub.docker.com/ | 镜像仓库，搜索官方镜像 |
 
-### 11.2 免费在线练习（浏览器即开即用，无需服务器）
+### 16.2 免费在线练习（浏览器即开即用，无需服务器）
 
 | 资源 | 链接 | 说明 |
 |---|---|---|
@@ -548,7 +826,7 @@ Linux 基础：目录结构、文件权限、进程、端口、systemd。不用�
 | Killercoda | https://killercoda.com/ | 免费互动实验平台，内置 Docker / K8s / Linux 场景（免费层约 1GB RAM、30 分钟不活跃回收） |
 | Play with Kubernetes | https://labs.play-with-k8s.com/ | 免费 K8s 练习环境，学完 Docker 衔接 K8s 用 |
 
-### 11.3 高质量社区 / 延伸
+### 16.3 高质量社区 / 延伸
 
 | 资源 | 链接 | 说明 |
 |---|---|---|

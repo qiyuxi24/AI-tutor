@@ -242,7 +242,7 @@ npm run dev
 - [Agent Loop redesign](docs/AgentLoop_重构设计讨论.md) ｜ [Agent Loop industry research](docs/AgentLoop_业界调研与学习路线.md) (in Chinese)
 - [Knowledge-graph frame-of-reference contract](docs/知识图谱_参照系契约.md) ｜ [Knowledge-graph module structure research](docs/知识图谱_模块结构与封装调研.md) (in Chinese)
 - [AI quiz generation research](docs/QUIZ_出题逻辑调研.md) ｜ [Collector design discussion](docs/教育资料采集模块_设计讨论.md) (in Chinese)
-- [Docker learning path & engineering deployment](docs/Docker_学习路径与工程化部署.md) ｜ [Benchmark project comparison](docs/标杆项目对标分析.md) (in Chinese)
+- [Docker learning path & engineering deployment](docs/Docker_学习路径与工程化部署.md) ｜ [Production launch & daily operations guide](docs/运维_生产上线与日常运营指南.md) ｜ [Benchmark project comparison](docs/标杆项目对标分析.md) (in Chinese)
 
 ## Contributing
 

@@ -14,13 +14,16 @@ from app.core.llm.thinking import LLM_EXTRA_BODY, strip_think_tags
 from app.core.token_counter import extract_usage
 
 
-async def call_llm(system_prompt: str, messages: list) -> str:
+async def call_llm(system_prompt: str, messages: list,
+                   max_tokens: int = 2000) -> str:
     """
     调用大模型 API —— 纯文本/JSON 分析场景（不带工具）。
 
     参数:
         system_prompt: 系统提示词
         messages: 完整对话历史 [{role, content}, ...] 或 Pydantic ChatMessage 列表
+        max_tokens: 输出 token 上限（默认 2000）。**要求模型输出长 JSON（如整份
+            节点 Markdown 讲解）时必须调大**，否则响应被硬截断、JSON 解析必然失败。
 
     返回:
         AI 的回复文本
@@ -38,11 +41,17 @@ async def call_llm(system_prompt: str, messages: list) -> str:
     response = await chat_create(
         messages=api_messages,
         temperature=0.7,
-        max_tokens=2000,
+        max_tokens=max_tokens,
         extra_body=LLM_EXTRA_BODY,
     )
 
-    message = response.choices[0].message
+    choice = response.choices[0]
+    if getattr(choice, "finish_reason", None) == "length":
+        logger.warning(
+            f"call_llm 输出被 max_tokens={max_tokens} 截断——JSON 类响应会解析失败，"
+            f"请调大 max_tokens 或缩小输入分块"
+        )
+    message = choice.message
     text = strip_think_tags(message.content or "")
     if not text:
         user_msg = log_error(ErrorCode.LLM_RESPONSE_EMPTY, detail="AI返回空内容")
