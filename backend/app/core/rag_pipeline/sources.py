@@ -51,7 +51,10 @@ class GraphRagSource:
 
     async def retrieve(self, ctx: RagContext) -> list[RagHit]:
         from app.core.rag.manager import rag_manager
-        results = await rag_manager.search(ctx.user_id, ctx.query, top_k=ctx.top_k)
+        # 图谱结构性扩跳（ctx.metadata 由调用方给出，缺省 0=纯语义检索）
+        hops = int(ctx.metadata.get("graph_hops") or 0)
+        results = await rag_manager.search(ctx.user_id, ctx.query,
+                                           top_k=ctx.top_k, hops=hops)
         hits = []
         for r in results:
             hits.append(RagHit(
