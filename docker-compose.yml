@@ -18,6 +18,12 @@ services:
     ports:
       - "${PORT:-8080}:80"
 
+    # 整份 .env 注入容器：.dockerignore 排除了 .env，容器内 load_dotenv 读不到文件，
+    # 只能靠注入。下面的 environment 是「显式契约 + 启动期校验」，优先级高于本项
+    # （不写死白名单的原因：config.py 有 20+ 字段，白名单必然漂移 → 新配置静默失效）
+    env_file:
+      - .env
+
     environment:
       # 对话主模型 / 嵌入服务（:? 语法：未配置直接报错，防止静默启动失败）
       - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:?请在根目录 .env 中配置 DASHSCOPE_API_KEY}
