@@ -67,6 +67,11 @@
 - [x] **图谱知识一键导出**（2026-09-08 完成）：`GET /knowledge/export?subject=` 返回合并 Markdown（节点列表 + 依赖关系），`Content-Disposition: attachment` 触发下载
 - [x] **节点内容 Markdown 分屏编辑**（2026-09-10 完成）：NodeDetail 编辑模式由单栏 textarea 改为双栏（左源码 / 右实时预览），复用 `frontend/src/utils/markdown.js` 既有渲染管线（marked + KaTeX + highlight.js + DOMPurify），窄屏 <760px 自动堆叠；零新依赖、单文件改动（`NodeDetail.vue`）
 - [ ] **Prompt 笔记优化**：教学后主动 `update_node_content`/`add_knowledge_node` 记笔记（提示词层，未动）
+- [ ] **空图谱时的行动顺序**（2026-09-13 MPV 已落地，仅提示词层）
+  - [x] 图谱为空时注入 `chat_service.EMPTY_GRAPH_PROMPT`：先 `add_knowledge_node` 建图谱 → 再 `add_edge`/`update_mastery`；并禁止向学生断言"你的图谱是空的"（模型个人数据幻觉）
+  - [ ] 后续（待议）：**空图谱时从教材一键建图**接入对话链路 —— 新增 Agent 工具复用 `kb/graph_generator`。注意单工具超时 60s、建整书图耗时数分钟 → 不能同步跑在 loop 里，需后台任务形态（前端已有 `POST /kb/graph/generate` 可复用）
+  - [ ] 后续（待议）：工具层引导 —— 节点不存在时把 `E-LLM-007` 变成"请先用 `add_knowledge_node` 创建它"的可自纠正提示（P1 对照实验发现模型会拿节点名当 `node_id`）
+- [ ] **建节点归属收口**（部分完成，2026-09-13）：显式参数（模型自报 `subject`/`board`，显式优先）与自动判定（`kg_taxonomy` 规则优先 + LLM 兜底）已并存且互不干扰；待收口 = 4 套写路径合并为唯一 `create_node_with_content()`、MD 模板统一、语义去重、权限守卫（顺序见 `docs/知识图谱_模块结构与封装调研.md`）
 
 ## P2 — 功能路线图（比赛可选项 / 有真实 key 后）
 

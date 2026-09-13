@@ -51,6 +51,7 @@ TOOL_CAPABILITY_PROMPT = """
 - **更新用户画像** → 调用 `update_user_profile`
 - **查询网页** → 调用 `fetch_webpage`（抓取网页正文，获取实时/外部信息）
 - **检索知识** → 调用 `rag_search`（从知识图谱/上传知识库中检索与某话题最相关的内容片段，补充教学依据）
+- **联网搜索** → 调用 `mcp__websearch__web_search`（互联网搜索，返回标题/链接/摘要。知识库和图谱里都没有、或需要最新信息时才用）
 
 例如用户说"帮我加一个汉诺塔节点"，你就调用 `add_knowledge_node` 创建节点，
 然后自然回复"已添加！汉诺塔现在关联在递归定义下"。
@@ -64,6 +65,7 @@ TOOL_CAPABILITY_PROMPT = """
 6. **更新用户画像**：当你在教学中观察到学生的性格特点、学习习惯、知识薄弱点等新信息时，调用 `update_user_profile` 追加到用户画像。这有助于后续更好地个性化教学。例如：发现学生害怕数学公式、喜欢图形化解释、做题容易粗心等。
 7. **查询网页**：当学生提到一个 URL、需要实时信息（新闻、最新文档、教程）或某个话题你需要外部资料来讲解时，调用 `fetch_webpage` 抓取网页正文。拿到正文后提炼要点，用通俗语言教给学生。若抓取失败，礼貌说明并提供其他学习途径。
 8. **检索知识**：当学生的问题涉及某个具体知识点、需要从已学图谱或上传资料中找依据、或你想确认某个概念的资料时，调用 `rag_search` 检索相关片段。拿到片段后据此准确回答并标注出处（如"据你之前学的《数据结构》第2章…"）。若未检索到相关内容，基于已有知识回答即可，不要编造。
+9. **联网搜索**：当问题需要**本地资料之外的实时/外部信息**（最新新闻、新版本特性、网上教程、你知识截止后的变化），或 `rag_search` 没找到依据时，调用 `mcp__websearch__web_search`。先搜关键词拿到链接与摘要，必要时再用 `fetch_webpage` 抓正文深入。回答时**必须标注来源链接**，并提醒学生自行核查；搜索失败或没有结果时，如实说明并基于已有知识回答。**不要**为本地资料已覆盖的内容去联网搜索（浪费且拖慢回复）。
 
 ### ⚠️ 权限限制（严格执行）
 - **你不能修改、删除或更新人类手动创建的节点**（added_by="human"）。这些操作会被系统拒绝。
@@ -75,6 +77,25 @@ TOOL_CAPABILITY_PROMPT = """
 ⚠️ 重要原则：知识图谱的质量远比数量重要。宁可漏掉一条关系，也不要创建错误的关系误导学习路径。
 
 你不需要等用户说"修改"才动手。只要对话涉及某节点内容，就主动去完善它。
+"""
+
+
+# ══════════════════════════════════════════════════════════════════
+#  图谱为空时的行动顺序（始终注入）
+# ══════════════════════════════════════════════════════════════════
+# 空图谱时通用模板里的「框架约束」退化成一个节点都没有，模型容易反复检索图谱，
+# 甚至反过来向学生断言"你的图谱是空的"（P1 对照实验实测到该幻觉）。
+# 这里把空图谱从"无话可说"改写成明确动作：先建图谱，再调用其他工具。
+EMPTY_GRAPH_PROMPT = """
+## ⚠️ 当前学生图谱为空（重要，优先于上面的框架约束）
+这个学生还没有任何知识点节点，上面的「框架约束」此刻无节点可依，请按下面顺序处理：
+
+1. **先建图谱**：本次对话涉及某个知识点时，先用 `rag_search` 从已上传资料中找依据，
+   再调用 `add_knowledge_node` 建立节点（能判断归属就一并带上 `subject` / `board`）。
+2. **再调用其他图谱工具**：节点建好之后，才用 `add_edge` 补关系、用 `update_mastery` 记掌握度。
+   图里不存在的节点调用这两个工具会失败，失败后不要反复重试同一个参数。
+3. **不要向学生断言图谱状态**：不要说"你的图谱是空的 / 没有找到你的记录"这类结论，
+   也不要为了确认而反复检索图谱；该建就直接建，建完照常讲解。
 """
 
 
@@ -160,12 +181,17 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
     if inject_tools:
         system_prompt += TOOL_CAPABILITY_PROMPT
 
+    # 图谱为空：放最后（最新指令优先级最高），覆盖退化的「框架约束」
+    if not kg.nodes:
+        system_prompt += EMPTY_GRAPH_PROMPT
+
     return system_prompt, last_user_msg
 
 
 async def _build_retrieval_context(student_message: str, user_id: int,
                                    kb: dict | None = None,
-                                   usage_mode: str = "personal") -> str:
+                                   usage_mode: str = "personal",
+                                   graph_hops: int = 0) -> str:
     """
     通过 RAG 管道检索相关片段，构造注入系统提示词的检索上下文。
 
@@ -174,6 +200,8 @@ async def _build_retrieval_context(student_message: str, user_id: int,
         user_id:         用户 ID
         kb:              知识库上下文范围 {node_ids, name} | None
         usage_mode:      版权/用途模式（调用方从画像读好后传入，缺省 personal）
+        graph_hops:      图谱扩跳深度（0=纯语义检索，默认）。>0 时沿前置关系
+                         额外补出语义不相似的前置知识片段，供 A/B 实验对比。
 
     返回:
         格式化的检索上下文 Markdown 文本（图谱区块 + 知识库区块）；
@@ -188,7 +216,7 @@ async def _build_retrieval_context(student_message: str, user_id: int,
 
     hits = await pipeline.run(RagContext(
         user_id=user_id, query=student_message, top_k=5, kb=kb,
-        mode=usage_mode,
+        mode=usage_mode, metadata={"graph_hops": graph_hops},
     ))
 
     graph_hits = [h for h in hits if h.source == "graph"]
