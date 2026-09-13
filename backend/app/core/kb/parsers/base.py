@@ -65,8 +65,10 @@ class BaseParser:
         """解析文档，子类必须实现"""
         raise NotImplementedError(f"{self.__class__.__name__}.parse() 未实现")
 
-    def _ok(self, text: str, ext: str = "", **meta) -> ParseResult:
-        return ParseResult(text=text, ext=ext or self.extensions_label(), ok=True, meta=meta)
+    def _ok(self, text: str, ext: str = "", meta: Optional[dict] = None, **extra) -> ParseResult:
+        """构造成功结果；meta 字典与额外关键字参数都会并入 meta"""
+        return ParseResult(text=text, ext=ext or self.extensions_label(), ok=True,
+                           meta={**(meta or {}), **extra})
 
     def _fail(self, ext: str, error: str, **meta) -> ParseResult:
         logger.warning(f"[{self.name}] 解析失败({ext}): {error}")
