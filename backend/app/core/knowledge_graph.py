@@ -190,32 +190,34 @@ class KnowledgeGraph:
 
     def get_prerequisites(self, node_id: str) -> list[str]:
         """
-        递归 CTE 获取某个节点的所有祖先前置依赖节点 ID（仅当前用户）
+        递归 CTE 获取某个节点的所有祖先前置节点 ID（仅当前用户）
 
-        边方向：A → B (prerequisite) 表示 A 依赖 B，即 B 是 A 的前置知识。
-        递归查找 B 的前置、B 的前置的前置……直到没有更多前置。
+        边方向（全库统一语义，与 add_edge / topological_sort / knowledge_writer
+        的建边方向一致）：A → B (prerequisite) 表示 **A 是 B 的前置**，必须先学 A。
+        因此查 node_id 的前置要沿边**反向**走：先取 to_node = node_id 的边的
+        from_node，再递归取这些 from_node 的 from_node……直到没有更多前置。
 
-        返回按依赖深度排序的列表（从最基础到直接前置）
+        返回去重后的祖先节点 ID 列表（顺序不保证）。
         """
         rows = self._conn.execute("""
             WITH RECURSIVE prereq_chain AS (
-                -- 基础情况：node_id 的直接前置
-                SELECT to_node, 1 AS depth
+                -- 基础情况：node_id 的直接前置（所有指向它的边的 from）
+                SELECT from_node, 1 AS depth
                 FROM edges
-                WHERE from_node = ? AND relation = 'prerequisite' AND user_id = ?
+                WHERE to_node = ? AND relation = 'prerequisite' AND user_id = ?
 
                 UNION ALL
 
                 -- 递归：前置的前置
-                SELECT e.to_node, pc.depth + 1
+                SELECT e.from_node, pc.depth + 1
                 FROM edges e
-                JOIN prereq_chain pc ON e.from_node = pc.to_node
+                JOIN prereq_chain pc ON e.to_node = pc.from_node
                 WHERE e.relation = 'prerequisite' AND e.user_id = ?
             )
-            SELECT DISTINCT to_node FROM prereq_chain
+            SELECT DISTINCT from_node AS node_id FROM prereq_chain
             ORDER BY depth
         """, (node_id, self.user_id, self.user_id)).fetchall()
-        return [r["to_node"] for r in rows]
+        return [r["node_id"] for r in rows]
 
     def topological_sort(self) -> list[str]:
         """

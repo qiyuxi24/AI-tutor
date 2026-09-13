@@ -53,10 +53,41 @@ if (-not (Test-Path $nodeModulesPath)) {
 
 Write-Host ""
 
+# ---------- 清理上轮残留进程（端口预检）----------
+# 必须清理的原因：uvicorn --reload 是「reloader + spawn worker」双层进程，只杀一个 PID 会
+# 留下孤儿 worker 继续 Listen 8000 → 本次启动 bind 失败（WinError 10048），但孤儿仍会响应
+# /api/health 200 把健康检查骗过，最终表现为「提示启动完成、服务却立刻全关」。
+$staleProcs = Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='python3.13.exe' OR Name='node.exe' OR Name='cmd.exe'" |
+    Where-Object { $_.CommandLine -match 'uvicorn|spawn_main|vite' }
+
+if ($staleProcs) {
+    Write-Host "----------------------------------------" -ForegroundColor Cyan
+    foreach ($p in $staleProcs) {
+        Write-Host "[清理] 结束上轮残留进程 PID $($p.ProcessId)" -ForegroundColor Yellow
+        taskkill /PID $p.ProcessId /T /F 2>&1 | Out-Null
+    }
+    Start-Sleep -Seconds 2
+}
+
+# 兜底：命令行匹配不到、但确实占着端口的进程（含上轮被强杀留下的孤儿）按端口清
+foreach ($port in 8000, 5173) {
+    $owners = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique
+    foreach ($procId in $owners) {
+        if ($procId) {
+            Write-Host "[清理] 端口 $port 仍被 PID $procId 占用，强制结束" -ForegroundColor Yellow
+            taskkill /PID $procId /T /F 2>&1 | Out-Null
+        }
+    }
+}
+
+Write-Host ""
+
 # ---------- 启动后端 ----------
 
 $backendDir = Join-Path $projectRoot "backend"
 $venvPython = Join-Path $backendDir "venv\Scripts\python.exe"
+$backendLog = Join-Path $projectRoot "logs\uvicorn-dev.log"
 
 Write-Host "----------------------------------------" -ForegroundColor Cyan
 Write-Host "[后端] 启动 FastAPI 服务 (端口 8000)..." -ForegroundColor Yellow
@@ -71,7 +102,16 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "[OK] 后端依赖安装完成" -ForegroundColor Green
 }
 
-$backendProcess = Start-Process -FilePath $venvPython -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--reload" -PassThru -NoNewWindow -WorkingDirectory $backendDir
+New-Item -ItemType Directory -Force -Path (Split-Path $backendLog -Parent) | Out-Null
+
+# 后端必须在独立控制台启动（这里刻意不加 -NoNewWindow），否则热重载会把整个脚本一起打死：
+# uvicorn 在 Windows 上用 os.kill(worker_pid, CTRL_C_EVENT) 重启 worker（见 supervisors/basereload.py），
+# 而 CTRL_C_EVENT 会广播给「同一控制台的所有进程」——共享控制台时，改一次 app/ 下的代码就会
+# 连带中断本脚本，finally 于是把前端也一起关掉，表现为「提示启动完成、服务却莫名全关」。
+# 代价是后端日志不再打在本窗口，改写入 logs\uvicorn-dev.log（logs/ 已在 .gitignore 中）。
+# --reload-dir app：本机缺 watchfiles，uvicorn 降级为 StatReload 并监视整个 backend/ 目录，
+# 跑测试或在 backend/ 下写临时文件都会触发重载；限定只监视 app/ 即可。
+$backendProcess = Start-Process -FilePath $venvPython -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--reload", "--reload-dir", "app", "--no-use-colors" -PassThru -WindowStyle Hidden -WorkingDirectory $backendDir -RedirectStandardError $backendLog
 
 Write-Host "[后端] PID: $($backendProcess.Id)" -ForegroundColor Green
 
@@ -92,7 +132,7 @@ do {
 } while ($retry -lt $maxRetries)
 
 if ($retry -ge $maxRetries) {
-    Write-Host "[WARN] 后端启动超时，但仍将继续启动前端..." -ForegroundColor Yellow
+    Write-Host "[WARN] 后端启动超时，请查看日志: $backendLog" -ForegroundColor Yellow
 }
 
 Write-Host ""
@@ -126,6 +166,7 @@ Write-Host "  前端地址:  http://localhost:5173" -ForegroundColor White
 Write-Host "  后端 API:  http://localhost:8000" -ForegroundColor White
 Write-Host "  健康检查:  http://localhost:8000/api/health" -ForegroundColor White
 Write-Host "  API 文档:  http://localhost:8000/docs" -ForegroundColor White
+Write-Host "  后端日志:  logs\uvicorn-dev.log" -ForegroundColor White
 Write-Host ""
 Write-Host "  默认管理员: admin / admin123" -ForegroundColor DarkGray
 Write-Host ""
@@ -151,13 +192,13 @@ try {
 } finally {
     Write-Host ""
     Write-Host "正在停止所有服务..." -ForegroundColor Yellow
-    
-    if (-not $backendProcess.HasExited) {
-        Stop-Process -Id $backendProcess.Id -Force -ErrorAction SilentlyContinue
+
+    # /T 结束整棵进程树：uvicorn 的 spawn worker、vite 的 node 子进程只杀父 PID 会变成孤儿继续占端口
+    foreach ($proc in @($backendProcess, $frontendProcess)) {
+        if ($proc -and -not $proc.HasExited) {
+            taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
+        }
     }
-    if (-not $frontendProcess.HasExited) {
-        Stop-Process -Id $frontendProcess.Id -Force -ErrorAction SilentlyContinue
-    }
-    
+
     Write-Host "所有服务已停止。" -ForegroundColor Green
 }

@@ -1,0 +1,116 @@
+{
+  "_doc": "知识图谱上下文注入 A/B 对照实验数据集。节点 id 统一 ab_ 前缀（避免与真实数据冲突）；边方向 from=前置 → to=后继（与全库语义一致）。cases.kind：general=通用知识问题（图谱帮助有限，用于验证定界没有过度限制），graph_dependent=依赖个人学习状态的问题（只有图谱能答，用于验证 L1/L2 参照系价值）。",
+  "user_id": 9902,
+  "nodes": [
+    {
+      "id": "ab_function_call",
+      "name": "函数调用",
+      "board": "编程基础",
+      "mastery": 90,
+      "difficulty": 2,
+      "estimated_minutes": 20,
+      "tags": ["编程与算法"],
+      "content": "# 函数调用\n\n函数是一段可复用的代码块，通过名字调用，执行完毕后把控制权交还给调用者。\n\n## 要点\n- 调用时会在内存中记录「返回地址」，以便函数执行完能回到原处继续。\n- 每次调用都会产生一份独立的局部变量空间（栈帧）。\n- 函数可以调用其他函数，也可以调用自己——后者就是递归的基础。\n\n## 示例\n```python\ndef square(x):\n    return x * x\n\nsquare(3)  # 9\n```\n\n## 常见误区\n把「函数定义」和「函数调用」混为一谈：定义只是写下规则，调用才真正执行。"
+    },
+    {
+      "id": "ab_iteration",
+      "name": "循环与迭代",
+      "board": "编程基础",
+      "mastery": 60,
+      "difficulty": 2,
+      "estimated_minutes": 25,
+      "tags": ["编程与算法"],
+      "content": "# 循环与迭代\n\n迭代是用循环结构（for / while）重复执行一段逻辑，靠「计数器 + 条件判断」推进。\n\n## 要点\n- 迭代在**同一层栈帧**里反复执行，不会累积调用栈。\n- 空间复杂度通常是 O(1)（只存若干变量）。\n- 适合「步数明确、状态简单」的重复计算。\n\n## 与递归的分工\n任何递归都能改写成迭代（手动维护一个栈），但可读性往往下降；反过来，迭代改递归通常更自然。"
+    },
+    {
+      "id": "ab_recursion_base",
+      "name": "递归终止条件",
+      "board": "递归",
+      "mastery": 85,
+      "difficulty": 3,
+      "estimated_minutes": 20,
+      "tags": ["编程与算法"],
+      "content": "# 递归终止条件\n\n终止条件（base case）是递归函数中「不再继续调用自己、直接返回结果」的分支。\n\n## 为什么必须有\n每次递归调用都会在调用栈上压入一个新栈帧且不释放。若没有终止条件，调用会无限进行，直到栈空间耗尽——这就是 **栈溢出（StackOverflow）**。\n\n## 写终止条件的三条经验\n1. 先写终止条件，再写递推关系。\n2. 终止条件必须能被「越来越小」的问题规模触发。\n3. 检查边界值（0、1、空集合）是否都被覆盖。\n\n## 示例\n```python\ndef fact(n):\n    if n <= 1:      # 终止条件\n        return 1\n    return n * fact(n - 1)\n```"
+    },
+    {
+      "id": "ab_recursion",
+      "name": "递归",
+      "board": "递归",
+      "mastery": 70,
+      "difficulty": 4,
+      "estimated_minutes": 45,
+      "tags": ["编程与算法"],
+      "content": "# 递归\n\n递归是函数直接或间接调用自己，把「大问题」拆成「同构的小问题」求解的方法。\n\n## 两个必备要素\n- **终止条件**：告诉递归何时停止。\n- **递推关系**：把问题规模缩小后交给自己处理，再合并结果。\n\n## 直觉模型\n把递归想象成「先一路往下问，问到最小的情况拿到答案，再一层层把答案带回来」。\n\n## 代价\n每次调用占一个栈帧，时间与空间都会随递归深度增长；深度过大时发生栈溢出。\n\n## 典型应用\n阶乘、斐波那契、树的遍历、分治（归并排序）、回溯（八皇后）。"
+    },
+    {
+      "id": "ab_recursion_stack",
+      "name": "递归调用栈",
+      "board": "递归",
+      "mastery": 35,
+      "difficulty": 4,
+      "estimated_minutes": 30,
+      "tags": ["编程与算法"],
+      "content": "# 递归调用栈\n\n每次递归调用都会在调用栈上新压入一个栈帧，保存参数、局部变量和返回地址。\n\n## 关键结论\n- 递归深度 = 调用栈的最大高度，空间复杂度通常就是 O(深度)。\n- 栈空间有限（Python 默认约 1000 层），深度超限即 **RecursionError / StackOverflow**。\n- 递归返回时栈帧**后进先出**地弹出，这也是结果被逐层「带回来」的原因。\n\n## 常见报错与排查\n报栈溢出时优先看三件事：终止条件是否可达、递归规模是否真的在缩小、是否重复计算导致深度异常。\n\n## 与尾递归的关系\n尾递归把递归调用放在最后一步，某些语言可复用栈帧从而不增长栈；Python 不支持该优化。"
+    },
+    {
+      "id": "ab_memo",
+      "name": "记忆化搜索",
+      "board": "算法进阶",
+      "mastery": 20,
+      "difficulty": 4,
+      "estimated_minutes": 40,
+      "tags": ["编程与算法"],
+      "content": "# 记忆化搜索\n\n记忆化（memoization）是把已经算过的子问题答案缓存起来，下次直接查表，避免重复计算。\n\n## 解决的问题\n朴素递归会重复求解同一子问题（如斐波那契的指数级展开）。加一张缓存表后，每个子问题只算一次，复杂度从指数级降到多项式级。\n\n## 实现要点\n- 缓存键 = 能唯一确定子问题的参数组合。\n- 进入函数先查缓存，命中直接返回；未命中则计算并写入。\n\n## 示例\n```python\nfrom functools import lru_cache\n\n@lru_cache(maxsize=None)\ndef fib(n):\n    return n if n < 2 else fib(n - 1) + fib(n - 2)\n```\n\n## 地位\n记忆化是递归走向动态规划的桥梁：它保留递归的自然表达，同时消除重复计算。"
+    },
+    {
+      "id": "ab_dp",
+      "name": "动态规划",
+      "board": "算法进阶",
+      "mastery": 0,
+      "difficulty": 5,
+      "estimated_minutes": 60,
+      "tags": ["编程与算法"],
+      "content": "# 动态规划\n\n动态规划（DP）通过把问题拆成重叠子问题、保存子问题答案来求最优解。\n\n## 两个前提\n- **最优子结构**：大问题的最优解可由子问题的最优解推出。\n- **重叠子问题**：子问题会被重复用到（否则分治就够了）。\n\n## 两条实现路线\n1. **自顶向下**：递归 + 记忆化，从原问题出发逐步下沉。\n2. **自底向上**：按依赖顺序填表，从小规模推到目标规模；通常可再压缩空间。\n\n## 学习路径提示\nDP 通常需要先具备：递归思维、终止条件与递推关系、记忆化（缓存重叠子问题）。缺少上述基础时，直接刷 DP 题往往只能背模板。"
+    }
+  ],
+  "edges": [
+    {"from": "ab_function_call", "to": "ab_recursion", "relation": "prerequisite", "label": "是学习递归的前置知识"},
+    {"from": "ab_recursion_base", "to": "ab_recursion", "relation": "prerequisite", "label": "是学习递归的前置知识"},
+    {"from": "ab_recursion", "to": "ab_recursion_stack", "relation": "prerequisite", "label": "是学习递归调用栈的前置知识"},
+    {"from": "ab_recursion", "to": "ab_memo", "relation": "prerequisite", "label": "是学习记忆化搜索的前置知识"},
+    {"from": "ab_memo", "to": "ab_dp", "relation": "prerequisite", "label": "是学习动态规划的前置知识"},
+    {"from": "ab_iteration", "to": "ab_dp", "relation": "prerequisite", "label": "是学习动态规划的前置知识"}
+  ],
+  "cases": [
+    {
+      "id": "g1",
+      "kind": "general",
+      "question": "为什么递归函数必须要有终止条件？如果不写会发生什么？",
+      "expect": ["ab_recursion_base", "ab_recursion", "ab_recursion_stack"]
+    },
+    {
+      "id": "g2",
+      "kind": "general",
+      "question": "递归和循环迭代在性能上有什么区别？各自适合什么场景？",
+      "expect": ["ab_recursion", "ab_iteration", "ab_recursion_stack"]
+    },
+    {
+      "id": "d1",
+      "kind": "graph_dependent",
+      "question": "结合我的知识图谱，我下一步应该优先学什么？请说明你是根据我已经学过、掌握到什么程度的哪些内容做出这个判断的。",
+      "expect": ["ab_memo", "ab_dp", "ab_recursion_stack"]
+    },
+    {
+      "id": "d2",
+      "kind": "graph_dependent",
+      "question": "我的知识图谱里和递归相关的内容，哪些我已经掌握了，哪些还比较薄弱？请具体说明。",
+      "expect": ["ab_recursion", "ab_recursion_base", "ab_recursion_stack", "ab_memo"]
+    },
+    {
+      "id": "d3",
+      "kind": "graph_dependent",
+      "question": "我想开始学动态规划。看看我的知识图谱，我是否已经具备了必要的前置知识？还缺什么？",
+      "expect": ["ab_dp", "ab_memo", "ab_iteration"]
+    }
+  ]
+}

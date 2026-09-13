@@ -12,6 +12,7 @@
 - PPT      : .pptx（python-pptx）
 - 图片     : .png .jpg .jpeg .bmp .webp .tiff（RapidOCR，需安装可选依赖）
 - 老式     : .doc .ppt .xls（需外部工具 textract/LibreOffice 等）
+- 电子书   : .epub .fb2（零依赖）；.mobi .azw .azw3（mobi 库/Calibre）、.djvu（djvutxt）
 """
 
 from __future__ import annotations

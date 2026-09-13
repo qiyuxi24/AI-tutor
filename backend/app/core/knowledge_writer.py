@@ -13,6 +13,7 @@
 import json
 from pathlib import Path
 
+from app.core.kg_taxonomy import assign_taxonomy_sync
 from app.core.knowledge_graph import KnowledgeGraph
 
 __all__ = ["create_node_from_ai", "apply_suggestion", "load_suggestions", "save_suggestions"]
@@ -41,7 +42,8 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
                         tags: list | None = None, summary: str = "",
                         difficulty: int = 3, estimated_minutes: int = 15,
                         content: str = "", from_nodes: list | None = None,
-                        confidence: float | None = None) -> str:
+                        confidence: float | None = None,
+                        subject: str = "", board: str = "") -> str:
     """
     公共函数：创建或更新一个 AI 生成的节点（写图谱 + 写 MD 文件 + 建前置边）。
     供 Agent 工具（execute_kg_tool）和图谱建议应用（apply_suggestion）共用。
@@ -60,10 +62,20 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
         content:          Markdown 正文（空则生成默认模板）
         from_nodes:       前置节点 ID 列表，自动创建 prerequisite 边
         confidence:       AI 置信度
+        subject:          显式学科（Agent 工具让模型自报）；空则由 kg_taxonomy 自动判定
+        board:            显式板块；空则由 kg_taxonomy 自动判定
 
     返回:
         操作结果描述字符串
     """
+    # 显式归属优先（Agent 工具让模型自报）：subject 放 tags 首位（学科由 node_subject
+    # 派生，取第一个非难度标签）、board 直接落库；缺的部分交给 kg_taxonomy 自动判定，
+    # 两边都齐就不会再烧 LLM。
+    subject = (subject or "").strip()
+    board = (board or "").strip()
+    if subject and subject not in (tags or []):
+        tags = [subject, *(tags or [])]
+
     existing = kg.get_node(node_id)
 
     if existing is not None:
@@ -76,6 +88,19 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
             new_tags = list(existing_tags | set(tags))
             if new_tags != existing.get("tags"):
                 update_data["tags"] = new_tags
+        # 归属补全：老节点可能既没有学科标签也没有板块（自动判定失败则原样不动）
+        merged = {
+            "name": node_name,
+            "summary": summary or existing.get("summary", ""),
+            "tags": update_data.get("tags", existing.get("tags", [])),
+            "board": board or existing.get("board", ""),
+        }
+        assign_taxonomy_sync(kg, merged)
+        if merged["tags"] != existing.get("tags"):
+            update_data["tags"] = merged["tags"]
+        if merged.get("board") and merged["board"] != existing.get("board"):
+            update_data["board"] = merged["board"]
+
         if existing.get("difficulty", 3) != difficulty:
             update_data["difficulty"] = difficulty
         if existing.get("estimated_minutes", 15) != estimated_minutes:
@@ -121,6 +146,7 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
         "name": node_name,
         "file": f"nodes/{node_id}.md",
         "tags": tags or [],
+        "board": board,
         "summary": summary,
         "mastery": 0,
         "difficulty": difficulty,
@@ -128,6 +154,8 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
         "added_by": "ai",
         "confidence": confidence,
     }
+    # 未指定学科/板块时自动判定（规则+LLM），失败保持未分类
+    assign_taxonomy_sync(kg, node_data)
     kg.add_node(node_data)
 
     # 写 MD 文件

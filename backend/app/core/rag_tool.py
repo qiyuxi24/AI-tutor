@@ -33,7 +33,8 @@ def _run_async(coro) -> object:
 
 
 def rag_search(query: str, source: str = "all",
-               top_k: int = 3, user_id: Optional[int] = None) -> str:
+               top_k: int = 3, user_id: Optional[int] = None,
+               hops: int = 0) -> str:
     """
     RAG 检索工具（MCP 风格）：检索知识图谱 / 知识库，返回相关片段供 LLM 使用。
 
@@ -42,6 +43,8 @@ def rag_search(query: str, source: str = "all",
         source:  检索来源 'graph'（知识图谱）/'kb'（上传知识库）/'all'（全部）
         top_k:   返回条数（1~5）
         user_id: 用户 ID（从 kg 传入；None 时无法检索，返回友好提示）
+        hops:    图谱扩跳深度（0~3，默认 0）。>0 时沿 prerequisite 边回溯，
+                 额外补出与当前话题**语义不相似、但必须先学过**的前置知识点。
 
     返回:
         格式化的检索结果文本；检索失败或为空时返回友好提示（不抛异常，让 LLM 直接使用）。
@@ -53,6 +56,10 @@ def rag_search(query: str, source: str = "all",
         top_k = max(1, min(int(top_k), 5))
     except (TypeError, ValueError):
         top_k = 3
+    try:
+        hops = max(0, min(int(hops), 3))
+    except (TypeError, ValueError):
+        hops = 0
     source = (source or "all").lower()
 
     from app.core.rag_pipeline import pipeline, RagContext
@@ -69,7 +76,8 @@ def rag_search(query: str, source: str = "all",
         # 仅图谱：构造一个不触发 kb 源的 context（无 kb 则 KbRagSource.should_query=False）
         kb = None
 
-    ctx = RagContext(user_id=user_id, query=query, top_k=top_k, kb=kb, mode=mode)
+    ctx = RagContext(user_id=user_id, query=query, top_k=top_k, kb=kb, mode=mode,
+                     metadata={"graph_hops": hops})
     hits = _run_async(pipeline.run(ctx))
 
     # 按来源过滤（source=all 时保留全部）

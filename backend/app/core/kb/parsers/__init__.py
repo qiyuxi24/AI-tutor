@@ -16,6 +16,7 @@
 - pptx       : .pptx（python-pptx）
 - image-ocr  : .png .jpg .jpeg .bmp .webp .tiff（RapidOCR，可选依赖，装则启用）
 - legacy     : .doc .ppt .xls（老式 Office，依赖外部工具，探测到才启用）
+- book       : .epub .fb2（零依赖，标准库）+ .mobi .azw .azw3 .djvu（外部能力，装则启用）
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from app.core.kb.parsers.docx import DocxParser
 from app.core.kb.parsers.pptx import PptxParser
 from app.core.kb.parsers.image import ImageOcrParser
 from app.core.kb.parsers.legacy import LegacyParser
+from app.core.kb.parsers.book import EpubParser, Fb2Parser, MobiParser, DjvuParser
 
 logger = logging.getLogger("ai-tutor")
 
@@ -41,6 +43,24 @@ def _register_builtin(target: ParserRegistry) -> None:
     target.register(PdfParser())
     target.register(DocxParser())
     target.register(PptxParser())
+
+    # 电子书：EPUB / FB2 纯标准库实现，始终可用
+    target.register(EpubParser())
+    target.register(Fb2Parser())
+
+    # Kindle 系列：需 mobi 库或 Calibre
+    if MobiParser.installed():
+        target.register(MobiParser())
+        logger.info("Kindle 电子书解析器已启用（mobi/azw/azw3）")
+    else:
+        logger.info("Kindle 电子书解析器未启用：未检测到 mobi 库或 Calibre（ebook-convert）")
+
+    # DJVU：需系统 djvulibre
+    if DjvuParser.installed():
+        target.register(DjvuParser())
+        logger.info("DJVU 解析器已启用（djvutxt）")
+    else:
+        logger.info("DJVU 解析器未启用：未检测到 djvutxt")
 
     # 图片 OCR：仅当 RapidOCR 可用时注册
     img = ImageOcrParser()

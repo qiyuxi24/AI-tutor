@@ -49,6 +49,11 @@ RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
 # 拷贝后端代码（.dockerignore 已排除 backend/data、.env、venv）
 COPY backend/ /app/backend/
 
+# 提示词模板（Jinja2）：prompt_loader.py 将目录解析为「项目根/data/prompts」，
+# 不在 backend/ 之下，必须单独拷贝 —— 漏掉会导致聊天时 TemplateNotFound 崩溃，
+# 而 /api/health 与首页仍 200，所以从表面看不出来
+COPY data/prompts /app/data/prompts
+
 # 前端静态资源
 COPY --from=frontend-build /build/dist /usr/share/nginx/html
 

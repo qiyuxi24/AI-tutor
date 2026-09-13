@@ -29,6 +29,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Depends, Body, Query
 from fastapi.responses import StreamingResponse
+from app.core.kg_taxonomy import assign_taxonomy
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.prerequisite import (
     DEFAULT_MAX_PARENTS, DEFAULT_THRESHOLD, apply_candidates, infer_prerequisites,
@@ -191,6 +192,9 @@ async def create_node(data: dict = Body(...), user_id: int = Depends(get_current
 
     返回: {"status": "ok", "node": {...完整节点信息...}}
 
+    未指定学科（tags 里的学科标签）或板块（board）时，按"规则+LLM"自动判定并写入
+    （见 core/kg_taxonomy.py）；判定失败落「未分类」，不影响建节点。
+
     注意：使用 dict + Body(...) 而非 Pydantic 模型，因为需要兼容 AI function calling
     传来的额外字段（id, from_nodes, difficulty 等），这些字段不固定。
     """
@@ -205,6 +209,7 @@ async def create_node(data: dict = Body(...), user_id: int = Depends(get_current
             "name": data["name"],
             "file": f"nodes/{data['id']}.md",
             "tags": data.get("tags", []),
+            "board": data.get("board", ""),
             "summary": data.get("summary", ""),
             "mastery": data.get("mastery", 0),
             "difficulty": data.get("difficulty", 3),
@@ -212,6 +217,8 @@ async def create_node(data: dict = Body(...), user_id: int = Depends(get_current
             "added_by": data.get("added_by", "human"),
             "confidence": data.get("confidence"),
         }
+
+        await assign_taxonomy(kg, node_data)
 
         kg.add_node(node_data)
 
@@ -509,6 +516,7 @@ async def decompose_question(request: DecomposeRequest,
                 "added_by": "ai",
                 "confidence": node.get("confidence"),
             }
+            await assign_taxonomy(kg, node_data)  # 未指定学科/板块时自动判定
             kg.add_node(node_data)
 
             # 创建空白 MD 文件

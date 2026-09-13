@@ -160,7 +160,7 @@ class RagManager:
     # ────────────────────────────────────────────
 
     async def search(self, user_id: int, query: str,
-                     top_k: int = DEFAULT_TOP_K) -> list[dict]:
+                     top_k: int = DEFAULT_TOP_K, hops: int = 0) -> list[dict]:
         """
         语义检索知识图谱相关片段
 
@@ -168,6 +168,9 @@ class RagManager:
             user_id: 用户 ID
             query:   查询文本（通常是学生最新消息）
             top_k:   返回条数
+            hops:    沿 prerequisite 边**回溯补充前置知识**的跳数（0=关闭，默认）。
+                     向量检索只能召回语义相近的节点，而前置知识常与问题语义不相似
+                     （问"动态规划"召回不到"递归"），靠图谱结构扩跳补齐。
 
         返回:
             [{node_id, node_name, heading, content, score}, ...]
@@ -181,7 +184,63 @@ class RagManager:
         store = self._get_store(user_id)
         results = store.search(user_id, embeddings[0], top_k=top_k)
         # 过滤低相似度
-        return [r for r in results if r["score"] >= MIN_SCORE]
+        results = [r for r in results if r["score"] >= MIN_SCORE]
+        if hops > 0 and results:
+            results = results + self._expand_prerequisites(user_id, results, top_k, hops)
+        return results
+
+    def _expand_prerequisites(self, user_id: int, hits: list[dict],
+                              top_k: int, hops: int,
+                              decay: float = 0.6) -> list[dict]:
+        """
+        沿 prerequisite 边反向回溯 hops 跳，补出语义初检召回不到的前置知识片段。
+
+        只回溯"前置"方向：学生卡住时最需要补的是基础，而不是超纲的后续内容。
+        命中分数按 decay^depth 衰减，保证排序仍排在语义初检之后。
+        （ponytail: 补充条数上限 = top_k，注入体量最多翻倍；要收紧就改这里。）
+        """
+        from app.core.knowledge_graph import KnowledgeGraph
+
+        kg = KnowledgeGraph(user_id=user_id)
+        try:
+            # 反向邻接 to(后继) → [from(前置)]，边语义见 knowledge_graph.get_prerequisites
+            parents: dict[str, list[str]] = {}
+            for e in kg.edges:
+                if e.get("relation") == "prerequisite" and e.get("from_node") and e.get("to_node"):
+                    parents.setdefault(e["to_node"], []).append(e["from_node"])
+
+            base_score = max((h.get("score", 0.0) for h in hits), default=0.0)
+            seen = {h.get("node_id") for h in hits}
+            frontier = [h["node_id"] for h in hits if h.get("node_id")]
+            extra: list[dict] = []
+
+            for depth in range(1, hops + 1):
+                nxt: list[str] = []
+                for nid in frontier:
+                    for pid in parents.get(nid, []):
+                        if pid in seen:
+                            continue
+                        seen.add(pid)
+                        node = kg.get_node(pid)
+                        content = kg.get_node_content_preview(pid, max_lines=20, max_chars=800)
+                        if not node or not content.strip():
+                            continue
+                        extra.append({
+                            "node_id": pid,
+                            "node_name": node.get("name", ""),
+                            "heading": "前置知识",
+                            "content": content,
+                            "score": round(base_score * (decay ** depth), 4),
+                        })
+                        nxt.append(pid)
+                frontier = nxt
+                if not frontier:
+                    break
+
+            extra.sort(key=lambda h: h["score"], reverse=True)
+            return extra[:max(1, top_k)]
+        finally:
+            kg.close()
 
     # ────────────────────────────────────────────
     #  信息
