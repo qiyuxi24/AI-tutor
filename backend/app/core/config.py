@@ -72,6 +72,12 @@ class Settings:
     # ─── 启动 / 管理员 ───
     default_admin_password: str = ""
 
+    # ─── 网页搜索（MCP 工具 web_search，见 core/mcp_host.py）───
+    # 关掉即回到原生 8 工具（不加载 MCP server，无需重启以外的清理）
+    web_search_enabled: bool = True
+    # 自建 SearXNG 实例地址（如 http://localhost:8888）；留空则用 ddgs（零 key）
+    searxng_url: str = ""
+
     # ─── 日志 ───
     log_level: str = "INFO"
     log_dir: str = "logs"
@@ -107,6 +113,8 @@ class Settings:
             cors_allow_methods=_parse_list(os.getenv("CORS_ALLOW_METHODS"), ["*"]),
             cors_allow_headers=_parse_list(os.getenv("CORS_ALLOW_HEADERS"), ["*"]),
             default_admin_password=os.getenv("DEFAULT_ADMIN_PASSWORD", ""),
+            web_search_enabled=_parse_bool(os.getenv("WEB_SEARCH_ENABLED"), True),
+            searxng_url=os.getenv("SEARXNG_URL", ""),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_dir=os.getenv("LOG_DIR", "logs"),
             log_max_bytes=int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024))),

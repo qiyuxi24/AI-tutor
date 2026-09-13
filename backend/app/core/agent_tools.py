@@ -5,8 +5,9 @@
 - KG_TOOLS（喂给模型的 tools 参数）与 execute_kg_tool（工具分发）均由注册表驱动
 - 新增工具：在 _TOOL_SPECS 注册一条 spec + 写一个 handler 即可，
   不再需要改 if/elif 分发或另抄 schema。
-  （ponytail: 暂不引入 MCP server 运行时——MiniMax/OpenAI 模型 API 原生消费
-   function calling；将来需要把工具导出给外部 agent 用时，本表可直接映射。）
+  （2026-09-12：MCP 工具已按同一形态并入——web_search 由 app/mcp_servers/web_search.py
+   以标准 MCP 协议提供，core/mcp_host.py 以内嵌 in-memory 连接取回其 tools/list，
+   追加为本表 spec。本表仍是唯一注册入口，模型侧/执行侧无需任何改动。）
 
 重型实现已拆到领域模块（本文件仅薄壳 handler + 注册表）：
 - fetch_webpage      → web_tool.py（SSRF 防护 + HTML→文本）
@@ -18,6 +19,7 @@ import json
 
 from app.core.error_codes import ErrorCode, log_error
 from app.core.knowledge_writer import create_node_from_ai
+from app.core.mcp_host import mcp_tool_specs
 from app.core.rag_tool import rag_search
 from app.core.web_tool import fetch_webpage
 
@@ -40,6 +42,8 @@ def _h_add_node(args, kg) -> str:
         estimated_minutes=int(args.get("estimated_minutes", 15)),
         content=args.get("content", ""),
         from_nodes=args.get("from_nodes"),
+        subject=args.get("subject", ""),
+        board=args.get("board", ""),
     )
 
 
@@ -80,7 +84,8 @@ def _h_fetch_webpage(args, kg) -> str:
 
 def _h_rag_search(args, kg) -> str:
     return rag_search(args.get("query", ""), source=args.get("source", "all"),
-                      top_k=int(args.get("top_k", 3)), user_id=kg.user_id)
+                      top_k=int(args.get("top_k", 3)), user_id=kg.user_id,
+                      hops=int(args.get("hops", 0) or 0))
 
 
 _TOOL_SPECS = [
@@ -93,7 +98,11 @@ _TOOL_SPECS = [
                 "id": {"type": "string", "description": "节点英文ID，如 'hanoi_tower'"},
                 "name": {"type": "string", "description": "节点中文名称"},
                 "tags": {"type": "array", "items": {"type": "string"},
-                         "description": "标签，含难度级别如 ['算法', '三级']"},
+                         "description": "标签，含难度级别如 ['三级']（学科请用 subject 字段，别混进 tags）"},
+                "subject": {"type": "string",
+                            "description": "该知识点所属学科（如 '数据结构'）。⚠️ 对话上下文能明确判断时填写，且必须复用已有学科名；不确定就省略，系统会自动判定。"},
+                "board": {"type": "string",
+                          "description": "该学科下的知识板块（如 '线性表'）。⚠️ 必须与 subject 匹配、优先复用该学科已有板块名；不确定就省略，系统会自动判定。"},
                 "summary": {"type": "string", "description": "一句话摘要"},
                 "difficulty": {"type": "integer", "description": "难度 1-5", "minimum": 1, "maximum": 5},
                 "estimated_minutes": {"type": "integer", "description": "预估学习分钟数"},
@@ -185,11 +194,17 @@ _TOOL_SPECS = [
              "source": {"type": "string", "enum": ["graph", "kb", "all"],
                         "description": "检索来源：graph=知识图谱，kb=上传知识库，all=全部（默认）"},
              "top_k": {"type": "integer", "description": "返回条数 1~5（默认 3）"},
+             "hops": {"type": "integer", "minimum": 0, "maximum": 3,
+                      "description": "图谱扩跳深度（默认 0）。设为 1~2 时会沿前置关系额外补出与当前话题字面不相似、但学生必须先学过的基础知识点。当学生卡住、或想讲清『为什么是这样』需要牵扯到前置概念时使用；只做概念定位时保持 0。"},
          },
          "required": ["query"]},
         _h_rag_search,
     ),
 ]
+
+# MCP 工具并入（2026-09-12）：schema/描述直接取自 MCP tools/list，宿主侧不重复维护。
+# 未启用或连接失败时 mcp_tool_specs() 返回 []，原生工具行为完全不变。
+_TOOL_SPECS.extend(mcp_tool_specs())
 
 # 工具名索引 + OpenAI function-calling 导出（喂给模型；结构保持不变，仅改数据源）
 _TOOL_BY_NAME = {s["name"]: s for s in _TOOL_SPECS}

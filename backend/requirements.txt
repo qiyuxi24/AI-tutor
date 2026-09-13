@@ -1,21 +1,25 @@
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-httpx==0.27.0
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+httpx==0.28.1
 # openai SDK 3.x 移除部分废弃 API，锁定 <3 与本地开发环境保持一致
 openai>=1.0.0,<3.0.0
 numpy>=1.26.0
-pandas>=2.2.0,<2.3.0
-PyYAML==6.0.1
-Jinja2==3.1.4
-python-jose[cryptography]==3.3.0
+PyYAML==6.0.3
+Jinja2==3.1.6
+python-jose[cryptography]==3.5.0
 bcrypt==4.2.1
-python-multipart==0.0.9
-python-dotenv==1.0.1
+python-multipart==0.0.32
+python-dotenv==1.2.2
 PyMuPDF>=1.24.0
 python-docx>=1.1.0
 whoosh>=2.7.4
 python-pptx>=0.6.23
 Pillow>=10.0.0
+# 电子书：.epub/.fb2 由标准库解析（无需依赖）；下列为可选能力，装则启用
+#   pip install mobi        → Kindle .mobi/.azw/.azw3（KF8 支持有限，失败自动降级）
+#   或安装 Calibre（ebook-convert）→ Kindle 全系列转换
+#   或安装 djvulibre（djvutxt）    → .djvu 文字层提取（纯扫描件仍需 OCR）
+# mobi>=0.3.4
 # 可选：图片 OCR（中文效果好、免费离线）。装则启用图片/扫描 PDF 文字识别
 # onnxruntime 体积较大，未装则图片解析自动降级为不支持。
 # 注意：清华 PyPI 镜像最高同步到 1.2.3，故放宽下限（API 一致）
@@ -25,3 +29,7 @@ onnxruntime>=1.16.0
 tiktoken>=0.7.0
 # 可选：语义去重本地离线嵌入（不装则回退到 text-embedding-v4 API 或内置哈希嵌入）
 # sentence-transformers>=2.2.0
+# MCP 协议（网页搜索工具的宿主层，见 app/core/mcp_host.py 与 app/mcp_servers/）
+mcp>=2,<3
+# 网页搜索后端：ddgs（MIT，零 API key）。实测走 bing 后端可用；配 SEARXNG_URL 可切自建实例
+ddgs>=9.16

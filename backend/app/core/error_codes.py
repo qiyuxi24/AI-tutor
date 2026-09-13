@@ -91,6 +91,8 @@ class ErrorCode:
     WEB_FETCH_FAILED  = ("E-WEB-001", "网页抓取失败")
     WEB_FETCH_TIMEOUT = ("E-WEB-002", "网页抓取超时")
     WEB_FETCH_BLOCKED = ("E-WEB-003", "目标地址被安全策略拦截")
+    # 网页搜索（MCP 工具 web_search：搜索后端异常 / MCP server 加载失败）
+    WEB_SEARCH_FAILED = ("E-WEB-004", "网页搜索失败")
 
     # ── 出题模块 (E-QUIZ) ──
     QUIZ_GENERATE_FAILED   = ("E-QUIZ-001", "AI 出题失败，请稍后重试")
