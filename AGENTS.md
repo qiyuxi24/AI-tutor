@@ -14,7 +14,7 @@
 | 启动后端 | `backend/venv/Scripts/python.exe -m uvicorn app.main:app --port 8000`（cwd=backend） |
 | **硬约束** | uvicorn **必须 `--workers 1`**（EventBus 用户队列 / 进程内定时 GC 依赖单进程；多 worker 会各自持有事件总线与队列） |
 | 启动前端 | cwd=frontend：`npm run dev`（Vite，默认 5173） |
-| 测试 | `backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"`（单元层约 480 用例，cwd=项目根；`llm_api`=真实付费 API 测试需 pytest-asyncio，单独跑） |
+| 测试 | `backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"`（离线用例 558，cwd=项目根；`llm_api`=真实付费 API 测试需 pytest-asyncio，单独跑） |
 | 配置真值 | 根目录 `.env`（唯一）；`backend/app/core/config.py` 读取 |
 | LLM 三段配置 | `LLM_API_KEY`+`LLM_BASE_URL`+`MODEL_NAME`（对话主模型，默认 **MiniMax-M3**）；`DASHSCOPE_API_KEY`+`EMBED_BASE_URL`（嵌入固定阿里 text-embedding-v4） |
 
@@ -50,7 +50,9 @@ api/v1/chat.py ──► services/chat_service.py ──编排──► core/age
 | `backend/app/core/agent_events.py` | 事件发射中间件：run_id 注入 + per-user 路由（agent_loop 对 event_bus 的唯一入口） |
 | `backend/app/core/context_guard.py` | 发送前预算守卫：run_agent_loop 入口一次性丢最旧历史（chat_service 调用） |
 | `backend/app/core/llm/` | **LLM 原语包**（自旧 llm_client.py 拆）：clients（client/embed_client/备用单例）、embed（**embed_texts 嵌入唯一出口**，kb/rag 共用）、messages、thinking（MiniMax 适配）、retry、fallback（chat_create 唯一出口）、call（call_llm） |
-| `backend/app/core/agent_tools.py` | **工具系统唯一注册表**：8 个工具 spec + 薄壳 handler + `KG_TOOLS` / `execute_kg_tool` 分发 |
+| `backend/app/core/agent_tools.py` | **工具系统唯一注册表**：8 个原生工具 spec + 薄壳 handler + `KG_TOOLS` / `execute_kg_tool` 分发；末尾追加 MCP 工具 |
+| `backend/app/core/mcp_host.py` | **MCP 宿主层**：连 MCP server → `tools/list` → 生成同构 spec 并入注册表（schema 直通不重复维护）；in-memory 传输 + 同步桥 + 失败降级为空 |
+| `backend/app/mcp_servers/web_search.py` | **网页搜索 MCP server**（标准协议，可独立运行）：工具 `web_search`，后端 ddgs（默认）/ SearXNG；stdio + Streamable HTTP |
 | `backend/app/core/rag_tool.py` / `web_tool.py` | 工具重型实现（MCP 风格纯函数）：RAG 检索 `rag_search` / 网页抓取 `fetch_webpage` |
 | `backend/app/core/agent_run_store.py` | agent_runs 表（运行记录**唯一事实源**，写/查/清理/统计） |
 | `backend/app/core/event_bus.py` | 进程内 per-user 发布订阅 → SSE |
@@ -59,6 +61,7 @@ api/v1/chat.py ──► services/chat_service.py ──编排──► core/age
 | `backend/app/core/profile/` | 用户画像分层包：schema(结构/字段权重) + store(原子写/旧MD迁移) + markdown(渲染/解析) + manager(门面)。外部只 import `UserProfile` 与 `get_usage_mode(user_id)` |
 | `backend/app/services/chat_service.py` | 对话编排：提示词组装 + 调 run_agent_loop + 后台图谱分析 |
 | `backend/app/core/knowledge_graph.py` | 图谱存储（SQLite + 节点 MD 文件），`KnowledgeGraph(user_id)` 实例级隔离 |
+| `backend/app/core/kg_taxonomy.py` | **建节点时的学科/板块自动判定**（规则优先 + LLM 兜底，失败保持未分类；`assign_taxonomy` async / `assign_taxonomy_sync` 同步桥） |
 | `backend/app/core/rag_pipeline/`、`kb/`、`rag/`、`hybrid_search/`、`quiz/` | RAG / 知识库 / 图谱索引 / 出题 |
 | `backend/app/core/collector/` | 采集链路：`adapters/`（数据源）+ `pipeline_ingest.py`（切章入库）+ `chapterizer.py`；其中 `quiz_splitter.py`（试卷整卷文本 → 逐题，纯函数零 LLM）**已就绪但尚未接入上传链路** |
 | `backend/app/api/v1/` | FastAPI 路由层（纯 HTTP 薄壳） |
@@ -95,7 +98,7 @@ api/v1/chat.py ──► services/chat_service.py ──编排──► core/age
 | GET | `/knowledge/node-ids` | 全部节点 ID |
 | GET/PUT/DELETE | `/knowledge/node/{node_id}` | 节点 CRUD |
 | PUT | `/knowledge/node/{node_id}/info` / `/mastery` | 节点信息 / 掌握度 |
-| POST | `/knowledge/node` | 创建节点 |
+| POST | `/knowledge/node` | 创建节点（未指定 `tags` 学科/`board` 板块时自动判定归属，见 `core/kg_taxonomy.py`） |
 | POST/PUT/DELETE | `/knowledge/edge...` | 边 CRUD（含 `/edge/{edge_id}`） |
 | POST | `/knowledge/ai/edit` | AI 建议批量应用 |
 | POST | `/knowledge/decompose` | 问题拆解 |
@@ -207,7 +210,8 @@ run_agent_loop(user_id=uid)
 2. **~~私有符号跨模块~~（2026-09-08 拆分已解决）**：原 `agent_loop` import `llm_client` 的 5 个下划线成员，已随 `core/llm/` 包化收敛为**公开契约**（`chat_create`/`build_api_messages`/`strip_think_tags`/`LLM_EXTRA_BODY`/`MODEL_NAME`）。agent_loop 用别名保持命名（`import chat_create as _chat_create`），不再触碰私有符号。
 3. **~~llm_client 上帝模块~~（2026-09-08 已拆，718 行归零）**：按职责拆为 `core/llm/` 原语包（clients/thinking/messages/retry/fallback/call）+ `core/agent_tools.py`（注册表+分发）+ `core/rag_tool.py`/`core/web_tool.py`（重型实现）。文件已删，全库零残留引用。
 4. **同步↔异步两层线程池（仍在，位置更新）**：agent_loop 用 `asyncio.to_thread` → `agent_tools.execute_kg_tool`（同步）→ `rag_tool.rag_search` 内部又用 `_run_async` + 线程池起新 loop。`_run_async` 现随 rag_tool 私有。
-5. ~~工具注册 3 处分散~~（2026-09-08 已收敛）：`agent_tools._TOOL_SPECS` 注册表（name/description/parameters/handler）为唯一注册入口；`KG_TOOLS`（模型 tools 参数）与 `execute_kg_tool`（分发）均由注册表生成/查表驱动。schema 结构同构 MCP `tools/list` inputSchema，未来要导出 MCP server 可直接映射（`ponytail:` 暂不引入 MCP 运行时——模型 API 原生吃 function calling）。`chat_service.TOOL_CAPABILITY_PROMPT` 保留为教学触发语义层（与注册表有意分离）。
+5. ~~工具注册 3 处分散~~（2026-09-08 已收敛）：`agent_tools._TOOL_SPECS` 注册表（name/description/parameters/handler）为唯一注册入口；`KG_TOOLS`（模型 tools 参数）与 `execute_kg_tool`（分发）均由注册表生成/查表驱动。`chat_service.TOOL_CAPABILITY_PROMPT` 保留为教学触发语义层（与注册表有意分离）。
+   **2026-09-12 更新（MCP 已引入）**：`core/mcp_host.py` 在 import 时调用 `mcp_tool_specs()`，把 MCP `tools/list` 的 name/description/inputSchema 原样转成注册表 spec（含闭包 handler）后 `_TOOL_SPECS.extend(...)`。故：注册表仍是唯一入口，**执行侧与模型侧零改动**；MCP 工具名前缀 `mcp__<server>__<tool>`；未装 mcp 包 / 连接失败 / `WEB_SEARCH_ENABLED=false` 时返回 `[]` 静默降级（原生工具行为不变）。新增 MCP server = 在 `mcp_host._SERVERS` 加 `(前缀, 模块路径)`。
 6. **messages 双形（dict/Pydantic）兼容不全**：`_build_api_messages`/`estimate_single_call` 兼容两者，但 `token_estimator._predict_completion_features` 只读 dict。
 7. **token 指标冗余**：`AgentRunResult`/`agent_runs` 表同时保留 `context_tokens` + `token_usage`（前者可由后者推导，向后兼容保留）。
 8. **双记录并存**：conversations 消息内嵌 thinking/tools 字段（前端 MessageBubble 在消费）vs agent_runs.evidence —— 前端回源需知道两处；未来统一方向以 agent_runs 为回放源。
@@ -216,7 +220,7 @@ run_agent_loop(user_id=uid)
 
 ## 4. 工具系统：如何新增一个工具
 
-**当前 8 个工具**：`add_knowledge_node` / `update_node_content` / `update_mastery` / `add_edge` / `delete_node` / `update_user_profile` / `fetch_webpage` / `rag_search`。
+**当前 9 个工具**：原生 8 个 —— `add_knowledge_node` / `update_node_content` / `update_mastery` / `add_edge` / `delete_node` / `update_user_profile` / `fetch_webpage` / `rag_search`（其中 `add_knowledge_node` 支持模型自报 `subject`/`board`，缺的部分由 `core/kg_taxonomy.py` 自动判定）；**MCP 1 个** —— `mcp__websearch__web_search`（联网搜索，server 源码 `app/mcp_servers/web_search.py`，宿主层 `core/mcp_host.py`）。
 
 **注册唯一入口**：`core/agent_tools.py` 的 `_TOOL_SPECS` 注册表（MCP/OpenAI function-calling 同构）。图谱/画像工具 handler 即薄壳在此；重型实现放领域模块（`web_tool.py` / `rag_tool.py`）被 handler 引用。
 
@@ -249,4 +253,5 @@ run_agent_loop(user_id=uid)
 | `docs/AgentLoop_业界调研与学习路线.md` | 业界 Agent 模式调研 |
 | `docs/token_consumption_prediction_research.md` | token 预估三层策略 |
 | `docs/RAG_*.md`、`QUIZ_出题逻辑调研.md` | RAG/出题设计 |
+| `docs/MCP_网页搜索工具_调研与实施方案.md` | MCP 网页搜索：协议/生态调研 + 实测数据 + 分期实施记录 |
 | `backend/app/core/*.py` docstring | 模块级最新契约（代码优先于文档） |
