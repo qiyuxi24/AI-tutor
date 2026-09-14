@@ -63,6 +63,15 @@ def _is_blocked_url(url: str) -> Optional[str]:
     return None
 
 
+def is_blocked_url(url: str) -> Optional[str]:
+    """SSRF 防护的公开入口：供 download_tool 等其他按 URL 取内容的工具复用。
+
+    实现仍在 _is_blocked_url（本模块是唯一实现），此处只做公开导出，
+    避免其他模块 import 下划线私有名。
+    """
+    return _is_blocked_url(url)
+
+
 def _is_private_ip(ip: str) -> bool:
     """判断 IP 是否为内网/保留地址。"""
     try:

@@ -26,8 +26,9 @@ async def call_llm(system_prompt: str, messages: list,
     参数:
         system_prompt: 系统提示词
         messages: 完整对话历史 [{role, content}, ...] 或 Pydantic ChatMessage 列表
-        max_tokens:   输出 token 上限（默认 2000）。图谱生成等"输出大 JSON"的场景
-                      需传更大值，否则 JSON 会被截断导致解析失败（2026-09-14 踩坑）
+        max_tokens: 输出 token 上限（默认 2000）。**要求模型输出长 JSON（出题 / 图谱生成 /
+            整份节点 Markdown 讲解）时必须调大**，否则响应被硬截断、JSON 解析必然失败
+            （2026-09-14 真机踩坑：completion 正好等于上限）
 
     返回:
         AI 的回复文本
@@ -55,12 +56,19 @@ async def call_llm(system_prompt: str, messages: list,
             max_tokens=attempt_tokens,
             extra_body=LLM_EXTRA_BODY,
         )
-        message = response.choices[0].message
-        text = strip_think_tags(message.content or "")
+        choice = response.choices[0]
+        finish = getattr(choice, "finish_reason", None)
+        # 撞顶截断：**即便 text 非空也要告警** —— JSON 类响应已被硬切断，
+        # 调用方只会看到"解析失败"，不知道真因是 max_tokens 不够（合并自另一分支）
+        if finish == "length":
+            logger.warning(
+                f"call_llm 输出被 max_tokens={attempt_tokens} 截断——JSON 类响应会解析失败，"
+                f"请调大 max_tokens 或缩小输入分块"
+            )
+        text = strip_think_tags(choice.message.content or "")
         if text:
             break
         if attempt == 0:
-            finish = getattr(response.choices[0], "finish_reason", "?")
             # 调用方预算已达上限时，"加大预算"无从加起（2026-09-14 真机踩坑：
             # 出题批次传 8000，日志打出"加大输出预算（8000→8000）"实际等于原样重试）
             if attempt_tokens < _EMPTY_RETRY_TOKENS:
@@ -87,8 +95,8 @@ async def call_llm(system_prompt: str, messages: list,
         )
     # finish_reason 非 stop 说明输出是被硬截断/异常终止的。出题 JSON"写一半"时
     # 光看"解析失败"无法判断根因（撞顶 length？还是模型自己 stop 但 JSON 不完整？），
-    # 这里显式告警（2026-09-14 真机排查用）。
-    if finish and finish != "stop":
+    # 这里显式告警（2026-09-14 真机排查用）。length 已在循环内单独告警，此处不重复。
+    if finish and finish not in ("stop", "length"):
         logger.warning(
             f"call_llm 非正常结束 finish_reason={finish} "
             f"(completion={usage.completion_tokens}/{attempt_tokens})"

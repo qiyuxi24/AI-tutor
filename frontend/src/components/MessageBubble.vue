@@ -31,6 +31,7 @@ const toolIcons = {
   rag_search: '🔍',
   quiz_generate: '📝',
   grade_answer: '✅',
+  mcp__websearch__web_search: '🔎',
 }
 
 function getToolIcon(name) {
@@ -49,6 +50,7 @@ function getToolDisplayName(name) {
     rag_search: '知识检索',
     quiz_generate: '出题检验',
     grade_answer: '判分',
+    mcp__websearch__web_search: '联网搜索',
   }
   return names[name] || name
 }

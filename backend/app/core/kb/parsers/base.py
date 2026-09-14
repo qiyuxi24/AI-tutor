@@ -6,14 +6,28 @@
 - 每个解析器负责一种或多种文件扩展名（can_handle 判定）
 - parse() 接收文件二进制内容，返回纯文本
 - 解析失败不抛异常，返回空文本并记录原因（由调用方决定是否继续）
+- 页标记（PAGE_MARKER_*）：分页文档解析产物的统一约定，见 §页标记
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 logger = logging.getLogger("ai-tutor")
+
+# ── 页标记（统一输出契约）────────────────────────────────────────────
+# 分页文档（PDF 等）逐页输出时在页首插一行 `<<<PAGE n>>>`：
+# - 分块器剥离标记并把页码记入 chunk["page"]（不再污染检索正文）
+# - 交叉校验 / 失败定位 / 增量重跑以此为最小单位（见 docs/RAG_视觉解析策略_调研与实施方案.md §4.6）
+PAGE_MARKER_TMPL = "<<<PAGE {n}>>>"
+PAGE_MARKER_RE = re.compile(r"^<<<PAGE\s+(\d+)>>>\s*$", re.MULTILINE)
+
+
+def page_marker(n: int) -> str:
+    """页标记行文本（解析器产出，分块器消费）"""
+    return PAGE_MARKER_TMPL.format(n=n)
 
 
 class ParseResult:

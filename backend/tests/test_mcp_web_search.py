@@ -25,21 +25,28 @@ def _fake_rows(*_, **__):
 # ── 1. MCP server 本体 ──
 
 def test_search_success_formats_sources(monkeypatch):
-    monkeypatch.setattr(ws, "_search_ddgs", _fake_rows)
+    monkeypatch.setattr(ws, "_search_bing_rss", _fake_rows)
     out = ws.web_search("关键词")
     assert "https://example.com/a" in out and "标题" in out and "摘要内容" in out
 
 
 def test_backend_failure_returns_friendly_text(monkeypatch):
-    def boom(query, max_results):
-        raise RuntimeError("网络不可用")
-    monkeypatch.setattr(ws, "_search_ddgs", boom)
+    def boom(label):
+        def _boom(query, max_results):
+            raise RuntimeError(f"{label} 网络不可用")
+        return _boom
+
+    # 两级后端都挂 → 汇总各级原因返回给模型（不由工具抛异常）
+    monkeypatch.setattr(ws, "_search_bing_rss", boom("bing"))
+    monkeypatch.setattr(ws, "_search_ddgs", boom("ddgs"))
     out = ws.web_search("关键词")
-    assert out.startswith("搜索失败") and "网络不可用" in out
+    assert out.startswith("搜索失败") and "bing 网络不可用" in out and "ddgs 网络不可用" in out
 
 
 def test_empty_query_and_empty_result(monkeypatch):
     assert "关键词为空" in ws.web_search("   ")
+    # 后端都正常但都没结果 → 给「未搜索到」而不是「搜索失败」
+    monkeypatch.setattr(ws, "_search_bing_rss", lambda query, max_results: [])
     monkeypatch.setattr(ws, "_search_ddgs", lambda query, max_results: [])
     assert "未搜索到" in ws.web_search("关键词")
 
@@ -51,30 +58,62 @@ def test_max_results_clamped(monkeypatch):
         seen["n"] = max_results
         return _fake_rows()
 
-    monkeypatch.setattr(ws, "_search_ddgs", fake)
+    monkeypatch.setattr(ws, "_search_bing_rss", fake)
     ws.web_search("关键词", max_results=999)
     assert seen["n"] == ws.MAX_RESULTS_LIMIT
 
 
-def test_ddgs_backend_falls_back_on_first_failure(monkeypatch):
-    """降级链：首个后端抛异常时应继续试下一个（实测多后端组合会整体拉挂）。"""
-    import ddgs
+_RSS = (
+    '<?xml version="1.0" encoding="utf-8"?><rss><channel>'
+    "<item><title>T1</title><link>https://a.example</link>"
+    "<description>d1</description></item>"
+    "<item><title>T2</title><link>https://b.example</link>"
+    "<description>  d2\n 分段 </description></item>"
+    "</channel></rss>"
+).encode("utf-8")
 
-    calls = []
+
+def test_bing_rss_parses_items(monkeypatch):
+    """主后端解析：RSS item → ddgs 同构字段，摘要压空白后渲染。"""
+    import httpx
+
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda url, **kw: SimpleNamespace(raise_for_status=lambda: None, content=_RSS),
+    )
+    out = ws.web_search("关键词", max_results=5)
+    assert "https://a.example" in out and "d1" in out
+    assert "https://b.example" in out and "d2 分段" in out
+
+
+def test_chain_falls_back_to_ddgs_when_bing_fails(monkeypatch):
+    """降级链：Bing RSS 抛异常时应继续试 ddgs。"""
+    def boom(query, max_results):
+        raise RuntimeError("bing 挂了")
+
+    monkeypatch.setattr(ws, "_search_bing_rss", boom)
+    monkeypatch.setattr(ws, "_search_ddgs", _fake_rows)
+    assert "https://example.com/a" in ws.web_search("关键词")
+
+
+def test_ddgs_backend_reports_all_engine_failures(monkeypatch):
+    """ddgs 兜底链：引擎异常要聚合上报（实测多后端组合失败会整体拉挂）。"""
+    import ddgs
 
     class FakeDDGS:
         def __init__(self, **kwargs):
             pass
 
         def text(self, query, backend=None, max_results=None):
-            calls.append(backend)
-            if backend == "auto":
-                raise RuntimeError("auto 挂了")
-            return _fake_rows()
+            raise RuntimeError(f"{backend} 挂了")
 
     monkeypatch.setattr(ddgs, "DDGS", FakeDDGS)
-    rows = ws._search_ddgs("关键词", 3)
-    assert calls == ["auto", "bing"] and rows
+    try:
+        ws._search_ddgs("关键词", 3)
+    except RuntimeError as e:
+        assert "auto" in str(e)
+    else:
+        raise AssertionError("ddgs 全败时应抛异常")
 
 
 def test_searxng_backend_used_when_configured(monkeypatch):
@@ -97,7 +136,7 @@ def test_searxng_backend_used_when_configured(monkeypatch):
 # ── 2. MCP 协议层（in-memory，真实往返）──
 
 def test_protocol_call_via_in_memory_client(monkeypatch):
-    monkeypatch.setattr(ws, "_search_ddgs", _fake_rows)
+    monkeypatch.setattr(ws, "_search_bing_rss", _fake_rows)
     result = mcp_host._run_async(mcp_host._call_tool(ws.mcp, "web_search", {"query": "x"}))
     assert "https://example.com/a" in result.content[0].text
     assert not result.is_error
@@ -122,7 +161,7 @@ def test_tool_merged_into_agent_tools():
 def test_execute_kg_tool_routes_to_mcp(monkeypatch):
     from app.core.agent_tools import execute_kg_tool
 
-    monkeypatch.setattr(ws, "_search_ddgs", _fake_rows)
+    monkeypatch.setattr(ws, "_search_bing_rss", _fake_rows)
     out = execute_kg_tool(_tool_call(TOOL, {"query": "x"}), None)
     assert "https://example.com/a" in out
 

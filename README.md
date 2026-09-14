@@ -238,7 +238,7 @@ npm run dev
 - [Agent Loop 重构设计](docs/AgentLoop_重构设计讨论.md) ｜ [Agent Loop 业界调研](docs/AgentLoop_业界调研与学习路线.md)
 - [知识图谱参照系契约](docs/知识图谱_参照系契约.md) ｜ [知识图谱模块结构调研](docs/知识图谱_模块结构与封装调研.md)
 - [AI 出题逻辑调研](docs/QUIZ_出题逻辑调研.md) ｜ [资源采集设计讨论](docs/教育资料采集模块_设计讨论.md)
-- [Docker 学习路径与工程化部署](docs/Docker_学习路径与工程化部署.md) ｜ [标杆项目对标分析](docs/标杆项目对标分析.md)
+- [Docker 学习路径与工程化部署](docs/Docker_学习路径与工程化部署.md) ｜ [生产上线与日常运营指南](docs/运维_生产上线与日常运营指南.md) ｜ [标杆项目对标分析](docs/标杆项目对标分析.md)
 
 ## 贡献
 

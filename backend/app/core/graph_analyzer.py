@@ -12,11 +12,9 @@
 - 依赖 core/knowledge_graph.py 的 KnowledgeGraph 获取当前图谱信息
 """
 
-import json
-import re
 import logging
 from typing import Optional
-from app.core.llm import call_llm
+from app.core.llm import call_llm, extract_json
 from app.core.error_codes import ErrorCode, log_error, log_info, publish_error_event
 
 logger = logging.getLogger("ai-tutor")
@@ -264,53 +262,13 @@ AI导师：{ai_reply}
 
     def _parse_json_response(self, raw: str) -> dict | None:
         """
-        从 LLM 原始响应中提取 JSON 对象（三策略，按优先级尝试）
+        从 LLM 原始响应中提取 JSON 对象（三策略）。
 
-        策略1：直接解析整个响应
-        策略2：提取 ```json ... ``` 代码块
-        策略3：提取第一个 { ... } 对象
-
-        返回:
-            解析成功的 dict，失败时返回 None
+        实现统一在 `core.llm.json_extract.extract_json`（全库唯一，供
+        graph_generator / quiz.generator 共用）；本方法保留为薄委托，
+        供本模块 3 处调用点使用。
         """
-        result = raw.strip()
-
-        # 策略1：直接解析
-        try:
-            return json.loads(result)
-        except json.JSONDecodeError:
-            pass
-
-        # 策略2：提取 Markdown JSON 代码块
-        code_block_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', result)
-        if code_block_match:
-            try:
-                return json.loads(code_block_match.group(1).strip())
-            except json.JSONDecodeError:
-                pass
-
-        # 策略3：提取第一个完整 { ... } 对象（非贪婪，逐步缩小范围）
-        # 从第一个 '{' 开始，逐步尝试更大的闭包，直到找到合法 JSON
-        first_brace = result.find('{')
-        if first_brace != -1:
-            # 找到匹配的 closing brace（处理嵌套）
-            depth = 0
-            end = -1
-            for i, ch in enumerate(result[first_brace:], first_brace):
-                if ch == '{':
-                    depth += 1
-                elif ch == '}':
-                    depth -= 1
-                    if depth == 0:
-                        end = i
-                        break
-            if end != -1:
-                try:
-                    return json.loads(result[first_brace:end + 1])
-                except json.JSONDecodeError:
-                    pass
-
-        return None
+        return extract_json(raw, "object")
 
     def _parse_response(self, raw: str) -> list[dict]:
         """

@@ -8,14 +8,18 @@
 本项目内则由 core/mcp_host.py 以 **in-memory** 方式连接（同进程、零端口，仍走协议层）。
 
 搜索后端（全开源、零 API key）：
-- 默认 ddgs（MIT）。实测（2026-09-12，本机网络）：'auto' 与 'bing' 可用，返回中文结果
-  1~2 秒；但显式多后端组合（如 'bing,mojeek'）会因单个后端失败而**整体抛异常**，
-  故降级链由本模块自己串（auto → bing）。
+- 主后端 **Bing RSS**（`cn.bing.com/search?format=rss`，stdlib 解析）。实测（2026-09-13，
+  校园网直连）：0.5s 返 10 条，中英文查询均可，是当前唯一稳定可用的入口。
+- 兜底 ddgs（MIT）。**注**：ddgs 9.16 已移除 `bing` 后端，且其剩余引擎
+  （google/duckduckgo/yahoo/brave/wikipedia/startpage/mojeek）在国内网络全部超时
+  （实测 32s 才抛错）→ 降级链首不再放它，只作海外/带代理环境的兜底。
+  显式多后端组合（如 'bing,mojeek'）会因单个后端失败而**整体抛异常**，故链由本模块自串。
 - 环境变量 SEARXNG_URL 配了则优先用自建 SearXNG（AGPL；需在其 settings.yml 中
   开启 JSON 格式：search.formats 加 json）。
 """
 
 import sys
+import xml.etree.ElementTree as ET
 
 from mcp.server import MCPServer
 
@@ -24,7 +28,63 @@ from app.core.config import settings
 DEFAULT_MAX_RESULTS = 5
 MAX_RESULTS_LIMIT = 10
 TIMEOUT_SECONDS = 10  # ponytail: 需按网络调优时再提为配置项
-_DDGS_BACKENDS = ("auto", "bing")  # 降级链，第一个有结果的胜出
+_BING_HOSTS = ("https://cn.bing.com", "https://www.bing.com")  # 依次降级
+_DDGS_BACKENDS = ("auto",)  # 兜底链（单后端：ddgs 多后端组合失败会整体拉挂）
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+def _search_bing_rss(query: str, max_results: int) -> list[dict]:
+    """Bing RSS 搜索（主后端）。返回结构与 ddgs 对齐：title/href/body。"""
+    import httpx
+
+    errors = []
+    for host in _BING_HOSTS:
+        try:
+            resp = httpx.get(
+                f"{host}/search",
+                params={"q": query, "format": "rss", "count": max_results},
+                timeout=TIMEOUT_SECONDS,
+                follow_redirects=True,
+                headers={"User-Agent": _UA},
+            )
+            resp.raise_for_status()
+            items = ET.fromstring(resp.content).findall(".//item")
+            rows = [
+                {"title": (it.findtext("title") or "").strip(),
+                 "href": (it.findtext("link") or "").strip(),
+                 "body": it.findtext("description") or ""}
+                for it in items[:max_results]
+            ]
+            if rows:
+                return rows
+            errors.append(f"{host}: 无结果")
+        except Exception as e:  # 单个镜像失败不该拖垮整次搜索
+            errors.append(f"{host}: {e}")
+    raise RuntimeError("；".join(errors))
+
+
+def _search_web(query: str, max_results: int) -> list[dict]:
+    """搜索总链：Bing RSS → ddgs，逐级降级。
+
+    全部后端都正常但都没结果 → 返回 []（上层给「未搜索到」提示）；
+    有后端报错且无结果 → 抛异常（上层给「搜索失败」+ 各级原因）。
+    """
+    errors, had_error = [], False
+    for label, fn in (("bing", _search_bing_rss), ("ddgs", _search_ddgs)):
+        try:
+            rows = fn(query, max_results)
+        except Exception as e:
+            errors.append(f"{label}: {e}")
+            had_error = True
+            continue
+        if rows:
+            return rows
+        errors.append(f"{label}: 无结果")
+    if not had_error:
+        return []
+    raise RuntimeError("；".join(errors))
+
 
 mcp = MCPServer("web-search")
 
@@ -96,7 +156,7 @@ def web_search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> str:
         rows = (
             _search_searxng(query, limit)
             if settings.searxng_url
-            else _search_ddgs(query, limit)
+            else _search_web(query, limit)
         )
     except Exception as e:  # 工具返回友好文本（本项目约定：不把异常抛给模型）
         return f"搜索失败: {e}。请基于已有知识回答，或稍后再试。"

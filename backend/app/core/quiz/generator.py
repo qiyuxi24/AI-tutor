@@ -19,10 +19,9 @@
 import asyncio
 import json
 import logging
-import re
 from typing import Optional
 
-from app.core.llm import call_llm
+from app.core.llm import call_llm, extract_json
 from app.core.kb.kb_manager import kb_manager
 from app.core.quiz.schema import Question
 from app.core.quiz.quality import filter_questions
@@ -142,38 +141,20 @@ async def _search_materials(user_id: int, subject: str,
 
 
 def _parse_json_array(raw: str) -> Optional[list]:
-    """从 LLM 响应中提取 JSON 数组（多策略）"""
-    result = raw.strip()
-    # 策略1：直接解析
-    try:
-        parsed = json.loads(result)
-        if isinstance(parsed, list):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-    # 策略2：Markdown json 代码块
-    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", result)
-    if m:
-        try:
-            parsed = json.loads(m.group(1).strip())
-            if isinstance(parsed, list):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-    # 策略3：第一个 [ ... ] 数组
-    first = result.find("[")
-    if first != -1:
-        for i in range(len(result) - 1, first, -1):
-            if result[i] == "]":
-                try:
-                    parsed = json.loads(result[first:i + 1])
-                    if isinstance(parsed, list):
-                        return parsed
-                except json.JSONDecodeError:
-                    continue
-    # 策略4（抢救式）：整体解析失败时，把已写完整的单个题目对象逐个挖出来。
-    # M3 偶发提前停止/格式非法（2026-09-14 踩坑），能救几道是几道。
-    # 仅在响应里出现过数组时启用（避免把裸对象 "{}" 误判成"含一道题的数组"）。
+    """从 LLM 响应中提取 JSON 数组（标准三策略 + 抢救式兜底）。
+
+    标准三策略（整段 → 代码块 → 第一个配平括号片段）统一在
+    `core.llm.json_extract.extract_json`（全库唯一实现），本函数只做薄委托；
+    再叠加**抢救式兜底**：整段响应被 max_tokens 截断、标准策略全失败时，
+    把已写完整的单题对象逐个挖出来（M3 偶发提前停止/格式非法，能救几道是
+    几道 —— 2026-09-14 踩坑）。
+    """
+    result = (raw or "").strip()
+    parsed = extract_json(result, "array")
+    if parsed is not None:
+        return parsed
+    # 以下为抢救路径：仅在响应里出现过数组时启用
+    # （避免把裸对象 "{}" 误判成"含一道题的数组"）。
     if "[" not in result:
         return None
     objs: list = []

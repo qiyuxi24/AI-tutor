@@ -82,21 +82,28 @@ def _register_builtin(target: ParserRegistry) -> None:
 _register_builtin(registry)
 
 
-def parse_document(filename: str, content: bytes) -> tuple[str, str]:
+def parse_document(filename: str, content: bytes,
+                   verbose: bool = False) -> "tuple[str, str] | ParseResult":
     """
-    解析文档为纯文本（兼容旧接口签名）。
+    解析文档（门面唯一入口）。
 
     参数:
         filename: 文件名（用于判定扩展名）
         content:  文件二进制内容
+        verbose:  True 时返回完整 `ParseResult`（含 meta：解析方式/页数/OCR 页数/
+                  乱码率等质量信号），供上传链路记录与后续路由；False（默认）
+                  保持旧签名 `(text, ext)` 不变。
 
     返回:
-        (text, ext): 解析出的纯文本 + 小写扩展名（含点）
-        解析失败或格式不支持时 text 为空字符串
+        verbose=False → (text, ext)：解析出的纯文本 + 小写扩展名（含点）
+                        解析失败或格式不支持时 text 为空字符串
+        verbose=True  → ParseResult（ok=False 时 text 为空、error 为原因）
     """
     from pathlib import Path
     ext = Path(filename).suffix.lower()
     result = registry.parse(filename, content)
+    if verbose:
+        return result
     if result.ok:
         return result.text, ext
     # 失败/不支持：返回空文本（保持旧行为），错误记入日志
