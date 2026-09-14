@@ -50,10 +50,10 @@ api/v1/chat.py ──► services/chat_service.py ──编排──► core/age
 | `backend/app/core/agent_events.py` | 事件发射中间件：run_id 注入 + per-user 路由（agent_loop 对 event_bus 的唯一入口） |
 | `backend/app/core/context_guard.py` | 发送前预算守卫：run_agent_loop 入口一次性丢最旧历史（chat_service 调用） |
 | `backend/app/core/llm/` | **LLM 原语包**（自旧 llm_client.py 拆）：clients（client/embed_client/备用单例）、embed（**embed_texts 嵌入唯一出口**，kb/rag 共用）、messages、thinking（MiniMax 适配）、retry、fallback（chat_create 唯一出口）、call（call_llm） |
-| `backend/app/core/agent_tools.py` | **工具系统唯一注册表**：8 个原生工具 spec + 薄壳 handler + `KG_TOOLS` / `execute_kg_tool` 分发；末尾追加 MCP 工具 |
+| `backend/app/core/agent_tools.py` | **工具系统唯一注册表**：9 个原生工具 spec + 薄壳 handler + `KG_TOOLS` / `execute_kg_tool` 分发；末尾追加 MCP 工具 |
 | `backend/app/core/mcp_host.py` | **MCP 宿主层**：连 MCP server → `tools/list` → 生成同构 spec 并入注册表（schema 直通不重复维护）；in-memory 传输 + 同步桥 + 失败降级为空 |
 | `backend/app/mcp_servers/web_search.py` | **网页搜索 MCP server**（标准协议，可独立运行）：工具 `web_search`，后端 ddgs（默认）/ SearXNG；stdio + Streamable HTTP |
-| `backend/app/core/rag_tool.py` / `web_tool.py` | 工具重型实现（MCP 风格纯函数）：RAG 检索 `rag_search` / 网页抓取 `fetch_webpage` |
+| `backend/app/core/rag_tool.py` / `web_tool.py` / `download_tool.py` | 工具重型实现（MCP 风格纯函数）：RAG 检索 `rag_search` / 网页抓取 `fetch_webpage`（只读） / 资源下载入库 `download_resource`（SSRF 复用 web_tool） |
 | `backend/app/core/agent_run_store.py` | agent_runs 表（运行记录**唯一事实源**，写/查/清理/统计） |
 | `backend/app/core/event_bus.py` | 进程内 per-user 发布订阅 → SSE |
 | `backend/app/core/token_counter.py` | `TokenUsage` / `count_messages_tokens` / `extract_usage`（token 计量唯一事实） |
@@ -220,7 +220,7 @@ run_agent_loop(user_id=uid)
 
 ## 4. 工具系统：如何新增一个工具
 
-**当前 9 个工具**：原生 8 个 —— `add_knowledge_node` / `update_node_content` / `update_mastery` / `add_edge` / `delete_node` / `update_user_profile` / `fetch_webpage` / `rag_search`（其中 `add_knowledge_node` 支持模型自报 `subject`/`board`，缺的部分由 `core/kg_taxonomy.py` 自动判定）；**MCP 1 个** —— `mcp__websearch__web_search`（联网搜索，server 源码 `app/mcp_servers/web_search.py`，宿主层 `core/mcp_host.py`）。
+**当前 10 个工具**：原生 9 个 —— `add_knowledge_node` / `update_node_content` / `update_mastery` / `add_edge` / `delete_node` / `update_user_profile` / `fetch_webpage`（只读网页正文）/ `download_resource`（下载文档/电子书入库知识库） / `rag_search`（其中 `add_knowledge_node` 支持模型自报 `subject`/`board`，缺的部分由 `core/kg_taxonomy.py` 自动判定）；**MCP 1 个** —— `mcp__websearch__web_search`（联网搜索，server 源码 `app/mcp_servers/web_search.py`，宿主层 `core/mcp_host.py`）。
 
 **注册唯一入口**：`core/agent_tools.py` 的 `_TOOL_SPECS` 注册表（MCP/OpenAI function-calling 同构）。图谱/画像工具 handler 即薄壳在此；重型实现放领域模块（`web_tool.py` / `rag_tool.py`）被 handler 引用。
 
@@ -254,4 +254,6 @@ run_agent_loop(user_id=uid)
 | `docs/token_consumption_prediction_research.md` | token 预估三层策略 |
 | `docs/RAG_*.md`、`QUIZ_出题逻辑调研.md` | RAG/出题设计 |
 | `docs/MCP_网页搜索工具_调研与实施方案.md` | MCP 网页搜索：协议/生态调研 + 实测数据 + 分期实施记录 |
+| `docs/Docker_学习路径与工程化部署.md` | Docker 原理与学习路径（入门，非运维） |
+| `docs/运维_生产上线与日常运营指南.md` | **上线后运营手册**：网关/SSE/证书、Linux 服务器运维、镜像治理、发布回滚备份、监控告警、排障表、真实事故复盘、上线检查清单 |
 | `backend/app/core/*.py` docstring | 模块级最新契约（代码优先于文档） |

@@ -29,6 +29,7 @@ const toolIcons = {
   update_user_profile: '👤',
   fetch_webpage: '🌐',
   rag_search: '🔍',
+  mcp__websearch__web_search: '🔎',
 }
 
 function getToolIcon(name) {
@@ -45,6 +46,7 @@ function getToolDisplayName(name) {
     update_user_profile: '更新画像',
     fetch_webpage: '抓取网页',
     rag_search: '知识检索',
+    mcp__websearch__web_search: '联网搜索',
   }
   return names[name] || name
 }

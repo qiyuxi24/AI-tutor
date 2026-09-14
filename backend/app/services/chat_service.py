@@ -50,6 +50,7 @@ TOOL_CAPABILITY_PROMPT = """
 - **创建关联** → 调用 `add_edge`
 - **更新用户画像** → 调用 `update_user_profile`
 - **查询网页** → 调用 `fetch_webpage`（抓取网页正文，获取实时/外部信息）
+- **下载资源** → 调用 `download_resource`（把公网上可直接下载的文档/电子书存入知识库，之后可被 `rag_search` 检索；只临时看网页正文用 `fetch_webpage`）
 - **检索知识** → 调用 `rag_search`（从知识图谱/上传知识库中检索与某话题最相关的内容片段，补充教学依据）
 - **联网搜索** → 调用 `mcp__websearch__web_search`（互联网搜索，返回标题/链接/摘要。知识库和图谱里都没有、或需要最新信息时才用）
 

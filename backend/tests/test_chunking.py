@@ -1,7 +1,8 @@
 """分块器单元测试：chunk_text / _split_paragraph_by_chars / _extract_heading
 
 覆盖：空文本、短文本整块保留、多段落合并、超长段落滑窗、重叠保证、
-heading 摘要提取、chunk_index 连续性。
+heading 摘要提取、chunk_index 连续性，以及结构化输入（页标记 / Markdown 标题 /
+电子书章节行）的页码与真实标题消费。
 """
 import pytest
 
@@ -88,3 +89,57 @@ def test_extract_heading_first_line():
 
 def test_extract_heading_truncated():
     assert _extract_heading("x" * 100) == "x" * 30
+
+
+# ── 结构化输入：页标记（PDF 解析产物）────────────────────────
+
+def test_page_marker_stripped_and_page_recorded():
+    """页标记不进检索正文，页码记入 chunk["page"]"""
+    text = "<<<PAGE 1>>>\n\n第一页正文。\n\n<<<PAGE 2>>>\n\n第二页正文。"
+    chunks = chunk_text(text, chunk_size=500)
+
+    assert len(chunks) == 1  # 短文本合为一块，页标记本身不产出段落
+    assert "<<<PAGE" not in chunks[0]["content"]
+    assert "第一页正文。" in chunks[0]["content"]
+    assert chunks[0]["page"] == 1  # 起始页
+
+
+def test_chunks_without_marker_have_none_page():
+    """纯文本（无页标记）→ page=None，行为与旧实现一致"""
+    chunks = chunk_text("普通文本。\n\n第二段。", chunk_size=500)
+    assert chunks[0]["page"] is None
+
+
+# ── 结构化输入：真实标题 ────────────────────────────────────
+
+def test_markdown_heading_becomes_chunk_heading():
+    """Markdown 标题：heading 取真实标题，且标题=分块边界（一块不跨小节）"""
+    text = "## 2.3 二叉树的遍历\n\n" + "前序遍历。\n\n" + "## 2.4 层序遍历\n\n层序遍历。"
+    chunks = chunk_text(text, chunk_size=500)
+
+    assert [c["heading"] for c in chunks] == ["2.3 二叉树的遍历", "2.4 层序遍历"]
+    assert chunks[0]["content"].startswith("## 2.3 二叉树的遍历")
+    assert "层序遍历" not in chunks[0]["content"]
+
+
+def test_nested_heading_uses_path():
+    """多级标题：heading 取层级路径（保留小节上下文）"""
+    text = "# 第2章 树\n\n## 2.3 遍历\n\n正文。"
+    chunks = chunk_text(text, chunk_size=500)
+
+    assert chunks[-1]["heading"] == "第2章 树 / 2.3 遍历"
+
+
+def test_book_chapter_line_is_heading():
+    """电子书章节行（book.py 产物）同样被识别为标题"""
+    text = "【第 1 章：绪论】\n\n" + "教材正文。"
+    chunks = chunk_text(text, chunk_size=500)
+
+    assert chunks[0]["heading"] == "【第 1 章：绪论】"
+
+
+def test_plain_text_heading_falls_back_to_first_line():
+    """无标题结构时回退为「首行前 30 字」（旧行为不变）"""
+    chunks = chunk_text("队列定义。\n\n" + "内容" * 300, chunk_size=200, overlap=20)
+    assert chunks[0]["heading"].startswith("队列定义")
+

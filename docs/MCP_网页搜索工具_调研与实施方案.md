@@ -358,4 +358,34 @@ docker compose up -d
 ```
 
 > 验证：`curl "http://localhost:8888/search?q=test&format=json"` 应返回 JSON。
+
+### 9.6 搜索后端切换：ddgs → Bing RSS（2026-09-13）
+
+**现象**：对话中模型**确实调用了** `mcp__websearch__web_search`（`agent_runs.evidence` 可查），但每次返回失败，模型只能回"搜索工具现在不稳定，几次都超时了"——**用户感知为"工具调不起来"，实际是工具调用成功、后端取数全败**。
+
+**根因（两层，均为实测）**：
+
+1. **ddgs 9.16 已移除 `bing` 后端**。`_DDGS_BACKENDS = ("auto", "bing")` 的第二级必然抛
+   `bing - backends do not exist or are disabled. Available: brave, duckduckgo, google, grokipedia, mojeek, startpage, wikipedia, yahoo`
+   → 第一级失败时**没有任何有效兜底**。（§9.4 记录 `bing` 可用是 9-12 的事实，版本/环境已变。）
+2. **ddgs 剩余引擎在当前网络全部不可达**：逐引擎实测（2026-09-13，校园网直连、系统代理已关）google/ddg/yahoo/brave/wikipedia/startpage 均 8s 超时，mojeek 403，`auto` 需 **32s 才抛错**。而 §9.4 记录的"primp 可绕过 UA 拦截"当日不再成立。
+
+| 入口 | 实测结果 |
+|---|---|
+| `cn.bing.com/search?format=rss` | **200 / 0.5s / 10 条**（中英文均可，唯一稳定入口）|
+| `cn.bing.com/search`（HTML `b_algo`） | 200 / 0.4s，**结果与 RSS 完全一致**（同一 SERP 的两种序列化）|
+| ddgs `auto` | 32s 后抛 TimeoutException |
+| ddgs 其余单引擎 | 8s 超时 / 403 |
+
+**修复**（`app/mcp_servers/web_search.py`，改动最小化）：
+
+- 新增主后端 `_search_bing_rss()`：`cn.bing.com` → `www.bing.com` 依次降级，`xml.etree.ElementTree`（stdlib）解析，零新依赖；输出结构与 ddgs 对齐（title/href/body），`_format` 复用不变。
+- 新增总链 `_search_web()`：`Bing RSS → ddgs`；**全后端正常但无结果 → 返回 `[]`**（保留原「未搜索到」提示语义），有报错且无结果 → 抛异常并汇总各级原因。
+- `_DDGS_BACKENDS` 收敛为 `("auto",)`（不存在的 `bing` 已删），ddgs 降级为海外/带代理环境的兜底。
+- 优先序不变：`SEARXNG_URL` 配了仍最优先。
+- 前端 `MessageBubble.vue` 工具图标/名称映射补 `mcp__websearch__web_search`（原先落到 fallback，显示原始英文名）。
+
+**验证**：`backend/tests/test_mcp_web_search.py` **14 passed**（新增 RSS 解析、链式降级、ddgs 异常聚合 3 例；原用例改 patch `_search_bing_rss` 以避免离线测试打网络）；离线全量 **562 passed**；真实链路 `run_mcp_tool` 实测 **0.5s** 返回 3 条中文结果。
+
+> 遗留：`cn.bing.com` 对多关键词长查询的相关性偏松（同一 SERP 的 HTML 入口同样如此，非 RSS 序列化导致），无 key 方案下暂可接受；必要时再评估搜索 API。
 > ⚠️ 受限网络下还需给容器配 `HTTP_PROXY/HTTPS_PROXY`（指向宿主机代理）并调整 `settings.yml` 的 `outgoing` 段 —— 否则容器内引擎同样连不出去。

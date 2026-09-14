@@ -28,6 +28,7 @@ from typing import Optional
 from app.core.llm import embed_texts    # 嵌入唯一出口：llm/embed.py（模型名/截断/失败兜底集中一处）
 from app.core.kb.kb_store import KbStore
 from app.core.kb.doc_vector_store import DocVectorStore
+from app.core.kb.parsers.base import PAGE_MARKER_RE   # 页标记契约唯一来源（parsers/base.py）
 from app.core.hybrid_search.whoosh_index import SparseIndex
 from app.core.hybrid_search.fusion import rrf_fuse
 
@@ -51,43 +52,125 @@ PARENT_MAX_BLOCKS = 8        # 最多拼接的相邻块数（防止极端长文�
 _KB_DIR = Path(__file__).parent.parent.parent.parent / "data" / "kb"
 
 
+# 标题行识别：Markdown ATX 标题、电子书章节行（book.py 产物「【第 N 章：标题】」）
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*)$")
+_BOOK_CHAPTER_RE = re.compile(r"^【第\s*\d+\s*章[:：].*】$")
+
+
+def _match_heading(line: str) -> Optional[tuple[int, str]]:
+    """识别标题行 → (层级, 标题文本)；非标题返回 None"""
+    s = line.strip()
+    m = _MD_HEADING_RE.match(s)
+    if m:
+        return len(m.group(1)), m.group(2).strip()
+    if _BOOK_CHAPTER_RE.match(s):
+        return 1, s
+    return None
+
+
+def _iter_paragraphs(text: str) -> list[tuple[str, Optional[int], tuple[str, ...], bool]]:
+    """
+    按「连续非空行」切段，同时跟踪页标记与标题层级。
+
+    产出: [(段落文本, 页码 or None, 标题层级路径, 是否标题行), ...]
+    页标记行（`<<<PAGE n>>>`）不产出段落，只更新当前页码 —— 标记不进检索正文。
+    """
+    page: Optional[int] = None
+    path: tuple[str, ...] = ()
+    stack: list[tuple[int, str]] = []   # 标题栈 (层级, 标题)，用于生成层级路径
+    buf: list[str] = []
+    out: list[tuple[str, Optional[int], tuple[str, ...], bool]] = []
+
+    def flush() -> None:
+        nonlocal buf
+        para = "\n".join(buf).strip()
+        buf = []
+        if para:
+            out.append((para, page, path, False))
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            flush()
+            continue
+        marker = PAGE_MARKER_RE.match(line.strip())
+        if marker:
+            flush()
+            page = int(marker.group(1))
+            continue
+        heading = _match_heading(line)
+        if heading:
+            flush()
+            level, title = heading
+            while stack and stack[-1][0] >= level:   # 同级或更深的标题出栈
+                stack.pop()
+            stack.append((level, title))
+            path = tuple(t for _, t in stack)
+            out.append((line.strip(), page, path, True))
+            continue
+        buf.append(line)
+    flush()
+    return out
+
+
+def _make_chunk(content: str, page: Optional[int],
+                path: tuple[str, ...]) -> dict:
+    """构造分块字典：heading 优先取真实标题（层级路径），否则回退首句摘要"""
+    return {
+        "content": content,
+        "heading": " / ".join(path) if path else _extract_heading(content),
+        "chunk_index": 0,
+        "page": page,
+    }
+
+
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE,
                overlap: int = CHUNK_OVERLAP) -> list[dict]:
     """
     通用文本分块（按段落优先，超长按字符滑窗）。
 
+    结构信息（2026-09-13 增强，零额外依赖）：
+    - 页标记 `<<<PAGE n>>>` 被剥离，块**起始页**记入 chunk["page"]（不再污染检索正文）；
+      （页不是分块边界，故跨页块记的是起页）
+    - Markdown 标题 / 电子书章节行作为**分块边界**，chunk["heading"] 取真实标题
+      （层级路径），不再取「首行前 30 字」；
+    - 纯文本（无标记、无标题）行为与旧实现一致。
+
     返回:
-        [{content, heading, chunk_index}, ...]
-        heading 尽量取所在段落首句前 30 字作为摘要
+        [{content, heading, chunk_index, page}, ...]
     """
     text = text.strip()
     if not text:
         return []
 
-    # 按段落（连续非空行）切分
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-
     chunks: list[dict] = []
     current = ""
-    for para in paragraphs:
-        if len(current) + len(para) > chunk_size and current:
-            chunks.extend(_split_paragraph_by_chars(current, chunk_size, overlap))
-            current = para
-        else:
-            current += ("\n\n" + para if current else para)
+    cur_page: Optional[int] = None
+    cur_path: tuple[str, ...] = ()
 
-    if current:
-        chunks.extend(_split_paragraph_by_chars(current, chunk_size, overlap))
+    def flush() -> None:
+        nonlocal current
+        body = current.strip()
+        current = ""
+        if not body:
+            return
+        for piece in _split_paragraph_by_chars(body, chunk_size, overlap):
+            piece = piece.strip()
+            if piece:
+                chunks.append(_make_chunk(piece, cur_page, cur_path))
 
-    # 添加 heading 和 chunk_index
-    result = []
+    for para, page, path, is_heading in _iter_paragraphs(text):
+        # 标题是结构边界（新的小节另起一块）；超长则按字符滑窗另起
+        if current and (is_heading or len(current) + len(para) > chunk_size):
+            flush()
+        if not current:
+            cur_page, cur_path = page, path
+        current += ("\n\n" + para if current else para)
+
+    flush()
     for i, c in enumerate(chunks):
-        result.append({
-            "content": c,
-            "heading": _extract_heading(c),
-            "chunk_index": i,
-        })
-    return result
+        c["chunk_index"] = i
+    return chunks
 
 
 def _split_paragraph_by_chars(text: str, chunk_size: int, overlap: int) -> list[str]:
@@ -179,7 +262,17 @@ class KbManager:
                 f"不支持的文件格式: {ext}，当前支持 {supported_label()}"
             )
 
-        text, _ = parse_document(filename, content)
+        # verbose=True 取回完整 ParseResult：meta 记录解析方式/页数/OCR 页数/乱码率
+        # （解析契约见 parsers/base.py 与 docs/RAG_视觉解析策略_调研与实施方案.md §4.6）
+        parsed = parse_document(filename, content, verbose=True)
+        text = parsed.text
+        if parsed.meta:
+            logger.info(f"解析 {filename} 完成: {parsed.meta}")
+
+        # 解析器明确报错且无文本（如损坏文件/DRM 电子书）→ 回传真实原因而非「文本过短」
+        if not parsed.ok and not text.strip():
+            raise ValueError(f"文档解析失败: {parsed.error}")
+
         # B2.3 入库文本质量下限：解析文本过短（< 200 字符）视为「图片型/不可解析」，不入库
         if len(text.strip()) < MIN_PARSE_TEXT_LEN:
             logger.warning(

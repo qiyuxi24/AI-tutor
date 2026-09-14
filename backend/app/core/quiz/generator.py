@@ -14,12 +14,10 @@
 - 知识库中的例题/真题本身就是天然的"母题"素材
 """
 
-import json
 import logging
-import re
 from typing import Optional
 
-from app.core.llm import call_llm
+from app.core.llm import call_llm, extract_json
 from app.core.kb.kb_manager import kb_manager
 from app.core.quiz.schema import Question
 from app.core.quiz.quality import filter_questions
@@ -116,36 +114,12 @@ async def _search_materials(user_id: int, subject: str,
 
 
 def _parse_json_array(raw: str) -> Optional[list]:
-    """从 LLM 响应中提取 JSON 数组（多策略）"""
-    result = raw.strip()
-    # 策略1：直接解析
-    try:
-        parsed = json.loads(result)
-        if isinstance(parsed, list):
-            return parsed
-    except json.JSONDecodeError:
-        pass
-    # 策略2：Markdown json 代码块
-    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", result)
-    if m:
-        try:
-            parsed = json.loads(m.group(1).strip())
-            if isinstance(parsed, list):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-    # 策略3：第一个 [ ... ] 数组
-    first = result.find("[")
-    if first != -1:
-        for i in range(len(result) - 1, first, -1):
-            if result[i] == "]":
-                try:
-                    parsed = json.loads(result[first:i + 1])
-                    if isinstance(parsed, list):
-                        return parsed
-                except json.JSONDecodeError:
-                    continue
-    return None
+    """从 LLM 响应中提取 JSON 数组。
+
+    实现统一在 `core.llm.json_extract.extract_json`（全库唯一）；保留本函数名
+    作为薄委托（既有测试与调用点依赖）。
+    """
+    return extract_json(raw, "array")
 
 
 async def generate_quiz(

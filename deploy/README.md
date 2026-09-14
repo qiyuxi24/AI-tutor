@@ -40,6 +40,11 @@ Copy-Item .env.example .env
 # 2. 构建并启动（首次构建较慢，需下载依赖）
 docker compose up -d --build
 
+# 也可用仓库根目录的一键脚本：自动判断要不要重建、等健康检查、打印访问地址
+#   .\start-docker.ps1            日常（仅当源码比镜像新才重建）
+#   .\start-docker.ps1 -Force     强制重建
+#   .\start-docker.ps1 -Port 8081 换端口
+
 # 3. 验证
 docker compose ps                    # 状态应为 healthy
 curl http://localhost:8080/api/health
