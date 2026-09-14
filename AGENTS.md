@@ -32,7 +32,7 @@ api/v1/chat.py ──► services/chat_service.py ──编排──► core/age
                      ▼                                                  ▼
         core/llm/(LLM 原语包)  +  agent_tools.py(工具)  core/agent_run_store.py(唯一事实源落库)
            chat_create/call_llm/embed_client                 ▲  token_estimator.py(读历史)
-           KG_TOOLS / execute_kg_tool                       │
+           KG_TOOLS / execute_kg_tool(_async)               │
            (rag/web 重型实现在 rag_tool/web_tool)           │
                      │                              │
                      ▼                              ▼
@@ -50,7 +50,8 @@ api/v1/chat.py ──► services/chat_service.py ──编排──► core/age
 | `backend/app/core/agent_events.py` | 事件发射中间件：run_id 注入 + per-user 路由（agent_loop 对 event_bus 的唯一入口） |
 | `backend/app/core/context_guard.py` | 发送前预算守卫：run_agent_loop 入口一次性丢最旧历史（chat_service 调用） |
 | `backend/app/core/llm/` | **LLM 原语包**（自旧 llm_client.py 拆）：clients（client/embed_client/备用单例）、embed（**embed_texts 嵌入唯一出口**，kb/rag 共用）、messages、thinking（MiniMax 适配）、retry、fallback（chat_create 唯一出口）、call（call_llm） |
-| `backend/app/core/agent_tools.py` | **工具系统唯一注册表**：8 个原生工具 spec + 薄壳 handler + `KG_TOOLS` / `execute_kg_tool` 分发；末尾追加 MCP 工具 |
+| `backend/app/core/agent_tools.py` | **工具系统唯一注册表**：10 个原生工具 spec + 薄壳 handler + `KG_TOOLS` / `execute_kg_tool(_async)` 分发；末尾追加 MCP 工具 |
+| `backend/app/core/quiz/chat_quiz.py` | **对话内出题（P0）**：后台异步出题 → 入库(`source="chat"`) → 推 `quiz_ready`；判分后答对确定性抬升 mastery |
 | `backend/app/core/mcp_host.py` | **MCP 宿主层**：连 MCP server → `tools/list` → 生成同构 spec 并入注册表（schema 直通不重复维护）；in-memory 传输 + 同步桥 + 失败降级为空 |
 | `backend/app/mcp_servers/web_search.py` | **网页搜索 MCP server**（标准协议，可独立运行）：工具 `web_search`，后端 ddgs（默认）/ SearXNG；stdio + Streamable HTTP |
 | `backend/app/core/rag_tool.py` / `web_tool.py` | 工具重型实现（MCP 风格纯函数）：RAG 检索 `rag_search` / 网页抓取 `fetch_webpage` |
@@ -132,6 +133,20 @@ api/v1/chat.py ──► services/chat_service.py ──编排──► core/age
 ### 2.7 出题（quiz）
 `POST /quiz/generate`、`GET /quiz/questions`、`GET /quiz/questions/{id}`、`POST /quiz/{id}/grade`、`GET /quiz/stats`
 
+**对话内出题（P0，2026-09-14）** 走 agent 工具而非 REST：`quiz_generate`（后台异步出 1 道客观题）
+→ `quiz_ready` SSE 事件 → 学生作答 → `grade_answer`（规则判分，答对自动 +20 掌握度）。
+详见 `core/quiz/chat_quiz.py`；端到端冒烟 `scripts/smoke_chat_quiz.py`。
+
+**掌握度更新的唯一主信号 = 出题判分（①，2026-09-14）**：
+- 实测 `update_mastery` 工具**从未被 AI 调用过**（12 次运行 0 次）—— "当用户正确回答/理解后适当调整"
+  是不可执行的软约束（苏格拉底教学里"学生在回答我"是每轮常态，模型分不清答对小题 vs 掌握知识点）。
+- 已改造：掌握度由 `grade_answer` **确定性**更新（答对 +20）；`update_mastery` 收敛为仅限 3 种硬证据。
+- **提示词坑**：只写"学生表示理解 → 出题"**无效**，模型会继续苏格拉底追问而不调工具；
+  必须提成**铁律级**并写明"**不要**用追问代替出题"（对立表述）。
+  → 触发类提示词必须写清"不要做什么"，否则会被更强的既有教学原则盖过。
+- 出题必须**跨调用去重**（`generate_quiz(avoid_questions=…)`）：否则学生重答同一道题就能刷掌握度。
+- 验证：`scripts/smoke_chat_quiz.py --simulate "学生发言"`（打印真实工具调用序列）。
+
 ### 2.8 资料采集（collector）
 `POST /collector/search`、`POST /collector/tasks`、`GET /collector/tasks/{id}`、`POST /collector/tasks/{id}/cancel`、`GET /collector/stats`
 
@@ -193,6 +208,18 @@ run_agent_loop(user_id=uid)
 
 **注意**：`chat_service._consume_agent_events` 是白名单 if/elif **无 else** —— 新增事件类型会被静默丢弃，需同步加透传。
 
+**常驻长连接事件（非 /chat/stream）**：`GET /knowledge/events`（前端 `EventSource`，登录后一直连着）。
+2026-09-14 起该端点改为 `subscribe(user_id=...)`（原来全局队列）。
+
+| type | payload 关键字段 | 说明 |
+|---|---|---|
+| `graph_updated` | — | 图谱变更通知刷新（全局广播，每个用户队列都会收到） |
+| `quiz_ready` | `{ok, node_id, subject, questions[], message?}` | **对话内出题完成**（后台任务约 4~40s 后到达）。`questions` 载荷**刻意不含 answer/analysis**（防作弊）；`ok=false` 时带 `message` |
+| `error` | `{code, message, module, detail}` | 错误 |
+
+> ⚠️ `publish(..., user_id=X)` 只在 X 的队列**已存在**时投递，否则静默丢弃 ——
+> 后台任务推事件前，用户必须已连上 `/knowledge/events`（或刚跑过 /chat/stream）。
+
 ### 3.5 agent_runs 表与存储 API（core/agent_run_store.py）
 表：`agent_runs`（run_id PK / user_id / status / started_at / ended_at / total_llm_calls / context_tokens / token_usage JSON / estimated_prompt_tokens / final_text / evidence JSON）。
 
@@ -209,30 +236,58 @@ run_agent_loop(user_id=uid)
 1. **~~core→api 反向依赖~~（2026-09-08 已解决）**：`create_node_from_ai`/`apply_suggestion`/`load_suggestions`/`save_suggestions` 四个纯业务函数已下沉到新模块 `core/knowledge_writer.py`（AI 写图谱层），`agent_tools._h_add_node` 与 `chat_service` 改从 core 导入；api 层原定义与 json/Path 无用 import 已删除。
 2. **~~私有符号跨模块~~（2026-09-08 拆分已解决）**：原 `agent_loop` import `llm_client` 的 5 个下划线成员，已随 `core/llm/` 包化收敛为**公开契约**（`chat_create`/`build_api_messages`/`strip_think_tags`/`LLM_EXTRA_BODY`/`MODEL_NAME`）。agent_loop 用别名保持命名（`import chat_create as _chat_create`），不再触碰私有符号。
 3. **~~llm_client 上帝模块~~（2026-09-08 已拆，718 行归零）**：按职责拆为 `core/llm/` 原语包（clients/thinking/messages/retry/fallback/call）+ `core/agent_tools.py`（注册表+分发）+ `core/rag_tool.py`/`core/web_tool.py`（重型实现）。文件已删，全库零残留引用。
-4. **同步↔异步两层线程池（仍在，位置更新）**：agent_loop 用 `asyncio.to_thread` → `agent_tools.execute_kg_tool`（同步）→ `rag_tool.rag_search` 内部又用 `_run_async` + 线程池起新 loop。`_run_async` 现随 rag_tool 私有。
+4. **同步↔异步线程池（2026-09-14 起为"双入口"）**：agent_loop 调 `agent_tools.execute_kg_tool_async` ——
+   **协程 handler 直接 await**，同步 handler 仍走 `asyncio.to_thread` → 其内部 `rag_tool.rag_search` 再用 `_run_async` + 线程池起新 loop（`_run_async` 随 rag_tool 私有）。
+   同步入口 `execute_kg_tool` 保留给测试/非 async 调用方，**无法执行协程 handler**。
+   为什么必须有异步入口：`asyncio.to_thread` 的工作线程里没有运行中的事件循环，工具内无法
+   `create_task`（如后台出题）；也不能退回 `asyncio.run` —— `llm/clients.py` 的 AsyncOpenAI 单例
+   在模块导入时创建，跨事件循环复用会报 "Event loop is closed"。
 5. ~~工具注册 3 处分散~~（2026-09-08 已收敛）：`agent_tools._TOOL_SPECS` 注册表（name/description/parameters/handler）为唯一注册入口；`KG_TOOLS`（模型 tools 参数）与 `execute_kg_tool`（分发）均由注册表生成/查表驱动。`chat_service.TOOL_CAPABILITY_PROMPT` 保留为教学触发语义层（与注册表有意分离）。
    **2026-09-12 更新（MCP 已引入）**：`core/mcp_host.py` 在 import 时调用 `mcp_tool_specs()`，把 MCP `tools/list` 的 name/description/inputSchema 原样转成注册表 spec（含闭包 handler）后 `_TOOL_SPECS.extend(...)`。故：注册表仍是唯一入口，**执行侧与模型侧零改动**；MCP 工具名前缀 `mcp__<server>__<tool>`；未装 mcp 包 / 连接失败 / `WEB_SEARCH_ENABLED=false` 时返回 `[]` 静默降级（原生工具行为不变）。新增 MCP server = 在 `mcp_host._SERVERS` 加 `(前缀, 模块路径)`。
-6. **messages 双形（dict/Pydantic）兼容不全**：`_build_api_messages`/`estimate_single_call` 兼容两者，但 `token_estimator._predict_completion_features` 只读 dict。
-7. **token 指标冗余**：`AgentRunResult`/`agent_runs` 表同时保留 `context_tokens` + `token_usage`（前者可由后者推导，向后兼容保留）。
-8. **双记录并存**：conversations 消息内嵌 thinking/tools 字段（前端 MessageBubble 在消费）vs agent_runs.evidence —— 前端回源需知道两处；未来统一方向以 agent_runs 为回放源。
+   **2026-09-14 更新（异步 handler）**：spec 新增可选 `timeout_secs`（单工具超时覆盖，None=用
+   agent_loop 默认 60s）；handler 可以是 `async def`（由 `execute_kg_tool_async` 直接 await）。
+   该字段**不出现在 `KG_TOOLS`**（模型侧 schema 不变）。
+
+6. **`/knowledge/events` 用户队列的两个陷阱（2026-09-14 修）**：
+   - 该端点原用 `subscribe()`（全局队列），收不到 `publish(user_id=...)` 的 per-user 事件 → 已改 `subscribe(user_id=...)`。
+   - `event_bus._cleanup_stale_queues` 会按 TTL 清"空闲"队列，但长连接只在建立时调用一次
+     `_get_user_queue`，不刷新访问时间 → 队列被清掉后订阅者仍在 await 那个已移除的对象，
+     从此**永久收不到事件**。已加 `_active_subs` 计数保护（有活跃订阅者的队列不清理）。
+7. **messages 双形（dict/Pydantic）兼容不全**：`_build_api_messages`/`estimate_single_call` 兼容两者，但 `token_estimator._predict_completion_features` 只读 dict。
+8. **token 指标冗余**：`AgentRunResult`/`agent_runs` 表同时保留 `context_tokens` + `token_usage`（前者可由后者推导，向后兼容保留）。
+9. **双记录并存**：conversations 消息内嵌 thinking/tools 字段（前端 MessageBubble 在消费）vs agent_runs.evidence —— 前端回源需知道两处；未来统一方向以 agent_runs 为回放源。
+10. **🔴 Jinja2 占位符必须是双花括号（2026-09-14 修，排查成本极高）**：
+   `data/prompts/system_prompt_common.j2` 曾把占位符写成**单花括号** `{knowledge_graph_summary}`
+   / `{user_profile}` —— Jinja2 只认 `{{ }}`，单括号是**字面文本**，渲染时原样输出，
+   **不报错、不告警**。后果：adaptive / free_talk 模式下 AI **完全看不到知识图谱与学生画像**
+   （57 个节点 id 在 prompt 里命中 0 个），「框架约束」整段形同虚设。
+   该 bug 曾被误判为"模型幻觉"（AI 说"你的图谱可能是空的"）并被 `EMPTY_GRAPH_PROMPT` 打补丁掩盖；
+   甚至 `tests/test_prompt_loader.py` 把它当成"预期行为"锁死。
+   → 改模板/加载器后，**必须断言"值被注入"，而不是"占位符名字出现"**。
+   → 诊断：`backend/scripts/probe_graph_prompt.py`（节点 id 命中数应等于节点总数）。
+   ⚠️ 注入后系统提示词约 14.4k tokens（57 节点），注意 `LLM_CTX_BUDGET`（默认 32000）留给历史的余量。
 
 ---
 
 ## 4. 工具系统：如何新增一个工具
 
-**当前 9 个工具**：原生 8 个 —— `add_knowledge_node` / `update_node_content` / `update_mastery` / `add_edge` / `delete_node` / `update_user_profile` / `fetch_webpage` / `rag_search`（其中 `add_knowledge_node` 支持模型自报 `subject`/`board`，缺的部分由 `core/kg_taxonomy.py` 自动判定）；**MCP 1 个** —— `mcp__websearch__web_search`（联网搜索，server 源码 `app/mcp_servers/web_search.py`，宿主层 `core/mcp_host.py`）。
+**当前 11 个工具**：原生 10 个 —— `add_knowledge_node` / `update_node_content` / `update_mastery` / `add_edge` / `delete_node` / `update_user_profile` / `fetch_webpage` / `rag_search` / `quiz_generate` / `grade_answer`（其中 `add_knowledge_node` 支持模型自报 `subject`/`board`，缺的部分由 `core/kg_taxonomy.py` 自动判定）；**MCP 1 个** —— `mcp__websearch__web_search`（联网搜索，server 源码 `app/mcp_servers/web_search.py`，宿主层 `core/mcp_host.py`）。
 
 **注册唯一入口**：`core/agent_tools.py` 的 `_TOOL_SPECS` 注册表（MCP/OpenAI function-calling 同构）。图谱/画像工具 handler 即薄壳在此；重型实现放领域模块（`web_tool.py` / `rag_tool.py`）被 handler 引用。
 
 新增工具只需两步（旧版需改 3-4 处）：
-1. 在 `_TOOL_SPECS` 加一条 spec：`name` / `description`（给模型看）/ `parameters`（JSON Schema，同 MCP inputSchema）/ `handler`。
-2. 写一个同步 handler `(args: dict, kg) -> str`：直接调 KnowledgeGraph / 领域函数（需要 RAG 检索等 async 能力的直接调 `rag_search()` 等既有封装，其内部已处理事件循环）。
-   - `KG_TOOLS`（模型 tools 参数）与 `execute_kg_tool`（执行分发）由注册表自动生成，无需再改。
+1. 在 `_TOOL_SPECS` 加一条 spec：`name` / `description`（给模型看）/ `parameters`（JSON Schema，同 MCP inputSchema）/ `handler`，
+   可选 `timeout_secs`（单工具超时覆盖）。
+2. 写一个 handler `(args: dict, kg) -> str`（同步）或 `async def`：直接调 KnowledgeGraph / 领域函数
+   （需要 RAG 检索等 async 能力的直接调 `rag_search()` 等既有封装，其内部已处理事件循环）。
+   - **异步 handler 的场景**：需要在工具内 `asyncio.create_task` 起后台任务（如 `quiz_generate` 后台出题）。
+     不要为了"想 await"而改成协程再 `asyncio.run` —— 见 §3.6 坑 4。
+   - `KG_TOOLS`（模型 tools 参数）与 `execute_kg_tool(_async)`（执行分发）由注册表自动生成，无需再改。
    - **可选**：若该工具需要"何时主动调用"的教学语义，才在 `services/chat_service.py` `TOOL_CAPABILITY_PROMPT` 补一条触发规则。
 3. 若工具会改动图谱 → 确认权限 `added_by` 体系与图谱分析是否需同步。
 
 > 工具返回约定：给模型看的友好文本（非异常向上抛）；业务错误以"操作失败: …"、权限拒绝以"权限不足: …"回填 tool 消息，让模型自行应对。
-> 执行异常分级：`ValueError`=业务错、`PermissionError`=权限不足、其余=意外错，由 `execute_kg_tool` 统一兜底 + `ErrorCode.LLM_TOOL_EXEC_FAILED` 记日志。
+> 执行异常分级：`ValueError`=业务错、`PermissionError`=权限不足、其余=意外错，由 `execute_kg_tool` / `execute_kg_tool_async` 共用 `_tool_error` 统一兜底 + `ErrorCode.LLM_TOOL_EXEC_FAILED` 记日志。
 
 ---
 

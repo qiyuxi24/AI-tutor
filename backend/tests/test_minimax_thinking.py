@@ -50,7 +50,10 @@ def _install_fake_chat(monkeypatch, responses: list) -> list:
         return item
 
     monkeypatch.setattr(agent_loop, "_chat_once", fake_chat)
-    monkeypatch.setattr(agent_loop, "execute_kg_tool", lambda tc, kg: f"已执行 {tc.function.name}")
+
+    async def _fake_execute(tc, kg):
+        return f"已执行 {tc.function.name}"
+    monkeypatch.setattr(agent_loop, "execute_kg_tool_async", _fake_execute)
     return received
 
 

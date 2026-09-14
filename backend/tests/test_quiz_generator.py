@@ -285,7 +285,7 @@ def test_generate_quiz_success(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return materials
 
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, max_tokens=None):
         return llm_output
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -323,7 +323,7 @@ def test_generate_quiz_rejects_bad_question(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, max_tokens=None):
         return llm_output
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -342,7 +342,7 @@ def test_generate_quiz_json_parse_failure(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, max_tokens=None):
         return "完全不是JSON"
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -360,7 +360,7 @@ def test_generate_quiz_llm_failure(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, max_tokens=None):
         raise RuntimeError("LLM 不可用")
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -393,7 +393,7 @@ def test_generate_quiz_dedup(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, max_tokens=None):
         return llm_output
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -424,7 +424,7 @@ def test_generate_quiz_markdown_wrapped_json(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, max_tokens=None):
         return llm_output
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -432,3 +432,168 @@ def test_generate_quiz_markdown_wrapped_json(monkeypatch):
 
     result = _run(generate_quiz(1, "test", None, 1, "easy", ["single"]))
     assert len(result["questions"]) == 1
+
+
+# ─── 分批出题 + 补题（2026-09-14 修复"每次出题都不全"）──────────
+
+def _q_dict(idx: int, subject_text: str = "栈是后进先出的数据结构") -> dict:
+    """造一道结构合法的单选题（题干长度需 ≥20 字以通过质量过滤）"""
+    return {
+        "id": f"q{idx}",
+        "type": "single",
+        "question": f"第{idx}题：{subject_text}，请问下列说法哪一项是正确的？请选择。",
+        "options": [
+            {"label": "选项甲", "value": "A"},
+            {"label": "选项乙", "value": "B"},
+            {"label": "选项丙", "value": "C"},
+            {"label": "选项丁", "value": "D"},
+        ],
+        "answer": ["A"],
+        "analysis": "解析内容",
+        "points": 10,
+    }
+
+
+def test_split_counts():
+    """拆批：每批不超过 QUIZ_BATCH_SIZE，且总数守恒"""
+    assert generator._split_counts(1) == [1]
+    assert generator._split_counts(4) == [4]
+    assert generator._split_counts(5) == [4, 1]
+    assert generator._split_counts(10) == [4, 4, 2]
+    assert sum(generator._split_counts(20)) == 20
+    assert max(generator._split_counts(20)) <= generator.QUIZ_BATCH_SIZE
+
+
+def test_types_for_batch_covers_all_types_without_overlap():
+    """题型切分：批次间不重叠，且所有请求题型都被覆盖到"""
+    types = ["single", "multiple", "judge", "fill", "short_answer"]
+    picked = [generator._types_for_batch(types, i, 3) for i in range(3)]
+    flat = [t for sub in picked for t in sub]
+    assert sorted(flat) == sorted(types)      # 覆盖完整
+    assert len(flat) == len(set(flat))        # 互不重叠
+
+
+def test_types_for_batch_single_type_repeats():
+    """只有一种题型时，每批都是该题型（退化为轮转复用）"""
+    picked = [generator._types_for_batch(["single"], i, 3) for i in range(3)]
+    assert picked == [["single"], ["single"], ["single"]]
+
+
+def test_generate_quiz_splits_into_batches(monkeypatch):
+    """请求 9 道 → 拆成 3 批并发，每题都可完整拿到（不再被截断丢题）"""
+    calls = []
+    counter = {"n": 0}
+
+    async def fake_search(uid, subj, nid, top_k=8):
+        return ["栈是后进先出的线性数据结构，支持 push 和 pop。"]
+
+    async def fake_call_llm(system, messages, max_tokens=None):
+        calls.append(messages[0]["content"])
+        # 每批返回互不相同的题（模拟真实"不同批次出不同题"）
+        batch = [_q_dict(counter["n"] + i) for i in range(3)]
+        counter["n"] += 3
+        return json.dumps(batch)
+
+    monkeypatch.setattr(generator, "_search_materials", fake_search)
+    monkeypatch.setattr(generator, "call_llm", fake_call_llm)
+
+    result = _run(generate_quiz(1, "栈", None, 9, "medium", ["single"]))
+
+    assert len(calls) == 3                      # 9 道 / 每批最多 4 道 → 3 批
+    assert len(result["questions"]) == 9        # 裁剪到请求数量
+    assert [q["id"] for q in result["questions"]] == [f"q{i}" for i in range(1, 10)]
+    assert result["requested"] == 9
+    assert all("分批说明" in c for c in calls)
+
+
+def test_generate_quiz_topup_when_first_round_short(monkeypatch):
+    """首轮被截断只抢救出 2 道（请求 5 道）→ 自动补题凑够 5 道"""
+    calls = []
+
+    async def fake_search(uid, subj, nid, top_k=8):
+        return []
+
+    async def fake_call_llm(system, messages, max_tokens=None):
+        calls.append(messages[0]["content"])
+        if "补题" in messages[0]["content"]:
+            return json.dumps([_q_dict(i) for i in range(100, 104)])  # 补题一次给 4 道
+        return json.dumps([_q_dict(1), _q_dict(2)])  # 首轮每批只回 2 道
+
+    monkeypatch.setattr(generator, "_search_materials", fake_search)
+    monkeypatch.setattr(generator, "call_llm", fake_call_llm)
+
+    result = _run(generate_quiz(1, "栈", None, 5, "medium", ["single"]))
+
+    assert len(result["questions"]) == 5          # 补题后凑够
+    assert len(calls) > 1                         # 确实发生了补题调用
+    assert any("禁止重复" in c for c in calls)     # 补题带上"避免重复"约束
+
+
+def test_generate_quiz_salvages_truncated_json_then_tops_up(monkeypatch):
+    """JSON 被 max_tokens 截断（末题写一半）→ 抢救完整题 + 补题补足目标数量"""
+    def _truncated_output() -> str:
+        full = json.dumps([_q_dict(1), _q_dict(2), _q_dict(3)])
+        return full[: int(len(full) * 0.75)]      # 末尾硬截断，最后一个对象不闭合
+
+    async def fake_search(uid, subj, nid, top_k=8):
+        return []
+
+    async def fake_call_llm(system, messages, max_tokens=None):
+        return _truncated_output()
+
+    monkeypatch.setattr(generator, "_search_materials", fake_search)
+    monkeypatch.setattr(generator, "call_llm", fake_call_llm)
+
+    # 截断后每批仍能抢救出 2 道；补题轮拿到的是不同 id，因此能补到 4 道
+    result = _run(generate_quiz(1, "栈", None, 4, "medium", ["single"]))
+
+    assert len(result["questions"]) >= 2          # 至少抢救出完整题，不再 0 道全丢
+    assert result["requested"] == 4
+
+
+def test_generate_quiz_shortfall_is_reported(monkeypatch):
+    """补题仍凑不够时：返回实际数量并记 requested，不报错（前端可提示差额）"""
+    async def fake_search(uid, subj, nid, top_k=8):
+        return []
+
+    async def fake_call_llm(system, messages, max_tokens=None):
+        return json.dumps([_q_dict(1)])           # 无论怎么补都只给 1 道
+
+    monkeypatch.setattr(generator, "_search_materials", fake_search)
+    monkeypatch.setattr(generator, "call_llm", fake_call_llm)
+
+    result = _run(generate_quiz(1, "栈", None, 6, "medium", ["single"]))
+
+    assert len(result["questions"]) == 1
+    assert result["requested"] == 6
+
+
+def test_generate_quiz_isolates_failed_batch(monkeypatch):
+    """并发批次里有一批抛异常（思考吃满 token 空回复）→ 隔离该批，其余照常出题。
+
+    2026-09-14 真机踩坑：3 批并发，1 批 finish_reason=length 返空 → E-LLM-006
+    → asyncio.gather 直接向上抛，另外 2 批已出好的题全废。
+    """
+    counter = {"n": 0}
+
+    async def fake_search(uid, subj, nid, top_k=8):
+        return []
+
+    async def fake_call_llm(system, messages, max_tokens=None):
+        prompt = messages[0]["content"]
+        if "第 1/2 批" in prompt:          # 这一批永远失败（模拟空回复）
+            raise RuntimeError("[E-LLM-006] AI返回了空回复，请重试")
+        # 第 2/2 批 + 补题轮：每次给一批互不相同、不会互相去重的题
+        counter["n"] += 1
+        base = counter["n"] * 100
+        return json.dumps([_q_dict(base + i) for i in range(4)])
+
+    monkeypatch.setattr(generator, "_search_materials", fake_search)
+    monkeypatch.setattr(generator, "call_llm", fake_call_llm)
+
+    # target=5 → 拆成 [4, 1] 两批：第 1 批全废，靠第 2 批 + 补题轮凑够
+    result = _run(generate_quiz(1, "栈", None, 5, "medium", ["single"]))
+
+    assert len(result["questions"]) == 5            # 没有因为一批失败而整次失败
+    assert result["requested"] == 5
+    assert [q["id"] for q in result["questions"]] == [f"q{i}" for i in range(1, 6)]

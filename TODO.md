@@ -67,6 +67,23 @@
 - [x] **图谱知识一键导出**（2026-09-08 完成）：`GET /knowledge/export?subject=` 返回合并 Markdown（节点列表 + 依赖关系），`Content-Disposition: attachment` 触发下载
 - [x] **节点内容 Markdown 分屏编辑**（2026-09-10 完成）：NodeDetail 编辑模式由单栏 textarea 改为双栏（左源码 / 右实时预览），复用 `frontend/src/utils/markdown.js` 既有渲染管线（marked + KaTeX + highlight.js + DOMPurify），窄屏 <760px 自动堆叠；零新依赖、单文件改动（`NodeDetail.vue`）
 - [ ] **Prompt 笔记优化**：教学后主动 `update_node_content`/`add_knowledge_node` 记笔记（提示词层，未动）
+- [x] **🔴 知识图谱从未注入提示词（2026-09-14 修复，影响面极大）**
+  - 根因：`data/prompts/system_prompt_common.j2` 的占位符写成**单花括号** `{knowledge_graph_summary}`
+    / `{user_profile}`。Jinja2 只认 `{{ }}`，单括号是**字面文本**，渲染时原样输出；
+    全库无任何 `.replace()` 兜底 → **adaptive / free_talk 模式下 AI 完全看不到知识图谱与学生画像**。
+    （recursive 模式正常，它用的是 `{{ knowledge_graph_framework }}`。）
+  - **这正是上面"模型个人数据幻觉"的真因**：AI 说"你的图谱可能是空的"不是幻觉，
+    它确实看不到图谱 —— 上一轮误判为幻觉并用 `EMPTY_GRAPH_PROMPT` 打了提示词补丁。
+  - 修复：模板改 `{{ knowledge_graph_summary }}` / `{{ user_profile }}`。
+  - 更坑的是 `tests/test_prompt_loader.py` 曾把这个 bug 当成"预期行为"锁死
+    （文件头注释 + `test_graph_summary_placeholder_in_output` 断言占位符名字出现）
+    → 已改为**断言值被注入 + 字面占位符不残留 + 模板源码不含单花括号**三条守卫。
+    **教训：断言"占位符名字出现"毫无意义。**
+  - 诊断脚本：`backend/scripts/probe_graph_prompt.py`（节点 id 命中数应为节点总数）
+  - ⚠️ **代价（待决策）**：注入后系统提示词 ~3k → **14.4k tokens**（57 节点 / 图谱摘要 22141 字符，
+    含每节点 200 字正文预览）。`LLM_CTX_BUDGET=32000` 下留给对话历史 ≈ 15.6k。
+    可选：调大 `LLM_CTX_BUDGET` / 调小 `get_node_content_preview(max_chars)` /
+    大图谱降级为 `detailed=False`（只给 id+name+标签，但会丢掌握度）。
 - [ ] **空图谱时的行动顺序**（2026-09-13 MPV 已落地，仅提示词层）
   - [x] 图谱为空时注入 `chat_service.EMPTY_GRAPH_PROMPT`：先 `add_knowledge_node` 建图谱 → 再 `add_edge`/`update_mastery`；并禁止向学生断言"你的图谱是空的"（模型个人数据幻觉）
   - [ ] 后续（待议）：**空图谱时从教材一键建图**接入对话链路 —— 新增 Agent 工具复用 `kb/graph_generator`。注意单工具超时 60s、建整书图耗时数分钟 → 不能同步跑在 loop 里，需后台任务形态（前端已有 `POST /kb/graph/generate` 可复用）
@@ -118,6 +135,39 @@
 ### AI 出题
 - [x] quiz 模块（schema/generator/grader/quality/store）+ API 5 端点
 - [x] QuizView 前端（配置→作答→客观题规则判分/简答 LLM 判分→解析反馈）
+- [x] **对话内出题（P0，2026-09-14）**：`quiz_generate` + `grade_answer` 两个工具，把"即学即测"闭环接进对话
+  - `core/quiz/chat_quiz.py`：后台异步出题（单题固有延迟数秒~40s，不能同步等）→ 入库（`source="chat"`）
+    → 推 `quiz_ready` 事件 → 前端追加题目消息 → 学生作答 → 规则判分 → **答对自动 +20 掌握度**
+  - 题目依据 = 刚学的图谱节点正文（`seed_materials`）+ KB 检索，解决"学生没上传教材就退化成通用常识出题"
+  - 支撑改造：工具层支持**协程 handler** + 单工具超时覆盖（`execute_kg_tool_async`）；
+    `/knowledge/events` 改为**按用户订阅**（原来全局队列，收不到 per-user 事件且互相广播）
+  - 真机验证：`scripts/smoke_chat_quiz.py` 全链路通过（出题 4.3~6.2s，答对 0→20 / 答错 20→20）
+  - [ ] P1：题目渲染成可点选项卡片（前端 `quiz_ready` 已带 `questions` 字段，`MessageBubble` 加 `QuizCard.vue`）
+  - [x] **同节点跨调用去重**（2026-09-14）：`QuizStore.asked_questions(node_id)` →
+        `generate_quiz(avoid_questions=…)` → 注入提示 + `filter_questions(avoid_texts=…)` 强制排除。
+        必须做：判分已是掌握度主信号，不去重就能靠重答同一道题刷分
+  - [ ] 已知瑕疵：KB 检索片段混入依据会导致题目轻微漂移（节点是"二叉树性质1"，
+        却出了"每层都达最大结点数 → 满二叉树"的题）——可考虑降 `CHAT_QUIZ_TOP_K` 或只用节点正文
+
+### 掌握度更新：以出题判分为主信号（①，2026-09-14）
+- [x] **实测发现 `update_mastery` 从未被 AI 调用过**（12 次 agent 运行，0 次）；
+      诊断脚本 `backend/scripts/probe_agent_runs.py --summary`
+- [x] 根因："当用户正确回答/理解后，适当调整 mastery"是**不可执行的软约束** ——
+      苏格拉底教学里"学生在回答我"是每轮常态，模型分不清"答对一个小问题"与"掌握了知识点"
+- [x] 提示词改造：新增「掌握度由谁更新」+「学生说懂了→**出题，不要再追问**（铁律）」；
+      `update_mastery` 收敛为**仅限 3 种硬证据**（说来就很熟→70 / 完全没学过→0 / 主动纠正→+10）；
+      删除旧的"根据回复质量打分（0=未掌握, 1-25=入门…）"档位
+- [x] **关键教训**：第一版只写"学生表示理解 → 出题"**无效** —— 真机模拟"我完全搞懂了"，
+      模型仍继续苏格拉底追问、不调工具。提成**铁律级** + 明确"不要用追问代替出题"后才生效
+      → 改触发类提示词**必须写清"不要做什么"**，否则会被更强的既有原则盖过
+- [x] 验证手段：`scripts/smoke_chat_quiz.py --simulate "学生发言"`（真机跑一轮，打印实际工具调用序列）
+
+### 出题稳定性（2026-09-14 真机冒烟结论）
+- [x] 修复"每次出题都不全"：分批 + 补题 + **批次隔离**（一批失败不再拖垮整次）；`scripts/smoke_quiz_generate.py`
+- [x] 观测能力：`call_llm` 日志带 `finish=`（区分撞顶/模型自停）、过滤原因从 debug 提到 info
+- [ ] 已知不可解：思考量随机波动 3~5 倍（1606~4916 token），**撞顶与"模型自己停"两种失败都压不掉**，
+      靠重试兜住（~10~20% 单次失败率）。延迟 ≈ 11ms × completion_tokens
+- [ ] 可选优化：出题改用非思考模型（结构化任务未必需要深度推理），需 A/B 质量
 
 ### 资源采集（Collector，见 TODO_Collector.md 逐项）
 - [x] B1.1-B1.8 全部：core 骨架 / MediaWiki 适配器(维基真网联调过) / manager(断点续传+协作取消) / API / 双模式 / seed 40 词条 / CollectorView 前端 / 商用过滤

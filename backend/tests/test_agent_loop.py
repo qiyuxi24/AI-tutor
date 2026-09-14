@@ -1,5 +1,5 @@
 """
-Agent Loop 单元测试（全部离线，mock _chat_once 与 execute_kg_tool）。
+Agent Loop 单元测试（全部离线，mock _chat_once 与 execute_kg_tool_async）。
 
 覆盖（对齐 docs/AgentLoop_重构设计讨论.md §8）：
 - 三种终止：无工具自然结束 / 达 max_rounds 强制收尾 / 工具异常（超时）隔离后继续
@@ -10,6 +10,7 @@ Agent Loop 单元测试（全部离线，mock _chat_once 与 execute_kg_tool）�
 """
 import asyncio
 import copy
+import inspect
 import json
 import time
 from types import SimpleNamespace
@@ -60,7 +61,24 @@ def _install_fake_chat(monkeypatch, responses: list, received: list):
 
 
 def _install_fake_execute(monkeypatch, fn=None):
-    monkeypatch.setattr(agent_loop, "execute_kg_tool", fn or (lambda tc, kg: f"已执行 {tc.function.name}"))
+    """
+    桩掉工具分发入口。
+
+    2026-09-14：agent_loop 改用 `execute_kg_tool_async`（支持协程 handler），
+    这里改为桩异步版本 —— 仍接受同步 fn，自动包成协程以兼容旧用例写法。
+    """
+    if fn is None:
+        async def _default(tc, kg):
+            return f"已执行 {tc.function.name}"
+        fn = _default
+
+    async def _async_dispatch(tc, kg):
+        result = fn(tc, kg)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    monkeypatch.setattr(agent_loop, "execute_kg_tool_async", _async_dispatch)
 
 
 # ─── 用例 ───────────────────────────────────────────────────
@@ -172,7 +190,9 @@ def test_tool_timeout_guardrail(monkeypatch):
         _resp(_msg(tool_calls=[_tc("fetch_webpage", {"url": "https://example.com"}, tc_id="slow")])),
         _resp(_msg(content="网页抓取超时了，我基于已有知识回答。")),
     ], received)
-    monkeypatch.setattr(agent_loop, "execute_kg_tool", lambda tc, kg: time.sleep(5))
+    async def _slow_dispatch(tc, kg):
+        await asyncio.sleep(5)   # 模拟慢工具（新分发是异步的，同步 sleep 会阻塞事件循环）
+    monkeypatch.setattr(agent_loop, "execute_kg_tool_async", _slow_dispatch)
 
     result = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}], kg=object(),
                                         tool_timeout_secs=0.2))

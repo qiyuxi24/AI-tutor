@@ -11,6 +11,7 @@
   - agent_start   — Agent 循环开始 {max_rounds}
   - agent_done    — Agent 循环结束 {rounds, total_llm_calls}
   - graph_updated — 知识图谱数据变更（向后兼容）
+  - quiz_ready    — 对话内出题完成 {ok, questions, node_id, subject}（后台异步）
   - error         — 后端错误 {code, message, module, detail}
 
 路由模式：
@@ -39,6 +40,7 @@ TOOL_RESULT = "tool_result"
 AGENT_START = "agent_start"
 AGENT_DONE = "agent_done"
 GRAPH_UPDATED = "graph_updated"
+QUIZ_READY = "quiz_ready"   # 对话内出题完成（后台异步，约 40s 后到达，见 quiz/chat_quiz.py）
 ERROR = "error"
 
 # 向后兼容：旧 "token" 事件 → text_delta
@@ -58,6 +60,10 @@ _loop: asyncio.AbstractEventLoop | None = None
 # 用户队列 TTL（秒）：空闲超时自动清理，避免内存泄漏
 _USER_QUEUE_TTL = 300  # 5 分钟
 _user_queue_last_access: dict[int, float] = {}
+
+# 每个用户当前的活跃订阅者数量（长连接 /knowledge/events）。
+# 有活跃订阅者的队列**不允许**被 TTL 清理 —— 见 _cleanup_stale_queues。
+_active_subs: dict[int, int] = {}
 
 
 def _get_global_queue() -> asyncio.Queue:
@@ -80,10 +86,17 @@ def _get_user_queue(user_id: int) -> asyncio.Queue:
 
 
 def _cleanup_stale_queues():
-    """清理超时未访问的用户队列，避免内存泄漏。"""
+    """
+    清理超时未访问的用户队列，避免内存泄漏。
+
+    ⚠️ 跳过仍有活跃订阅者的队列。长连接 /knowledge/events 只在**建立时**调用一次
+    _get_user_queue，之后不再刷新访问时间；若不跳过，连接空闲超过 TTL 后队列会被
+    从 _user_queues 里清掉，而订阅者仍在 await 那个已被移除的队列对象 ——
+    从此再也收不到 per-user 事件（publish 查不到队列就静默丢弃）。
+    """
     now = time.monotonic()
     stale = [uid for uid, t in _user_queue_last_access.items()
-             if now - t > _USER_QUEUE_TTL]
+             if now - t > _USER_QUEUE_TTL and not _active_subs.get(uid)]
     for uid in stale:
         _user_queues.pop(uid, None)
         _user_queue_last_access.pop(uid, None)
@@ -182,9 +195,19 @@ async def subscribe(user_id: Optional[int] = None) -> AsyncGenerator[str, None]:
     if user_id is not None:
         # 用户专属模式：订阅自己的队列
         q = _get_user_queue(user_id)
-        while True:
-            event_data = await q.get()
-            yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+        _active_subs[user_id] = _active_subs.get(user_id, 0) + 1
+        try:
+            while True:
+                event_data = await q.get()
+                yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+        finally:
+            # 断开时释放计数，让队列重新可被 TTL 清理
+            left = _active_subs.get(user_id, 1) - 1
+            if left > 0:
+                _active_subs[user_id] = left
+            else:
+                _active_subs.pop(user_id, None)
+            _user_queue_last_access[user_id] = time.monotonic()
     else:
         # 全局模式（兼容旧端点）
         q = _get_global_queue()

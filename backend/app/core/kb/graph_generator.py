@@ -22,6 +22,7 @@
 - 去重：节点按 id/name 全局去重；边由 add_edge 自动去重
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -39,6 +40,11 @@ DEDUP_CANDIDATE_THRESHOLD = 0.78
 # LLM 二次确认失败时（如额度耗尽）的保守合并阈值：
 # 相似度 >= 此值才自动合并，宁可不合并也不误合并。
 DEDUP_FALLBACK_THRESHOLD = 0.90
+
+# 图谱生成专用输出预算：一次要输出完整 JSON（多节点 + 每个节点的 Markdown 讲解）。
+# 默认 2000 会被顶满截断 → JSON 解析失败 → chunk 被静默跳过（2026-09-14 踩坑，
+# 日志证据: completion=2000 + "返回无法解析的 JSON"）。
+GRAPH_GENERATOR_MAX_TOKENS = 8000
 
 # 学科图谱生成专用系统提示词（从书籍内容批量提取知识点 + 建立关系）
 GRAPH_GENERATOR_SYSTEM_PROMPT = """你是一个「学科知识图谱构建专家」。你的任务是从给定的学科书籍内容中，提取该学科的核心知识点，并分析知识点之间的联系，构建一份结构化的知识图谱。
@@ -83,7 +89,10 @@ GRAPH_GENERATOR_SYSTEM_PROMPT = """你是一个「学科知识图谱构建专家
 2. difficulty 取值 1-5（1=最简单，5=最难）；estimated_minutes 为预估学习分钟数。
 3. 边只建立知识点之间的实质联系。如果某些知识点没有明确联系，不要强行连线。
 4. edges 中的 from/to 必须是 nodes 或已存在节点（见下方"已有节点"）里的 id。
-5. 答案必须是有效的 JSON。"""
+5. 答案必须是有效的 JSON。
+6. 控制篇幅（重要）：每次最多提取 8 个知识点；每个 content 控制在 300 字以内，
+   讲清定义与核心要点即可，不要展开长篇示例与推导。
+   输出超过上限会被截断，导致整批内容全部作废。"""
 
 
 class GraphGenerator:
@@ -126,7 +135,7 @@ class GraphGenerator:
         return results
 
     @staticmethod
-    def _split_text(text: str, max_chars: int = 5000) -> list[str]:
+    def _split_text(text: str, max_chars: int = 3000) -> list[str]:
         """将长文本按字符数切分（尽量在段落边界切）"""
         text = text.strip()
         if not text:
@@ -217,14 +226,22 @@ class GraphGenerator:
 
 请按格式输出 JSON。"""
 
-        try:
-            raw = await call_llm(
-                GRAPH_GENERATOR_SYSTEM_PROMPT,
-                [{"role": "user", "content": user_prompt}],
-            )
-        except Exception as e:
-            logger.error(f"学科图谱生成 LLM 调用失败: {e}")
-            return None
+        # 偶发空回复（M3 思考阶段耗尽输出预算）→ 短暂等待后重试一次再放弃
+        for attempt in range(2):
+            try:
+                raw = await call_llm(
+                    GRAPH_GENERATOR_SYSTEM_PROMPT,
+                    [{"role": "user", "content": user_prompt}],
+                    max_tokens=GRAPH_GENERATOR_MAX_TOKENS,
+                )
+                break
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning(f"图谱生成调用失败（{e}），2 秒后重试一次")
+                    await asyncio.sleep(2)
+                else:
+                    logger.error(f"学科图谱生成 LLM 调用失败: {e}")
+                    return None
 
         data = self._parse_json(raw)
         if data is None or not isinstance(data, dict):
@@ -518,12 +535,14 @@ class GraphGenerator:
             "skipped_nodes": [],
             "merged_nodes": [],
         }
+        failed_chunks = 0
 
         for book in books:
             chunks = self._split_text(book["text"])
             for chunk in chunks:
                 result = await self._call_generator_llm(subject, chunk, existing)
                 if not result:
+                    failed_chunks += 1
                     continue
                 stats = await self._write_to_graph(kg, subject, result,
                                                    existing_nodes=existing)
@@ -534,6 +553,12 @@ class GraphGenerator:
                 # 更新已存在节点，供后续批次引用与去重
                 existing = kg.get_nodes_by_subject(subject)
 
+        aggregate["failed_chunks"] = failed_chunks
+        if failed_chunks and not aggregate["created_nodes"]:
+            aggregate["error"] = (
+                f"全部 {failed_chunks} 个片段都生成失败（空回复或输出被截断）。"
+                "请检查日志中的 E-LLM-006 / 无法解析的 JSON，确认 LLM 配置后重试。"
+            )
         return aggregate
 
     async def generate_section_graph(self, kg, subject: str,
@@ -572,12 +597,14 @@ class GraphGenerator:
             "skipped_nodes": [],
             "merged_nodes": [],
         }
+        failed_chunks = 0
 
         for book in books:
             chunks = self._split_text(book["text"])
             for chunk in chunks:
                 result = await self._call_generator_llm(subject, chunk, existing)
                 if not result:
+                    failed_chunks += 1
                     continue
                 stats = await self._write_to_graph(kg, subject, result,
                                                    existing_nodes=existing,
@@ -587,6 +614,13 @@ class GraphGenerator:
                 aggregate["skipped_nodes"].extend(stats["skipped_nodes"])
                 aggregate["merged_nodes"].extend(stats["merged_nodes"])
                 existing = kg.get_nodes_by_subject(subject)
+
+        aggregate["failed_chunks"] = failed_chunks
+        if failed_chunks and not aggregate["created_nodes"]:
+            aggregate["error"] = (
+                f"全部 {failed_chunks} 个片段都生成失败（空回复或输出被截断）。"
+                "请检查日志中的 E-LLM-006 / 无法解析的 JSON，确认 LLM 配置后重试。"
+            )
 
         # 携带板块名返回，便于前端切换到该板块视图
         aggregate["board"] = board

@@ -29,6 +29,8 @@ const toolIcons = {
   update_user_profile: '👤',
   fetch_webpage: '🌐',
   rag_search: '🔍',
+  quiz_generate: '📝',
+  grade_answer: '✅',
 }
 
 function getToolIcon(name) {
@@ -45,6 +47,8 @@ function getToolDisplayName(name) {
     update_user_profile: '更新画像',
     fetch_webpage: '抓取网页',
     rag_search: '知识检索',
+    quiz_generate: '出题检验',
+    grade_answer: '判分',
   }
   return names[name] || name
 }

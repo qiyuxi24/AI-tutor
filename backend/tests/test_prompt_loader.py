@@ -2,9 +2,11 @@
 Prompt loader 提示词加载器测试。
 覆盖：三种模式渲染、未知模式报错、模板拼接、参数传递。
 
-注意：common 模板中 {knowledge_graph_summary} 和 {user_profile} 是字面文本
-（非 Jinja2 变量语法 {{ }}），值不会被注入。但 {% if user_profile %} 控制流
-正常工作：传入非空 user_profile 时「学生画像」区块会出现。
+⚠️ 2026-09-14 修复：`system_prompt_common.j2` 里图谱/画像占位符曾写成**单花括号**
+`{knowledge_graph_summary}`（Jinja2 只认 `{{ }}`）→ 渲染时被当字面文本原样输出，
+**知识图谱从未注入过 AI 提示词**（57 个节点的 id 在 prompt 里出现 0 次）。
+本文件曾有测试把这个错误行为当成"预期"锁死（断言 `"knowledge_graph_summary" in result`）——
+现改为断言**值真的被替换进来**，防止回退。
 """
 import pytest
 
@@ -116,14 +118,42 @@ def test_user_profile_section_absent_when_empty():
     assert "学生画像" not in result_without
 
 
-def test_graph_summary_placeholder_in_output():
-    """common 模板中 {knowledge_graph_summary} 是字面文本，始终出现在输出中"""
+def test_graph_summary_is_actually_injected():
+    """图谱摘要必须**真的被替换进** prompt（曾因模板用单花括号而静默丢失）。
+
+    回归守卫：只断言"占位符名字出现"是不够的 —— 模板写错时名字照样出现，
+    但图谱内容一个节点都没有。所以断言**值**与**字面占位符残留**两件事。
+    """
+    summary = "### 现有节点（共 2 个）\n  [binary_tree] 二叉树 (掌握度:0)"
     result = get_system_prompt(
         mode="free_talk",
         student_message="hi",
-        graph_summary="图谱内容",
+        graph_summary=summary,
     )
-    assert "knowledge_graph_summary" in result
+    assert "binary_tree" in result, "图谱内容没有被注入"
+    assert "掌握度:0" in result
+    assert "{knowledge_graph_summary}" not in result, "占位符未被 Jinja2 替换（单花括号 bug 回退）"
+
+
+def test_user_profile_is_actually_injected():
+    """学生画像内容必须真的被替换进 prompt（同上的单花括号 bug）。"""
+    result = get_system_prompt(
+        mode="free_talk",
+        student_message="hi",
+        user_profile="偏好：图形化理解",
+    )
+    assert "偏好：图形化理解" in result
+    assert "{user_profile}" not in result
+
+
+def test_common_template_has_no_single_brace_placeholders():
+    """模板级回归守卫：common 模板不得再出现单花括号占位符。"""
+    src = (prompt_loader.PROMPT_DIR / prompt_loader.COMMON_TEMPLATE).read_text(
+        encoding="utf-8")
+    assert "{knowledge_graph_summary}" not in src
+    assert "{user_profile}" not in src
+    assert "{{ knowledge_graph_summary }}" in src
+    assert "{{ user_profile }}" in src
 
 
 # ─── 递归模式参数 ────────────────────────────────────────────────

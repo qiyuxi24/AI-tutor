@@ -615,6 +615,9 @@ export const useChatStore = defineStore('chat', () => {
             // 如果刚刚执行过 CRUD 操作（3 秒内），忽略此次 SSE 事件
             if (sseSuppressTimer) return
             refreshGraph()
+          } else if (data.type === 'quiz_ready') {
+            // 对话内出题完成（后台任务，约 40s 后到达）→ 追加一条题目消息
+            handleQuizReady(data)
           } else if (data.type === 'error') {
             console.warn(`[SSE Error] ${data.code} | ${data.module}: ${data.message}`, data.detail || '')
           }
@@ -629,6 +632,49 @@ export const useChatStore = defineStore('chat', () => {
     } catch {
       // SSE 不支持时静默失败
     }
+  }
+
+  /**
+   * 对话内出题完成（后台异步，约 40s 后到达）→ 往当前对话追加一条题目消息。
+   *
+   * 为什么走这条常驻连接而不是对话 SSE：出题是后台任务，对话的流式响应早已结束，
+   * 40 秒后才有结果，只能由 /knowledge/events 这条长连接送达（见后端 quiz_ready 事件）。
+   */
+  function handleQuizReady(data) {
+    const conv = currentConversation.value
+    if (!conv) return
+    if (!data.ok) {
+      // 不能让 AI 说的"稍等片刻"变成永远没有下文，失败也要给个交代
+      conv.messages.push({
+        role: 'assistant',
+        content: `（出题没能完成：${data.message || '请稍后再试'}）`,
+        thinking: [], tools: [],
+      })
+      persist()
+      return
+    }
+    conv.messages.push({
+      role: 'assistant',
+      content: formatQuizMessage(data),
+      thinking: [], tools: [],
+      quiz: data.questions || [],   // 留字段：P1 换成可点选项卡片时直接用
+    })
+    persist()
+  }
+
+  /** 把推送来的题目渲染成 markdown（P0 先用纯文本，P1 再换可点卡片） */
+  function formatQuizMessage(data) {
+    const lines = [`**来，检验一下刚才学的「${data.subject || '这个知识点'}」**`, '']
+    for (const q of data.questions || []) {
+      lines.push(q.question)
+      if (q.options?.length) {
+        lines.push('')
+        for (const o of q.options) lines.push(`- **${o.value}.** ${o.label}`)
+      }
+      lines.push('')
+    }
+    lines.push('> 直接回复你的答案就行（比如 `A`），我来判分。')
+    return lines.join('\n')
   }
 
   /** 断开 SSE 并取消重连定时器 */

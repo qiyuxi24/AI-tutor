@@ -39,7 +39,7 @@ from app.core.agent_events import (
     THINKING, TEXT_DELTA,
 )
 from app.core.agent_run_store import save_run as _save_run
-from app.core.agent_tools import KG_TOOLS, execute_kg_tool
+from app.core.agent_tools import KG_TOOLS, execute_kg_tool_async, tool_timeout_secs
 from app.core.llm.clients import MODEL_NAME
 from app.core.llm.fallback import chat_create as _chat_create
 from app.core.llm.thinking import LLM_EXTRA_BODY as _LLM_EXTRA_BODY, strip_think_tags as _strip_think_tags
@@ -120,13 +120,16 @@ async def _execute_tool(tc, kg, timeout: float, round_idx: int,
             "tool_call_id": tc.id, "arguments": _clip(tc.function.arguments or ""),
         })
 
+    # 单工具超时可按 spec 覆盖：慢工具（quiz_generate 要调 LLM 出题）在 spec 里声明
+    # timeout_secs，否则会被默认 60s 掐断（2026-09-14）
+    effective_timeout = tool_timeout_secs(tc, timeout)
     try:
         result = await asyncio.wait_for(
-            asyncio.to_thread(execute_kg_tool, tc, kg), timeout=timeout
+            execute_kg_tool_async(tc, kg), timeout=effective_timeout
         )
         ok, content = True, result
     except asyncio.TimeoutError:
-        ok, content = False, f"工具 {name} 执行超时（>{timeout}s），已中止。"
+        ok, content = False, f"工具 {name} 执行超时（>{effective_timeout}s），已中止。"
     except Exception as e:  # execute_kg_tool 内部已兜底，此处仅防未来漏网
         ok, content = False, f"工具 {name} 执行出错: {e}"
 
