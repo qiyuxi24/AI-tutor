@@ -93,6 +93,39 @@ def test_failed_chunks_counted_not_silent(monkeypatch):
     assert result["created_nodes"] == []
 
 
+def test_bad_json_retried_once(monkeypatch):
+    """模型偶发吐非法 JSON（同一块重发即成）→ 重试一次而不是丢掉整块"""
+    gen = gg.GraphGenerator(user_id=1)
+    replies = ["{不是 JSON", '{"nodes":[{"id":"n1","name":"N1"}],"edges":[]}']
+    calls = []
+
+    async def fake_call_llm(system, messages, **kw):
+        calls.append(kw)
+        return replies[len(calls) - 1]
+
+    monkeypatch.setattr(gg, "call_llm", fake_call_llm)
+    result = asyncio.run(gen._call_generator_llm("S", "正文", []))
+
+    assert result is not None and result["nodes"][0]["id"] == "n1"
+    assert len(calls) == 2
+    assert calls[0]["thinking"] is False          # 批量抽取关闭思考
+    assert calls[0]["max_tokens"] == gg.GRAPH_MAX_TOKENS
+
+
+def test_bad_json_gives_up_after_retries(monkeypatch):
+    """连续非法 JSON → 返回 None（由 _generate 计入 failed_chunks）"""
+    gen = gg.GraphGenerator(user_id=1)
+    calls = []
+
+    async def fake_call_llm(system, messages, **kw):
+        calls.append(kw)
+        return "{还是不是 JSON"
+
+    monkeypatch.setattr(gg, "call_llm", fake_call_llm)
+    assert asyncio.run(gen._call_generator_llm("S", "正文", [])) is None
+    assert len(calls) == gg.GRAPH_JSON_RETRIES + 1
+
+
 def test_no_readable_text_returns_error(monkeypatch):
     gen, _ = _patch(monkeypatch, "", llm_result=None)
     result = asyncio.run(gen.generate_subject_graph(FakeKg(), "S", []))

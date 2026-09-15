@@ -45,6 +45,9 @@ class Settings:
     llm_timeout: float = 120.0
     # 对话发送预算（tokens）：system_prompt + 历史超预算时自动裁掉最旧轮次（见 core/context_guard.py）
     llm_ctx_budget: int = 32_000
+    # 图谱注入 system prompt 的字符上限（≈8K token）：超出则按降级阶梯收敛
+    # 省节点内容摘要 → 限量节点（见 core/graph_analyzer.build_graph_context）。0=不限制
+    graph_inject_max_chars: int = 12_000
     # 备用对话服务（可选，模型回退链）：主模型配额耗尽/认证失败/持续异常时自动静默降级。
     # 三件套缺任一即不启用（留空=保持单模型旧行为）。key 缺省回退 DASHSCOPE_API_KEY。
     fallback_llm_api_key: str = ""
@@ -96,6 +99,7 @@ class Settings:
             ),
             llm_timeout=float(os.getenv("LLM_TIMEOUT", "120")),
             llm_ctx_budget=int(os.getenv("LLM_CTX_BUDGET", str(32_000))),
+            graph_inject_max_chars=int(os.getenv("GRAPH_INJECT_MAX_CHARS", "12000")),
             fallback_llm_api_key=os.getenv("FALLBACK_LLM_API_KEY", ""),
             fallback_llm_base_url=os.getenv("FALLBACK_LLM_BASE_URL", ""),
             fallback_model_name=os.getenv("FALLBACK_MODEL_NAME", ""),

@@ -14,6 +14,7 @@
 
 import logging
 from typing import Optional
+from app.core.config import settings
 from app.core.llm import call_llm, extract_json
 from app.core.error_codes import ErrorCode, log_error, log_info, publish_error_event
 
@@ -121,46 +122,44 @@ JSON 格式如下：
 """
 
 
-def build_graph_context(kg, detailed: bool = False) -> str:
-    """
-    构造当前图谱的文本摘要（独立函数，无需创建 GraphAnalyzer 实例）。
+# ── 图谱注入体量控制（2026-09-13）──
+# 背景：主对话路径曾把全量节点（每节点 ≈260 字符 = 名称/掌握度/难度行 + 200 字摘要）
+# 与全量边无上限注入 system prompt，约 200 节点即自身顶穿 32K token 预算，
+# context_guard 对此只能"照发 + warning"（静默失效）。
+# 现按三档降级取第一档能放下的；降级时**必须**显式标注展示范围，否则模型会误判
+# 图谱只有这么大（参照系契约 I1-3 反面）。
+#
+# 降级顺序 = 节点内容摘要 → 节点数：摘要是可省项（改由 rag_search 现取），
+# 节点框架不可省（它就是「教学的唯一边界」）。
 
-    参数:
-        kg:       KnowledgeGraph 实例
-        detailed: 若为 True，会读取 MD 文件摘要并包含掌握度/难度等字段，
-                  适用于聊天 LLM 的上下文注入；
-                  若为 False，仅输出节点名和标签的概览，适用于分析 LLM。
 
-    返回:
-        格式化的图谱信息字符串（节点列表 + 关系列表）
+def _render_graph_block(kg, nodes: list, edges: list, mode: str) -> str:
+    """把（已选定的）节点/边渲染为注入文本。
+
+    mode: preview（含摘要）/ compact（省摘要）/ overview（仅名称+标签）；
+    表头用图谱真实规模（不用展示数），便于配合展示范围说明。
     """
-    # 节点列表
     node_lines = []
-    for n in kg.nodes:
-        tags = ", ".join(n.get("tags", []))
-        if detailed:
-            # 详细模式：含掌握度、难度、MD 摘要（用于聊天 AI 上下文）
-            # 使用 KnowledgeGraph 的内容缓存方法，减少文件 I/O 开销
-            content = kg.get_node_content_preview(n['id'])
-            mastery = n.get("mastery", 0)
-            diff = n.get("difficulty", 3)
-            mins = n.get("estimated_minutes", 15)
-            node_lines.append(
-                f"  [{n['id']}] {n['name']} (掌握度:{mastery}, 难度:{diff}, 预计:{mins}分)\n"
-                f"    摘要: {content[:200].replace(chr(10), ' ')}"
-            )
-        else:
+    for n in nodes:
+        if mode == "overview":
             # 概览模式：仅 ID + 名称 + 标签（用于分析 LLM）
-            node_lines.append(f"  [{n['id']}] {n['name']} (标签: {tags})")
+            node_lines.append(f"  [{n['id']}] {n['name']} (标签: {', '.join(n.get('tags', []))})")
+            continue
+        line = (
+            f"  [{n['id']}] {n['name']} (掌握度:{n.get('mastery', 0)}, "
+            f"难度:{n.get('difficulty', 3)}, 预计:{n.get('estimated_minutes', 15)}分)"
+        )
+        if mode == "preview":
+            # 详细模式：附 MD 摘要（走 KnowledgeGraph 的内容缓存，减少文件 I/O）
+            content = kg.get_node_content_preview(n["id"])
+            line += f"\n    摘要: {content[:200].replace(chr(10), ' ')}"
+        node_lines.append(line)
     node_list = "\n".join(node_lines) if node_lines else "  (暂无节点)"
 
-    # 关系列表
-    edge_lines = []
-    for e in kg.edges:
-        edge_lines.append(
-            f"  {e['from_node']} → {e['to_node']} ({e['relation']}): {e.get('label', '')}"
-        )
-    edge_list = "\n".join(edge_lines) if edge_lines else "  (暂无关系)"
+    edge_list = "\n".join(
+        f"  {e['from_node']} → {e['to_node']} ({e['relation']}): {e.get('label', '')}"
+        for e in edges
+    ) or "  (暂无关系)"
 
     return f"""## 当前知识图谱
 
@@ -169,6 +168,105 @@ def build_graph_context(kg, detailed: bool = False) -> str:
 
 ### 现有关系（共 {len(kg.edges)} 条）
 {edge_list}"""
+
+
+def _visible_edges(nodes: list, edges: list) -> list:
+    """只保留两端都在展示集内的边（限量展示时避免引用不存在的节点）。"""
+    ids = {n["id"] for n in nodes}
+    return [e for e in edges if e["from_node"] in ids and e["to_node"] in ids]
+
+
+def _focus_order(nodes: list, edges: list, focus_node_id: str) -> list:
+    """把当前教学节点及其直接邻居排到最前 —— 截断不能把正在讲的节点丢掉。"""
+    ids = {n["id"] for n in nodes}
+    if not focus_node_id or focus_node_id not in ids:
+        return nodes
+    near = {focus_node_id}
+    for e in edges:
+        if e["from_node"] == focus_node_id:
+            near.add(e["to_node"])
+        elif e["to_node"] == focus_node_id:
+            near.add(e["from_node"])
+    return [n for n in nodes if n["id"] in near] + [n for n in nodes if n["id"] not in near]
+
+
+def _scope_note(preview_dropped: bool, shown_n: int, total_n: int,
+                shown_e: int, total_e: int) -> str:
+    """降级说明（未降级时返回空串）。"""
+    parts = []
+    if preview_dropped:
+        parts.append("为控制上下文体量，上述节点已省略内容摘要（不等于该节点没有内容）；"
+                     "需要某知识点的详细讲解时，调用 rag_search 检索。")
+    if shown_n < total_n or shown_e < total_e:
+        parts.append(f"当前展示范围：节点 {shown_n}/{total_n} 个、关系 {shown_e}/{total_e} 条"
+                     f"（已按与当前教学节点的邻近程度优先保留），未列出的部分并非不存在，"
+                     f"需要时可用 rag_search 检索。")
+    if not parts:
+        return ""
+    return "\n\n> 说明：" + " ".join(parts)
+
+
+def build_graph_context(kg, detailed: bool = False,
+                        max_chars: int | None = None,
+                        focus_node_id: str = "") -> str:
+    """
+    构造当前图谱的注入文本（独立函数，无需创建 GraphAnalyzer 实例）。
+
+    参数:
+        kg:            KnowledgeGraph 实例
+        detailed:      True=附节点 MD 摘要（对话注入）；False=仅名称+标签（分析 LLM）
+        max_chars:     注入文本字符上限。None=settings.graph_inject_max_chars；0=不限制
+        focus_node_id: 当前正在教学的节点 ID，限量展示时优先保留其邻域
+
+    返回:
+        格式化的图谱信息字符串（节点列表 + 关系列表，超限时附展示范围说明）
+
+    体量控制（2026-09-13）：未超限时输出与旧实现逐字符一致；超限按三档降级取第一档
+    能放下的 —— ① 全量含摘要 → ② 全量省摘要 → ③ 限量节点 + 相应边。
+    """
+    cap = settings.graph_inject_max_chars if max_chars is None else max_chars
+    nodes, edges = list(kg.nodes), list(kg.edges)
+    mode = "preview" if detailed else "overview"
+
+    text = _render_graph_block(kg, nodes, edges, mode)
+    if not nodes or cap <= 0 or len(text) <= cap:
+        return text
+
+    # 降级 ①：省节点内容摘要（保住框架完整性 —— 名称/掌握度/难度/边全在）
+    preview_dropped = False
+    if detailed:
+        preview_dropped, mode = True, "compact"
+        compact = _render_graph_block(kg, nodes, edges, mode) + _scope_note(
+            True, len(nodes), len(nodes), len(edges), len(edges))
+        if len(compact) <= cap:
+            logger.info(f"图谱注入降级: 省节点摘要（{len(nodes)} 节点、{len(compact)} 字符，上限 {cap}）")
+            return compact
+
+    # 降级 ②：限量节点（当前教学节点邻域优先），边只保留两端都在展示集内的。
+    # 说明文字计入长度 —— 展示范围说明本身不能把注入推过上限。
+    ordered = _focus_order(nodes, edges, focus_node_id)
+
+    def render(k: int) -> str:
+        shown = ordered[:k]
+        visible = _visible_edges(shown, edges)
+        return _render_graph_block(kg, shown, visible, mode) + _scope_note(
+            preview_dropped, k, len(nodes), len(visible), len(edges))
+
+    # 二分求最大可展示节点数（文本长度随 k 单调不减），模式同 context_guard
+    lo, hi, best = 1, len(ordered), 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if len(render(mid)) <= cap:
+            best, lo = mid, mid + 1
+        else:
+            hi = mid - 1
+
+    text = render(best)
+    logger.info(
+        f"图谱注入降级: 节点 {best}/{len(nodes)}、"
+        f"{len(text)} 字符（上限 {cap}，模式 {mode}）"
+    )
+    return text
 
 
 class GraphAnalyzer:

@@ -19,7 +19,10 @@
 设计：
 - 数据来源：KbStore.get_document_text(node_id) 读取解析后的纯文本
 - 分块：复用 kb_manager.chunk_text（按标题/段落边界切，自动剥离页标记）
-- LLM：call_llm(纯 JSON 输出)，max_tokens 必须调大——每节点要写完整 Markdown 讲解
+- LLM：call_llm(纯 JSON 输出)，两个参数**都不能省**（2026-09-13 实测数据见 docs §10.5）：
+    · max_tokens=GRAPH_MAX_TOKENS —— 默认 2000 会在几个节点后硬截断；
+    · thinking=False —— 思考与正文共享输出预算，实测 3/8 分块出现"思考 26k 字符、
+      预算顶满、正文为空"，关掉思考后同样分块 3/3 正常。
 - 写库：直接调用 KnowledgeGraph，caller="ai"（AI 直接写库，不经人审）
 - 去重：节点按 id/name 全局去重；边由 add_edge 自动去重
 """
@@ -44,7 +47,11 @@ DEDUP_FALLBACK_THRESHOLD = 0.90
 GRAPH_CHUNK_CHARS = 3000
 # 单次生成的输出 token 上限。每个节点要写完整 Markdown 讲解（数百 token），
 # call_llm 的默认 2000 会在几个节点后硬截断 → JSON 解析必然失败。
+# 关掉思考后实测单块正文峰值 ≈5.3k token，8000 留有约 50% 余量。
 GRAPH_MAX_TOKENS = 8000
+# JSON 解析失败时的重试次数：模型偶发吐非法 JSON（实测同一块重发即成功），
+# 重发一次比丢掉整块（含其全部节点与边）划算。
+GRAPH_JSON_RETRIES = 1
 
 # 学科图谱生成专用系统提示词（从书籍内容批量提取知识点 + 建立关系）
 GRAPH_GENERATOR_SYSTEM_PROMPT = """你是一个「学科知识图谱构建专家」。你的任务是从给定的学科书籍内容中，提取该学科的核心知识点，并分析知识点之间的联系，构建一份结构化的知识图谱。
@@ -88,8 +95,11 @@ GRAPH_GENERATOR_SYSTEM_PROMPT = """你是一个「学科知识图谱构建专家
 1. 只提取给定内容中真正涉及的核心知识点，不要凭空编造内容里没有的概念。
 2. difficulty 取值 1-5（1=最简单，5=最难）；estimated_minutes 为预估学习分钟数。
 3. 边只建立知识点之间的实质联系。如果某些知识点没有明确联系，不要强行连线。
-4. edges 中的 from/to 必须是 nodes 或已存在节点（见下方"已有节点"）里的 id。
-5. 答案必须是有效的 JSON。"""
+4. edges 中的 from/to 必须是 nodes 或已存在节点（见下方「已有节点」）里的 id。
+5. 答案必须是有效的 JSON。
+6. **字符串值内部禁止出现英文双引号**：需要引用术语时用中文引号「」或“”；
+   代码示例里的字符串请改用单引号；字符串内的换行必须写成 \\n 转义。
+   （未转义的引号会让整个响应作废——这是最常见的失败原因。）"""
 
 
 class GraphGenerator:
@@ -192,19 +202,33 @@ class GraphGenerator:
 
 请按格式输出 JSON。"""
 
-        try:
-            raw = await call_llm(
-                GRAPH_GENERATOR_SYSTEM_PROMPT,
-                [{"role": "user", "content": user_prompt}],
-                max_tokens=GRAPH_MAX_TOKENS,
-            )
-        except Exception as e:
-            logger.error(f"学科图谱生成 LLM 调用失败: {e}")
-            return None
+        for attempt in range(GRAPH_JSON_RETRIES + 1):
+            try:
+                raw = await call_llm(
+                    GRAPH_GENERATOR_SYSTEM_PROMPT,
+                    [{"role": "user", "content": user_prompt}],
+                    max_tokens=GRAPH_MAX_TOKENS,
+                    thinking=False,
+                )
+            except Exception as e:
+                # 异常（额度/网络）已由 chat_create 的重试+降级链处理过，这里不再重试
+                logger.error(f"学科图谱生成 LLM 调用失败: {e}")
+                return None
 
-        data = extract_json(raw)
-        if data is None:
-            logger.warning(f"学科图谱生成 LLM 返回无法解析的 JSON: {str(raw)[:200]}")
+            data = extract_json(raw)
+            if data is not None:
+                break
+            if attempt < GRAPH_JSON_RETRIES:
+                # 模型偶发吐非法 JSON（同一块重发即成），重发一次比丢掉整块划算
+                logger.warning(
+                    f"学科图谱生成 JSON 解析失败（{len(raw)} 字符，偶发格式错误），重试一次"
+                )
+                continue
+            # 头+尾同时打：只看头部无法区分「截断」与「引号未转义」（尾部是否收在 } 是关键）
+            logger.warning(
+                f"学科图谱生成 LLM 返回无法解析的 JSON（{len(raw)} 字符）"
+                f" 头200: {raw[:200]} 尾120: {raw[-120:]}"
+            )
             return None
 
         nodes = data.get("nodes", [])
@@ -322,6 +346,7 @@ class GraphGenerator:
             raw = await call_llm(
                 "你是一个严谨的知识图谱去重助手。判断两个知识点是否指向同一概念。",
                 [{"role": "user", "content": prompt}],
+                thinking=False,   # 单个 merge/keep 判定，不需要思考（省时省钱）
             )
         except Exception as e:
             logger.warning(f"去重确认 LLM 调用失败，按相似度({similarity:.2f})降级判断: {e}")

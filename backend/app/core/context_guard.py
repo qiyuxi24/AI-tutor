@@ -84,7 +84,13 @@ def trim_history_to_budget(
             else:
                 hi = mid - 1
     else:
-        # system_prompt 自身已超预算：无可裁余地，退化为只剩当前消息（软目标，1M 窗口兜底照发）
+        # system_prompt 自身已超预算：无可裁余地，退化为只剩当前消息（软目标，1M 窗口兜底照发）。
+        # 这是静默失效点 —— 必须 warning 点名，否则"每轮输入几十 K token"无人知晓
+        sys_only = count_messages_tokens([sys_msg], model=model)
+        logger.warning(
+            f"上下文守卫: system_prompt 自身 {sys_only} tokens 已超预算 {target}（含历史共 {before}），"
+            f"历史全裁仍超出 → 照发。请下调注入体量（图谱见 GRAPH_INJECT_MAX_CHARS）"
+        )
         drop = hi
 
     # 保证裁剪后消息序列以 user 开头（API 要求首条非 system 为 user）

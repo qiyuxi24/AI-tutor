@@ -24,10 +24,12 @@ from typing import AsyncGenerator
 from datetime import datetime
 from app.core.prompt_loader import get_system_prompt
 from app.core.agent_loop import run_agent_loop
+from app.core.config import settings
 from app.core.context_guard import trim_history_to_budget
 from app.core.graph_analyzer import GraphAnalyzer, build_graph_context
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.profile import UserProfile
+from app.core.token_counter import count_tokens
 from app.core.error_codes import ErrorCode, log_error, publish_error_event
 from app.core.event_bus import publish, subscribe, get_user_queue, TEXT_DELTA
 from app.core.knowledge_writer import apply_suggestion, load_suggestions, save_suggestions
@@ -104,15 +106,17 @@ EMPTY_GRAPH_PROMPT = """
 #  Prompt 构建
 # ══════════════════════════════════════════════════════════════════
 
-def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True) -> str:
+def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True,
+                         focus_node_id: str = "") -> str:
     """
     构建知识图谱摘要文本，注入到通用模板的 {knowledge_graph_summary} 占位符。
 
     参数:
-        kg:       KnowledgeGraph 实例（已绑定 user_id）
-        detailed: True=全量数据（后台阶段用），False=精简摘要（流式阶段用）
+        kg:            KnowledgeGraph 实例（已绑定 user_id）
+        detailed:      True=全量数据（后台阶段用），False=精简摘要（流式阶段用）
+        focus_node_id: 当前教学节点；注入体量超上限时优先保留其邻域（见 graph_analyzer）
     """
-    return build_graph_context(kg, detailed=detailed)
+    return build_graph_context(kg, detailed=detailed, focus_node_id=focus_node_id)
 
 
 async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
@@ -135,7 +139,7 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
          if (m.role if hasattr(m, 'role') else m['role']) == 'user'),
         ''
     )
-    graph_summary = _build_graph_summary(kg, detailed=inject_tools)
+    graph_summary = _build_graph_summary(kg, detailed=inject_tools, focus_node_id=current_node)
 
     # 加载用户画像（空画像返回 ""，不会把空模板注入提示词）
     profile = UserProfile(user_id=kg.user_id)
@@ -185,6 +189,12 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
     # 图谱为空：放最后（最新指令优先级最高），覆盖退化的「框架约束」
     if not kg.nodes:
         system_prompt += EMPTY_GRAPH_PROMPT
+
+    # 预算可观测：system prompt 是每轮重发的固定成本，图谱区块是其中随规模增长的一项
+    logger.info(
+        f"系统提示词 {count_tokens(system_prompt)} tokens"
+        f"（图谱区块 {len(graph_summary)} 字符，发送预算 {settings.llm_ctx_budget}）"
+    )
 
     return system_prompt, last_user_msg
 
