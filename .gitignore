@@ -71,24 +71,25 @@ backend/eval_data/prof_writer/
 
 # ════════════════════════════════════════════
 # AI 编程助手 / 自动化工具产物
-# .codebuddy 与 .workbuddy 的工作记忆、Agent 配置全队共享；
-# 仅排除第三方插件、本机配置与个人日志
+# 本机工具目录、会话记忆、缓存与生成物不纳入版本控制。
+# 团队开发约定保留在 AGENTS.md，项目提示词保留在 data/prompts/。
 # ════════════════════════════════════════════
+.codebuddy/
+.workbuddy/
+.codex/
+.claude/
+.cursor/
 .trae/
+.aider*
+.continue/
+.roo/
+.cline/
+.serena/
 
 .playwright-cli/
 # Playwright 页面快照（根目录临时文件）
 /init.yaml
 /login.yaml
-# 第三方插件库（ponytail 等，成员按需自行安装）
-.codebuddy/skills/
-# 本机插件配置
-.codebuddy/settings.local.json
-# 个人求职日志（与项目无关，勿提交）
-.workbuddy/memory/2026-09-01.md
-# PPT 生成工具的工作目录：进程状态（.slidep/）、state.json、图标缓存等可重建产物。
-# 成品 PPT 若要留档，请拷到 docs/ 或根目录再提交，不要从工具目录里提交。
-/.workbuddy/ppt_workspace/
 
 # ════════════════════════════════════════════
 # 运行时数据 / 生成文件

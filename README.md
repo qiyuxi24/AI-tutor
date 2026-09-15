@@ -1,250 +1,349 @@
-# TutorAgent — 知识图谱驱动的自适应导学 Agent
 
-**简体中文** ｜ [English](README.en.md)
+# <center> *TutorAgent* — 知识图谱驱动的自适应导学 Agent </center>
 
-> 面向大学生的 AI 学习伙伴：不止是问答，而是**有地图（知识图谱）、有路径（学习规划）、有记忆（学情画像）、有反馈（AI 出题 + 进度仪表盘）**的主动学习系统。
+**简体中文** ｜ [English](README.en.md) 
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p align="center">
+  面向大学生的 AI 学习伙伴：不止是问答，而是<b>有地图（知识图谱）、有路径（学习规划）、有记忆（学情画像）、有反馈（AI 出题 + 进度仪表盘）</b> 的主动学习系统。
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2563eb?style=flat-square" alt="License: MIT"></a>
+  <a href="backend/requirements.txt"><img src="https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10+"></a>
+  <a href="frontend/package.json"><img src="https://img.shields.io/badge/Vue-3-42b883?style=flat-square&amp;logo=vuedotjs&amp;logoColor=white" alt="Vue 3"></a>
+  <a href="backend/requirements.txt"><img src="https://img.shields.io/badge/FastAPI-SSE-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI with SSE"></a>
+</p>
+
+<p align="center">
+  <a href="#overview">项目简介</a> ·
+  <a href="#architecture">架构全景</a> ·
+  <a href="#quick-start">快速开始</a> ·
+  <a href="#configuration">配置说明</a> ·
+  <a href="#documentation">文档与支持</a> ·
+  <a href="CONTRIBUTING.md">参与贡献</a>
+</p>
 
 ---
 
-## 这是什么
+<a id="overview"></a>
 
-TutorAgent 把「对话式 AI 家教」与「知识图谱」「个人学情画像」结合起来，让 AI 从"你问我答"升级为主动导学：它记得你学过什么、看得见知识全貌、能规划下一步学什么，并自动把聊天沉淀成结构化笔记。
+## 项目简介
 
-它解决大学生自学三大痛点：
+TutorAgent 将 **对话式 AI 家教、知识图谱、学情画像和学习路径** 结合起来。让 AI 从"你问我答"升级为主动导学：它记得你学过什么、看得见知识全貌、能规划下一步学什么，并自动把聊天沉淀成结构化笔记。你可以从一个问题开始学习，把教材放进知识库，在对话中积累结构化笔记，再通过出题自测获得反馈。
 
-- **学习盲目碎片** —— 不知道知识结构，学完串不起来 → 知识图谱可视化全景 + 拓扑排序学习路径
-- **学完没有反馈** —— 看不到掌握度，不知道自己差在哪 → 掌握度建模 + AI 出题自测 + 进度仪表盘
-- **记笔记费劲** —— 边学边记手忙脚乱 → 对话即笔记，图谱节点与学情画像自动沉淀
+| 自学时的困扰 | TutorAgent 的做法 |
+| :--- | :--- |
+| 知识点零散，不知道先学什么 | 用可视化图谱呈现知识关系，按先修关系推荐学习路径 |
+| 感觉听懂了，却不知道能否独立作答 | 通过 AI 出题与判分更新掌握度，在仪表盘查看薄弱点 |
+| 对话和笔记分散，复习时难以找回 | 将学习内容沉淀为图谱节点和学情画像，供后续教学使用 |
 
 相比通用对话工具（ChatGPT / Kimi）"对话完即忘"、知识管理工具（Notion / Obsidian）"只存不教"、MOOC 平台"千人一面"，TutorAgent 将**对话交互、知识图谱、学情画像、路径推荐**融为一体——它是主动的学习伙伴，不是被动的问答工具。
 
----
+<a id="architecture"></a>
 
-## 全景（Architecture）
+## 架构全景
 
-### 分层架构
+**Agent Loop 是对话的主执行链路**：模型按需调用工具，再生成回答；思考、工具进度与回答文本通过 SSE（服务器发送事件）实时传回前端。
 
-```
-┌────────────────────────── 前端 Vue 3 SPA ─────────────────────────────┐
-│  Home 对话 │ Knowledge 图谱 │ Dashboard 仪表盘 │ Quiz │ KB │ Collector │
-│          Element Plus + D3 力导向科技树 + Markdown / LaTeX 渲染          │
-└───────────────────▲──────────────────────┬───────────────────────────┘
-            SSE 流式文本 / 事件刷新     REST 查询（图谱 / 题库 / KB / 画像）
-┌───────────────────┴──────────────────────▼───────── FastAPI 后端 ──────┐
-│  api/v1: auth chat conversations knowledge profile rag kb quiz collector│
-│  chat_service：文本流式优先 → 后台 Agent Loop（LLM ↔ 工具 真多轮编排）   │
-│    · 对话 / Agent 主模型 MiniMax-M3（OpenAI 兼容 + function calling）   │
-│    · 工具集 = 图谱 CRUD/路径、画像 note、rag_search（图谱 | KB）         │
-│  领域子系统                                                             │
-│    knowledge_graph / graph_middleware(学科→板块切片) / graph_analyzer   │
-│    rag_pipeline（RagSource 协议，多源并行检索融合）                      │
-│    hybrid_search（向量 + Whoosh BM25 + RRF）＋ kb/parsers + graph_gen   │
-│    quiz 出题 │ collector 资源采集 │ user_profile 画像 │ conversation    │
-│  横切：event_bus │ error_codes │ rate_limiter │ llm/ 原语包 │ config   │
-└────────┬──────────────────────────┬────────────────────────┬───────────┘
-   SQLite（图谱/对话/题库/采集）   节点 Markdown 文件        学情画像 JSON
+```mermaid
+flowchart TB
+    UI["学习界面 · Vue 3"] -->|对话请求| API["FastAPI · chat_service"]
+    API --> LOOP["Agent Loop · 多轮编排"]
+    LOOP <--> MODEL["对话模型 · OpenAI 兼容接口"]
+    LOOP <--> TOOLS["工具注册表 · 图谱 / RAG / 出题 / MCP"]
+    TOOLS --> DATA[("学习数据 · SQLite / Markdown / JSON")]
+    LOOP --> RUNS[("运行记录 · agent_runs")]
+    LOOP --> EVENTS["EventBus · 用户事件队列"]
+    EVENTS -.->|SSE · 思考 / 工具 / 回答| UI
+
+    classDef interface fill:#eff6ff,stroke:#2563eb,color:#172554
+    classDef agent fill:#f0fdf4,stroke:#16a34a,color:#14532d
+    classDef storage fill:#faf5ff,stroke:#9333ea,color:#581c87
+    class UI,API,EVENTS interface
+    class LOOP,MODEL,TOOLS agent
+    class DATA,RUNS storage
 ```
 
-### 两大核心闭环
+| 闭环 | 数据如何流动 |
+| :--- | :--- |
+| **学习与反馈** | 对话教学 → 后台出题 → 学生作答与判分 → 更新掌握度 → 调整学习路径 |
+| **资料与检索** | 上传或采集资料 → 解析分块 → 向量与 BM25 索引 → 混合检索 → 在对话中引用来源 |
+| **运行与回放** | 一次对话生成 `run_id` → 事件实时展示 → 运行记录保存证据 → 按 ID 查询与复核 |
 
-1. **学习闭环（越用越懂）**：对话 → Agent Loop 调用图谱/画像工具 → 节点掌握度与学情画像更新 → 仪表盘与学习路径重算 → 下次对话据此做薄弱点引导与推荐。
-2. **知识闭环（喂料→可查）**：上传教材（PDF/Word/PPT/图片/文本）或 Collector 采集网页 → 解析器按类型路由、可选依赖自动降级 → 分块 + 向量化 & BM25 建双索引 → 混合检索（宽召回 → RRF 融合 → 溯源 + 父级扩展）→ 对话中以 `rag_search` 工具带引用回答。
+<details>
+<summary>查看纯文本架构与开发入口</summary>
 
-### 一次对话发生了什么
+```text
+Vue 3 前端
+  | REST / SSE
+FastAPI -> chat_service -> Agent Loop <-> 对话模型
+                              | 工具调用
+                     图谱 / 画像 / RAG / 出题 / MCP
+                              | 持久化
+                     SQLite / Markdown / JSON
+```
 
-用户消息 → 纯规则路由（问候/过短跳过 RAG）→ 注入学情上下文 + 按需检索 → **先流式吐出正文**（无感延迟）→ 后台 `agent_loop.run_agent_loop` 自动决定调哪些工具（建/改图谱节点、更新画像、查知识库）→ 图谱与仪表盘经 SSE 事件自动刷新，无需手动刷新页面。
+核心入口：[对话编排](backend/app/services/chat_service.py)、[Agent Loop](backend/app/core/agent_loop.py)、[工具注册表](backend/app/core/agent_tools.py)。Agent开发见 [AGENTS.md](AGENTS.md)。
 
----
+</details>
 
 ## 核心功能
 
-| 模块 | 说明 | 状态 |
-|------|------|------|
-| **对话 = Agent Loop** | 自适应引导/自由对话/递归式教学/路径推荐四模式；后台多轮工具循环（max 5 轮、单工具超时、trace 落盘） | ✅ |
-| **流式 + 事件双通道** | SSE 逐 token 推文 + 后台图谱操作事件自动刷新 UI | ✅ |
-| **知识图谱** | D3 力导向可视化 + CRUD + 拓扑排序学习路径（Kahn）+ 搜索聚焦 | ✅ |
-| **科技树化图谱** | 节点按掌握度四色着色 + 图例 + 学习路径高亮 + 薄弱点脉冲 | ✅ |
-| **学习进度仪表盘** | 掌握/学习中/未学统计、平均掌握度、预估时长、薄弱点 + 学科进度 | ✅ |
-| **学情画像 v2** | 结构化 JSON（basic/goals/knowledge/learning/preferences/ai_notes）动态更新 | ✅ |
-| **文件知识库 (KB)** | 目录树式管理，上传 PDF/Word/PPT/图片/文本 → 解析分块向量化 | ✅ |
-| **混合检索 RAG** | 向量 + Whoosh BM25 宽召回各 30 → RRF 融合 → path 溯源 + 父级扩展 | ✅ |
-| **Agentic RAG** | `rag_search` 工具：对话中 LLM 按需检索图谱/知识库并引用来源 | ✅ |
-| **教材→图谱生成** | graph_generator 从学科教材自动生成图谱节点并语义去重 | ✅ |
-| **AI 出题** | 依据教材 KB 混合检索出题（单选/多选/判断/填空/简答），规则/LLM 判分 | ✅ |
-| **资源采集 (Collector)** | 从 Wikipedia/Wikibooks 等发现并入库学科资料（断点续传 + 版权双模式） | ✅ |
-| **运行记录与证据回放** | 每次运行落 `agent_runs`（thinking 全文 / 完整工具参数与返回 / 最终回答），事件带 `run_id` 可回源复核 | ✅ |
-| **模型回退链** | 主模型额度耗尽 / 认证失效 / 持续异常时静默降级到备用服务，教学对话不中断 | ✅ |
-| **版权双模式** | 个人模式（合理使用）/ 商用模式（仅 L0 开放许可），检索层过滤 L2 | ✅ |
+| 功能 | 说明 | 状态 |
+| :--- | :--- | :---: |
+| 自适应对话 | 自适应引导、自由对话、递归式教学三种模式；支持多轮工具调用 | ✅ |
+| 知识图谱与学习路径 | D3 力导向图、学科与板块切片、掌握度着色、先修关系与路径推荐 | ✅ |
+| 学情画像与仪表盘 | 记录目标、偏好与教学笔记，展示掌握度和薄弱点 | ✅ |
+| 文件知识库 | 目录树管理；解析 PDF、Word、PPT、文本及图片，OCR 能力依赖相应组件 | ✅ |
+| 混合检索与 Agentic RAG | 向量检索与 BM25 融合；模型通过 `rag_search` 按需查询图谱和知识库 | ✅ |
+| 教材生成图谱 | 从知识库教材提取知识节点，并进行语义去重 | ✅ |
+| AI 出题与判分 | 题库支持多种题型；对话内客观题异步生成，答对后确定性更新掌握度 | ✅ |
+| 联网搜索与资料采集 | MCP 网页搜索、网页正文抓取、资源下载入库与 Collector 采集 | ✅ |
+| 运行记录与模型回退 | 按 `run_id` 保存思考与工具证据；配置备用服务后支持失败回退 | ✅ |
+| 用户隔离与资料过滤 | JWT 认证；用户数据隔离；按个人或商用模式过滤资料许可等级 | ✅ |
 
 ## 技术栈
 
-| 层级 | 技术 | 说明 |
-|------|------|------|
-| **前端** | Vue 3 + Vite + Pinia + Element Plus + D3.js | SPA，科技树力导向图，Markdown/LaTeX 渲染 |
-| **后端** | Python FastAPI + Uvicorn + Jinja2 | RESTful + SSE 流式，统一错误码 |
-| **AI 对话** | MiniMax-M3（OpenAI 兼容，function calling） | 主模型可切阿里 qwen（见配置）；LLM 重试指数退避+抖动 |
-| **嵌入** | 阿里 text-embedding-v4（固定，独立于对话模型） | 向量索引 / RAG 召回 |
-| **检索** | SQLite 向量存储 + Whoosh BM25 + RRF 融合 | `backend/app/core/hybrid_search/` |
-| **解析** | PyMuPDF / python-docx / python-pptx / RapidOCR | 注册表 + 策略模式，可选依赖降级 |
-| **存储** | SQLite（图谱/对话/题库/采集）+ 节点 MD + 画像 JSON | 零配置，按用户隔离 |
-| **认证** | JWT (python-jose) + bcrypt | 注册/登录/Token 鉴权 |
-| **部署** | Docker 单容器（Nginx:80 + Uvicorn:8000）+ docker-compose | healthcheck + 数据卷 + SSE 反代 |
+| 层级 | 技术 | 用途 |
+| :--- | :--- | :--- |
+| 前端 | Vue 3 · Vite 8 · Pinia · Element Plus · D3 | 对话、图谱与仪表盘，Markdown / LaTeX 渲染 |
+| 后端 | FastAPI · Uvicorn · Jinja2 | REST API、SSE 事件流与提示词模板 |
+| 对话与工具 | OpenAI 兼容接口 · MCP | 模板预设 `MiniMax-M3`；模型、地址与密钥可配置 |
+| 嵌入与检索 | text-embedding-v4 · Whoosh BM25 · RRF | 独立嵌入服务与混合检索 |
+| 文档解析 | PyMuPDF · python-docx · python-pptx · RapidOCR | 按文件类型解析与 OCR |
+| 存储与认证 | SQLite · Markdown · JSON · JWT · bcrypt | 本地持久化、账户认证与用户隔离 |
+| 部署 | Docker Compose · Nginx | 单容器部署、SSE 反向代理与数据卷 |
 
----
+<a id="quick-start"></a>
 
 ## 快速开始
 
-### 前置要求
+### 1. 准备环境
 
-- Python 3.10+（开发推荐 3.11/3.13）
-- Node.js 18+
+- Python ：`3.10+`（开发推荐 `3.11`或`3.13`）
+- Node.js ：`^20.19.0` 或 `>=22.12.0`
 
-### 一键安装 & 启动（Windows PowerShell）
+
+```bash
+git clone https://github.com/qiyuxi24/AI-tutor.git
+cd AI-tutor
+```
+
+### 2. 安装并配置（Windows PowerShell）
+
+安装脚本会创建虚拟环境并安装前后端依赖；根目录不存在 `.env` 时，会从模板生成它。
 
 ```powershell
-# 1. 安装依赖（后端 venv + 前端 node_modules）
 .\install.ps1
+notepad .env
+```
 
-# 2. 配置环境（根目录 .env 是唯一真值文件，本地与 Docker 共源）
-copy .env.example .env
-notepad .env        # 填 LLM_API_KEY(MiniMax) / DASHSCOPE_API_KEY / SECRET_KEY
+在 `.env` 中填写 `LLM_API_KEY`、`DASHSCOPE_API_KEY` 与 `SECRET_KEY`。对话模型、端点与密钥应属于同一服务，具体见[配置说明](#configuration)。可用下面的命令生成随机密钥，再将输出填入 `SECRET_KEY`：
 
-# 3. 启动前后端
+```powershell
+.\backend\venv\Scripts\python.exe -c "import secrets; print(secrets.token_hex(32))"
+```
+
+> [!IMPORTANT]
+> 配置统一放在根目录 `.env`，后端使用项目虚拟环境。手动运行 Uvicorn 时显式指定 `--workers 1`；用户事件队列依赖单进程。
+
+### 3. 启动并体验
+
+```powershell
 .\start.ps1
 ```
 
-启动后访问 http://localhost:5173（首次启动自动创建管理员；**生产部署务必在根 `.env` 设置 `DEFAULT_ADMIN_PASSWORD`**，不要暴露默认口令 `admin/admin123`——见下方配置表）。
+| 入口 | 地址与预期 |
+| :--- | :--- |
+| 学习界面 | [localhost:5173](http://localhost:5173) |
+| API 文档 | [localhost:8000/docs](http://localhost:8000/docs)，查看请求与响应 schema |
+| 健康检查 | [localhost:8000/api/health](http://localhost:8000/api/health)，返回 `{"status":"ok"}` |
 
-### Docker 部署（Linux 服务器）
+首次使用可注册账户。若需要启动时创建 `admin`，先设置 `DEFAULT_ADMIN_PASSWORD`；留空时不会自动创建管理员。
 
-```bash
-# 根目录 .env 配置 DASHSCOPE_API_KEY / SECRET_KEY 后：
-docker compose up -d --build
-# 访问 http://<服务器IP>:8080
+登录后，选择一个知识点并发送「帮我梳理这个知识点的先修知识」，开始体验对话与图谱联动。
+
+<details>
+<summary>手动开发：Windows PowerShell</summary>
+
+以下命令从项目根目录执行。已有虚拟环境与依赖时，直接启动服务即可。
+
+```powershell
+python -m venv backend/venv
+.\backend\venv\Scripts\python.exe -m pip install -r backend/requirements.txt
+npm --prefix frontend ci
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env
 ```
 
-> 数据持久化挂载 `data/{knowledge,conversations,profiles}` + `backend/data`；.dockerignore 排除 .env，防止覆盖容器环境变量。
+后端终端：
 
-### 手动开发
-
-```bash
-# 后端（自动读根目录 .env，无需在 backend 下重复建 .env）
+```powershell
 cd backend
-python -m venv venv && venv\Scripts\activate   # Windows；Linux/mac: source venv/bin/activate
-pip install -r requirements.txt
-copy ..\.env.example ..\.env                     # Linux/mac: cp ../.env.example ../.env
-uvicorn app.main:app --reload --port 8000
-
-# 前端（另开终端）
-cd frontend
-npm install
-npm run dev
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload --reload-dir app --port 8000 --workers 1
 ```
 
-### 服务地址
+前端终端（从项目根目录打开）：
 
-| 服务 | 地址 |
-|------|------|
-| 前端页面 | http://localhost:5173 |
-| 后端 API / Swagger | http://localhost:8000 / /docs |
-| 健康检查 | http://localhost:8000/api/health |
+```powershell
+npm --prefix frontend run dev
+```
 
----
+</details>
 
-## 配置（根目录 .env，模板见 `.env.example`）
+<details>
+<summary>手动开发：Linux / macOS</summary>
 
-| 变量 | 必填 | 说明 |
-|------|------|------|
-| `LLM_API_KEY` | ✅* | 对话/Agent 主模型 Key（默认 MiniMax 国内站）；留空则回退 `DASHSCOPE_API_KEY` 走阿里 qwen |
-| `LLM_BASE_URL` | ❌ | 默认 `https://api.minimaxi.com/v1`；切阿里时改百炼兼容地址 |
-| `MODEL_NAME` | ❌ | 默认 `MiniMax-M3`（1M 上下文/多模态）；备选 `MiniMax-M2.7` / `M2.5` / `qwen-plus` |
-| `DASHSCOPE_API_KEY` | ✅ | 阿里云百炼 Key：**text-embedding-v4 嵌入必需**（独立于对话模型） |
-| `EMBED_BASE_URL` | ❌ | 嵌入端点，默认阿里百炼，通常无需修改 |
-| `FALLBACK_LLM_API_KEY` | ❌ | 备用对话服务 Key（模型回退链）：主模型额度耗尽/认证失效/持续异常时自动**静默降级**到备用服务重发，对话不中断 |
-| `FALLBACK_LLM_BASE_URL` | ❌ | 备用服务 OpenAI 兼容端点（须与 `FALLBACK_MODEL_NAME` 同填才生效） |
-| `FALLBACK_MODEL_NAME` | ❌ | 备用模型名（建议选**不同供应商**的独立 Key 才有真实冗余；留空=单模型旧行为） |
-| `LLM_TIMEOUT` | ❌ | 请求超时，默认 120s |
-| `SECRET_KEY` | ✅ | JWT 签名密钥，缺失拒绝启动 |
-| `CORS_ALLOW_ORIGINS` | ❌ | 逗号分隔白名单，默认仅本地 5173 |
-| `DEFAULT_ADMIN_PASSWORD` | ❌ | 设置后首次启动自动建 admin |
+以下命令从项目根目录执行。创建 `.env` 后，使用编辑器填写上述配置。
 
----
+```bash
+python3 -m venv backend/venv
+backend/venv/bin/python -m pip install -r backend/requirements.txt
+npm --prefix frontend ci
+test -f .env || cp .env.example .env
+```
+
+后端终端：
+
+```bash
+cd backend
+venv/bin/python -m uvicorn app.main:app --reload --reload-dir app --port 8000 --workers 1
+```
+
+前端终端（从项目根目录打开）：
+
+```bash
+npm --prefix frontend run dev
+```
+
+</details>
+
+<details>
+<summary>Docker Compose 部署</summary>
+
+先在根目录配置 `.env` 中的模型服务、`DASHSCOPE_API_KEY` 与 `SECRET_KEY`，再运行：
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+本机访问 [localhost:8080](http://localhost:8080)；远程部署使用服务器地址，端口可通过 `PORT` 调整。Compose 挂载图谱、对话、画像及 `backend/data`；提示词模板随镜像提供。部署、备份与排障见[生产上线与日常运营指南](docs/运维_生产上线与日常运营指南.md)。
+
+</details>
+
+<a id="configuration"></a>
+
+## 配置说明
+
+配置模板：[.env.example](.env.example) · 读取入口：[config.py](backend/app/core/config.py)。下表区分模板预设与代码回退值，完整选项以这两个文件为准。
+
+| 变量 | 是否必填 | 说明 |
+| :--- | :--- | :--- |
+| `LLM_API_KEY` | 对话需要 | 对话服务 Key；留空会使用 `DASHSCOPE_API_KEY`，端点与模型也须同步配置 |
+| `LLM_BASE_URL` | 与模型配套 | 模板预设 `https://api.minimaxi.com/v1`；未设置该变量时，代码默认使用百炼兼容端点 |
+| `MODEL_NAME` | 与端点配套 | 模板预设 `MiniMax-M3`；未设置该变量时，代码默认使用 `qwen-plus` |
+| `DASHSCOPE_API_KEY` | 嵌入 / Docker 必填 | 阿里百炼 Key，供固定的 `text-embedding-v4` 使用 |
+| `SECRET_KEY` | 必填 | JWT 签名密钥；未配置时服务拒绝启动 |
+| `DEFAULT_ADMIN_PASSWORD` | 可选 | 首次创建 `admin` 的密码；留空不自动创建，也不会修改已有账户密码 |
+
+<details>
+<summary>高级配置：备用模型、检索、上下文预算与部署</summary>
+
+| 变量 | 是否必填 | 说明 |
+| :--- | :--- | :--- |
+| `EMBED_BASE_URL` | 可选 | 默认 `https://dashscope.aliyuncs.com/compatible-mode/v1`，独立于对话模型 |
+| `FALLBACK_LLM_API_KEY` | 可选 | 备用服务 Key；留空时使用 `DASHSCOPE_API_KEY` |
+| `FALLBACK_LLM_BASE_URL` / `FALLBACK_MODEL_NAME` | 可选 | 同时配置且有可用 Key 时启用备用服务 |
+| `WEB_SEARCH_ENABLED` | 可选 | 默认 `true`；设为 `false` 关闭 MCP 网页搜索 |
+| `SEARXNG_URL` | 可选 | 自建 SearXNG 地址；未配置时使用 ddgs |
+| `LLM_CTX_BUDGET` | 可选 | 对话发送预算，默认 `32000` tokens |
+| `GRAPH_INJECT_MAX_CHARS` | 可选 | 图谱注入字符上限，默认 `12000`；`0` 表示不限制 |
+| `LLM_TIMEOUT` | 可选 | 模型请求超时，默认 `120` 秒 |
+| `CORS_ALLOW_ORIGINS` / `PORT` | 可选 | 前者配置跨域来源；后者控制 Docker 映射端口，默认 `8080` |
+
+</details>
+
+> [!NOTE]
+> 切换对话服务时，一起修改 `LLM_API_KEY`、`LLM_BASE_URL` 与 `MODEL_NAME`。嵌入配置独立维护；仅清空对话 Key 不会自动切换服务地址。
 
 ## 项目结构
 
+```text
+AI-tutor/
+├── frontend/src/             # Vue 界面、组件、Pinia 与 SSE 客户端
+├── backend/
+│   ├── app/api/v1/           # HTTP 路由
+│   ├── app/services/         # 对话编排
+│   ├── app/core/             # Agent、图谱、画像、RAG、出题与采集
+│   ├── app/mcp_servers/      # MCP 服务
+│   ├── tests/                # 单元与集成测试
+│   └── scripts/              # 诊断、冒烟与评测脚本
+├── data/prompts/             # 纳入版本控制的 Jinja2 提示词模板
+├── docs/                     # 设计、调研与运维文档
+├── .github/workflows/        # GitHub Actions
+├── .env.example              # 环境配置模板
+├── docker-compose.yml        # 容器编排
+├── CONTRIBUTING.md           # 开发、验证与 PR 规范
+└── AGENTS.md                 # 架构契约与开发索引
 ```
-├── frontend/                 # Vue 3 前端
-│   └── src/
-│       ├── views/            # Home(对话)/Knowledge(图谱)/Dashboard/Quiz/Collector/Settings/Login
-│       ├── components/       # ForceGraph(科技树)/ChatArea/NodeDetail/ActivityBar...
-│       ├── stores/           # Pinia：authStore / chatStore
-│       ├── api/              # axios + SSE 封装
-│       └── utils/            # feedback / errorCodes / theme
-│
-├── backend/                  # FastAPI 后端
-│   └── app/
-│       ├── api/v1/           # auth/chat/conversations/knowledge/profile/rag/kb/quiz/collector
-│       ├── services/         # chat_service（流式 + 后台 Agent Loop 编排）
-│       └── core/
-│           ├── agent_loop.py            # Agent 多轮循环（LLM ↔ 工具）
-│           ├── agent_run_store.py       # 运行记录（唯一事实源，证据级 JSON）
-│           ├── agent_tools.py           # 工具注册表（KG_TOOLS 与分发表自动生成）
-│           ├── knowledge_graph.py / graph_middleware.py / graph_analyzer.py
-│           ├── rag_pipeline/            # RagSource 协议 + 路由 + 多源融合
-│           ├── hybrid_search/           # 向量 + Whoosh BM25 + RRF/加权融合
-│           ├── kb/                      # 目录树知识库 + parsers + graph_generator
-│           ├── rag/  quiz/  collector/  # 图谱RAG / AI出题 / 资源采集
-│           ├── profile/                 # 用户画像（结构 / 存储 / 渲染 / 门面）
-│           ├── llm/                     # LLM 原语包：clients / embed / messages / retry / fallback / call
-│           └── event_bus.py / error_codes.py / rate_limiter.py /
-│               config.py / prompt_loader.py / token_counter.py
-│
-├── data/                     # 运行时数据（不入库，按用户隔离）
-│   ├── knowledge/            # 图谱 db + 节点 MD
-│   ├── conversations/ profiles/ prompts/
-│   └── collector/
-├── Dockerfile / docker-compose.yml / nginx.conf / entrypoint.sh   # 生产部署
-├── install.ps1 / start.ps1   # Windows 一键安装/启动
-├── README.md / README.en.md  # 中文主文档 + 英文镜像（文首可切换）
-├── CONTRIBUTING.md           # 贡献指南：环境、测试命令、提交规范
-├── AGENTS.md                 # 架构契约索引（AI 编码 Agent 与开发者）
-└── docs/                     # 调研、设计文档与 README 编写规范
-```
+
+图谱、画像、对话和上传资料等运行时数据按用户保存；提交代码时保留提示词模板，排除 `.env`、运行时数据及依赖目录。
 
 ## 质量与测试
 
-- **零网络用例 533 通过**（mock 掉 LLM / embedding 网络调用，无外网依赖；共收集 540 项，其中 7 个真实 API 用例按 `llm_api` 标记排除）：
-  分块 / 融合 / 父级扩展 / 路由 / pipeline 异常隔离 / 稀疏索引 / 图谱切片 / 先修关系推断 / 掌握度分档 / rag_search 工具 / 上传检索全链路 / 用户隔离 / 采集注册表 / 商用过滤 / Agent Loop 与运行记录等各模块。
-  复现命令（cwd = `backend`）：
+提交前运行后端离线测试。以下 PowerShell 命令的工作目录均为 **项目根目录**：
 
-  ```bash
-  backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"   # → 533 passed, 7 deselected
-  ```
+```powershell
+.\backend\venv\Scripts\python.exe -m pip install -r backend/requirements-dev.txt
+.\backend\venv\Scripts\python.exe -m pytest backend/tests -q -m "not llm_api"
+```
 
-- **离线评测集**（复用 CMRC2018，256 文档/1000 查询）：`backend/scripts/eval_rag.py`
-  mock 基线：vector R@1=0.470 / BM25 0.964 / hybrid(RRF) 0.766 / fuse(加权 α=0.6) 0.818（真实 text-embedding-v4 额度恢复后 `--embed api` 复跑）。
-- **编码准则**：YAGNI 最小实现 + 提示词模板外置（Jinja2）+ 单一配置源（根 .env）+ 统一错误码。
-- **方法学自证**：mock 仅替换 LLM / embedding 的**网络调用**，用于零外网、可重复的 CI 回归；分块、检索、图谱、Agent Loop 等链路逻辑全部真实。真实模型端到端（对话 / 流式 / 工具调用）与真实嵌入评测在含 API key 的部署环境单独执行，完整评测口径与评审证据模块见 [国创技术报告（校评支撑版）](docs/国创技术报告_校评支撑版.md)。
+| 检查 | 验证内容与口径 |
+| :--- | :--- |
+| 后端离线测试 | 图谱、检索、用户隔离与 Agent 等链路；用例数量和结果以当前运行输出为准 |
+| [GitHub Actions](.github/workflows/backend-tests.yml) | CI 在 Python 3.13 下执行同一组离线测试 |
+| 前端构建 | 从根目录运行 `npm --prefix frontend run build` |
+| 真实模型测试 | 标记为 `llm_api`，需有效 API Key 与相应测试依赖，单独执行 |
 
----
+离线用例替换 LLM / embedding 的网络调用，验证真实的分块、检索与编排逻辑；它们不代表真实模型的教学质量或语义检索效果。
 
-## 文档索引
+<details>
+<summary>检索评测与对话出题</summary>
 
-- [README 编写规范](docs/README_编写规范.md)（v3：门面模板 / 双语维护 / 贡献指南规范） ｜ [贡献指南](CONTRIBUTING.md) ｜ [English README](README.en.md)
-- [开发参考手册 AGENTS.md](AGENTS.md) — 架构契约、模块职责与新增工具/端点的接入点
-- [RAG 去耦合与目录检索调研](docs/RAG_去耦合与目录检索调研.md) ｜ [RAG 召回与重排优化调研](docs/RAG_召回与重排优化调研.md) ｜ [Agentic RAG 调研](docs/RAG_参考资料与学习路线.md)
-- [Agent Loop 重构设计](docs/AgentLoop_重构设计讨论.md) ｜ [Agent Loop 业界调研](docs/AgentLoop_业界调研与学习路线.md)
-- [知识图谱参照系契约](docs/知识图谱_参照系契约.md) ｜ [知识图谱模块结构调研](docs/知识图谱_模块结构与封装调研.md)
-- [AI 出题逻辑调研](docs/QUIZ_出题逻辑调研.md) ｜ [资源采集设计讨论](docs/教育资料采集模块_设计讨论.md)
-- [Docker 学习路径与工程化部署](docs/Docker_学习路径与工程化部署.md) ｜ [生产上线与日常运营指南](docs/运维_生产上线与日常运营指南.md) ｜ [标杆项目对标分析](docs/标杆项目对标分析.md)
+从项目根目录运行 CMRC2018 检索评测，使用确定性的 mock 嵌入比较检索策略：
 
-## 贡献
+```powershell
+.\backend\venv\Scripts\python.exe backend/scripts/eval_rag.py --embed mock
+```
 
-欢迎 Issue 与 PR：bug 报告、文档修正、双语同步、新学科图谱数据、检索评测复跑等。
-动手前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)（环境准备、测试命令与提交规范）；提交前请跑通 `-m "not llm_api"` 测试套件，并遵循项目既有的分层与 YAGNI 最小实现约定。若改动了架构、命令或量化数字，请**同步更新中英文两份 README**。
+真实嵌入可改用 `--embed api`。对话出题的端到端验证见 [smoke_chat_quiz.py](backend/scripts/smoke_chat_quiz.py)，调用真实服务时会消耗 API 额度。评测方法与技术证据见[技术报告](docs/国创技术报告.md)。
+
+</details>
+
+<a id="documentation"></a>
+
+## 文档与支持
+
+| 你想了解 | 阅读入口 |
+| :--- | :--- |
+| 开发环境、提交约定与贡献流程 | [贡献指南](CONTRIBUTING.md) |
+| 模块职责、工具接入与架构契约 | [开发参考手册](AGENTS.md) |
+| API 参数与响应 | 启动后访问 [FastAPI /docs](http://localhost:8000/docs) |
+| Agent 设计 | [Agent Loop 重构设计](docs/AgentLoop_重构设计讨论.md) |
+| 知识库与出题 | [RAG 学习路线](docs/RAG_参考资料与学习路线.md) · [出题设计](docs/QUIZ_出题逻辑调研.md) |
+| 联网工具 | [MCP 网页搜索方案](docs/MCP_网页搜索工具_调研与实施方案.md) |
+| 部署与运营 | [Docker 指南](docs/Docker_学习路径与工程化部署.md) · [运维指南](docs/运维_生产上线与日常运营指南.md) |
+| Git 协作与双语文档 | [Git 工作流](docs/Git_多人协作_工作流调研与学习路径.md) · [README 规范](docs/README_编写规范.md) |
+
+遇到问题，请先搜索已有 [Issues](https://github.com/qiyuxi24/AI-tutor/issues)，再提供系统版本、复现步骤、预期结果和去除密钥后的日志。项目由 [qiyuxi24](https://github.com/qiyuxi24) 与[社区贡献者](https://github.com/qiyuxi24/AI-tutor/graphs/contributors)维护，开发讨论见 [Pull requests](https://github.com/qiyuxi24/AI-tutor/pulls)。
+
+## 参与贡献
+
+欢迎提交 Bug 报告、文档修正、测试与功能改进。开始前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，按 **Fork → 本地分支 → 验证与提交 → Push → PR** 协作；涉及 README 的结构、命令或事实变化时，同步更新中英文版本。
 
 ## License
 
-[MIT](LICENSE)
+本项目采用 [MIT License](LICENSE)。
+
+<p align="right"><a href="#tutoragent">返回顶部 ↑</a></p>
