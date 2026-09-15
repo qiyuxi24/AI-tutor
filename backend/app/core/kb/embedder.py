@@ -125,6 +125,10 @@ class ApiEmbedder(BaseEmbedder):
 
     name = "text-embedding-v4"
 
+    # DashScope text-embedding-v4 单次请求最多 10 条（2026-09-14 踩坑：
+    # 整批发送报 400 "batch size is invalid, it should not be larger than 10"）
+    BATCH_SIZE = 10
+
     def __init__(self):
         self._client = None
 
@@ -142,12 +146,14 @@ class ApiEmbedder(BaseEmbedder):
             return []
         try:
             # 语义去重文本量小、调用低频，用同步客户端可接受
-            resp = self._get_client().embeddings.create(
-                model="text-embedding-v4", input=texts,
-            )
             vectors = [None] * len(texts)
-            for item in resp.data:
-                vectors[item.index] = item.embedding
+            for start in range(0, len(texts), self.BATCH_SIZE):
+                batch = texts[start:start + self.BATCH_SIZE]
+                resp = self._get_client().embeddings.create(
+                    model="text-embedding-v4", input=batch,
+                )
+                for item in resp.data:
+                    vectors[start + item.index] = item.embedding
             return [v for v in vectors if v is not None]
         except Exception as e:
             logger.warning(f"text-embedding-v4 嵌入失败: {e}")

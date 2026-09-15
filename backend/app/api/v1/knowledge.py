@@ -55,13 +55,20 @@ router = APIRouter()
 @router.get("/knowledge/events")
 async def knowledge_events(user_id: int = Depends(get_current_user_from_token)):
     """
-    知识图谱变更事件流（SSE）。需通过 URL query 参数传入 JWT token。
+    图谱写通道事件流（SSE）。需通过 URL query 参数传入 JWT token。
     前端通过 EventSource 连接此端点，当图谱数据变更时自动收到通知并刷新。
     事件格式：data: {"type": "graph_updated", ...}\n\n
-    
+
     由于 EventSource 不支持自定义请求头，通过 URL query 参数 ?token=xxx 传递 JWT。
+
+    2026-09-14 改为**按用户订阅**（原来是 subscribe() 全局队列）：
+      - 必要：对话内出题完成的 `quiz_ready` 事件带题目内容，走 per-user 路由，
+        全局队列收不到（publish 带 user_id 时只投该用户队列）；
+      - 顺带修掉一个既有泄漏：全局广播的 graph_updated 会被所有在线用户都收到。
+      全局广播仍能到达（publish 无 user_id 时会同时投递到每个用户队列），
+      所以 graph_updated 行为不变。
     """
-    return StreamingResponse(subscribe(), media_type="text/event-stream")
+    return StreamingResponse(subscribe(user_id=user_id), media_type="text/event-stream")
 
 
 # ══════════════════════════════════════════════════════════════════

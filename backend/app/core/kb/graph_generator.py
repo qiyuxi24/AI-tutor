@@ -27,6 +27,7 @@
 - 去重：节点按 id/name 全局去重；边由 add_edge 自动去重
 """
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -47,6 +48,7 @@ DEDUP_FALLBACK_THRESHOLD = 0.90
 GRAPH_CHUNK_CHARS = 3000
 # 单次生成的输出 token 上限。每个节点要写完整 Markdown 讲解（数百 token），
 # call_llm 的默认 2000 会在几个节点后硬截断 → JSON 解析必然失败。
+# 2026-09-14 真机踩坑证据：completion=2000 顶满 + "返回无法解析的 JSON" → chunk 被静默跳过。
 # 关掉思考后实测单块正文峰值 ≈5.3k token，8000 留有约 50% 余量。
 GRAPH_MAX_TOKENS = 8000
 # JSON 解析失败时的重试次数：模型偶发吐非法 JSON（实测同一块重发即成功），
@@ -96,8 +98,10 @@ GRAPH_GENERATOR_SYSTEM_PROMPT = """你是一个「学科知识图谱构建专家
 2. difficulty 取值 1-5（1=最简单，5=最难）；estimated_minutes 为预估学习分钟数。
 3. 边只建立知识点之间的实质联系。如果某些知识点没有明确联系，不要强行连线。
 4. edges 中的 from/to 必须是 nodes 或已存在节点（见下方「已有节点」）里的 id。
-5. 答案必须是有效的 JSON。
-6. **字符串值内部禁止出现英文双引号**：需要引用术语时用中文引号「」或“”；
+5. 控制篇幅（重要）：每次最多提取 8 个知识点；每个 content 控制在 300 字以内，
+   讲清定义与核心要点即可，不要展开长篇示例与推导。
+   输出超过上限会被截断，导致整批内容全部作废。
+6. 答案必须是有效的 JSON，**字符串值内部禁止出现英文双引号**：需要引用术语时用中文引号「」或“”；
    代码示例里的字符串请改用单引号；字符串内的换行必须写成 \\n 转义。
    （未转义的引号会让整个响应作废——这是最常见的失败原因。）"""
 
@@ -202,6 +206,9 @@ class GraphGenerator:
 
 请按格式输出 JSON。"""
 
+        # 一次循环同时兜住两种偶发失败：① 空回复/瞬时异常（M3 思考阶段耗尽输出预算）
+        # ② 吐非法 JSON。两者"重发一次即成功"的概率都很高，比丢掉整块（含其全部
+        # 节点与边）划算。旋钮统一用 GRAPH_JSON_RETRIES，不再另设常数。
         for attempt in range(GRAPH_JSON_RETRIES + 1):
             try:
                 raw = await call_llm(
@@ -211,7 +218,12 @@ class GraphGenerator:
                     thinking=False,
                 )
             except Exception as e:
-                # 异常（额度/网络）已由 chat_create 的重试+降级链处理过，这里不再重试
+                # 异常（额度/网络）已由 chat_create 的重试+降级链处理过；
+                # 这里只再等一轮就放弃，不再叠加无界重试。
+                if attempt < GRAPH_JSON_RETRIES:
+                    logger.warning(f"图谱生成调用失败（{e}），2 秒后重试一次")
+                    await asyncio.sleep(2)
+                    continue
                 logger.error(f"学科图谱生成 LLM 调用失败: {e}")
                 return None
 
@@ -516,6 +528,7 @@ class GraphGenerator:
             "merged_nodes": [],
             "failed_chunks": 0,
         }
+        failed_chunks = 0
 
         for book in books:
             for chunk in chunk_text(book["text"], chunk_size=GRAPH_CHUNK_CHARS):
@@ -539,6 +552,13 @@ class GraphGenerator:
                 f"学科图谱生成（{subject}）：{aggregate['failed_chunks']} 个文本块"
                 f"未能生成图谱（已跳过，其余块正常写入）"
             )
+            # 全部失败通常是配置问题（额度/模型名），只留 warning 会被日志埋掉
+            # → 直接回 error 给前端提示（合并自另一分支的排查经验）
+            if not aggregate["created_nodes"]:
+                aggregate["error"] = (
+                    f"全部 {aggregate['failed_chunks']} 个文本块都生成失败（空回复或输出被截断）。"
+                    "请检查日志中的 E-LLM-006 / 无法解析的 JSON，确认 LLM 配置后重试。"
+                )
         return aggregate
 
     async def generate_subject_graph(self, kg, subject: str,

@@ -21,6 +21,8 @@ logger = logging.getLogger("ai-tutor")
 # 阿里云 text-embedding-v4：支持 8192 token，这里设保守字符数
 EMBEDDING_MODEL = "text-embedding-v4"
 MAX_EMBED_CHARS = 6000
+# 单次请求最多条数（DashScope 限制 10 条，2026-09-14 踩坑：超限报 400）
+EMBED_BATCH_SIZE = 10
 
 
 async def embed_texts(texts: list[str],
@@ -38,13 +40,15 @@ async def embed_texts(texts: list[str],
     if not texts:
         return []
     try:
-        resp = await embed_client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=[t[:max_chars] for t in texts],
-        )
         vectors: list[list[float] | None] = [None] * len(texts)
-        for item in resp.data:
-            vectors[item.index] = item.embedding
+        for start in range(0, len(texts), EMBED_BATCH_SIZE):
+            batch = [t[:max_chars] for t in texts[start:start + EMBED_BATCH_SIZE]]
+            resp = await embed_client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                input=batch,
+            )
+            for item in resp.data:
+                vectors[start + item.index] = item.embedding
     except Exception as e:
         logger.error(f"嵌入调用失败: {e}")
         return []

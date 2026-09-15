@@ -57,9 +57,17 @@ def _check_self_contained(q: Question) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _deduplicate(questions: list[Question]) -> list[Question]:
-    """重复检测器：按归一化题干去重"""
-    seen: set[str] = set()
+def _deduplicate(questions: list[Question],
+                 avoid_texts: list[str] | None = None) -> list[Question]:
+    """
+    重复检测器：按归一化题干去重。
+
+    参数:
+        avoid_texts: 额外"已经出过"的题干（**跳调用**去重）。
+            对话内出题以"答题判分"作为掌握度主信号，必须排除该节点已考过的题 ——
+            否则学生反复答同一道题就能把掌握度刷上去。
+    """
+    seen: set[str] = {_normalize(t) for t in (avoid_texts or []) if t}
     result: list[Question] = []
     for q in questions:
         key = _normalize(q.question)
@@ -70,7 +78,9 @@ def _deduplicate(questions: list[Question]) -> list[Question]:
     return result
 
 
-def filter_questions(questions: list[Question]) -> tuple[list[Question], int]:
+def filter_questions(questions: list[Question],
+                     avoid_texts: list[str] | None = None
+                     ) -> tuple[list[Question], int]:
     """
     质量过滤管道：逐题检查 + 去重。
 
@@ -82,12 +92,14 @@ def filter_questions(questions: list[Question]) -> tuple[list[Question], int]:
         for checker in (_check_length, _check_self_contained):
             ok, reason = checker(q)
             if not ok:
-                logger.debug(f"出题过滤: {reason} | {q.question[:40]}")
+                # INFO 而非 debug：被过滤会触发"数量不足 → 补题"，每次都多花 45~85s 与一次
+                # LLM 调用，过滤原因是延迟/成本的关键线索，默认日志必须可见（2026-09-14）。
+                logger.info(f"出题过滤: {reason} | {q.question[:50]}")
                 rejected += 1
                 break
         else:
             passed.append(q)
 
-    deduped = _deduplicate(passed)
+    deduped = _deduplicate(passed, avoid_texts=avoid_texts)
     rejected += len(passed) - len(deduped)
     return deduped, rejected

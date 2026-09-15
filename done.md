@@ -94,6 +94,20 @@
 - 检索扩跳 `rag_manager.search(hops=)` → `_expand_prerequisites`（只反向补前置，A/B 实测命中 25%→62.5%）
 - 掌握度四档唯一实现 `mastery_bucket()`；参照系契约 `docs/知识图谱_参照系契约.md`
 
+### 4.2 知识图谱从未注入提示词 —— 影响面极大的静默 bug（2026-09-14 修复）
+- 根因：`data/prompts/system_prompt_common.j2` 的占位符写成了**单花括号** `{knowledge_graph_summary}`
+  / `{user_profile}`。Jinja2 只认 `{{ }}`，单括号是**字面文本**，渲染时原样输出；
+  全库无任何 `.replace()` 兜底 → **adaptive / free_talk 模式下 AI 完全看不到知识图谱与学生画像**。
+  （recursive 模式正常，它用的是 `{{ knowledge_graph_framework }}`。）
+- **这是此前被误判为"模型个人数据幻觉"的真因** —— AI 说"你的图谱可能是空的"不是幻觉，
+  它确实看不到图谱（修复后 57 个节点 id 命中 57）。
+- 更坑的是 `tests/test_prompt_loader.py` 曾把这个 bug 当成"预期行为"锁死
+  （断言占位符名字出现）→ 已改为**断言值被注入 + 字面占位符不残留 + 模板源码不含单花括号**三条守卫。
+  **教训：断言"占位符名字出现"毫无意义。**
+- 诊断脚本：`backend/scripts/probe_graph_prompt.py`（节点 id 命中数应为节点总数）
+- 代价：注入后系统提示词 ~3k → **14.4k tokens**（57 节点 / 图谱摘要 22141 字符）；
+  `LLM_CTX_BUDGET=32000` 下留给历史 ≈ 15.6k，待决策项见 `TODO.md`
+
 ## 5. RAG / 知识库
 - 知识库目录树（递归多级 + 上传/删除/检索/上下文选择）
 - 解析器注册表去耦合（text 30+ / pdf / docx / pptx / image-OCR / legacy / 电子书 epub+fb2，可选依赖降级）
@@ -108,6 +122,41 @@
 ## 6. AI 出题
 - quiz 模块（schema / generator / grader / quality / store）+ API 5 端点
 - QuizView 前端（配置 → 作答 → 客观题规则判分 / 简答 LLM 判分 → 解析反馈）
+
+### 6.1 出题数量不足修复 —— 分批 + 补题 + 批次隔离（2026-09-14）
+- 根因：思考型模型的 `max_tokens` **同时约束思考 + 正文** → 一次要 10 道题时 JSON 被硬截断，
+  而抢救策略只能挖出已闭合的对象 → 请求 5 道只拿回 2 道。
+- 修复：`QUIZ_BATCH_SIZE=4` 分批并发（`_split_counts` / `_types_for_batch`）+ 不足补题
+  （`QUIZ_MAX_TOPUP_ROUNDS=2`）+ **批次隔离**（`asyncio.gather(return_exceptions=True)`，
+  一批炸掉不再拖垮整次出题；`_generate_batch` 内部再自加一次重试）。
+- 真机验证：请求 1 / 3 / 5 / 10 全部达标；`scripts/smoke_quiz_generate.py --top-k`
+- 观测能力：`call_llm` 日志带 `finish=`（区分撞顶 / 模型自停）、过滤原因从 debug 提到 info
+- 已知不可解：思考量随机波动 3~5 倍（1606~4916 token），撞顶与"模型自己停"两种失败都压不掉，
+  靠重试兜住（~10~20% 单次失败率）；延迟 ≈ 11ms × completion_tokens
+
+### 6.2 对话内出题 P0（2026-09-14）
+- `quiz_generate` + `grade_answer` 两个 Agent 工具，把"即学即测"闭环接进对话
+- `core/quiz/chat_quiz.py`：后台异步出题（单题固有延迟数秒~40s，不能同步等）→ 入库（`source="chat"`）
+  → 推 `quiz_ready` 事件 → 前端追加题目消息 → 学生作答 → 规则判分 → **答对自动 +20 掌握度**
+- 题目依据 = 刚学的图谱节点正文（`seed_materials`）+ KB 检索，解决"学生没上传教材就退化成通用常识出题"
+- 支撑改造：工具层支持**协程 handler** + 单工具超时覆盖（`execute_kg_tool_async` / `tool_timeout_secs`）；
+  `/knowledge/events` 改为**按用户订阅**（原来全局队列，收不到 per-user 事件且互相广播）
+- 真机验证：`scripts/smoke_chat_quiz.py` 全链路通过（出题 4.3~6.2s，答对 0→20 / 答错 20→20）
+- 同节点跨调用去重：`QuizStore.asked_questions(node_id)` → `generate_quiz(avoid_questions=…)`
+  → 注入提示 + `filter_questions(avoid_texts=…)` 强制排除（判分已是掌握度主信号，不去重就能靠重答刷分）
+
+### 6.3 掌握度更新：以出题判分为主信号（①，2026-09-14）
+- **实测发现 `update_mastery` 从未被 AI 调用过**（12 次 agent 运行，0 次）；
+  诊断脚本 `backend/scripts/probe_agent_runs.py --summary`
+- 根因："当用户正确回答/理解后，适当调整 mastery"是**不可执行的软约束** ——
+  苏格拉底教学里"学生在回答我"是每轮常态，模型分不清"答对一个小问题"与"掌握了知识点"
+- 提示词改造（`chat_service.TOOL_CAPABILITY_PROMPT`）：新增「掌握度由谁更新」+「学生说懂了 → **出题，不要再追问**（铁律）」；
+  `update_mastery` 收敛为**仅限 3 种硬证据**（说来就很熟→70 / 完全没学过→0 / 主动纠正→+10）；
+  删除旧的"根据回复质量打分（0=未掌握, 1-25=入门…）"档位
+- **关键教训**：第一版只写"学生表示理解 → 出题"**无效** —— 真机模拟"我完全搞懂了"，
+  模型仍继续苏格拉底追问、不调工具。提成**铁律级** + 明确"❌ 错误做法：继续反问"后才生效
+  → 改触发类提示词**必须写清"不要做什么"**，否则会被更强的既有原则盖过
+- 验证手段：`scripts/smoke_chat_quiz.py --simulate "学生发言"`（真机跑一轮，打印实际工具调用序列）
 
 ## 7. 资源采集 Collector
 

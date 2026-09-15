@@ -15,6 +15,8 @@ import {
   generateQuiz,
   gradeQuizQuestion,
   getQuizStats,
+  downloadQuiz,
+  readBlobError,
 } from '../api/quiz.js'
 
 // ─── 出题配置 ───
@@ -46,6 +48,8 @@ const results = ref({})                // { 本地索引: 判分结果 }
 const submittingId = ref(null)         // 正在判分的题目
 const rejectedCount = ref(0)
 const materialsUsed = ref(0)
+// 请求的题数（分批出题后可能因截断/重复凑不满，用来提示差额）
+const requestedCount = ref(0)
 
 const stats = ref({ total_questions: 0 })
 
@@ -110,10 +114,17 @@ async function handleGenerate() {
     }))
     rejectedCount.value = d.rejected || 0
     materialsUsed.value = d.materials_used || 0
+    requestedCount.value = d.requested || questions.value.length
     if (!questions.value.length) {
       ElMessage.warning('AI 未能生成合格题目，请调整主题后重试')
     } else {
-      ElMessage.success(`已生成 ${questions.value.length} 道题目`)
+      const short = requestedCount.value - questions.value.length
+      if (short > 0) {
+        // 分批出题后仍凑不满（多轮补题也没补上），明确告知差额而不是静默少给
+        ElMessage.warning(`请求 ${requestedCount.value} 道，实际生成 ${questions.value.length} 道（差 ${short} 道）`)
+      } else {
+        ElMessage.success(`已生成 ${questions.value.length} 道题目`)
+      }
       loadStats()
     }
   } catch (e) {
@@ -169,6 +180,51 @@ function normalizeAnswer(q, a) {
     return Array.isArray(a) ? a.join(',') : String(a || '')
   }
   return String(a || '')
+}
+
+// ─── 试卷导出（Word / PDF / Markdown）───
+const exportOptions = [
+  { fmt: 'docx', label: 'Word', tip: '可继续编辑的 .docx' },
+  { fmt: 'pdf', label: 'PDF', tip: '适合打印/打印预览' },
+  { fmt: 'md', label: 'Markdown', tip: '纯文本，便于二次加工' },
+]
+const exportingFmt = ref('')        // 正在导出的格式，用于按钮 loading
+const withAnswer = ref(true)        // false = 学生卷（不含答案解析）
+
+/**
+ * 导出当前这套题；若还没出题，则按主题导出题库。
+ * 后端按 ids 优先，因此刚出的那套题顺序、内容与页面完全一致。
+ */
+async function handleExport(fmt) {
+  const ids = questions.value
+    .map((q) => q.dbId)
+    .filter((id) => id != null)
+    .join(',')
+  const subj = subject.value.trim()
+
+  if (!ids && !subj) {
+    ElMessage.warning('请先「开始出题」，或填写主题以导出该主题的题库')
+    return
+  }
+
+  exportingFmt.value = fmt
+  try {
+    const name = await downloadQuiz(
+      {
+        format: fmt,
+        ids,                              // 有当前题目 → 只导出这套
+        subject: ids ? '' : subj,         // 否则按主题导出题库
+        limit: 200,
+        with_answer: withAnswer.value,
+      },
+      `${subj || 'AI试题'}${withAnswer.value ? '_试题' : '_学生卷'}`
+    )
+    ElMessage.success(`已下载 ${name}`)
+  } catch (e) {
+    ElMessage.error(await readBlobError(e))
+  } finally {
+    exportingFmt.value = ''
+  }
 }
 
 onMounted(() => {
@@ -235,8 +291,43 @@ onMounted(() => {
         <!-- 出题结果统计 -->
         <div v-if="questions.length" class="quiz-meta">
           <span>本次生成 <b>{{ questions.length }}</b> 道</span>
+          <span v-if="requestedCount > questions.length" class="meta-shortfall">
+            ，请求 <b>{{ requestedCount }}</b> 道（差 <b>{{ requestedCount - questions.length }}</b> 道）
+          </span>
           <span v-if="rejectedCount">，过滤不合格 <b>{{ rejectedCount }}</b> 道</span>
           <span v-if="materialsUsed">，依据知识库 {{ materialsUsed }} 个片段</span>
+        </div>
+
+        <!-- 试卷导出：出过题导出这套题，否则按主题导出题库 -->
+        <div v-if="questions.length || subject.trim()" class="quiz-export">
+          <span class="export-title">导出试卷</span>
+
+          <el-radio-group v-model="withAnswer" size="small">
+            <el-radio-button :value="true">教师卷（含答案解析）</el-radio-button>
+            <el-radio-button :value="false">学生卷（仅题目）</el-radio-button>
+          </el-radio-group>
+
+          <el-tooltip
+            v-for="opt in exportOptions"
+            :key="opt.fmt"
+            :content="opt.tip"
+            placement="top"
+          >
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              :loading="exportingFmt === opt.fmt"
+              :disabled="!!exportingFmt && exportingFmt !== opt.fmt"
+              @click="handleExport(opt.fmt)"
+            >
+              导出 {{ opt.label }}
+            </el-button>
+          </el-tooltip>
+
+          <span class="export-hint">
+            {{ questions.length ? '导出当前这次生成的题目' : `导出主题「${subject.trim()}」的题库题目` }}
+          </span>
         </div>
 
         <!-- 题目列表 -->
@@ -447,8 +538,33 @@ onMounted(() => {
   color: var(--color-text-secondary);
   margin-bottom: 14px;
 }
+/* 数量不足提示（分批出题后仍未凑够请求题数） */
+.quiz-meta .meta-shortfall {
+  color: var(--el-color-warning);
+}
 .quiz-meta b {
   color: var(--color-accent);
+}
+
+/* 试卷导出工具条 */
+.quiz-export {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-subtle, rgba(127, 127, 127, 0.05));
+}
+.quiz-export .export-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.quiz-export .export-hint {
+  font-size: 12px;
+  color: var(--color-text-secondary);
 }
 
 /* 题目卡片 */

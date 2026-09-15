@@ -16,6 +16,8 @@
 - add_knowledge_node → knowledge_writer.py（AI 建节点/更新节点，纯业务，2026-09-08 下沉）
 """
 
+import asyncio
+import inspect
 import json
 
 from app.core.download_tool import download_resource
@@ -26,9 +28,19 @@ from app.core.rag_tool import rag_search
 from app.core.web_tool import fetch_webpage
 
 
-def _spec(name, description, parameters, handler):
+def _spec(name, description, parameters, handler, timeout_secs=None):
+    """
+    注册一条工具 spec。
+
+    参数:
+        timeout_secs: 单工具超时覆盖（None = 用 agent_loop 的默认值）。
+            慢工具必须显式放宽：`quiz_generate` 要调 LLM 出题，真机实测单题 ~40s，
+            默认 60s 护栏太紧（2026-09-14）。异步 handler 会被直接 await，
+            同步 handler 仍放线程池执行 —— 由 execute_kg_tool_async 判定。
+    """
     return {"name": name, "description": description,
-            "parameters": parameters, "handler": handler}
+            "parameters": parameters, "handler": handler,
+            "timeout_secs": timeout_secs}
 
 
 # ── handler：工具执行体（(args: dict, kg: KnowledgeGraph) -> 给模型的文本）──
@@ -93,6 +105,50 @@ def _h_rag_search(args, kg) -> str:
     return rag_search(args.get("query", ""), source=args.get("source", "all"),
                       top_k=int(args.get("top_k", 3)), user_id=kg.user_id,
                       hops=int(args.get("hops", 0) or 0))
+
+
+# ── 对话内出题 / 判分（P0，2026-09-14）──────────────────────────────
+# 这两个是**协程 handler**：agent_loop 会直接 await 而不是丢线程池。
+# 原因见 execute_kg_tool_async 的 docstring（工具内要 asyncio.create_task 起后台出题）。
+
+async def _h_quiz_generate(args, kg) -> str:
+    """
+    对话内出题：**立即返回**，真正出题在后台 task 里跑，出好后推 QUIZ_READY 事件。
+
+    为什么不在这里同步等：单题出题固有延迟 ~40s（思考型模型，实测延迟 ≈ 11ms ×
+    completion_tokens），同步等会把对话卡死。
+    """
+    from app.core.quiz.chat_quiz import start_background_generation  # 延迟导入，避免拖慢启动
+
+    node_id = str(args.get("node_id", "") or "").strip()
+    if not node_id:
+        return "需要指定 node_id（要检验的知识点节点 id）。请从当前知识图谱里选一个刚讲过的节点。"
+    if kg.get_node(node_id) is None:
+        return f"知识点 {node_id} 不在当前知识图谱里，无法出题。请先确认节点 id 是否正确。"
+
+    if not start_background_generation(kg.user_id, node_id=node_id):
+        return "已经有一道题在生成中（约 40 秒），不要重复触发。"
+
+    return (
+        "已开始后台出题（题目会在几秒后自动推送给学生）。\n"
+        "⚠️ 你现在**不要等待**：只需用一句话告诉学生「我出一道题检验一下，稍等片刻」，"
+        "然后正常收尾这一轮回复。题目准备好后会自动出现在对话里，那时学生会作答，"
+        "你再调用 grade_answer 判分。"
+    )
+
+
+async def _h_grade_answer(args, kg) -> str:
+    """
+    对学生刚作答的题目判分（规则判分：single/multiple/judge/fill 全部 0 token、瞬时）。
+
+    学生只需说出答案，模型不需要知道题库 id —— 见 chat_quiz.grade_pending_answer。
+    """
+    from app.core.quiz.chat_quiz import grade_pending_answer
+
+    user_answer = str(args.get("user_answer", "") or "").strip()
+    if not user_answer:
+        return "缺少 user_answer（学生的原始作答内容），请把它一并传进来。"
+    return await grade_pending_answer(kg, user_answer)
 
 
 _TOOL_SPECS = [
@@ -219,6 +275,45 @@ _TOOL_SPECS = [
          "required": ["query"]},
         _h_rag_search,
     ),
+    _spec(
+        "quiz_generate",
+        "针对某个刚学过的知识点**出一道题**检验学生（后台生成，通常几秒后自动推送给学生；本工具立即返回，不需要等待）。"
+        "⚠️ 只在合适时机调用：①学生表示已理解（『懂了』『明白了』）或正确回答了你的引导问题；"
+        "②同一个知识点已讨论 2 轮以上、需要检验是否真懂；③学生主动要求练习。"
+        "**不要**在学生刚提新问题、话题还在展开、或已有题目待作答时调用。",
+        {
+            "type": "object",
+            "properties": {
+                "node_id": {
+                    "type": "string",
+                    "description": "要检验的知识点节点 id（必须是当前知识图谱里**已有**的节点，"
+                                   "选刚才讲解/讨论的那个）",
+                },
+            },
+            "required": ["node_id"],
+        },
+        _h_quiz_generate,
+        # 防御性放大：正常路径立即返回，但万一 KG 查询等环节卡住，别被默认 60s 掐断
+        timeout_secs=90,
+    ),
+    _spec(
+        "grade_answer",
+        "对学生刚作答的题目判分并记录（规则判分，瞬时返回）。"
+        "学生回答你出的题之后调用，只需把学生的原话传进来，系统会自动找到那道待作答的题。"
+        "答对会自动提升该知识点的掌握度；判分结果里含参考答案与解析，"
+        "请据此决定是『简短肯定后推进』还是『回到苏格拉底式追问』——答错时**不要**直接给答案。",
+        {
+            "type": "object",
+            "properties": {
+                "user_answer": {
+                    "type": "string",
+                    "description": "学生的原始作答内容，如 'A'、'AC'、'对'、'栈'",
+                },
+            },
+            "required": ["user_answer"],
+        },
+        _h_grade_answer,
+    ),
 ]
 
 # MCP 工具并入（2026-09-12）：schema/描述直接取自 MCP tools/list，宿主侧不重复维护。
@@ -234,10 +329,53 @@ KG_TOOLS = [
 ]
 
 
+def _resolve_spec(tool_call):
+    """从 tool_call 取 (name, spec)；工具未注册时 spec 为 None。"""
+    name = getattr(getattr(tool_call, "function", None), "name", None)
+    return name, _TOOL_BY_NAME.get(name)
+
+
+def _decode_args(tool_call, name: str):
+    """解析工具参数。返回 (args, None)；失败返回 (None, 错误文案)。"""
+    try:
+        args = json.loads(getattr(tool_call.function, "arguments", "{}"))
+        if not isinstance(args, dict):
+            raise ValueError("工具参数必须是 JSON 对象")
+        return args, None
+    except ValueError as e:
+        log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=f"参数解析失败: {e}",
+                  context={"tool": name})
+        return None, f"操作失败: {str(e)}"
+
+
+def _tool_error(name: str, e: BaseException) -> str:
+    """工具异常的友好文案 —— 同步/异步两条分发路径共用同一套错误语义。"""
+    if isinstance(e, ValueError):
+        # 业务逻辑错误（重复节点、不存在的节点等）——这是 AI 的错，返回友好提示
+        log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), context={"tool": name})
+        return f"操作失败: {str(e)}"
+    if isinstance(e, PermissionError):
+        # AI 权限不足（试图修改人类创建的节点）——友好提示 AI 不要这样做
+        log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), context={"tool": name})
+        return f"权限不足: {str(e)}。如需修改，请让用户手动操作。"
+    # 其他意外错误（文件写入失败等）
+    log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), exception=e, context={"tool": name})
+    return f"工具执行出错: {str(e)}"
+
+
+def _run_sync_handler(handler, args, kg, name: str) -> str:
+    """线程池里跑同步 handler，异常隔离为文案。"""
+    try:
+        return handler(args, kg)
+    except Exception as e:
+        return _tool_error(name, e)
+
+
 def execute_kg_tool(tool_call, kg) -> str:
     """
-    按工具注册表执行模型请求的工具调用，返回给模型的结果描述。
+    （同步入口，保留给测试与非 async 调用方）
 
+    按工具注册表执行模型请求的工具调用，返回给模型的结果描述。
     数据驱动分发（查 _TOOL_SPECS，不再手写 if/elif）：新增工具只需注册
     spec + handler，模型侧的 KG_TOOLS 与执行侧自动生效。
 
@@ -246,34 +384,48 @@ def execute_kg_tool(tool_call, kg) -> str:
     - 异常类型清晰（ValueError=业务错 / PermissionError=权限不足）
     - 与图谱建议应用（knowledge_writer.apply_suggestion）使用同一套 kg 操作方式
 
-    参数:
-        tool_call: 模型返回的工具调用对象（.function.name / .function.arguments）
-        kg:        KnowledgeGraph 实例（已绑定当前 user_id）
+    ⚠️ 协程 handler 必须走 execute_kg_tool_async，本入口无法执行它们。
     """
-    name = getattr(getattr(tool_call, "function", None), "name", None)
-    spec = _TOOL_BY_NAME.get(name)
+    name, spec = _resolve_spec(tool_call)
     if spec is None:
         return f"未知工具: {name}"
+    args, err = _decode_args(tool_call, name)
+    if err:
+        return err
+    handler = spec["handler"]
+    if inspect.iscoroutinefunction(handler):
+        return f"工具执行出错: {name} 是异步工具，请改用 execute_kg_tool_async 调用"
+    return _run_sync_handler(handler, args, kg, name)
 
-    try:
-        args = json.loads(getattr(tool_call.function, "arguments", "{}"))
-        if not isinstance(args, dict):
-            raise ValueError("工具参数必须是 JSON 对象")
-    except ValueError as e:
-        log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=f"参数解析失败: {e}", context={"tool": name})
-        return f"操作失败: {str(e)}"
 
-    try:
-        return spec["handler"](args, kg)
-    except ValueError as e:
-        # 业务逻辑错误（重复节点、不存在的节点等）——这是 AI 的错，返回友好提示
-        log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), context={"tool": name})
-        return f"操作失败: {str(e)}"
-    except PermissionError as e:
-        # AI 权限不足（试图修改人类创建的节点）——友好提示 AI 不要这样做
-        log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), context={"tool": name})
-        return f"权限不足: {str(e)}。如需修改，请让用户手动操作。"
-    except Exception as e:
-        # 其他意外错误（文件写入失败等）
-        log_error(ErrorCode.LLM_TOOL_EXEC_FAILED, detail=str(e), exception=e, context={"tool": name})
-        return f"工具执行出错: {str(e)}"
+async def execute_kg_tool_async(tool_call, kg) -> str:
+    """
+    异步分发（agent_loop 使用）：协程 handler 直接 await，同步 handler 仍放线程池。
+
+    为什么需要它：`quiz_generate` 要在工具内部 `asyncio.create_task` 起后台出题，
+    而 `asyncio.to_thread` 跑在工作线程里、没有运行中的事件循环，做不到这一点。
+    也不能退回 `asyncio.run` —— `clients.py` 的 AsyncOpenAI 单例在模块导入时创建，
+    跨事件循环复用会触发 "Event loop is closed"（2026-09-14）。
+    """
+    name, spec = _resolve_spec(tool_call)
+    if spec is None:
+        return f"未知工具: {name}"
+    args, err = _decode_args(tool_call, name)
+    if err:
+        return err
+
+    handler = spec["handler"]
+    if inspect.iscoroutinefunction(handler):
+        try:
+            return await handler(args, kg)
+        except Exception as e:
+            return _tool_error(name, e)
+    return await asyncio.to_thread(_run_sync_handler, handler, args, kg, name)
+
+
+def tool_timeout_secs(tool_call, default: int) -> int:
+    """取该工具的超时秒数（spec 未声明则用 default）。"""
+    _, spec = _resolve_spec(tool_call)
+    if spec and spec.get("timeout_secs"):
+        return int(spec["timeout_secs"])
+    return default

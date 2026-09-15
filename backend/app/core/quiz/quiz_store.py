@@ -71,18 +71,28 @@ class QuizStore:
         self._conn.close()
 
     # ── 保存题目 ──
-    def save_questions(self, questions: list[Question],
+    def save_questions(self, questions: list[Question | dict],
                        subject: str = "", node_id: Optional[int] = None,
-                       difficulty: str = "medium") -> list[int]:
-        """批量保存题目，返回题目 id 列表"""
+                       difficulty: str = "medium", source: str = "") -> list[int]:
+        """
+        批量保存题目，返回题目 id 列表（兼容 Question 对象或 dict）。
+
+        参数:
+            source: 题目来源标记。对话内出题（quiz_generate 工具）传 "chat"，
+                    用于 `get_pending_question` 精确取"学生刚被推送到的那道题"，
+                    避免误取题库页历史里未作答的题。
+        """
         ids = []
         with self._conn:
             for q in questions:
+                if isinstance(q, dict):
+                    q = Question(**q)
                 cur = self._conn.execute("""
                     INSERT INTO questions
                         (node_id, subject, type, question, options_json, answer_json,
-                         points, difficulty, analysis, comment_prompt, knowledge_point)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         points, difficulty, analysis, comment_prompt, knowledge_point,
+                         source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     node_id,
                     subject,
@@ -95,6 +105,7 @@ class QuizStore:
                     q.analysis,
                     q.comment_prompt,
                     q.knowledge_point,
+                    source,
                 ))
                 ids.append(cur.lastrowid)
         return ids
@@ -104,6 +115,40 @@ class QuizStore:
         row = self._conn.execute(
             "SELECT * FROM questions WHERE id = ?", (question_id,)
         ).fetchone()
+        return self._row_to_question(dict(row)) if row else None
+
+    def asked_questions(self, knowledge_point: str, limit: int = 20) -> list[str]:
+        """
+        取某知识点**已经出过**的题干（跨调用去重用）。
+
+        knowledge_point 在对话内出题时存的是**图谱节点 id**。
+        为什么必须去重：判分已成为掌握度的主信号（答对 +20），若同一节点反复出同一道题，
+        学生重答一次就能再拿一次加分 —— 必须排除已考过的题干。
+        """
+        if not knowledge_point:
+            return []
+        rows = self._conn.execute(
+            "SELECT question FROM questions WHERE knowledge_point = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (knowledge_point, limit),
+        ).fetchall()
+        return [r["question"] for r in rows if r["question"]]
+
+    def get_pending_question(self, source: str = "chat") -> Optional[dict]:
+        """
+        取「最近一道还没作答的题」（默认只看对话内出的题）。
+
+        对话内判分（grade_answer 工具）用它定位题目：题目是后台异步生成的，
+        模型拿到工具结果时题目还不存在，所以模型不可能知道题库 id。
+        学生作答后模型只需传「学生的原话」，由这里反查待答题目。
+        限定 source="chat" 是为了不误取题库页历史里未作答的题。
+        """
+        row = self._conn.execute("""
+            SELECT q.* FROM questions q
+            LEFT JOIN attempts a ON a.question_id = q.id
+            WHERE a.id IS NULL AND (? = '' OR q.source = ?)
+            ORDER BY q.id DESC LIMIT 1
+        """, (source, source)).fetchone()
         return self._row_to_question(dict(row)) if row else None
 
     def list_questions(self, subject: str = "",
