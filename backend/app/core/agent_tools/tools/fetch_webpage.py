@@ -1,23 +1,27 @@
-"""网页正文抓取工具实现（MCP 风格：LLM 通过 function calling 调用，2026-08-31）。
+"""工具 `fetch_webpage` —— 抓网页正文，剥离 HTML 后返回纯文本（**只读，不落盘**）。
 
-自 llm_client.py 拆分（2026-09-08）：本模块只含纯实现（SSRF 防护 + HTML→文本）；
-工具 spec / 分发注册在 agent_tools._TOOL_SPECS（handler 薄壳调 fetch_webpage）。
+与 `download_resource` 的分工（都抓 URL，但目的不同）：
+- fetch_webpage    ：**只读看一眼**。网页正文 → 文本返回给模型，不落盘。
+- download_resource：**长期留存**。下载 bytes → 解析 → 入知识库，之后可被 `rag_search` 检索到。
+
+这个分工同时写进了两条 spec 的 description / guidance，模型侧才不会混用。
+
+安全与限额：SSRF 检查走 `..net_guard`（唯一实现）；单次请求 10s 超时；
+返回文本截断到 `max_chars`（默认 3000，上限 20000）。
+
+ponytail: 正则剥标签（`_RE_BLOCK` / `_RE_TAG`）不是完整 HTML 解析器 —— 对正文抽取够用，
+      引入 readability/bs4 收益不抵一个新依赖；遇到结构特别怪的站点再换。
 """
+
 import html
 import re
-import socket
-from typing import Optional
-from urllib.parse import urlparse
 
 import httpx
 
 from app.core.error_codes import ErrorCode, log_error
 
-# 禁止访问的内网/回环/保留网段（SSRF 防护）
-_BLOCKED_HOST_PATTERNS = [
-    "localhost", "127.0.0.1", "::1", "0.0.0.0",
-    "169.254.",  # 链路本地
-]
+from ..net_guard import is_blocked_url
+from ..registry import _spec
 
 # 抓取超时（秒）
 _FETCH_TIMEOUT = 10.0
@@ -40,49 +44,6 @@ _RE_BLOCK = re.compile(
 _RE_TAG = re.compile(r'<[^>]+>')
 
 
-def _is_blocked_url(url: str) -> Optional[str]:
-    """SSRF 防护：检查 URL 是否指向内网/回环等危险地址，返回拒绝原因或 None。"""
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return "无法解析 URL"
-    if parsed.scheme not in ("http", "https"):
-        return f"仅支持 http/https 协议，收到 {parsed.scheme!r}"
-    host = parsed.hostname or ""
-    if any(p in host for p in _BLOCKED_HOST_PATTERNS):
-        return f"拒绝访问内网/回环地址: {host}"
-    # 解析 DNS，进一步校验解析出的 IP 是否为内网保留地址
-    try:
-        for info in socket.getaddrinfo(host, None):
-            ip = info[4][0]
-            if _is_private_ip(ip):
-                return f"拒绝访问私有地址: {host} ({ip})"
-            break
-    except socket.gaierror:
-        return f"无法解析域名: {host}"
-    return None
-
-
-def is_blocked_url(url: str) -> Optional[str]:
-    """SSRF 防护的公开入口：供 download_tool 等其他按 URL 取内容的工具复用。
-
-    实现仍在 _is_blocked_url（本模块是唯一实现），此处只做公开导出，
-    避免其他模块 import 下划线私有名。
-    """
-    return _is_blocked_url(url)
-
-
-def _is_private_ip(ip: str) -> bool:
-    """判断 IP 是否为内网/保留地址。"""
-    try:
-        import ipaddress
-        addr = ipaddress.ip_address(ip)
-        return (addr.is_private or addr.is_loopback or addr.is_link_local
-                or addr.is_reserved or addr.is_multicast)
-    except ValueError:
-        return True
-
-
 def _html_to_text(raw: str) -> str:
     """将 HTML 转为可读纯文本：剥离阻塞标签、HTML 标签，解码实体，压缩空白。"""
     text = _RE_BLOCK.sub(" ", raw)
@@ -98,23 +59,17 @@ def fetch_webpage(url: str, max_chars: int = 3000) -> str:
     """
     抓取网页正文并返回可读文本（MCP 风格网页查询工具）。
 
-    安全特性：
-    - SSRF 防护：拒绝内网/回环/私有 IP 地址
-    - 超时保护：单次请求 10 秒超时
-    - 长度限制：返回文本截断到 max_chars（默认 3000，最大 20000）
-    - 内容剥离：自动去除脚本、样式、导航等非正文 HTML
-
     参数:
         url:       要查询的网页完整 URL（http/https）
         max_chars: 返回文本最大字符数
 
     返回:
-        网页可读文本，失败时返回带错误说明的友好提示（不抛异常，让 LLM 直接使用）
+        网页可读文本；失败时返回带错误说明的**友好提示**（不抛异常，让 LLM 直接使用）
     """
     try:
         max_chars = max(500, min(int(max_chars), _FETCH_MAX_CHARS))
 
-        blocked = _is_blocked_url(url)
+        blocked = is_blocked_url(url)
         if blocked:
             log_error(ErrorCode.WEB_FETCH_BLOCKED, detail=f"{url}: {blocked}")
             return f"无法抓取网页：{blocked}。请提供一个公网 http/https 地址。"
@@ -150,3 +105,31 @@ def fetch_webpage(url: str, max_chars: int = 3000) -> str:
     except Exception as e:
         log_error(ErrorCode.WEB_FETCH_FAILED, detail=str(e), exception=e, context={"url": url})
         return f"抓取网页出错：{str(e)}"
+
+
+DESCRIPTION = ("抓取并返回一个网页的可读文本内容（会自动剥离 HTML 标签、脚本、样式）。当学生提到某个 "
+               "URL、网上资料、或需要实时信息（新闻、文档、教程）时，可以用此工具获取网页正文。"
+               "返回内容会截断到 max_chars 限制内。")
+
+PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "url": {"type": "string", "description": "要查询的网页完整 URL，需以 http:// 或 https:// 开头"},
+        "max_chars": {"type": "integer", "description": "返回文本的最大字符数（默认 3000，最大 20000）。超出部分会被截断。"},
+    },
+    "required": ["url"],
+}
+
+GUIDANCE = """
+抓取网页正文（已剥离 HTML 标签/脚本/样式）。
+- **何时用**：学生提到某个 URL、需要实时信息（新闻、最新文档、教程）、或你需要外部资料来讲解。
+- 拿到正文后提炼要点、用通俗语言教给学生；抓取失败就如实说明并给其他学习途径。
+- 只想临时看一眼用本工具；要长期留存资料请用 `download_resource`。
+"""
+
+
+def handler(args, kg) -> str:
+    return fetch_webpage(args["url"], max_chars=int(args.get("max_chars", 3000)))
+
+
+SPEC = _spec("fetch_webpage", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE)

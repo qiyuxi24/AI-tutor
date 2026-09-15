@@ -100,14 +100,14 @@ Guiding principle: **follow the existing style and layering of the repository fi
 | Topic | Convention |
 |---|---|
 | Layering | `api/v1/` holds thin HTTP shells only; orchestration lives in `services/`; domain logic lives in `core/`. Never import `api/` from `core/`. |
-| Single source of truth | Config = root `.env`; run records = `core/agent_run_store.py`; embedding calls = `core/llm/embed.py::embed_texts`; tool registry = `core/agent_tools.py::_TOOL_SPECS`. **New capabilities attach to existing entry points — never create a parallel copy.** |
+| Single source of truth | Config = root `.env`; run records = `core/agent/store.py`; embedding calls = `core/llm/embed.py::embed_texts`; tool registry = `core/agent_tools/registry.py::_TOOL_SPECS`. **New capabilities attach to existing entry points — never create a parallel copy.** |
 | Minimal implementation | YAGNI: first ask "is this needed now / can the standard library or existing code already do it"; do not add abstraction layers or dependencies for hypothetical needs. |
 | Error handling | Error codes live in `core/error_codes.py`; exception messages start with `[E-XXX]` and go through `log_error()`; tools return text such as "操作失败: …" to the model instead of raising bare exceptions. |
 | User isolation | Graph / profile / knowledge base / run records are all partitioned by `user_id`; create `KnowledgeGraph(user_id)` per use and `close()` it afterwards — never share an instance across coroutines. |
 | `user_id` source | Always resolved from the JWT (`Depends(get_current_user)`); **never** pass it in the body or query string. |
 | Prompts | Externalized as Jinja2 templates (`data/prompts/*.j2`); do not hard-code long prompts into Python strings. |
 | New LLM calls | Go through `core/llm/` (fallback chain and retries are built in); do not `httpx.post` a model endpoint from business code. |
-| New tools | Add one spec to `_TOOL_SPECS` and write the handler; heavy implementations belong in `rag_tool.py` / `web_tool.py`. |
+| New tools | Create one module per tool under `core/agent_tools/tools/` (copy any module and edit five spots), then add one line to `NATIVE_SPECS` in `tools/__init__.py`. See `core/agent_tools/tools/README.md`. |
 | Comments | Only where the "why" is not obvious; do not narrate what the code does line by line. |
 
 > Changing the architecture (splitting modules, altering contracts, changing table schemas)? Read the architecture contract and the "known couplings and pitfalls" section in [`AGENTS.md`](AGENTS.md) first, then open an issue to discuss.

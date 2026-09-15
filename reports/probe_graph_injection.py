@@ -28,3 +28,20 @@ for n in (50, 100, 200, 300):
 kg = FakeKg(300, n_edges=299)
 out = build_graph_context(kg, detailed=True)
 print("\n降级说明尾部：\n" + out[out.index("> 说明："):])
+
+
+# ── 递归模式的重复注入块（2026-09-15 已删，这里量化它曾经的体量）──
+def _old_recursive_framework(kg) -> str:
+    lines = [f"  [{n['id']}] {n['name']} (掌握度:{n.get('mastery', 0)}, "
+             f"标签:{', '.join(n.get('tags', []))})" for n in kg.nodes]
+    edges = [f"  {e['from_node']} → {e['to_node']} (前置依赖)"
+             for e in kg.edges if e.get("relation") == "prerequisite"]
+    return (f"### 框架节点\n{chr(10).join(lines)}\n\n"
+            f"### 依赖关系\n{chr(10).join(edges)}")
+
+
+print("\n递归模式重复注入块（已删）的体量：")
+for n in (100, 300):
+    block = _old_recursive_framework(FakeKg(n, n_edges=n - 1))
+    print(f"  {n:>3} 节点：{len(block):>6} 字符 / {count_tokens(block):>6} token"
+          f"  → 递归模式 system prompt 曾比 adaptive 多这一整份且无上限")

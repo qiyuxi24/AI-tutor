@@ -15,14 +15,15 @@ import json
 import time
 from types import SimpleNamespace
 
-from app.core import agent_loop, agent_run_store as run_store
-from app.core.agent_events import (
+from app.core.agent import loop as agent_loop, store as run_store
+from app.core.agent.context import TOOL_RESULT_CLEARED
+from app.core.agent.events import (
     AgentEventEmitter,
     AGENT_START, AGENT_DONE,
     TOOL_START, TOOL_RESULT,
     THINKING, TEXT_DELTA,
 )
-from app.core.agent_loop import run_agent_loop
+from app.core.agent.loop import run_agent_loop
 
 
 # ─── 构造假响应 ──────────────────────────────────────────────
@@ -228,8 +229,15 @@ def test_run_persists_to_agent_runs_evidence(tmp_path, monkeypatch):
     assert runs[0]["total_llm_calls"] == 2
     assert runs[0]["context_tokens"] == 240
     assert runs[0]["final_text"] == "已添加关联。"
+    # 发送前预估随 run 落库（列表页即可看到，与真值 token_usage 同表对照）
+    assert runs[0]["token_estimate"]["prompt_estimated"] > 0
 
     run = run_store.get_run(7, runs[0]["run_id"], db_dir=tmp_path)
+    # 预估明细：无历史（首次 run）→ Phase 3 关键词规则，并含成本换算
+    est = run["token_estimate"]
+    assert est["method"] == "feature"
+    assert est["total_estimated"] == est["prompt_estimated"] + est["completion_predicted"]
+    assert est["estimated_cost_usd"] >= 0
     kinds = [s["kind"] for s in run["evidence"]]
     assert kinds == ["tool_call", "tool_result", "final_text"]
     # 证据级：工具参数与结果完整保留（不截断）
@@ -285,7 +293,7 @@ def test_force_finish_llm_error_fallback(monkeypatch):
     assert result.total_llm_calls == 2
 
 
-# ─── 消息发射中间件（app/core/agent_events.py）───
+# ─── 消息发射中间件（app/core/agent/events.py）───
 
 class _CollectEmitter:
     """注入用哑发射器：只收集事件序列，不触 event_bus。"""
@@ -300,7 +308,7 @@ class _CollectEmitter:
 def test_agent_emitter_injects_run_id_and_routes(monkeypatch):
     """AgentEventEmitter.emit 自动注入 run_id 并精准路由 user_id。"""
     calls = []
-    monkeypatch.setattr("app.core.agent_events.publish",
+    monkeypatch.setattr("app.core.agent.events.publish",
                         lambda t, d, user_id: calls.append((t, d, user_id)))
     AgentEventEmitter("run-abc", user_id=9).emit(TEXT_DELTA, text="hi")
     AgentEventEmitter("run-abc", user_id=9).emit(AGENT_DONE, rounds=1, total_llm_calls=2)
@@ -313,7 +321,7 @@ def test_agent_emitter_injects_run_id_and_routes(monkeypatch):
 def test_agent_emitter_silent_without_user(monkeypatch):
     """无 user 的 run 静默不发布（不污染全局广播/订阅者）。"""
     calls = []
-    monkeypatch.setattr("app.core.agent_events.publish", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr("app.core.agent.events.publish", lambda *a, **k: calls.append(a))
     AgentEventEmitter("run-abc").emit(THINKING, text="x")
     AgentEventEmitter("run-abc").emit(TEXT_DELTA, text="y")
     assert calls == []
@@ -337,3 +345,38 @@ def test_loop_events_flow_through_emitter(monkeypatch):
     assert fake.events[0][1]["max_rounds"] == 5
     assert fake.events[-1][1]["rounds"] == 1
     assert fake.events[-1][1]["total_llm_calls"] == 2
+
+
+# ─── S8 Tool Result Clearing 的接线（P1-③）───────────────────
+
+def test_old_tool_results_cleared_across_rounds(monkeypatch):
+    """接线守卫：清理必须真的在 loop 里被调用（历史上曾把它落在永远匹配不到的 guard 里）。
+
+    第 3 个工具批次起，最早批次的 tool 正文应在**下一次请求**里已被占位符替换，
+    而 tool_call_id / assistant tool_calls 保持配对（否则服务端 400）。
+    """
+    received = []
+    big = "检索到的知识片段正文。" * 200
+    _install_fake_chat(monkeypatch, [
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q1"}, tc_id="c1")])),
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q2"}, tc_id="c2")])),
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q3"}, tc_id="c3")])),
+        _resp(_msg(content="好了，讲完了。")),
+    ], received)
+
+    async def _big_result(tc, kg):
+        return big
+
+    monkeypatch.setattr(agent_loop, "execute_kg_tool_async", _big_result)
+
+    result = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}], kg=object()))
+
+    assert result.text == "好了，讲完了。"
+    msgs = received[3]["messages"]          # 第 3 批回填后再发的那次请求
+    tools = [m for m in msgs if m.get("role") == "tool"]
+    assert len(tools) == 3
+    assert tools[0]["content"] == TOOL_RESULT_CLEARED   # 最早批次被清
+    assert tools[1]["content"] == big and tools[2]["content"] == big
+    assert [m["tool_call_id"] for m in tools] == ["c1", "c2", "c3"]      # 配对不动
+    assistants = [m for m in msgs if m.get("tool_calls")]
+    assert [[tc["id"] for tc in m["tool_calls"]] for m in assistants] == [["c1"], ["c2"], ["c3"]]

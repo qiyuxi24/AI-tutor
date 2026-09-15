@@ -1,13 +1,16 @@
 """AI 写图谱层（纯业务函数，2026-09-08 从 api 层下沉）。
 
 消除 core/services → api 的反向依赖（AGENTS.md §3.6-1），供三类调用方共用：
-- agent_tools._h_add_node（Agent 工具 add_knowledge_node）
+- agent_tools.tools.add_knowledge_node（Agent 工具 add_knowledge_node）
 - chat_service 图谱分析建议的自动应用 / 待审核持久化
 - api 路由层按需复用
 
 核心语义：create_node_from_ai 创建/更新一个 AI 生成的节点（写图谱 + 写 MD 文件 +
 建前置边）。节点 ID 已存在时自动转"补全字段 + 追加内容"的更新模式，不报错——
 避免 Agent 循环中重复创建同一概念时 ValueError 中断工具执行。
+
+**MD 落盘不自持模板**：一律走 `KnowledgeGraph.create_node_with_content()`，
+本模块只负责"建什么节点"（字段与归属），不负责"文件长什么样"。
 """
 
 import json
@@ -38,6 +41,28 @@ def save_suggestions(data_dir: Path, suggestions: list) -> None:
         json.dump(suggestions, f, ensure_ascii=False, indent=2)
 
 
+def _find_same_name(kg: KnowledgeGraph, node_name: str, subject: str) -> str:
+    """
+    在本人图谱里找**中文名完全相同**的节点 ID（同名并轨，返回空串表示没有）。
+
+    学科已知时只在同学科（或未归档）节点里找 —— 不同学科的「树」是两个概念，不能并轨。
+
+    ponytail: 只做精确同名，不做嵌入语义去重（那要在 Agent 热路径上多付一次嵌入 + LLM
+    二次确认，且当前嵌入 API 欠费）。要升级就复用 `kb/graph_generator.py` 的
+    `_find_dedup_candidates` + `_confirm_synonyms` 双闸。
+    """
+    name = (node_name or "").strip()
+    if not name:
+        return ""
+    for node in kg.nodes:
+        if (node.get("name") or "").strip() != name:
+            continue
+        if subject and KnowledgeGraph.node_subject(node) not in ("", subject):
+            continue
+        return node["id"]
+    return ""
+
+
 def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
                         tags: list | None = None, summary: str = "",
                         difficulty: int = 3, estimated_minutes: int = 15,
@@ -50,6 +75,10 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
 
     节点 ID 已存在时自动转为更新模式（追加内容/补全字段），不报错——避免
     Agent 循环中重复创建同一概念时 ValueError 中断工具执行。
+
+    **同名并轨**：ID 不同但**中文名完全相同**（同一学科内）时也走更新模式 ——
+    模型每轮都可能给同一个概念编出不同 ID（实测：`harmony_dev_intro` / `harmonyos_intro`
+    同名「鸿蒙开发入门」并存，见 `docs/知识图谱_模块结构与封装调研.md` §7）。
 
     参数:
         kg:               KnowledgeGraph 实例（已绑定 user_id）
@@ -77,6 +106,9 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
         tags = [subject, *(tags or [])]
 
     existing = kg.get_node(node_id)
+    if existing is None:
+        node_id = _find_same_name(kg, node_name, subject) or node_id
+        existing = kg.get_node(node_id)
 
     if existing is not None:
         # 节点已存在 → 更新模式：补全字段 + 追加内容
@@ -116,7 +148,6 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
                 pass
 
         # 追加内容到 MD 文件（有新内容时）
-        md_path = kg.nodes_dir / f"{node_id}.md"
         if content.strip():
             try:
                 kg.update_node_content(node_id, content, mode="append", caller="ai")
@@ -156,18 +187,8 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
     }
     # 未指定学科/板块时自动判定（规则+LLM），失败保持未分类
     assign_taxonomy_sync(kg, node_data)
-    kg.add_node(node_data)
-
-    # 写 MD 文件
-    md_path = kg.nodes_dir / f"{node_id}.md"
-    if content.strip():
-        md_content = content if content.strip().startswith("#") else \
-                     f"# {node_name}\n\n> 由 AI 自动创建\n\n{content}"
-    else:
-        summary_line = f"\n> {summary}" if summary else ""
-        md_content = f"# {node_name}\n> 由 AI 自动创建{summary_line}\n\n## 概述\n\n待完善...\n"
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write(md_content)
+    # 建库 + 写 MD 一次完成（模板与来源标注的唯一来源在 KnowledgeGraph）
+    kg.create_node_with_content(node_data, content, origin="ai")
 
     # 创建前置边
     edge_count = 0

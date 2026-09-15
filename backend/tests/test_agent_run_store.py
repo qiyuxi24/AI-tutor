@@ -3,7 +3,7 @@
 store 已被 agent_loop 落库与 token_estimator 历史预估覆盖主路径，
 此处补充 schema 级边界：upsert 幂等、越权隔离、历史 token 排序过滤。
 """
-from app.core import agent_run_store as store
+from app.core.agent import store as store
 
 
 def _seed(db_dir, run_id, user_id=1, ct=50, status="ok", started_at=None):
@@ -68,6 +68,52 @@ def test_default_db_dir_points_to_data(tmp_path):
     assert d.name == "agent_runs"
     assert "backend" in d.parts
     assert "data" in d.parts
+
+
+def test_token_estimate_roundtrip(tmp_path):
+    """发送前预估（token_estimate）随 run 落库：列表与详情都可读，缺省为空 dict。"""
+    store.save_run({
+        "run_id": "e1", "user_id": 5, "started_at": 1.0, "ended_at": 2.0,
+        "token_usage": {"prompt_tokens": 100, "completion_tokens": 50},
+        "token_estimate": {"method": "historical", "prompt_estimated": 95,
+                           "completion_predicted": 50, "total_estimated": 145,
+                           "estimated_cost_usd": 0.0001},
+        "evidence": [],
+    }, db_dir=tmp_path)
+    _seed(tmp_path, "e2", user_id=5)  # 未传 token_estimate → 空 dict
+
+    runs = {r["run_id"]: r for r in store.list_runs(5, db_dir=tmp_path)}
+    assert runs["e1"]["token_estimate"]["method"] == "historical"
+    assert runs["e2"]["token_estimate"] == {}
+
+    run = store.get_run(5, "e1", db_dir=tmp_path)
+    # 预估与真值同表可比（追踪预估准确度、校准历史中位数策略的前提）
+    assert run["token_estimate"]["total_estimated"] == 145
+    assert run["token_usage"]["completion_tokens"] == 50
+
+
+def test_legacy_db_gets_token_estimate_column(tmp_path):
+    """老库（建表时无 token_estimate 列）打开时自动补列，老行读为空预估。"""
+    import sqlite3
+    db = tmp_path / "agent_runs.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("""
+        CREATE TABLE agent_runs (
+            run_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ok', started_at REAL NOT NULL, ended_at REAL,
+            total_llm_calls INTEGER NOT NULL DEFAULT 0,
+            context_tokens INTEGER NOT NULL DEFAULT 0,
+            token_usage TEXT NOT NULL DEFAULT '{}',
+            estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            final_text TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '[]')
+    """)
+    conn.execute("INSERT INTO agent_runs (run_id, user_id, started_at) VALUES ('old', 1, 1.0)")
+    conn.commit()
+    conn.close()
+
+    assert store.get_run(1, "old", db_dir=tmp_path)["token_estimate"] == {}
+    _seed(tmp_path, "new", user_id=1)
+    assert store.list_runs(1, db_dir=tmp_path)[0]["token_estimate"] == {}
 
 
 # ═══════════════ 清理 / 删除 / 统计（2026-09-08 治理面） ═══════════════

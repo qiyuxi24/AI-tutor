@@ -1,6 +1,13 @@
 """
 本地/轻量语义嵌入层（用于语义去重，可插拔）
 
+与检索侧的关系（2026-09-15 收口）：`llm/embed.py::embed_texts` 是**检索侧**唯一出口
+（kb 向量化 / 图谱 RAG），async 且无兜底（假向量会污染检索质量）；本模块是**语义去重侧**
+入口，必须同步（调用方 `prerequisite` / `graph_generator` 都是同步流程）且需要 hash
+兜底（无 key / 欠费时仍要能跑）。两侧**共用 `EMBEDDING_MODEL` / `EMBED_BATCH_SIZE` /
+`MAX_EMBED_CHARS`**，只有调用形态与兜底策略不同 —— 换模型/调批大小请改 `llm/embed.py`，
+勿在此硬编码字面量。
+
 用途：知识图谱生成时对新知识点做语义去重（合并"栈/堆栈"等同义概念）。
 
 方案（可插拔，按优先级尝试）：
@@ -18,12 +25,13 @@
 
 import logging
 import hashlib
-import math
 from typing import Optional
 
 import numpy as np
 
 from app.core.config import settings
+# 与检索侧共用同一份模型名 / 批大小 / 截断上限（唯一来源，见模块 docstring）
+from app.core.llm.embed import EMBED_BATCH_SIZE, EMBEDDING_MODEL, MAX_EMBED_CHARS
 
 logger = logging.getLogger("ai-tutor")
 
@@ -121,13 +129,16 @@ class SentenceTransformerEmbedder(BaseEmbedder):
 
 
 class ApiEmbedder(BaseEmbedder):
-    """阿里云 text-embedding-v4 API 嵌入（默认首选）"""
+    """阿里云 text-embedding-v4 API 嵌入（默认首选）
 
-    name = "text-embedding-v4"
+    与检索侧 `llm/embed.py::embed_texts` 同模型、同批大小、同截断口径；
+    差别只在调用形态（同步）与失败后的降级方式（本类返回空，由调用方决定
+    弃权 C5 准则或退到 hash 兜底）。
+    """
 
-    # DashScope text-embedding-v4 单次请求最多 10 条（2026-09-14 踩坑：
-    # 整批发送报 400 "batch size is invalid, it should not be larger than 10"）
-    BATCH_SIZE = 10
+    # 模型名/批大小一律取检索侧常量（唯一来源，勿在此写死字面量）
+    name = EMBEDDING_MODEL
+    BATCH_SIZE = EMBED_BATCH_SIZE
 
     def __init__(self):
         self._client = None
@@ -142,22 +153,31 @@ class ApiEmbedder(BaseEmbedder):
         return self._client
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        if not settings.dashscope_api_key:
+        """批量嵌入；空输入 / 无 key / 调用失败 / **条数不齐** 一律返回 []。
+
+        条数不齐宁可整批作废：调用方按顺序与文本一一对应（`zip(ids, vecs)`），
+        返回短列表会静默错位 —— 与 `embed_texts` 保持同一失败语义。
+        """
+        if not texts or not settings.dashscope_api_key:
             return []
+        vectors: list[list[float] | None] = [None] * len(texts)
         try:
             # 语义去重文本量小、调用低频，用同步客户端可接受
-            vectors = [None] * len(texts)
             for start in range(0, len(texts), self.BATCH_SIZE):
-                batch = texts[start:start + self.BATCH_SIZE]
+                batch = [t[:MAX_EMBED_CHARS] for t in texts[start:start + self.BATCH_SIZE]]
                 resp = self._get_client().embeddings.create(
-                    model="text-embedding-v4", input=batch,
+                    model=self.name, input=batch,
                 )
                 for item in resp.data:
                     vectors[start + item.index] = item.embedding
-            return [v for v in vectors if v is not None]
         except Exception as e:
-            logger.warning(f"text-embedding-v4 嵌入失败: {e}")
+            logger.warning(f"{self.name} 嵌入失败: {e}")
             return []
+        if any(v is None for v in vectors):
+            # 部分返回：与检索侧同样整批作废，不能让向量与文本错位
+            logger.warning(f"{self.name} 嵌入返回条数不足（{len(texts)} 条请求）")
+            return []
+        return vectors  # type: ignore[return-value]
 
 
 # 全局单例缓存
@@ -194,7 +214,7 @@ def get_embedder(prefer_api: bool = True, prefer_local: bool = False) -> BaseEmb
     if _api_embedder is None and prefer_api:
         if settings.dashscope_api_key:
             _api_embedder = ApiEmbedder()
-            logger.info("语义去重使用 text-embedding-v4 API 嵌入")
+            logger.info(f"语义去重使用 {ApiEmbedder.name} API 嵌入")
     if _api_embedder is not None:
         return _api_embedder
 

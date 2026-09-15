@@ -26,6 +26,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.core import agent_tools  # noqa: E402
+from app.core.agent_tools.tools import grade_answer, quiz_generate  # noqa: E402
 from app.core.event_bus import get_user_queue  # noqa: E402
 from app.core.knowledge_graph import KnowledgeGraph  # noqa: E402
 from app.core.quiz.chat_quiz import (  # noqa: E402
@@ -61,7 +62,7 @@ async def _simulate_turn(args) -> int:
     这是"出题作为掌握度主信号"的唯一有效验证 —— 提示词改了之后，
     模型到底会不会主动出题，只能真跑一轮才知道。
     """
-    from app.core.agent_loop import run_agent_loop
+    from app.core.agent.loop import run_agent_loop
     from app.services.chat_service import _build_system_prompt
 
     kg = KnowledgeGraph(user_id=args.user)
@@ -123,7 +124,7 @@ async def _main_async(args) -> int:
 
     # ── 1. 调 quiz_generate 工具：必须立即返回 ──
     started = time.monotonic()
-    tool_out = await agent_tools._h_quiz_generate({"node_id": args.node}, kg)
+    tool_out = await quiz_generate.handler({"node_id": args.node}, kg)
     elapsed = time.monotonic() - started
     print(f"\n── quiz_generate 工具返回（耗时 {elapsed:.1f}s）──")
     print(f"  {tool_out}")
@@ -166,7 +167,7 @@ async def _main_async(args) -> int:
     print(f"\n── 模拟学生作答：{my_answer}"
           f"（正确答案 {correct_answer}，{'故意答错' if args.answer_wrong else '答对'}）──")
 
-    grade_out = await agent_tools._h_grade_answer({"user_answer": my_answer}, kg)
+    grade_out = await grade_answer.handler({"user_answer": my_answer}, kg)
     print(f"  {grade_out}")
 
     # ── 4. 复查掌握度 ──

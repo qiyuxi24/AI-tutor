@@ -4,7 +4,7 @@
 职责：
 - 读取知识库（KB）中某学科下的书籍/章节文本
 - 调用 LLM 从书本内容中提取知识点（节点）并建立知识点之间的联系（边）
-- 将结果写入知识图谱（复用 KnowledgeGraph.add_node / add_edge）
+- 将结果写入知识图谱（复用 KnowledgeGraph.create_node_with_content / add_edge）
 
 对外只有两个入口，共用同一条执行路径（`_generate`）：
 1. generate_subject_graph — 整学科一键生成（选中的文件夹会展开为文件）。
@@ -441,22 +441,13 @@ class GraphGenerator:
                 "added_by": "ai",
             }
             try:
-                kg.add_node(node_data)
+                # 建库 + 写 MD 一次完成（模板收口在 KnowledgeGraph，本处只给来源标注差异）
+                kg.create_node_with_content(node_data, n.get("content", ""), origin="book")
             except ValueError as e:
                 logger.info(f"跳过节点 {nid}（{name}）: {e}")
                 skipped_nodes.append(nid)
                 node_id_by_name[name] = nid
                 continue
-            # 写 MD 文件
-            content = n.get("content", "")
-            md_path = kg.nodes_dir / f"{nid}.md"
-            if content.strip():
-                md_content = content if content.strip().startswith("#") else \
-                             f"# {name}\n\n> 由 AI 从学科书籍自动生成\n\n{content}"
-            else:
-                md_content = f"# {name}\n\n> 由 AI 从学科书籍自动生成\n\n## 概述\n\n待完善...\n"
-            with open(md_path, "w", encoding="utf-8") as f:
-                f.write(md_content)
             node_ids.add(nid)
             node_id_by_name[name] = nid
             created_nodes.append(nid)

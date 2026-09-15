@@ -14,7 +14,7 @@ import argparse
 import asyncio
 import json
 
-from app.core.agent_loop import run_agent_loop
+from app.core.agent.loop import run_agent_loop
 from app.core.knowledge_graph import KnowledgeGraph
 
 # 轻量系统提示：引导模型在需要时调用知识图谱工具（与 chat_service 的工具说明同源）

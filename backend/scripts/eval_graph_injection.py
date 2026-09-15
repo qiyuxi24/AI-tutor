@@ -226,7 +226,7 @@ def summarize(rows: list[dict]) -> dict:
 # ────────────────────────────────────────────
 
 async def run_group(group: str, kg, cases: list[dict], node_names: dict[str, str]) -> list[dict]:
-    from app.core.agent_loop import run_agent_loop
+    from app.core.agent.loop import run_agent_loop
 
     rows = []
     for case in cases:

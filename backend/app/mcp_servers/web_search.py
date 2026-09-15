@@ -5,7 +5,7 @@
 远程运行（Streamable HTTP，供容器 / 跨进程宿主调用）：
     cd backend && venv/Scripts/python.exe -m app.mcp_servers.web_search \
         --transport streamable-http --port 8100
-本项目内则由 core/mcp_host.py 以 **in-memory** 方式连接（同进程、零端口，仍走协议层）。
+本项目内则由 core/agent_tools/mcp_host.py 以 **in-memory** 方式连接（同进程、零端口，仍走协议层）。
 
 搜索后端（全开源、零 API key）：
 - 主后端 **Bing RSS**（`cn.bing.com/search?format=rss`，stdlib 解析）。实测（2026-09-13，
@@ -142,7 +142,9 @@ def web_search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> str:
     """在互联网上搜索网页，返回标题、链接与摘要。
 
     当需要最新信息、外部资料、或本地知识库/图谱中没有的内容时使用。
-    返回结果含来源链接，回答时应标注出处。
+    先搜关键词拿到链接与摘要，必要时再用 fetch_webpage 抓正文深入。
+    ⚠️ 不要为本地资料（知识库/图谱）已覆盖的内容联网搜索 —— 既浪费又拖慢回复。
+    返回结果含来源链接，回答时必须标注出处，并提醒学生自行核查。
     """
     query = (query or "").strip()
     if not query:

@@ -8,7 +8,7 @@
 import json
 from types import SimpleNamespace
 
-from app.core import mcp_host
+from app.core.agent_tools import mcp_host
 from app.mcp_servers import web_search as ws
 
 TOOL = "mcp__websearch__web_search"

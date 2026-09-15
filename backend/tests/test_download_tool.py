@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app.core import agent_tools, download_tool
+from app.core import agent_tools
+from app.core.agent_tools.tools import download_resource as download_tool
 
 
 # ────────────────────────────────────────────
@@ -223,7 +224,8 @@ def test_tool_registered_and_dispatched(monkeypatch):
     assert "download_resource" in [t["function"]["name"] for t in agent_tools.KG_TOOLS]
 
     called: dict = {}
-    monkeypatch.setattr(agent_tools, "download_resource",
+    # handler 在 tools/download_resource.py 里解析 download_resource 模块全局名，故 patch 到该模块
+    monkeypatch.setattr(download_tool, "download_resource",
                         lambda url, **kw: called.update(url=url, **kw) or "已下载")
 
     tc = SimpleNamespace(function=SimpleNamespace(

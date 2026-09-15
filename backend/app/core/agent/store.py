@@ -25,6 +25,7 @@
         "started_at": ..., "ended_at": ...,
         "total_llm_calls": n, "context_tokens": n,
         "token_usage": {...}, "estimated_prompt_tokens": n,
+        "token_estimate": {...},  # 发送前预估（estimator.to_dict()，与真值同表可对照）
         "final_text": "...", "evidence": [...],
     })
 """
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     context_tokens      INTEGER NOT NULL DEFAULT 0,
     token_usage         TEXT NOT NULL DEFAULT '{}',
     estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    token_estimate TEXT NOT NULL DEFAULT '{}',
     final_text  TEXT NOT NULL DEFAULT '',
     evidence    TEXT NOT NULL DEFAULT '[]'
 );
@@ -87,7 +89,18 @@ def _connect(db_dir: Path | None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """给已存在的老库就地补列（CREATE TABLE IF NOT EXISTS 不会补新字段）。幂等。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(agent_runs)")}
+    if "token_estimate" not in cols:
+        with conn:
+            conn.execute(
+                "ALTER TABLE agent_runs ADD COLUMN token_estimate TEXT NOT NULL DEFAULT '{}'"
+            )
 
 
 def _truncate(text: str, limit: int = _RECORD_TEXT_LIMIT) -> str:
@@ -106,8 +119,8 @@ def save_run(run: dict, db_dir: Path | None = None) -> None:
                 """INSERT INTO agent_runs (
                        run_id, user_id, status, started_at, ended_at,
                        total_llm_calls, context_tokens, token_usage,
-                       estimated_prompt_tokens, final_text, evidence)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       estimated_prompt_tokens, token_estimate, final_text, evidence)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(run_id) DO UPDATE SET
                        status = excluded.status,
                        ended_at = excluded.ended_at,
@@ -115,6 +128,7 @@ def save_run(run: dict, db_dir: Path | None = None) -> None:
                        context_tokens = excluded.context_tokens,
                        token_usage = excluded.token_usage,
                        estimated_prompt_tokens = excluded.estimated_prompt_tokens,
+                       token_estimate = excluded.token_estimate,
                        final_text = excluded.final_text,
                        evidence = excluded.evidence""",
                 (
@@ -123,6 +137,7 @@ def save_run(run: dict, db_dir: Path | None = None) -> None:
                     run.get("total_llm_calls", 0), run.get("context_tokens", 0),
                     json.dumps(run.get("token_usage", {}), ensure_ascii=False),
                     run.get("estimated_prompt_tokens", 0),
+                    json.dumps(run.get("token_estimate", {}), ensure_ascii=False),
                     run.get("final_text", ""),
                     json.dumps(run.get("evidence", []), ensure_ascii=False),
                 ),
@@ -146,6 +161,7 @@ def _row_to_run(row: sqlite3.Row) -> dict:
         "context_tokens": row["context_tokens"],
         "token_usage": json.loads(row["token_usage"] or "{}"),
         "estimated_prompt_tokens": row["estimated_prompt_tokens"],
+        "token_estimate": json.loads(row["token_estimate"] or "{}"),
         "final_text": row["final_text"],
         "evidence": json.loads(row["evidence"] or "[]"),
     }
@@ -164,7 +180,7 @@ def list_runs(user_id: int, limit: int = 50, offset: int = 0,
         rows = conn.execute(
             """SELECT run_id, user_id, status, started_at, ended_at,
                       total_llm_calls, context_tokens, token_usage,
-                      estimated_prompt_tokens, final_text
+                      estimated_prompt_tokens, token_estimate, final_text
                FROM agent_runs WHERE user_id = ?
                ORDER BY started_at DESC LIMIT ? OFFSET ?""",
             (user_id, limit, offset),
@@ -173,6 +189,7 @@ def list_runs(user_id: int, limit: int = 50, offset: int = 0,
         for r in rows:
             d = dict(r)
             d["token_usage"] = json.loads(d["token_usage"] or "{}")
+            d["token_estimate"] = json.loads(d.get("token_estimate") or "{}")
             d.pop("evidence", None)
             runs.append(d)
         return runs

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core import agent_tools
+from app.core.agent_tools.tools import grade_answer, quiz_generate
 from app.core.quiz import chat_quiz
 from app.core.quiz.quiz_store import QuizManager
 
@@ -136,7 +137,7 @@ def test_quiz_generate_schedules_background_and_returns_immediately(monkeypatch)
     kg = _FakeKg({"bt": {"id": "bt", "name": "二叉树"}})
 
     async def _scenario():
-        out = await agent_tools._h_quiz_generate({"node_id": "bt"}, kg)
+        out = await quiz_generate.handler({"node_id": "bt"}, kg)
         await asyncio.sleep(0)      # 让 create_task 落地
         return out
 
@@ -149,12 +150,12 @@ def test_quiz_generate_schedules_background_and_returns_immediately(monkeypatch)
 def test_quiz_generate_rejects_unknown_node():
     """节点不存在 → 友好文案，不起后台任务。"""
     kg = _FakeKg({})
-    out = _run(agent_tools._h_quiz_generate({"node_id": "nope"}, kg))
+    out = _run(quiz_generate.handler({"node_id": "nope"}, kg))
     assert "不在当前知识图谱" in out
 
 
 def test_quiz_generate_rejects_missing_node_id():
-    out = _run(agent_tools._h_quiz_generate({}, _FakeKg()))
+    out = _run(quiz_generate.handler({}, _FakeKg()))
     assert "需要指定 node_id" in out
 
 
@@ -168,8 +169,8 @@ def test_quiz_generate_dedupes_concurrent_trigger(monkeypatch):
     kg = _FakeKg({"bt": {"id": "bt", "name": "二叉树"}})
 
     async def _scenario():
-        first = await agent_tools._h_quiz_generate({"node_id": "bt"}, kg)
-        second = await agent_tools._h_quiz_generate({"node_id": "bt"}, kg)
+        first = await quiz_generate.handler({"node_id": "bt"}, kg)
+        second = await quiz_generate.handler({"node_id": "bt"}, kg)
         return first, second
 
     first, second = _run(_scenario())
@@ -419,5 +420,5 @@ def test_grade_answer_without_pending_question(tmp_path, monkeypatch):
 
 def test_grade_answer_requires_answer_text():
     """空作答不发判分。"""
-    out = _run(agent_tools._h_grade_answer({"user_answer": "  "}, _FakeKg()))
+    out = _run(grade_answer.handler({"user_answer": "  "}, _FakeKg()))
     assert "缺少 user_answer" in out

@@ -2,14 +2,16 @@
 对话服务层：编排整个对话处理流程
 
 流程（Agent Loop，2026-09-06 起，已全面收敛）：
-  统一调用 run_agent_loop（app/core/agent_loop.py）标准 agent 循环：
+  统一调用 run_agent_loop（app/core/agent/loop.py）标准 agent 循环：
   带工具说明的提示词 → LLM↔工具多轮串联 → 最终回答；运行记录自动落 agent_runs，
   循环内事件（thinking/tool_start/tool_result/text_delta）经 event_bus 实时推送
   （/chat/stream 消费转发 SSE，每事件带 run_id 便于前端回源）。
 
 提示词组装逻辑：
   通用模板 (system_prompt_common.j2) + 模式模板 → 完整 system prompt
-  统一注入工具能力说明（TOOL_CAPABILITY_PROMPT），进入 agent 循环
+  统一注入工具能力说明（TOOL_CAPABILITY_PROMPT = 注册表生成的逐工具指南 + 跨工具策略），
+  进入 agent 循环。逐工具说明的唯一来源是 core/agent_tools/tools/*.py 的 GUIDANCE
+  （2026-09-15 收敛：原先这里手写一份，与 spec.description 构成双源且已实测漂移）。
 
 图谱分析（后台异步）：
   _analyze_and_apply 分析对话 → 高置信度建议自动应用 / 其余入待审核；失败不影响回复
@@ -23,9 +25,10 @@ import logging
 from typing import AsyncGenerator
 from datetime import datetime
 from app.core.prompt_loader import get_system_prompt
-from app.core.agent_loop import run_agent_loop
+from app.core.agent.loop import run_agent_loop
+from app.core.agent_tools import TOOLS_PROMPT  # 注册表生成的「工具调用指南」段落
 from app.core.config import settings
-from app.core.context_guard import trim_history_to_budget
+from app.core.agent.guard import trim_history_to_budget
 from app.core.graph_analyzer import GraphAnalyzer, build_graph_context
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.profile import UserProfile
@@ -38,28 +41,15 @@ logger = logging.getLogger("ai-tutor")
 
 
 # ══════════════════════════════════════════════════════════════════
-#  工具能力说明（仅在后台阶段注入）
+#  工具能力说明（inject_tools=True 时注入）
+#  逐工具指南 = 注册表生成（TOOLS_PROMPT）；跨工具策略 = 本文件 TOOL_POLICY_PROMPT
 # ══════════════════════════════════════════════════════════════════
 
-TOOL_CAPABILITY_PROMPT = """
-## 知识图谱编辑能力
-你可以通过调用工具来管理知识图谱。当用户提到以下内容时，主动使用工具：
+TOOL_POLICY_PROMPT = """
+## 工具使用策略（跨工具）
 
-- **添加知识点** → 调用 `add_knowledge_node`，自动创建节点+MD文件+关联边
-- **删除知识点** → 调用 `delete_node`
-- **更新内容** → 调用 `update_node_content`
-- **更新掌握程度** → 调用 `update_mastery`。⚠️ **通道已收敛**：掌握度主要由「出题 → 判分」自动更新（见下节），只有硬证据才允许你手动调（规则见「你的额外能力」第 2 条）
-- **创建关联** → 调用 `add_edge`
-- **更新用户画像** → 调用 `update_user_profile`
-- **查询网页** → 调用 `fetch_webpage`（抓取网页正文，获取实时/外部信息）
-- **下载资源** → 调用 `download_resource`（把公网上可直接下载的文档/电子书存入知识库，之后可被 `rag_search` 检索；只临时看网页正文用 `fetch_webpage`）
-- **检索知识** → 调用 `rag_search`（从知识图谱/上传知识库中检索与某话题最相关的内容片段，补充教学依据）
-- **联网搜索** → 调用 `mcp__websearch__web_search`（互联网搜索，返回标题/链接/摘要。知识库和图谱里都没有、或需要最新信息时才用）
-- **出题检验** → 调用 `quiz_generate`（针对刚学的知识点出 1 道题；**后台生成，通常几秒后自动推给学生**，本工具立即返回）
-- **判分** → 调用 `grade_answer`（学生作答后判分，只需把学生原话传进来；答对会自动提升该知识点掌握度）
-
-例如用户说"帮我加一个汉诺塔节点"，你就调用 `add_knowledge_node` 创建节点，
-然后自然回复"已添加！汉诺塔现在关联在递归定义下"。
+逐工具说明见上一节「工具调用指南」——它由工具注册表生成，新增工具会自动出现在其中。
+下面几条是**跨工具**的硬性策略，优先级高于任何单个工具的说明。
 
 ### 掌握度由谁更新（重要，别搞错）
 
@@ -69,7 +59,7 @@ TOOL_CAPABILITY_PROMPT = """
 - 所以你的首要任务是**在合适时机出题**，而不是凭对话感受去改数字
 
 **不要**因为"学生说懂了""学生回答得不错"就调 `update_mastery` —— 这类主观判断不可复核，
-历史上导致掌握度长期不动。你的手动通道已收敛到 3 种硬证据（见「你的额外能力」第 2 条）。
+历史上导致掌握度长期不动。你的手动通道已收敛到 3 种硬证据（见 `update_mastery` 的说明）。
 
 ### 学生说"我懂了"时：**出题，不要再追问**（铁律，优先于其他引导策略）
 
@@ -85,60 +75,17 @@ TOOL_CAPABILITY_PROMPT = """
 **"追问"和"出题"分工不同，不要混用**：追问用于把困惑的学生问明白；
 出题用于确认学生是否真的明白了。学生一旦表态理解，就该切换到出题。
 
-### 出题与判分的时机（严格执行，否则会烦到学生）
-
-**什么时候出题**（满足任一条即可）：
-1. 学生表示理解了（"懂了""明白了""原来如此""对吧？"），或正确回答了你的引导问题 ← **最常见**
-2. 同一个知识点已经来回讨论 2 轮以上，需要检验是否真懂
-3. 学生主动要求："考考我""练一道"
-
-**什么时候不要出题**：
-- 学生刚提出新问题、话题还在展开
-- 学生明显困惑、还没被引导明白（这时该继续追问，不是考试）
-- **已经有一道题推给学生但还没作答**（不要连出，等学生答完）
-- 同一段对话里刚出过一道题（间隔至少 2~3 个来回）
-- 该知识点在图谱里的掌握度已 ≥70（已掌握，不必再考）
-- 同一节点你已经出过 2 道题、且学生都答对了（掌握度已 40+，够说明问题，别反复考同一节点）
-
-**出完题之后**：`quiz_generate` 是后台任务，题目会稍晚（通常几秒）才出现在对话里。
-你要做的是**用一句话告诉学生"我出一道题检验一下，稍等片刻"，然后正常收尾这一轮回复**——
-不要等待、不要反复确认、更不要把题目内容编出来（你此刻还没有它）。
-
-**学生作答后**：调用 `grade_answer`，把学生的原话传进去。
-判分结果里含参考答案与解析：
-- **答对** → 简短肯定 + 点出关键要点，自然推进到下一步
-- **答错** → **不要直接给出答案**，回到苏格拉底式追问，把学生引到正确思路上
-
-### 你的额外能力
-1. **主动优化**：当用户讨论一个知识点时，你发现节点内容不完善，主动调用 `update_node_content` 补充
-2. **手动调掌握度（仅限硬证据）**：只有下面 3 种情况才调 `update_mastery`，其他情况**一律不要调**：
-   1. 学生明确说"这个我早就会了/很熟" → 设 70（已掌握档）
-   2. 学生明确说"我完全没学过这个" → 设 0
-   3. 学生主动纠正自己之前的错误理解、并把正确理解讲对了 → 当前值 +10（上限 100）
-   数值规则：先看图谱摘要里该节点的**当前**掌握度，在其基础上**加增量**，不要凭感觉给绝对值。
-   ⚠️ `node_id` 必须从图谱摘要里**逐字复制**，不要自己拼写（摘要是 `binary_tree_definition`，
-   就不能传 `binary_tree`）。传错 id 工具会失败，你还会因此错误地告诉学生"图谱里没有这个知识点"。
-3. **关联节点**：当发现节点间有**实质性知识关系**时才调用 `add_edge`。不要仅因为两个概念在同一对话中出现就连边。必须确认它们之间存在真正的 prerequisite/related/confusion/extension 关系
-4. **扩展图谱**：当用户提到知识图谱中没有的概念时，调用 `add_knowledge_node` 自动创建。`from_nodes` 只能填真正的前置知识节点（必须先学它才能理解新节点），不要随便填
-5. **~~根据回复质量给 mastery 打分~~（已废弃）**：不要用"用户回复的质量"去估 mastery 数值 ——
-   这是原先不可复核的做法（模型拍脑袋，实测 12 次对话 0 次调用）。掌握度改由**出题判分自动更新**，
-   你只在上面第 2 条的 3 种硬证据下才手动调。
-6. **更新用户画像**：当你在教学中观察到学生的性格特点、学习习惯、知识薄弱点等新信息时，调用 `update_user_profile` 追加到用户画像。这有助于后续更好地个性化教学。例如：发现学生害怕数学公式、喜欢图形化解释、做题容易粗心等。
-7. **查询网页**：当学生提到一个 URL、需要实时信息（新闻、最新文档、教程）或某个话题你需要外部资料来讲解时，调用 `fetch_webpage` 抓取网页正文。拿到正文后提炼要点，用通俗语言教给学生。若抓取失败，礼貌说明并提供其他学习途径。
-8. **检索知识**：当学生的问题涉及某个具体知识点、需要从已学图谱或上传资料中找依据、或你想确认某个概念的资料时，调用 `rag_search` 检索相关片段。拿到片段后据此准确回答并标注出处（如"据你之前学的《数据结构》第2章…"）。若未检索到相关内容，基于已有知识回答即可，不要编造。
-9. **联网搜索**：当问题需要**本地资料之外的实时/外部信息**（最新新闻、新版本特性、网上教程、你知识截止后的变化），或 `rag_search` 没找到依据时，调用 `mcp__websearch__web_search`。先搜关键词拿到链接与摘要，必要时再用 `fetch_webpage` 抓正文深入。回答时**必须标注来源链接**，并提醒学生自行核查；搜索失败或没有结果时，如实说明并基于已有知识回答。**不要**为本地资料已覆盖的内容去联网搜索（浪费且拖慢回复）。
-
 ### ⚠️ 权限限制（严格执行）
+
 - **你不能修改、删除或更新人类手动创建的节点**（added_by="human"）。这些操作会被系统拒绝。
 - **你不能在两个人类创建的节点之间添加 prerequisite 边**（因为前置关系影响学习路径）。
 - 你可以在人类节点之间添加 related/confusion/extension 边，但这些边会标记为 AI 建议，等待审核。
 - **你创建的节点和边**（added_by="ai"）可以自由修改和删除。
 - 如果用户明确要求你修改某个特定节点（如"帮我改一下XX的内容"），你可以调用工具，系统会放行。
-
-⚠️ 重要原则：知识图谱的质量远比数量重要。宁可漏掉一条关系，也不要创建错误的关系误导学习路径。
-
-你不需要等用户说"修改"才动手。只要对话涉及某节点内容，就主动去完善它。
 """
+
+# 完整工具能力说明 = 注册表生成的逐工具指南（含 MCP 工具，随开关自动增减）+ 跨工具策略
+TOOL_CAPABILITY_PROMPT = TOOLS_PROMPT + TOOL_POLICY_PROMPT
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -164,8 +111,46 @@ EMPTY_GRAPH_PROMPT = """
 #  Prompt 构建
 # ══════════════════════════════════════════════════════════════════
 
+# 固定段（S2–S7 = 整个 system prompt）预算线，见 docs/上下文工程_预算框架.md §3.2 / 不变量 B-3
+FIXED_SEGMENT_WARN_RATIO = 0.40      # 超此线记 warning：固定成本开始挤压 S8 历史
+FIXED_SEGMENT_DEGRADE_RATIO = 0.45   # 超此线强制重建图谱注入（唯一还能压的可还原段）
+
+# ── S6 / S7 独立配额（框架 §1.2 表 / 不变量 B-6）──
+# 两源各自截断、互不挤占：图谱正文与 S4 结构注入天然重复（压它风险最低），
+# 知识库正文是全新内容但噪声代价高（Chroma 实测 1 个干扰项即有害）。
+RETRIEVAL_SEGMENT_MAX_TOKENS = 3_000   # 每段上限（目标 2K / 上限 3K）
+RETRIEVAL_HIT_OVERHEAD = 20            # 每条片段的标题行等固定开销（token）
+# query 双端放置（框架 §4.2，Lost in the Middle：KV 检索 45.6%→100%，代价 ~50 token）
+RETRIEVAL_QUERY_ECHO_MAX_CHARS = 300
+
+
+def _trim_hits(hits: list, max_tokens: int) -> tuple[list, int]:
+    """按相关性降序（pipeline 已排序）保留放得下的片段，至少留 1 条。
+
+    返回 (kept, dropped)；dropped > 0 时调用方须在区块尾部标注截断
+    （对齐 S4 的"展示范围说明"风格：不标注会让模型以为检索只有这么多依据）。
+    """
+    kept: list = []
+    used = 0
+    for hit in hits:
+        cost = count_tokens(hit.content) + RETRIEVAL_HIT_OVERHEAD
+        if kept and used + cost > max_tokens:
+            break
+        kept.append(hit)
+        used += cost
+    return kept, len(hits) - len(kept)
+
+
+def _truncation_note(shown: int, dropped: int) -> str:
+    """检索区块的截断说明（未截断时返回空串）。"""
+    if dropped <= 0:
+        return ""
+    return (f"\n\n> 说明：本区块为控制上下文体量已截断，仅展示最相关的 {shown} 条"
+            f"（共 {shown + dropped} 条）；需要更多依据时可再次检索。")
+
+
 def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True,
-                         focus_node_id: str = "") -> str:
+                         focus_node_id: str = "", max_chars: int | None = None) -> str:
     """
     构建知识图谱摘要文本，注入到通用模板的 {knowledge_graph_summary} 占位符。
 
@@ -173,8 +158,11 @@ def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True,
         kg:            KnowledgeGraph 实例（已绑定 user_id）
         detailed:      True=全量数据（后台阶段用），False=精简摘要（流式阶段用）
         focus_node_id: 当前教学节点；注入体量超上限时优先保留其邻域（见 graph_analyzer）
+        max_chars:     本次注入的字符上限；None=settings.graph_inject_max_chars。
+                       固定段越线强制降级时会传一个更小的值重建（见 _build_system_prompt）
     """
-    return build_graph_context(kg, detailed=detailed, focus_node_id=focus_node_id)
+    return build_graph_context(kg, detailed=detailed, focus_node_id=focus_node_id,
+                               max_chars=max_chars)
 
 
 async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
@@ -184,8 +172,9 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
     构建系统提示词（合并原 _build_stream_prompt / _build_chat_prompt）。
     
     参数:
-        inject_tools: True=后台阶段（详细图谱 + 工具能力说明）
-                      False=流式阶段（精简图谱，纯教学引导）
+        inject_tools: True=注入详细图谱 + 工具能力说明（生产唯一用法：/chat 与 /chat/stream 都传它）
+                      False=精简图谱、不注入工具说明（旧两段式架构"流式阶段"的遗留开关，
+                      已无生产调用点，保留给"纯教学、不给工具"的实验）
         current_node: 递归模式：当前正在教学的知识点 ID
         kb: 知识库上下文范围 {node_ids: [...], name: str}，可选；
             传入后在所选目录范围内检索文档片段注入提示词
@@ -203,56 +192,78 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
     profile = UserProfile(user_id=kg.user_id)
     profile_text = profile.get_summary()
 
-    # 递归模式额外参数
+    # 递归模式额外参数。
+    # 图谱统一由上面的 graph_summary 注入：模板不再自拼第二份「框架节点 + 仅 prerequisite 边」——
+    # 那份与 graph_summary 信息重叠（节点 + 全量带 relation 标签的边），且不走注入体量控制。
     extra_kwargs = {}
     if mode == "recursive":
-        # 构建框架摘要（所有节点 ID + 名称 + 依赖关系，不含内容）
-        framework_lines = []
-        for n in kg.nodes:
-            tags = ", ".join(n.get("tags", []))
-            mastery = n.get("mastery", 0)
-            framework_lines.append(f"  [{n['id']}] {n['name']} (掌握度:{mastery}, 标签:{tags})")
-        node_list = "\n".join(framework_lines) if framework_lines else "  (暂无节点)"
-
-        edge_lines = []
-        for e in kg.edges:
-            if e.get("relation") == "prerequisite":
-                edge_lines.append(f"  {e['from_node']} → {e['to_node']} (前置依赖)")
-        edge_list = "\n".join(edge_lines) if edge_lines else "  (暂无依赖关系)"
-
-        extra_kwargs["knowledge_graph_framework"] = (
-            f"### 框架节点\n{node_list}\n\n### 依赖关系\n{edge_list}"
-        )
         extra_kwargs["current_node"] = current_node or "未知节点"
-
-    system_prompt = get_system_prompt(
-        mode=mode,
-        student_message=last_user_msg,
-        graph_summary=graph_summary,
-        user_profile=profile_text,
-        **extra_kwargs,
-    )
 
     # 注入检索上下文（RAG 是增强而非必需：检索失败或为空时不影响主提示词）
     # 去耦合：检索编排统一走 rag_pipeline，一次 run 按数据源分组生成图谱/知识库两个区块
     # usage_mode 由上面同一个 profile 实例带下来，避免一次请求重复读画像文件
+    # 检索块先取一次：下面拼装要用，且降级重建时不重复检索
     retrieval = await _build_retrieval_context(last_user_msg, kg.user_id, kb,
                                               usage_mode=profile.get_usage_mode())
-    if retrieval:
-        system_prompt += retrieval
 
-    if inject_tools:
-        system_prompt += TOOL_CAPABILITY_PROMPT
+    def _assemble(graph_text: str) -> str:
+        """按固定顺序拼装 system prompt（= 固定段 S2–S7 全集）。"""
+        prompt = get_system_prompt(
+            mode=mode,
+            student_message=last_user_msg,
+            graph_summary=graph_text,
+            user_profile=profile_text,
+            **extra_kwargs,
+        )
+        if retrieval:
+            prompt += retrieval
+        if inject_tools:
+            prompt += TOOL_CAPABILITY_PROMPT
+        # 图谱为空：放最后（最新指令优先级最高），覆盖退化的「框架约束」
+        if not kg.nodes:
+            prompt += EMPTY_GRAPH_PROMPT
+        return prompt
 
-    # 图谱为空：放最后（最新指令优先级最高），覆盖退化的「框架约束」
-    if not kg.nodes:
-        system_prompt += EMPTY_GRAPH_PROMPT
+    system_prompt = _assemble(graph_summary)
+    fixed_tokens = count_tokens(system_prompt)
+    budget = max(1, settings.llm_ctx_budget)
 
-    # 预算可观测：system prompt 是每轮重发的固定成本，图谱区块是其中随规模增长的一项
+    # 固定段越线强制降级（框架 §3.2「不得照发」）：能压的只有图谱结构注入（S4，
+    # 有外部还原源）；S1/S2/S9 不可压，S3 的 schema 每轮必发。guard 裁不动 system_prompt，
+    # 所以这一步必须在组装侧做。上限减半重建一次，仍越线记 error 照发（已无手段）。
+    degrade_line = int(budget * FIXED_SEGMENT_DEGRADE_RATIO)
+    if fixed_tokens > degrade_line and graph_summary:
+        graph_summary = _build_graph_summary(
+            kg, detailed=inject_tools, focus_node_id=current_node,
+            max_chars=max(1, len(graph_summary) // 2),
+        )
+        shrunk_prompt = _assemble(graph_summary)
+        shrunk_tokens = count_tokens(shrunk_prompt)
+        if shrunk_tokens > degrade_line:
+            logger.error(
+                f"固定段（S2–S7）{shrunk_tokens} tokens 超 {FIXED_SEGMENT_DEGRADE_RATIO:.0%}×预算 "
+                f"{budget}（图谱减半重建前 {fixed_tokens}）→ 照发：S1/S2/S3/S9 不可压，已无手段"
+            )
+        else:
+            logger.warning(
+                f"固定段越线（{fixed_tokens} > {degrade_line}）→ 图谱注入降级重建："
+                f"{fixed_tokens}→{shrunk_tokens} tokens（图谱区块 {len(graph_summary)} 字符）"
+            )
+        system_prompt, fixed_tokens = shrunk_prompt, shrunk_tokens
+
+    # 预算可观测（不变量 B-3）：system prompt = 固定段全集，是每轮重发的固定成本
     logger.info(
-        f"系统提示词 {count_tokens(system_prompt)} tokens"
-        f"（图谱区块 {len(graph_summary)} 字符，发送预算 {settings.llm_ctx_budget}）"
+        f"系统提示词 {fixed_tokens} tokens"
+        f"（固定段占预算 {fixed_tokens / budget:.1%}；"
+        f"图谱区块 {len(graph_summary)} 字符，检索区块 {len(retrieval)} 字符）"
     )
+    warn_line = int(budget * FIXED_SEGMENT_WARN_RATIO)
+    if fixed_tokens > warn_line:
+        logger.warning(
+            f"固定段（S2–S7）{fixed_tokens} tokens 超告警线 {warn_line}"
+            f"（{FIXED_SEGMENT_WARN_RATIO:.0%}×预算 {budget}）→ 正在挤压 S8 历史；"
+            f"优先降 GRAPH_INJECT_MAX_CHARS 与画像体量"
+        )
 
     return system_prompt, last_user_msg
 
@@ -280,6 +291,9 @@ async def _build_retrieval_context(student_message: str, user_id: int,
         检索编排统一走 rag_pipeline，一次 run 并行检索所有已注册数据源，
         按 source 分组生成两个区块，避免对同一 query 重复 embedding。
         鲁棒性：pipeline 内部已做按需开关 + 单源超时/异常隔离，绝不抛错。
+        体量（2026-09-15，不变量 B-6）：S6 图谱 / S7 知识库**各自**截断到
+        `RETRIEVAL_SEGMENT_MAX_TOKENS`，一源超长不挤占另一源；截断时尾部标注展示范围。
+        位置（框架 §4.2）：当前问题同时出现在检索块**前后**（query-aware contextualization）。
     """
     from app.core.rag_pipeline import pipeline, RagContext
 
@@ -290,6 +304,10 @@ async def _build_retrieval_context(student_message: str, user_id: int,
 
     graph_hits = [h for h in hits if h.source == "graph"]
     kb_hits = [h for h in hits if h.source == "kb"]
+
+    # 两源独立截断（B-6）：图谱先截、知识库后截，互不挤占预算
+    graph_hits, graph_dropped = _trim_hits(graph_hits, RETRIEVAL_SEGMENT_MAX_TOKENS)
+    kb_hits, kb_dropped = _trim_hits(kb_hits, RETRIEVAL_SEGMENT_MAX_TOKENS)
 
     blocks: list[str] = []
 
@@ -304,7 +322,7 @@ async def _build_retrieval_context(student_message: str, user_id: int,
             lines.append(f"### 片段 {i}：{node_name}"
                          + (f"（{r.heading}）" if r.heading else ""))
             lines.append(r.content)
-        blocks.append("\n\n".join(lines))
+        blocks.append("\n\n".join(lines) + _truncation_note(len(graph_hits), graph_dropped))
 
     # 知识库区块
     if kb_hits:
@@ -317,9 +335,15 @@ async def _build_retrieval_context(student_message: str, user_id: int,
             lines.append(f"### 片段 {i}"
                          + (f"：{r.path}" if r.path else ""))
             lines.append(r.content)
-        blocks.append("\n\n".join(lines))
+        blocks.append("\n\n".join(lines) + _truncation_note(len(kb_hits), kb_dropped))
 
-    return "\n\n".join(blocks)
+    if not blocks:
+        return ""
+
+    # query-aware 双端放置（框架 §4.2 唯一允许的注入顺序改动）：查询同时置于数据前后
+    echo = ("## 当前问题（检索片段以此为准）\n"
+            f"{student_message[:RETRIEVAL_QUERY_ECHO_MAX_CHARS]}\n")
+    return "\n\n".join([echo, *blocks, echo])
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -475,7 +499,7 @@ async def process_message(user_id: int, messages: list, mode: str,
             messages, mode, kg, inject_tools=True, current_node=current_node, kb=kb
         )
 
-        # 2. 发送前守卫：历史超预算时裁掉最旧轮次（裁剪统计由守卫内部记日志）
+        # 2. 发送前守卫：清理较早工具结果 + 历史超预算时分层压缩（统计由守卫内部记日志）
         messages, _ = trim_history_to_budget(system_prompt, messages)
 
         # 3. Agent 主循环：LLM ↔ 工具 多轮串联，直到自然给出最终回复
@@ -535,7 +559,7 @@ async def process_message_stream(
         # （旧实现先启动 agent 再 subscribe，agent 可能在队列创建前就发了事件 → 静默丢弃）
         get_user_queue(user_id)
 
-        # 发送前守卫：历史超预算时裁掉最旧轮次（裁剪统计由守卫内部记日志）
+        # 发送前守卫：清理较早工具结果 + 历史超预算时分层压缩（统计由守卫内部记日志）
         messages, _ = trim_history_to_budget(tool_prompt, messages)
 
         # 启动 agent loop 为后台任务（事件通过 event_bus 投递到用户队列）

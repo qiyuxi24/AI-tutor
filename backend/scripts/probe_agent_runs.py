@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.core import agent_run_store as run_store  # noqa: E402
+from app.core.agent import store as run_store  # noqa: E402
 
 
 def _tool_calls(run: dict) -> list[tuple[str, dict]]:

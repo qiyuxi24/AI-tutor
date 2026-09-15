@@ -1,17 +1,15 @@
-"""资源下载工具实现（MCP 风格）：把 URL 指向的文档下载并入库到用户知识库。
+"""工具 `download_resource` —— 把 URL 指向的文档/电子书下载并入库到学生知识库。
 
-与 web_tool.fetch_webpage 的分工（都抓 URL，但目的不同）：
-- fetch_webpage    ：只读。网页正文 → 文本返回给模型看，不落盘。
-- download_resource：留存。任意受支持格式（pdf/epub/docx/pptx/txt/html…）→
-                     下载 bytes → 解析 → 分块 → 入知识库（KbManager），
-                     之后可被 rag_search(source="kb") 检索到。
+与 `fetch_webpage` 的分工（都抓 URL，但目的不同）：
+- fetch_webpage    ：**只读看一眼**。网页正文 → 文本返回给模型，不落盘。
+- download_resource：**长期留存**。任意受支持格式（pdf/epub/docx/pptx/txt/html…）→
+                     下载 bytes → 解析 → 分块 → 入知识库（`kb_manager`），
+                     之后可被 `rag_search(source="kb")` 检索到。
 
-安全边界（SSRF 防护沿用 web_tool，唯一实现不重复）：
+安全边界（SSRF 沿用 `..net_guard`，唯一实现不重复）：
 - 协议限 http/https；拒绝内网/回环/私有 IP
 - 体积上限 max_mb（默认 50MB）：content-length 预检 + 流式累计双重校验
-- 扩展名白名单 = kb 解析器注册表（is_supported），不支持则不入库半成品
-
-工具 spec / 分发注册在 agent_tools._TOOL_SPECS（handler 薄壳调 download_resource）。
+- 扩展名白名单 = kb 解析器注册表（`is_supported`），不支持则不入库半成品
 """
 
 import asyncio
@@ -26,7 +24,9 @@ import httpx
 
 from app.core.error_codes import ErrorCode, log_error
 from app.core.kb.parsers import is_supported, supported_label
-from app.core.web_tool import is_blocked_url
+
+from ..net_guard import is_blocked_url
+from ..registry import _spec
 
 logger = logging.getLogger("ai-tutor")
 
@@ -60,12 +60,16 @@ _CT_EXT = {
     "text/html": ".html",
 }
 
-# 同步→异步桥：与 rag_tool / mcp_host / kg_taxonomy 同一约定（各持单例池互不干扰）
+# 同步→异步桥：与 rag_search / mcp_host / kg_taxonomy 同一约定（各持单例池互不干扰）
 _POOL = ThreadPoolExecutor(max_workers=1)
 
 
 def _run_async(coro):
-    """在同步上下文里跑协程（当前线程无事件循环则直接 run，否则丢线程池）。"""
+    """在同步上下文里跑协程（当前线程无事件循环则直接 run，否则丢线程池）。
+
+    ⚠️ 各工具**刻意各持单个例池**（本工具 1 个 worker、`rag_search` 2 个）：
+    合并成一个共享池会让一次慢下载占满池、阻塞检索。见 `../tools/README.md`。
+    """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -104,7 +108,7 @@ def _resolve_filename(url: str, headers: httpx.Headers) -> str:
 
 async def _save_to_kb(user_id: int, filename: str, content: bytes,
                       subject: str = "") -> int:
-    """入库：AI 下载/AI 下载+学科 目录下建文件节点（解析 + 分块 + 索引）。"""
+    """入库：AI 下载/{学科} 目录下建文件节点（解析 + 分块 + 索引）。"""
     from app.core.kb.kb_manager import kb_manager
 
     parts = [_KB_FOLDER]
@@ -212,3 +216,34 @@ def download_resource(url: str, title: str = "", subject: str = "",
     return (f"已下载并存入知识库：{filename}（{len(content) / 1048576:.2f}MB，"
             f"目录「{folder}」，文件节点 ID {node_id}）。"
             f"后续可用 rag_search(source=\"kb\") 检索其内容。")
+
+
+DESCRIPTION = ("把一个 URL 指向的文档/电子书（PDF、EPUB、DOCX、PPTX、TXT 等）下载并存入学生的"
+               "知识库，之后可用 rag_search 检索到其内容。当学生说『帮我下载/收藏/存到知识库』"
+               "某份资料、或你在联网搜索中发现一份值得长期留存的学习资料（教材、电子书、讲义、论文）"
+               "时调用。⚠️ 只想临时看一眼网页正文请用 fetch_webpage，不要用它下载；"
+               "URL 必须是可直接下载文件的公网地址（指向文件本身，而非网页页面）。")
+
+PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "url": {"type": "string", "description": "资源的可直接下载地址（http/https，指向文件本身）"},
+        "title": {"type": "string", "description": "存入知识库时的显示名（可选），如『傲慢与偏见』；不填则用 URL 中的文件名"},
+        "subject": {"type": "string", "description": "学科名（可选），会存入知识库『AI 下载/{学科}』子目录便于归类"},
+    },
+    "required": ["url"],
+}
+
+GUIDANCE = """
+把公网文档/电子书（PDF、EPUB、DOCX、PPTX、TXT 等）下载并存入学生知识库，之后可被 `rag_search` 检索到。
+- **何时用**：学生说"帮我下载/收藏/存到知识库"，或你联网搜索时发现值得长期留存的学习资料（教材、电子书、讲义、论文）。
+- URL 必须是**指向文件本身**的可直接下载公网地址；只想临时看网页正文请用 `fetch_webpage`。
+"""
+
+
+def handler(args, kg) -> str:
+    return download_resource(args["url"], title=args.get("title", ""),
+                             subject=args.get("subject", ""), user_id=kg.user_id)
+
+
+SPEC = _spec("download_resource", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE)

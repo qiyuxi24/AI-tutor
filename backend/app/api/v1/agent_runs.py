@@ -6,7 +6,7 @@
 """
 from fastapi import APIRouter, HTTPException, Query, Depends
 from app.core.auth import get_current_user
-from app.core import agent_run_store as store
+from app.core.agent import store as store
 
 router = APIRouter()
 

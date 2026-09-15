@@ -43,8 +43,9 @@ class Settings:
     model_name: str = "qwen-plus"
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_timeout: float = 120.0
-    # 对话发送预算（tokens）：system_prompt + 历史超预算时自动裁掉最旧轮次（见 core/context_guard.py）
-    llm_ctx_budget: int = 32_000
+    # 对话发送预算（tokens）：system_prompt + 历史超预算时分层压缩（见 core/agent/guard.py）
+    # 48K = 预算框架 §1.1 的 B：已含"有效长度打折"，是保守值，勿再叠加折扣
+    llm_ctx_budget: int = 48_000
     # 图谱注入 system prompt 的字符上限（≈8K token）：超出则按降级阶梯收敛
     # 省节点内容摘要 → 限量节点（见 core/graph_analyzer.build_graph_context）。0=不限制
     graph_inject_max_chars: int = 12_000
@@ -75,7 +76,7 @@ class Settings:
     # ─── 启动 / 管理员 ───
     default_admin_password: str = ""
 
-    # ─── 网页搜索（MCP 工具 web_search，见 core/mcp_host.py）───
+    # ─── 网页搜索（MCP 工具 web_search，见 core/agent_tools/mcp_host.py）───
     # 关掉即回到原生 8 工具（不加载 MCP server，无需重启以外的清理）
     web_search_enabled: bool = True
     # 自建 SearXNG 实例地址（如 http://localhost:8888）；留空则用 ddgs（零 key）
@@ -98,7 +99,7 @@ class Settings:
                 "LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
             ),
             llm_timeout=float(os.getenv("LLM_TIMEOUT", "120")),
-            llm_ctx_budget=int(os.getenv("LLM_CTX_BUDGET", str(32_000))),
+            llm_ctx_budget=int(os.getenv("LLM_CTX_BUDGET", str(48_000))),
             graph_inject_max_chars=int(os.getenv("GRAPH_INJECT_MAX_CHARS", "12000")),
             fallback_llm_api_key=os.getenv("FALLBACK_LLM_API_KEY", ""),
             fallback_llm_base_url=os.getenv("FALLBACK_LLM_BASE_URL", ""),

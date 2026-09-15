@@ -29,7 +29,7 @@ onnxruntime>=1.16.0
 tiktoken>=0.7.0
 # 可选：语义去重本地离线嵌入（不装则回退到 text-embedding-v4 API 或内置哈希嵌入）
 # sentence-transformers>=2.2.0
-# MCP 协议（网页搜索工具的宿主层，见 app/core/mcp_host.py 与 app/mcp_servers/）
+# MCP 协议（网页搜索工具的宿主层，见 app/core/agent_tools/mcp_host.py 与 app/mcp_servers/）
 mcp>=2,<3
 # 网页搜索后端：ddgs（MIT，零 API key）。实测走 bing 后端可用；配 SEARXNG_URL 可切自建实例
 ddgs>=9.16

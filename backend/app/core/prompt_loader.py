@@ -6,8 +6,9 @@
   3. 拼接返回完整系统提示词
 
 递归模式（recursive）：
-  额外需要 knowledge_graph_framework 和 current_node 两个参数，
-  它们不通过通用模板渲染，而是直接注入模式模板。
+  额外需要 current_node（当前教学节点 ID），不通过通用模板渲染，直接注入模式模板。
+  图谱本身统一由通用模板的 {{ knowledge_graph_summary }} 注入 —— 各模式不另拼副本
+  （2026-09-15：删掉递归模板里重复的 knowledge_graph_framework 块）。
 """
 from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
@@ -39,7 +40,7 @@ def get_system_prompt(mode: str, student_message: str, graph_summary: str = "",
         student_message: 学生当前消息内容
         graph_summary:   知识图谱摘要文本（可选，由调用方构建后传入）
         user_profile:    用户画像 Markdown（可选，用于个性化教学）
-        **extra_kwargs:  额外参数（递归模式需要 current_node, knowledge_graph_framework）
+        **extra_kwargs:  额外参数（递归模式需要 current_node）
 
     返回:
         拼接后的完整 system prompt 字符串

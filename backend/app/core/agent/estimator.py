@@ -1,17 +1,26 @@
-"""Token 消耗预估模块 —— 发送请求前预估本次 LLM 调用的总 token 消耗
+"""发送前 token 预估 —— run 的一次输入/输出/成本预估，并随 run 记录落库追踪。
+
+位置：2026-09-15 自 `core/token_estimator.py` 迁入本包（agent run 的上下文工程环
+节，与 `guard.py`/`loop.py` 同属"发送前"这件事）。**唯一调用方 = `loop.py`**，
+预估结果写进 `AgentRunResult.token_estimate` → `store.agent_runs.token_estimate`
+字段落库，与真值 `token_usage` 同表可比（预估 vs 实际，用于校准 Phase 2 中位数）。
 
 三层预估策略（按可用性自动选择）：
   Phase 1（max_tokens 上限）：prompt 预计数 + max_tokens → 成本上限
   Phase 2（历史中位数）  ：从 agent_runs 表提取该用户历史 completion_tokens 中位数
   Phase 3（关键词规则）  ：基于 prompt 内容特征（"详细"/"简短"等）调整预估
 
-历史数据源（2026-09-08 迁移）：旧 jsonl trace 已退役，统一从 agent_run_store 的
+与 guard 的分工：guard 只做"超预算就裁历史"的**比较**（用 token_counter 精确计数，
+不需要 completion 预估）；本模块提供 completion 预估与成本换算，供上下文预算
+（S1 输出预留 / S8 历史配额）参考与事后审计。
+
+历史数据源（2026-09-08 迁移）：旧 jsonl trace 已退役，统一从 agent/store.py 的
   agent_runs 表读取（run_agent_loop 内部落库）。
 
 设计依据：docs/token_consumption_prediction_research.md
 
-使用方式：
-  from app.core.token_estimator import estimate_token_consumption
+独立使用（脚本/探针）：
+  from app.core.agent.estimator import estimate_token_consumption
   est = estimate_token_consumption(messages, model="MiniMax-M3", max_tokens=2000, user_id=42)
   print(f"预估消耗 {est.total_estimated} tokens（上限 {est.total_max}），约 ${est.estimated_cost_usd:.4f}")
 """
@@ -21,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.token_counter import count_messages_tokens
-from app.core import agent_run_store as run_store
+from app.core.agent import store as run_store
 
 logger = logging.getLogger("ai-tutor")
 

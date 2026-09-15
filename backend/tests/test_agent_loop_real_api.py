@@ -22,8 +22,8 @@ import re
 
 import pytest
 
-from app.core.agent_loop import run_agent_loop
-from app.core import agent_run_store as run_store
+from app.core.agent.loop import run_agent_loop
+from app.core.agent import store as run_store
 from app.core.knowledge_graph import KnowledgeGraph
 
 pytestmark = [pytest.mark.llm_api, pytest.mark.asyncio]

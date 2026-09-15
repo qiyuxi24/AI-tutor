@@ -5,11 +5,27 @@
 - 超预算 → 从头部丢最旧、保留当前问题、计数确实下降
 - 裁剪结果以 user 开头（notice 占位 + 首轮消息角色合法）
 - dict / Pydantic 双形与空/单条极端情形不崩溃
+- 预算口径与框架 §1.1/§1.2 对齐（B=48K、S1 预留 3K）
 """
-from app.core.context_guard import trim_history_to_budget
+from app.core.agent.guard import trim_history_to_budget
 from app.core.token_counter import count_messages_tokens
 
 _SYS = "你是一个针对性的教学助手，请结合学生的知识图谱进行引导式教学。"
+
+
+# ─── 预算口径守卫（P0-①）─────────────────────────────────────
+
+def test_budget_defaults_match_framework():
+    """B=48000（框架 §1.1）、输出预留 3000（§1.2 的 S1 目标）——两者是成对口径，防单边回退。"""
+    from app.core.agent import guard
+    from app.core.config import Settings
+
+    defaults = Settings()
+    assert defaults.llm_ctx_budget == 48_000
+    assert guard.OUTPUT_RESERVE == 3_000
+    # S1 上限 8K（§1.2 表）：预留不得越过上限，也不得挤掉半边预算
+    assert 2_000 <= guard.OUTPUT_RESERVE <= 8_000
+    assert guard.OUTPUT_RESERVE < defaults.llm_ctx_budget // 10
 
 
 def _conv(pairs: int, fill: int = 40) -> list:

@@ -54,12 +54,12 @@ def test_get_system_prompt_recursive():
     result = get_system_prompt(
         mode="recursive",
         student_message="学到二叉树",
+        graph_summary="### 现有节点（共 1 个）\n  [binary_tree] 二叉树 (掌握度:0)",
         current_node="binary_tree",
-        knowledge_graph_framework="### 框架节点\n  [1] 二叉树",
     )
     assert "学到二叉树" in result
     assert "binary_tree" in result
-    assert "框架节点" in result
+    assert "掌握度:0" in result          # 图谱经通用模板注入，递归模板不自拼副本
 
 
 def test_get_system_prompt_unknown_mode():
@@ -84,7 +84,6 @@ def test_get_system_prompt_all_three_modes():
         kwargs = {"student_message": f"test_{mode}"}
         if mode == "recursive":
             kwargs["current_node"] = "node_1"
-            kwargs["knowledge_graph_framework"] = "framework"
         result = get_system_prompt(mode=mode, **kwargs)
         assert f"test_{mode}" in result
         assert len(result) > 50
@@ -159,15 +158,33 @@ def test_common_template_has_no_single_brace_placeholders():
 # ─── 递归模式参数 ────────────────────────────────────────────────
 
 def test_recursive_extra_kwargs_passed():
-    """递归模式的 extra_kwargs 被正确传给模板"""
+    """递归模式的 extra_kwargs（current_node）被正确传给模板"""
     result = get_system_prompt(
         mode="recursive",
         student_message="msg",
         current_node="my_node",
-        knowledge_graph_framework="MY_FRAMEWORK",
     )
     assert "my_node" in result
-    assert "MY_FRAMEWORK" in result
+
+
+def test_recursive_graph_injected_once():
+    """回归守卫：图谱在递归模式下**只被注入一次**。
+
+    2026-09-15 前，递归模板另拼一份 `knowledge_graph_framework`（节点 + 仅 prerequisite 边），
+    与通用模板的 `{{ knowledge_graph_summary }}` 信息重叠，且不走注入体量控制
+    → 递归模式注入量约为其他模式的两倍且无上限。
+    """
+    summary = "GRAPH_MARK"
+    result = get_system_prompt(
+        mode="recursive",
+        student_message="msg",
+        graph_summary=summary,
+        current_node="my_node",
+    )
+    assert result.count(summary) == 1
+
+    src = (prompt_loader.PROMPT_DIR / "system_prompt_recursive.j2").read_text(encoding="utf-8")
+    assert "knowledge_graph_framework" not in src
 
 
 def test_recursive_mode_section():
@@ -176,9 +193,8 @@ def test_recursive_mode_section():
         mode="recursive",
         student_message="学习",
         current_node="node_a",
-        knowledge_graph_framework="框架",
     )
-    assert "递归" in result or "recursive" in result.lower() or "框架" in result
+    assert "递归" in result or "recursive" in result.lower()
 
 
 # ─── 拼接验证 ────────────────────────────────────────────────────

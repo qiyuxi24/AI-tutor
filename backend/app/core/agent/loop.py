@@ -31,14 +31,15 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from app.core.agent_context import AgentContext
-from app.core.agent_events import (
+from app.core.agent.context import AgentContext, TOOL_RESULTS_KEEP_BATCHES
+from app.core.agent.estimator import estimate_token_consumption
+from app.core.agent.events import (
     AgentEventEmitter,
     AGENT_START, AGENT_DONE,
     TOOL_START, TOOL_RESULT,
     THINKING, TEXT_DELTA,
 )
-from app.core.agent_run_store import save_run as _save_run
+from app.core.agent.store import save_run as _save_run
 from app.core.agent_tools import KG_TOOLS, execute_kg_tool_async, tool_timeout_secs
 from app.core.llm.clients import MODEL_NAME
 from app.core.llm.fallback import chat_create as _chat_create
@@ -55,6 +56,7 @@ logger = logging.getLogger("ai-tutor")
 AGENT_MAX_ROUNDS = 5          # 最多工具执行轮数
 AGENT_TOOL_TIMEOUT_SECS = 60  # 单工具执行超时（本地 KG 操作瞬时，兜底未来慢工具）
 AGENT_TEMPERATURE = 0.3       # 循环内统一低温：工具判定与教育文本都要确定性
+AGENT_MAX_TOKENS = 2000       # 单次 LLM 输出上限（实调与发送前预估同一口径）
 
 # 达工具轮上限后的强制收尾指令（Votek 同款策略：不再执行新工具，让模型自然回答）
 # 以 user 消息追加：规避兼容网关对"多条 system 消息"支持不确定的风险
@@ -78,6 +80,7 @@ class AgentRunResult:
     context_tokens: int = 0  # 各轮 response.usage.prompt_tokens 真值累加（向后兼容）
     token_usage: TokenUsage = field(default_factory=TokenUsage)  # 完整 token 明细（Layer 2 真值）
     estimated_prompt_tokens: int = 0  # 发送前本地预计数（Layer 1）
+    token_estimate: dict = field(default_factory=dict)  # estimator.to_dict() 完整预估，随 run 落库
 
 
 def _clip(text: str) -> str:
@@ -85,8 +88,26 @@ def _clip(text: str) -> str:
     return text if len(text) <= _RECORD_LIMIT else text[:_RECORD_LIMIT] + "\n…(记录超长截断)"
 
 
+def _estimate_send(api_messages: list[dict], *, user_id: int | None,
+                   db_dir=None) -> dict:
+    """发送前 token 预估（Layer 1）：prompt 计数 + completion 预估 + 成本换算。
+
+    预估本身失败（如历史库不可读）不阻断主流程 —— 返回 {}，调用方退化为纯计数。
+    user_id=None（纯测试 / 无用户上下文）时跳过 Phase 2 历史中位数。
+    """
+    try:
+        est = estimate_token_consumption(
+            api_messages, model=MODEL_NAME, max_tokens=AGENT_MAX_TOKENS,
+            user_id=user_id, db_dir=db_dir,
+        )
+        return est.to_dict()
+    except Exception as e:
+        logger.warning(f"发送前 token 预估失败，退化为纯计数: {e}")
+        return {}
+
+
 async def _chat_once(api_messages: list[dict], *, temperature: float,
-                     tools: list | None = None, max_tokens: int = 2000):
+                     tools: list | None = None, max_tokens: int = AGENT_MAX_TOKENS):
     """单次 LLM 调用封装（瞬时重试 + 错误码映射 + 主模型静默降级到备用服务）。
     测试通过 patch 本函数注入假响应。"""
     kwargs = {
@@ -159,6 +180,7 @@ async def _force_finish(ctx: AgentContext, msg, *, temperature: float,
                         rounds: list[dict], steps: list[dict], llm_calls: int,
                         context_tokens: int, token_usage: TokenUsage = None,
                         estimated_prompt_tokens: int = 0,
+                        token_estimate: dict | None = None,
                         emitter: AgentEventEmitter) -> AgentRunResult:
     """
     达 max_rounds 仍请求工具 → 强制自然收尾。
@@ -187,7 +209,8 @@ async def _force_finish(ctx: AgentContext, msg, *, temperature: float,
     return AgentRunResult(text=text, rounds=rounds, evidence=steps,
                           total_llm_calls=llm_calls, context_tokens=context_tokens,
                           token_usage=token_usage,
-                          estimated_prompt_tokens=estimated_prompt_tokens)
+                          estimated_prompt_tokens=estimated_prompt_tokens,
+                          token_estimate=token_estimate or {})
 
 
 async def _loop_core(
@@ -200,6 +223,8 @@ async def _loop_core(
     temperature: float,
     emitter: AgentEventEmitter,
     steps: list[dict],
+    user_id: int | None = None,
+    db_dir=None,
 ) -> AgentRunResult:
     """agent 循环主体：LLM ↔ 工具多轮串联。事件实时推送，证据步骤累积到 steps。"""
     ctx = AgentContext(system_prompt, messages)
@@ -207,12 +232,22 @@ async def _loop_core(
     llm_calls = 0
     context_tokens = 0
     token_usage = TokenUsage()
-    # Layer 1：发送前本地预计数（仅首轮，后续轮因工具结果无法预估）
-    estimated_prompt_tokens = count_messages_tokens(ctx.messages, model=MODEL_NAME)
+    # Layer 1：发送前预估（仅首轮，后续轮因工具结果无法预估）。带 user_id 时走 Phase 2
+    # 历史中位数（读 agent_runs），结果随 run 落库 → 与真值 token_usage 同表可对照校准。
+    token_estimate = _estimate_send(ctx.messages, user_id=user_id, db_dir=db_dir)
+    estimated_prompt_tokens = (
+        token_estimate.get("prompt_estimated")
+        or count_messages_tokens(ctx.messages, model=MODEL_NAME)
+    )
 
     emitter.emit(AGENT_START, max_rounds=max_rounds)
 
     for round_idx in range(max_rounds + 1):
+        # S8：较早工具批次的正文换占位符（幂等；保留最近 K 批 = 当前推理链，工具可重放）
+        cleared = ctx.clear_old_tool_results()
+        if cleared:
+            logger.info(f"工具结果清理: {cleared} 条较早结果换占位符"
+                        f"（保留最近 {TOOL_RESULTS_KEEP_BATCHES} 批）")
         resp = await _chat_once(ctx.messages, temperature=temperature, tools=KG_TOOLS)
         llm_calls += 1
         usage = extract_usage(resp)
@@ -239,7 +274,8 @@ async def _loop_core(
             return AgentRunResult(text=text, rounds=rounds, evidence=steps,
                                   total_llm_calls=llm_calls, context_tokens=context_tokens,
                                   token_usage=token_usage,
-                                  estimated_prompt_tokens=estimated_prompt_tokens)
+                                  estimated_prompt_tokens=estimated_prompt_tokens,
+                                  token_estimate=token_estimate)
 
         # 已达工具轮上限仍请求 → 强制收尾（不再执行新工具）
         if round_idx == max_rounds:
@@ -248,6 +284,7 @@ async def _loop_core(
                 llm_calls=llm_calls, context_tokens=context_tokens,
                 token_usage=token_usage,
                 estimated_prompt_tokens=estimated_prompt_tokens,
+                token_estimate=token_estimate,
                 emitter=emitter,
             )
 
@@ -263,7 +300,8 @@ async def _loop_core(
     return AgentRunResult(text="", rounds=rounds, evidence=steps,
                           total_llm_calls=llm_calls, context_tokens=context_tokens,
                           token_usage=token_usage,
-                          estimated_prompt_tokens=estimated_prompt_tokens)
+                          estimated_prompt_tokens=estimated_prompt_tokens,
+                          token_estimate=token_estimate)
 
 
 def _persist_run(run_id: str, user_id: int, started: float,
@@ -278,6 +316,7 @@ def _persist_run(run_id: str, user_id: int, started: float,
             "context_tokens": result.context_tokens if result else 0,
             "token_usage": result.token_usage.to_dict() if result else {},
             "estimated_prompt_tokens": result.estimated_prompt_tokens if result else 0,
+            "token_estimate": result.token_estimate if result else {},
             "final_text": _clip(result.text) if result else "",
             "evidence": steps,
         }, db_dir=db_dir)
@@ -310,7 +349,7 @@ async def run_agent_loop(
         user_id:       用户 ID。传 None 不推事件也不落库（纯测试/无用户上下文场景）；
                        传值则默认可观测：事件带 run_id 推送 + 运行结束（含异常）写入
                        agent_runs 表（证据级：thinking 全文/完整工具参数与返回）。
-        emitter:       消息发射中间件（可选，公开层见 app/core/agent_events.py）。
+        emitter:       消息发射中间件（可选，公开层见本包 events.py）。
                        默认按 user_id 构造 AgentEventEmitter（绑定 run_id；user_id
                        为空时自动静默不推）；注入自定义 emitter 可接管消息分发。
         db_dir:        agent_runs 库所在目录（默认 backend/data/agent_runs；测试注入临时目录用）
@@ -330,6 +369,7 @@ async def run_agent_loop(
             system_prompt, messages, kg=kg, max_rounds=max_rounds,
             tool_timeout_secs=tool_timeout_secs, temperature=temperature,
             emitter=emitter, steps=steps,
+            user_id=user_id, db_dir=db_dir,
         )
     except Exception:
         # 异常运行也落库（status=error + 已收集的证据），再向上抛保持原错误语义

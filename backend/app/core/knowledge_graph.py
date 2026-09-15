@@ -7,6 +7,8 @@
 设计决策：
 - kg.nodes / kg.edges 保持为 @property（只读），外部调用方零改动
 - content（MD 文件内容）不在节点表中，通过 get_node_content_preview() 按需读取
+- **新建带内容节点统一走 create_node_with_content()**（add_node + 写 MD 的原子方法）：
+  调用方不得再自己 open(nodes_dir/...)，MD 模板的唯一来源是 ORIGIN_NOTES
 - 内部写操作全部走 SQL，不再维护内存列表
 - 实例级缓存：_node_cache / _edge_cache / _content_cache 减少重复查询
 """
@@ -17,6 +19,18 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+
+# 新节点 MD 的「来源标注」唯一真值。
+# 原先「写一个节点 MD」有 4 套内联模板散在 knowledge_writer / kb/graph_generator /
+# api/v1/knowledge.py（create_node、decompose）里，新增写路径就会长出第 5 套 ——
+# 收口见 docs/知识图谱_模块结构与封装调研.md §7 第二步。
+ORIGIN_NOTES = {
+    "ai": "由 AI 自动创建",
+    "book": "由 AI 从学科书籍自动生成",
+    "manual": "手动创建",
+    "decompose": "由 AI 通过问题拆解自动创建（学习路径框架节点）",
+}
+ORIGIN_DEFAULT = "manual"
 
 
 class KnowledgeGraph:
@@ -710,6 +724,37 @@ class KnowledgeGraph:
                 self.user_id,
             ))
         self._invalidate_cache()
+
+    def create_node_with_content(self, node_data: dict, content: str = "",
+                                 origin: str = ORIGIN_DEFAULT) -> None:
+        """
+        建节点 + 写节点 MD 文件（原子操作：调用方不再自己 open() 文件，也不自带模板）。
+
+        「写一个节点」的四条路径（Agent 工具写层 / 学科书籍建图 / 手动建节点 API /
+        问题拆解）**唯一落点**；它们之间的差异只剩 origin 一个参数，不再是四套模板。
+
+        参数:
+            node_data: 同 add_node（必须含 id、name）
+            content:   Markdown 正文；以 # 开头视为完整文档，原样落盘
+            origin:    ORIGIN_NOTES 的键（决定 MD 里的来源标注）
+
+        异常:
+            ValueError: 与 add_node 相同（ID 缺失或已存在）—— 此时**不落 MD 文件**
+        """
+        self.add_node(node_data)  # 先写库：ID 冲突在此抛出，不会留下孤儿 MD
+        node_id = node_data["id"]
+        content = (content or "").strip()
+
+        if content.startswith("#"):
+            md_content = content
+        else:
+            head = f"# {node_data.get('name', '')}\n\n> {ORIGIN_NOTES.get(origin, ORIGIN_NOTES[ORIGIN_DEFAULT])}"
+            if node_data.get("summary") and not content:  # 只有骨架节点才附摘要，避免与正文重复
+                head += f"\n> {node_data['summary']}"
+            md_content = f"{head}\n\n{content or '## 概述\n\n待完善...'}\n"
+
+        (self.nodes_dir / f"{node_id}.md").write_text(md_content, encoding="utf-8")
+        self.invalidate_content_cache(node_id)
 
     def remove_node(self, node_id: str, caller: str = "human") -> int:
         """

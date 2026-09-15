@@ -25,15 +25,21 @@
 - [ ] **空图谱时的行动顺序（后续项，待议）** —— 提示词层 MPV 已完成（见 `done.md` §2.2）
   - [ ] **空图谱时从教材一键建图**接入对话链路 —— 新增 Agent 工具复用 `kb/graph_generator`。注意单工具超时 60s、建整书图耗时数分钟 → 不能同步跑在 loop 里，需后台任务形态（前端已有 `POST /kb/graph/generate` 可复用）
   - [ ] **工具层引导** —— 节点不存在时把 `E-LLM-007` 变成"请先用 `add_knowledge_node` 创建它"的可自纠正提示（P1 对照实验发现模型会拿节点名当 `node_id`）
-- [ ] **知识图谱注入后的上下文预算（待决策）**：修复占位符后系统提示词 ~3k → **14.4k tokens**（57 节点 / 图谱摘要 22141 字符，含每节点 200 字正文预览）；`LLM_CTX_BUDGET=32000` 下留给对话历史 ≈ 15.6k
-  - 可选：调大 `LLM_CTX_BUDGET` / 调小 `get_node_content_preview(max_chars)` / 大图谱降级为 `detailed=False`（只给 id+name+标签，但会丢掌握度）
+- [ ] **上下文预算（已立项 → 清单搬去 `TODO_Context.md`）**：口径已定 = **B=48K + 九段配额 S1–S9**（SSOT = `docs/上下文工程_预算框架.md`）；P0/P1/P2 实现清单与验收标准全部在 **`TODO_Context.md`**，本文件不再跟踪此项。
+  - 历史背景：修复占位符后系统提示词从 ~3k 涨到 14.4k tokens（57 节点），`LLM_CTX_BUDGET=32000` 下只剩 ~15.6k 给对话历史 —— 现由**图谱注入硬上限**（`GRAPH_INJECT_MAX_CHARS=12000` + 降级阶梯）与 48K 预算共同解决。
   - 修复详情见 `done.md` §4.2
 - [ ] **对话内出题（P0）遗留** —— 主链路已落地（见 `done.md` §6.2）
   - [ ] P1：题目渲染成可点选项卡片（前端 `quiz_ready` 已带 `questions` 字段，`MessageBubble` 加 `QuizCard.vue`）
   - [ ] 已知瑕疵：KB 检索片段混入依据会导致题目轻微漂移（节点是"二叉树性质1"，却出了"每层都达最大结点数 → 满二叉树"的题）—— 可考虑降 `CHAT_QUIZ_TOP_K` 或只用节点正文
 - [ ] **出题稳定性遗留** —— 分批 + 补题 + 批次隔离已落地（见 `done.md` §6.1）
   - [ ] 可选优化：出题改用非思考模型（结构化任务未必需要深度推理），需 A/B 质量验证
-- [ ] **建节点归属收口**（部分完成，2026-09-13）：显式参数（模型自报 `subject`/`board`，显式优先）与自动判定（`kg_taxonomy` 规则优先 + LLM 兜底）已并存且互不干扰；待收口 = 4 套写路径合并为唯一 `create_node_with_content()`、MD 模板统一、语义去重、权限守卫（顺序见 `docs/知识图谱_模块结构与封装调研.md`）
+- [ ] **建节点收口 · 收尾项**（写路径部分 2026-09-15 已闭环）
+  - [x] 归属判定统一（2026-09-13）：显式参数（模型自报，显式优先）+ `kg_taxonomy` 自动判定
+  - [x] 4 套写路径 → 唯一 `KnowledgeGraph.create_node_with_content()`（2026-09-15）
+  - [x] MD 模板统一 → `ORIGIN_NOTES` 一张表（2026-09-15，来源标注降级为 `origin` 参数）
+  - [x] 精确同名并轨 → `knowledge_writer._find_same_name`（2026-09-15，实测重名证据：`harmony_dev_intro`/`harmonyos_intro`）
+  - [ ] **嵌入语义去重**（栈/堆栈 这类同名不同字）：Agent 热路径上要多付一次嵌入 + LLM 二次确认，且当前嵌入 API 欠费 → 待嵌入恢复后量化收益再定；实现路径 = 复用 `graph_generator._find_dedup_candidates` + `_confirm_synonyms`
+  - [ ] 权限守卫：**新建路径本就不触发** `_guard_human_content`（调研 §8 已核实），仅当将来新增"AI 覆盖已有节点"入口时才需要 —— 那时走 `update_node_content(caller="ai")` 即可
 
 ## P2 — 功能路线图（比赛可选项 / 有真实 key 后）
 
@@ -51,6 +57,7 @@
 
 - [ ] **试卷拆分器 `quiz_splitter.py` 已实现但零引用（未接入上传链路）**（2026-09-12 发现，详见 `TODO_Collector.md` 遗留技术债 #2）：需先定入口形态（`/kb/upload` 自动拆 / 独立 `POST /quiz/import` / 并入 B3.1）。
 - [ ] **图谱 RAG 未接入 hybrid_search 双检索**（2026-09-11 调研发现）：图谱侧只有向量检索（`rag/manager.search`），未享 BM25 稀疏路。**评估结论：不是小改** —— `hybrid_search/whoosh_index.py` 的 schema 把 `node_id` 定为 `NUMERIC`（KB 文件节点 int），图谱 node_id 是 TEXT，复用需改 schema + 老索引迁移/双 schema 兼容。收益（图谱写回 BM25 召回）与成本需先量化，暂缓。
+- [ ] **`collector/pipeline_ingest.py` + `chapterizer.py` 零引用（2026-09-15 core 审计）**：整书切章入库链路（`ingest_book_chapters`）已实现且 6 例测试通过，但采集链路 `manager.run_task` 直接调 `kb_manager.upload_and_index`，**未接此管线**（`chapterizer` 只被它引用，同属链内）。需定入口：采集任务整书入库 / 手动导入 / 判定不用后删除。
 - [ ] **conversations 内嵌 tools/thinking 去留 + run 与会话无关联键**（9/8 起挂着，**待决策**）：需定"是否为 agent_runs 加 conversation 外键/会话 id 字段（动 schema）"，或接受现状。
 
 ## 进度速览（2026-09-13）

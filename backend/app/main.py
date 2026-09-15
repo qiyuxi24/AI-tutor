@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI):
         conn.close()
 
     # ── 启动：agent_runs 分层 GC ──
-    from app.core import agent_run_store as run_store
+    from app.core.agent import store as run_store
 
     async def _daily_prune():
         while True:

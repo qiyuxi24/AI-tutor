@@ -1,6 +1,6 @@
 """MCP 宿主层：把 MCP server 的工具并入 agent 工具表（2026-09-12）。
 
-职责边界：`agent_tools._TOOL_SPECS` 仍是**唯一注册入口**，本模块只做三件事 ——
+职责边界：`registry._TOOL_SPECS` 仍是**唯一注册入口**，本模块只做三件事 ——
 「连 MCP server → list_tools → 生成同构 spec（handler 为同步桥）」。连接失败或
 未启用时返回 `[]`，原生工具不受影响（不阻断启动）。
 
@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app.core.config import settings
 from app.core.error_codes import ErrorCode, log_error
 
-# 同步→异步桥：与 rag_tool._run_async / kg_taxonomy 同一约定（各持单例池互不干扰）
+# 同步→异步桥：与 impl/rag._run_async / kg_taxonomy 同一约定（各持单例池互不干扰）
 _POOL = ThreadPoolExecutor(max_workers=2)
 
 # 已挂载的 MCP server：(工具名前缀, server 工厂)。前缀用业界 mcp__<server>__<tool> 惯例

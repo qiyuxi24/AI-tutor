@@ -26,7 +26,7 @@ logger = logging.getLogger("ai-tutor")
 __all__ = ["assign_taxonomy", "assign_taxonomy_sync"]
 
 # 同步→异步桥：调用方（execute_kg_tool → create_node_from_ai）在 asyncio.to_thread
-# 线程里，没有运行中的事件循环。做法与 rag_tool._run_async 一致（各持单例池互不干扰）。
+# 线程里，没有运行中的事件循环。做法与 agent_tools/tools/rag_search._run_async 一致（各持单例池互不干扰）。
 _POOL = ThreadPoolExecutor(max_workers=2)
 
 _SYSTEM_PROMPT = "你是知识图谱归类助手，只输出 JSON，不解释。"

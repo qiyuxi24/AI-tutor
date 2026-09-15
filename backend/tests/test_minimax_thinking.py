@@ -12,8 +12,8 @@ import copy
 import json
 from types import SimpleNamespace
 
-from app.core import agent_loop
-from app.core.agent_context import assistant_snapshot
+from app.core.agent import loop as agent_loop
+from app.core.agent.context import assistant_snapshot
 from app.core.llm.thinking import strip_think_tags
 
 

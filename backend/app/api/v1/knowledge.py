@@ -227,15 +227,8 @@ async def create_node(data: dict = Body(...), user_id: int = Depends(get_current
 
         await assign_taxonomy(kg, node_data)
 
-        kg.add_node(node_data)
-
-        # 创建对应的 MD 文件
-        md_path = kg.nodes_dir / f"{data['id']}.md"
-        md_content = data.get("content")
-        if not md_content:
-            md_content = f"# {data['name']}\n\n> 手动创建\n\n## 概述\n\n待完善...\n"
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(md_content)
+        # 建库 + 写 MD 一次完成（模板收口在 KnowledgeGraph）
+        kg.create_node_with_content(node_data, data.get("content") or "", origin="manual")
 
         publish("graph_updated")
         return {"status": "ok", "node": node_data}
@@ -524,13 +517,8 @@ async def decompose_question(request: DecomposeRequest,
                 "confidence": node.get("confidence"),
             }
             await assign_taxonomy(kg, node_data)  # 未指定学科/板块时自动判定
-            kg.add_node(node_data)
-
-            # 创建空白 MD 文件
-            md_path = kg.nodes_dir / f"{node_id}.md"
-            md_content = f"# {node_name}\n\n> 由 AI 通过问题拆解自动创建（学习路径框架节点）\n\n## 概述\n\n待完善...\n"
-            with open(md_path, "w", encoding="utf-8") as f:
-                f.write(md_content)
+            # 建库 + 写空白骨架 MD（模板收口在 KnowledgeGraph）
+            kg.create_node_with_content(node_data, origin="decompose")
 
             created_nodes.append(node_id)
 

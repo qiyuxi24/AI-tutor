@@ -2,8 +2,8 @@
 
 位置关系：
   - event_bus.py    = 进程内队列基础设施（发布/订阅 + 事件类型常量，任何模块可用）
-  - agent_events.py = 本文件：agent 一次运行的语义封装，是 agent_loop 对 event_bus 的
-                      唯一「分发/管理」入口，agent_loop 不再直调 event_bus。
+  - events.py       = 本文件：agent 一次运行的语义封装，是 loop 对 event_bus 的
+                      唯一「分发/管理」入口，loop 不再直调 event_bus。
   - 后续分发/管理策略（多端推送、持久化重放、切换底层实现）都落在此层，
     替换/扩展实现只需保证 emit(event_type, **data) 鸭子接口。
 

@@ -98,14 +98,14 @@ venv\Scripts\python.exe scripts/eval_rag.py --embed mock
 | 主题 | 约定 |
 |---|---|
 | 分层 | `api/v1/` 只做 HTTP 薄壳；编排放 `services/`；领域逻辑放 `core/`。不要从 `core/` 反向 import `api/`。 |
-| 单一事实源 | 配置 = 根 `.env`；运行记录 = `core/agent_run_store.py`；嵌入调用 = `core/llm/embed.py::embed_texts`；工具注册 = `core/agent_tools.py::_TOOL_SPECS`。**新增能力要挂到既有入口，不要另起一份。** |
+| 单一事实源 | 配置 = 根 `.env`；运行记录 = `core/agent/store.py`；嵌入调用 = `core/llm/embed.py::embed_texts`；工具注册 = `core/agent_tools/registry.py::_TOOL_SPECS`。**新增能力要挂到既有入口，不要另起一份。** |
 | 最小实现 | YAGNI：先问"这功能现在真需要吗 / 标准库或已有代码能不能解决"，不要为假想需求加抽象层与新依赖。 |
 | 错误处理 | 错误码集中在 `core/error_codes.py`；异常消息以 `[E-XXX]` 开头并走 `log_error()`；工具向模型返回"操作失败: …"这类文本，不抛裸异常。 |
 | 用户隔离 | 图谱 / 画像 / 知识库 / 运行记录全部按 `user_id` 分区；`KnowledgeGraph(user_id)` 每次新建、用毕 `close()`，不要跨协程共享实例。 |
 | `user_id` 来源 | 一律由 JWT 解析（`Depends(get_current_user)`），**不要**在 body / query 里传。 |
 | 提示词 | 外置为 Jinja2 模板（`data/prompts/*.j2`），不要把长 prompt 硬编码进 Python 字符串。 |
 | 新增 LLM 调用 | 走 `core/llm/`（回退链与重试内建），不要在业务代码里直接 `httpx.post` 模型端点。 |
-| 新增工具 | 在 `_TOOL_SPECS` 加一条 spec 并写 handler；重型实现放 `rag_tool.py` / `web_tool.py`。 |
+| 新增工具 | 在 `core/agent_tools/tools/` 下新建一个模块（**一个工具一个文件**，复制任一模块改五处），再在 `tools/__init__.py` 的 `NATIVE_SPECS` 加一行。规范见 `core/agent_tools/tools/README.md`。 |
 | 注释 | 只在"为什么"不明显时写；不要逐行解释代码在做什么。 |
 
 > 想改架构（拆模块、动契约、改数据表结构）→ 先读根目录 [`AGENTS.md`](AGENTS.md) 的架构契约与"已知耦合与坑"，再开 Issue 讨论。

@@ -1,0 +1,135 @@
+# `core/agent` —— Agent 运行内核
+
+> 建立：2026-09-15（原先是 `core/` 下 5 个平铺文件，归并成本包；同日 `token_estimator.py` 作为第 6 个成员加入）
+> 这个文件夹回答一个问题：**一条学生消息进来后，到最终回答落库之间发生了什么、谁负责哪一段。**
+
+---
+
+## 1. 为什么归成一个包
+
+这 6 个职责是**互相咬合**的：消息怎么写由 context 管，什么时候裁由 guard 管，发出去前估多少由 estimator 管，什么时候再来一轮由 loop 管，发出去的通知由 events 管，跑完存哪由 store 管。原先平铺在 `core/` 下时：
+
+- 想搞清"一次 run 里消息是怎么攒起来的"，要在 5 个文件之间来回跳；
+- `core/` 下同时躺着 RAG、知识图谱、quiz、collector……**分不出哪些是"一次对话运行"的内务**；
+- 新加一个 run 级能力（比如预算记账、工具结果清理）没有天然落点。
+
+归并后：**一个包 = 一次 run 的全部内务**。外部只 import 本包门面，不需要知道内部拆成了几个文件。
+
+## 2. 六个模块（职责 + 它垄断了什么）
+
+| 文件 | 原名 | 职责 | **垄断的不变量**（别在别处做第二遍） |
+|---|---|---|---|
+| `loop.py` | `agent_loop.py` | 主循环：LLM ↔ 工具 多轮串联（纯编排，不碰图谱/RAG 内部） | 唯一决定"要不要再来一轮工具"的地方；护栏（`max_rounds=5`、单工具超时 60s、连续工具轮上限）都在这 |
+| `context.py` | `agent_context.py` | run 内 API 消息序列的持有与写入 + **Tool Result Clearing**（较早工具批次正文换占位符） | **唯一往 `messages` 里 append 的地方**：assistant 带 `tool_calls` 快照、`reasoning_details` 随轮保留、tool 回填按 `tool_call_id` 配对 |
+| `guard.py` | `context_guard.py` | 发送前预算守卫：按预算线裁最旧历史 + 插省略说明 | **唯一裁历史的地方**（入口一次性；loop 内刻意不裁） |
+| `estimator.py` | `token_estimator.py` | 发送前 token 预估：prompt 计数 + completion 预估（历史中位数 / 关键词规则）+ 成本换算 | **唯一做"发送前预估"的地方**；结果进 `AgentRunResult.token_estimate` → `agent_runs.token_estimate` 字段，与真值 `token_usage` 同表可对照 |
+| `events.py` | `agent_events.py` | 事件发射：run_id 自动注入 + per-user 路由 | loop 对 `event_bus` 的**唯一入口**（loop 不再直调 bus） |
+| `store.py` | `agent_run_store.py` | `agent_runs` 表落库 / 查询 / 清理 / 统计 | **`agent_runs` 的唯一写入方**（只有 loop 调 `save_run`） |
+
+门面（`__init__.py`）只导出外部真正要用的名字：
+
+```python
+from app.core.agent import run_agent_loop, AgentRunResult      # loop
+from app.core.agent import AgentContext, assistant_snapshot    # context
+from app.core.agent import trim_history_to_budget              # guard
+from app.core.agent import estimate_token_consumption, TokenEstimate   # estimator
+from app.core.agent import AgentEventEmitter                   # events
+from app.core.agent import store                               # store（子模块，按需 import）
+```
+
+## 3. 一次 run 的时序（含预算介入点）
+
+```
+chat_service.process_message_stream(messages, mode, user_id)
+ │
+ ① _build_system_prompt()                       ← 不在本包（chat_service）
+ │    静态指令 + 图谱结构注入 + 画像 + RAG 检索块 + 工具说明
+ │
+ ② guard.trim_history_to_budget(prompt, messages)      ★ 预算介入点 1
+ │    「静态段 + 历史」> B − 输出预留 → 从头部丢最旧 + 插省略说明
+ │
+ ③ loop.run_agent_loop(prompt, messages, kg=..., user_id=...)
+ │    run_id = uuid4().hex                      ← 事件与落库共用这一个 id
+ │    ctx = AgentContext(prompt, messages)      ← context：消息序列在此累积
+ │    estimator.estimate_token_consumption()    ← 发送前预估（带 user_id 走历史中位数）
+ │    emit("agent_start")
+ │    ┌── 每轮 ─────────────────────────────────────────┐
+ │    │ msg = _chat_once(ctx.messages)     真打 LLM     │
+ │    │ ctx.append_assistant_turn(msg)     快照（含思考）│
+ │    │ for tc in msg.tool_calls:                       │
+ │    │     execute(tc, kg)  → ctx.append_tool_result() │
+ │    │     emit("tool_start"/"tool_result")            │
+ │    │ 无 tool_calls → 自然结束 / 达 max_rounds → 强制收尾│
+ │    └─────────────────────────────────────────────────┘
+ │    store.save_run(evidence, token_usage, token_estimate, …)   ← 正常 or 异常都落库
+ │
+ ④ back in chat_service：消费 EventBus 队列 → 转 SSE 给前端
+```
+
+**事件 ↔ 记录靠同一个 `run_id` 打通**：前端拿到 SSE 里的 `run_id`，就能用 `GET /agent/runs/{run_id}` 回源完整证据（thinking 全文、完整工具参数与返回）。
+
+## 4. 预算/压缩的介入点（全项目就这几处）
+
+| 介入点 | 位置 | 做什么 |
+|---|---|---|
+| ① 组装时（固定段） | `chat_service._build_system_prompt` | 固定段（S2–S7）越 **40%×B 告警**、越 **45%×B 强制重建图谱注入**（`guard` 裁不动字符串，必须在组装侧）；S6/S7 按源**独立截断** + query 双端放置 |
+| ② 发送前（入口一次） | `guard.trim_history_to_budget` | **历史（S8）分层压缩**：`[省略说明+规则要点] + [首条 user 锚点] + [最近 N 轮完整]` |
+| ③ loop 内每轮（幂等） | `context.AgentContext.clear_old_tool_results` | **较早工具批次**的正文换占位符（保留最近 K 批 = 当前推理链；`tool_call_id` 一个字不动） |
+| ④ 图谱注入（组装时） | `graph_analyzer.build_graph_context` | 图谱结构段（S4）的硬上限 + 降级阶梯（省摘要 → 限量节点 + 焦点邻域优先） |
+
+**loop 内不做历史裁剪**：每轮回填的 tool 结果属"必要思维链"，整条丢掉会让模型看到断裂的推理。③ 只清**较早批次**的正文（工具可重放），最近 K 批原样。
+
+**③ 为什么不在 `guard`**（2026-09-15 实测修正，别再搬回去）：guard 处理的是跨请求历史，而 `models/schemas.ChatMessage` 只有 `role` / `content` —— **历史里永远没有 tool 消息**，在 guard 里清理是死代码。另一条独立理由：`llm/messages.build_api_messages` 只透传 `role` / `content`，会丢掉 `tool_call_id`，谁在那里改 tool 消息都会造出非法序列（真机 400：`tool result's tool id() not found`）。
+
+**预估不介入裁剪决策**：`estimator` 只产出"这一次大概花多少"（prompt/completion/成本），不改变任何行为；裁不裁仍由 `guard` 的精确计数与预算线决定。预估值随 run 落库，是事后校准 Phase 2 历史中位数、以及回看 S1/S8 配额的依据（预估 vs 真值同表）。
+
+> 各段的配额、让位顺序、触发阶梯见 **`docs/上下文工程_预算框架.md`**（配额 SSOT）。
+
+## 5. 不装什么（边界）
+
+| 不在这里 | 在哪 | 为什么 |
+|---|---|---|
+| `token_counter` | `core/token_counter.py` | 通用计量工具（quiz / API / 探针脚本共用），不是 run 专属；本包的 `guard` 与 `estimator` 都建立在它之上 |
+| 提示词组装 | `services/chat_service.py` | 依赖画像、图谱、RAG pipeline、工具注册表，是本包的上游 |
+| 工具注册表与执行 | `core/agent_tools/` | 另有 README；本包只通过 `KG_TOOLS` / `execute_kg_tool_async` 消费 |
+| 事件基础设施 | `core/event_bus.py` | 进程内队列，任何模块可用；本包只是它的一个语义封装 |
+| 运行记录的查询侧 | `api/v1/agent_runs.py` | 直连 `store` 做列表/详情/删除/统计，不经 loop |
+
+## 6. 改代码时的坑
+
+1. **别在 loop 里直接 `messages.append({...})`** —— 一律走 `AgentContext.append_*`。协议细节（`tool_calls` 快照、`reasoning_details` 回填、tool id 配对）全靠这一处收敛。
+2. **`reasoning_details` 必须随轮保留** —— MiniMax 的 Interleaved Thinking 要求多轮工具调用时回填思考块，丢了会掉进"模型不思考"的退化。
+3. **传了 `user_id` 就自动落库**：调用方**不要**再自己 `save_run` / `save_trace`（历史上两套记录并存过）。
+4. **token 真值优先用 `AgentRunResult.token_usage`**（API `usage` 提取），`context_tokens` 是旧字段，仅向后兼容。
+5. **`user_id=None` 是纯测试模式**：不推事件、不落库 —— 写测试时用它，别 mock 整个 event_bus。
+6. **每个 `KnowledgeGraph` 实例用毕 `close()`**，别跨协程共享（`chat_service` 已经踩过 use-after-close）。
+7. **事件类型是白名单**：`chat_service._format_agent_sse` 是 if/elif 无 else，新增事件类型必须同步加透传，否则会被静默丢弃。
+8. **改 `store.py` 的表结构要同步** `prune()` 的分层保留策略（≤30 天全量 / >30 天摘 evidence / >180 天整行删）与 `api/v1/agent_runs.py` 的字段假设。**新增列必须落到 `store._migrate()` 的老库补列**——`CREATE TABLE IF NOT EXISTS` 不会给已存在的表补字段（`token_estimate` 就是这么加的）。
+9. **预估 ≠ 真值**：`token_estimate`（estimator 估的）与 `token_usage`（API usage 真值）不是一回事，业务判断一律用真值（见坑 4），预估值只用于预算参考与事后校准。
+10. **改 `guard.py` 分层规则前先看 `tests/test_history_layering.py` 的四条不变量**：首条 user（任务锚点）永不丢；保留的近端消息**逐字未改**（分层只产出"原文 or 要点行"，不篡改）；裁剪后仍以 user 开头（分层会产生**连续 user** 消息，真机已验证 API 接受）；总 token ≤ 裁剪线。
+11. **改 `context.clear_old_tool_results` 前先确认配对不破**：只改 `tool` 消息的 `content`，`tool_call_id` 与 assistant `tool_calls` 的 id 列表必须逐字保留 —— 破了服务端报 400 `tool result's tool id() not found`。接线在 `loop._loop_core` 每轮 `_chat_once` 之前，`tests/test_agent_loop.py::test_old_tool_results_cleared_across_rounds` 锁住"真的被调用"（防止再次出现"实现了但匹配不到数据"的空转）。
+
+## 7. 自测
+
+```bash
+# 本包相关（离线，零真实 API）
+backend/venv/Scripts/python.exe -m pytest backend/tests/test_agent_loop.py \
+    backend/tests/test_context_guard.py backend/tests/test_agent_run_store.py \
+    backend/tests/test_token_estimator.py backend/tests/test_minimax_thinking.py -q
+
+# 全量离线
+backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"
+```
+
+真实 API 的用例在 `tests/test_agent_loop_real_api.py`（打 `llm_api` 标记，需付费 key，不随默认套件跑）。
+
+## 8. 相关文档
+
+| 文档 | 管什么 |
+|---|---|
+| `docs/上下文工程_预算框架.md` | **配额 SSOT**：九段配额、让位顺序、触发阶梯 |
+| `docs/上下文工程_调研与差距审计.md` | 现状审计 + 业界/学术调研 + 实施记录 |
+| `docs/AgentLoop_重构设计讨论.md` | loop 的设计决策（路线 A、护栏、事件/记录整合） |
+| `docs/AgentLoop_业界调研与学习路线.md` | 业界 Agent 模式调研 |
+| `AGENTS.md` §3 | 本包的内部契约与已知耦合（对外索引） |
+| `backend/app/core/agent_tools/README.md` | 上游：工具注册表与执行 |
