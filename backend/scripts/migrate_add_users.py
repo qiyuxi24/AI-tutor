@@ -34,9 +34,24 @@ def migrate():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
-                created_at TEXT DEFAULT (datetime('now'))
+                created_at TEXT DEFAULT (datetime('now')),
+                status TEXT DEFAULT 'active',
+                role TEXT DEFAULT 'user',
+                last_login_at TEXT
             )
         """)
+
+        # 1b. 老 users 表补齐新增列（账号状态 / 角色 / 最后登录时间）
+        cursor.execute("PRAGMA table_info(users)")
+        user_columns = [col[1] for col in cursor.fetchall()]
+        for col_name, col_ddl in (
+            ("status", "TEXT DEFAULT 'active'"),
+            ("role", "TEXT DEFAULT 'user'"),
+            ("last_login_at", "TEXT"),
+        ):
+            if col_name not in user_columns:
+                print(f"给 users 表添加 {col_name} 列...")
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_ddl}")
 
         # 2. 检查 nodes 表是否有 user_id 列
         cursor.execute("PRAGMA table_info(nodes)")

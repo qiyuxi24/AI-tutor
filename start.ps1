@@ -70,7 +70,7 @@ if ($staleProcs) {
 }
 
 # 兜底：命令行匹配不到、但确实占着端口的进程（含上轮被强杀留下的孤儿）按端口清
-foreach ($port in 8000, 5173) {
+foreach ($port in 8000, 5173, 8001, 5174) {
     $owners = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty OwningProcess -Unique
     foreach ($procId in $owners) {
@@ -156,17 +156,91 @@ Write-Host "[前端] PID: $($frontendProcess.Id)" -ForegroundColor Green
 
 Write-Host ""
 
+# ---------- 启动运维后台后端 ----------
+
+$adminBackendDir = Join-Path $projectRoot "backend-admin"
+$adminVenvPython = Join-Path $adminBackendDir "venv\Scripts\python.exe"
+$adminBackendLog = Join-Path $projectRoot "logs\uvicorn-admin.log"
+
+Write-Host "----------------------------------------" -ForegroundColor Cyan
+Write-Host "[运维后端] 启动 FastAPI 服务 (端口 8001)..." -ForegroundColor Yellow
+
+# 创建运维后端虚拟环境并安装依赖
+if (-not (Test-Path (Join-Path $adminBackendDir "venv"))) {
+    Write-Host "[运维后端] 创建虚拟环境..." -ForegroundColor Yellow
+    Push-Location $adminBackendDir
+    python -m venv venv
+    Pop-Location
+}
+
+# 安装运维后端依赖
+$adminReqCheck = & $adminVenvPython -c "import fastapi, uvicorn" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[运维后端] 安装依赖..." -ForegroundColor Yellow
+    Push-Location $adminBackendDir
+    & $adminVenvPython -m pip install -r requirements.txt -q
+    Pop-Location
+    Write-Host "[运维后端] 依赖安装完成" -ForegroundColor Green
+}
+
+$adminBackendProcess = Start-Process -FilePath $adminVenvPython -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8001", "--reload", "--reload-dir", "app", "--no-use-colors" -PassThru -WindowStyle Hidden -WorkingDirectory $adminBackendDir -RedirectStandardError $adminBackendLog
+
+Write-Host "[运维后端] PID: $($adminBackendProcess.Id)" -ForegroundColor Green
+
+# 等待运维后端启动
+Write-Host "[运维后端] 等待服务就绪..." -ForegroundColor Yellow
+$maxRetries = 30
+$retry = 0
+do {
+    Start-Sleep -Seconds 1
+    $retry++
+    try {
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:8001/health" -UseBasicParsing -TimeoutSec 2
+        if ($response.StatusCode -eq 200) {
+            Write-Host "[运维后端] 服务已就绪!" -ForegroundColor Green
+            break
+        }
+    } catch {}
+} while ($retry -lt $maxRetries)
+
+Write-Host ""
+
+# ---------- 启动运维前端 ----------
+
+$adminFrontendDir = Join-Path $projectRoot "frontend-admin"
+
+Write-Host "----------------------------------------" -ForegroundColor Cyan
+Write-Host "[运维前端] 启动 Vite 开发服务器 (端口 5174)..." -ForegroundColor Yellow
+
+# 安装运维前端依赖
+if (-not (Test-Path (Join-Path $adminFrontendDir "node_modules"))) {
+    Write-Host "[运维前端] 安装依赖..." -ForegroundColor Yellow
+    Push-Location $adminFrontendDir
+    npm install
+    Pop-Location
+    Write-Host "[运维前端] 依赖安装完成" -ForegroundColor Green
+}
+
+$adminFrontendProcess = Start-Process -FilePath $npxPath -ArgumentList "vite", "--host", "--port", "5174" -PassThru -NoNewWindow -WorkingDirectory $adminFrontendDir
+
+Write-Host "[运维前端] PID: $($adminFrontendProcess.Id)" -ForegroundColor Green
+
+Write-Host ""
+
 # ---------- 汇总信息 ----------
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  启动完成!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  前端地址:  http://localhost:5173" -ForegroundColor White
-Write-Host "  后端 API:  http://localhost:8000" -ForegroundColor White
-Write-Host "  健康检查:  http://localhost:8000/api/health" -ForegroundColor White
-Write-Host "  API 文档:  http://localhost:8000/docs" -ForegroundColor White
-Write-Host "  后端日志:  logs\uvicorn-dev.log" -ForegroundColor White
+Write-Host "  主系统前端:   http://localhost:5173" -ForegroundColor White
+Write-Host "  主系统后端:   http://localhost:8000" -ForegroundColor White
+Write-Host "  运维前端:     http://localhost:5174" -ForegroundColor White
+Write-Host "  运维后端:     http://localhost:8001" -ForegroundColor White
+Write-Host "  后端日志:     logs\uvicorn-dev.log" -ForegroundColor White
+Write-Host "  运维后端日志: logs\uvicorn-admin.log" -ForegroundColor White
+Write-Host ""
+Write-Host "  运维后台管理员: admin / admin123" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  默认管理员: admin / admin123" -ForegroundColor DarkGray
 Write-Host ""
@@ -194,7 +268,7 @@ try {
     Write-Host "正在停止所有服务..." -ForegroundColor Yellow
 
     # /T 结束整棵进程树：uvicorn 的 spawn worker、vite 的 node 子进程只杀父 PID 会变成孤儿继续占端口
-    foreach ($proc in @($backendProcess, $frontendProcess)) {
+    foreach ($proc in @($backendProcess, $frontendProcess, $adminBackendProcess, $adminFrontendProcess)) {
         if ($proc -and -not $proc.HasExited) {
             taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
         }

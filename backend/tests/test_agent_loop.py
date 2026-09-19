@@ -221,7 +221,7 @@ def test_run_persists_to_agent_runs_evidence(tmp_path, monkeypatch):
         "sys", [{"role": "user", "content": "连边"}], kg=object(), user_id=7, db_dir=tmp_path,
     ))
     assert result.total_llm_calls == 2
-    assert len(result.evidence) == 3  # tool_call + tool_result + final_text
+    assert len(result.evidence) == 4  # tool_call + tool_result + final_text + loop_stop
 
     runs = run_store.list_runs(7, db_dir=tmp_path)
     assert len(runs) == 1
@@ -239,7 +239,8 @@ def test_run_persists_to_agent_runs_evidence(tmp_path, monkeypatch):
     assert est["total_estimated"] == est["prompt_estimated"] + est["completion_predicted"]
     assert est["estimated_cost_usd"] >= 0
     kinds = [s["kind"] for s in run["evidence"]]
-    assert kinds == ["tool_call", "tool_result", "final_text"]
+    assert kinds == ["tool_call", "tool_result", "final_text", "loop_stop"]
+    assert run["evidence"][-1]["reason"] == "natural"  # 终止原因随证据落库，可事后回看
     # 证据级：工具参数与结果完整保留（不截断）
     tc_step = run["evidence"][0]
     assert json.loads(tc_step["arguments"]) == {"from": "a", "to": "b", "relation": "related"}
@@ -257,7 +258,7 @@ def test_run_persists_to_agent_runs_evidence(tmp_path, monkeypatch):
     assert len(runs) == 2
     plain = run_store.get_run(7, runs[0]["run_id"], db_dir=tmp_path)
     assert plain["status"] == "ok"
-    assert [s["kind"] for s in plain["evidence"]] == ["final_text"]
+    assert [s["kind"] for s in plain["evidence"]] == ["final_text", "loop_stop"]
 
 
 def test_natural_finish_empty_content_fallback(monkeypatch):
@@ -380,3 +381,113 @@ def test_old_tool_results_cleared_across_rounds(monkeypatch):
     assert [m["tool_call_id"] for m in tools] == ["c1", "c2", "c3"]      # 配对不动
     assistants = [m for m in msgs if m.get("tool_calls")]
     assert [[tc["id"] for tc in m["tool_calls"]] for m in assistants] == [["c1"], ["c2"], ["c3"]]
+
+
+# ─── 工具调用安全边界（2026-09-19）────────────────────────────
+
+def test_identical_tool_call_rejected(monkeypatch):
+    """同工具 + 同参数重复调用到上限 → 拒绝执行 + 回填带原因的文案，模型不再拿到同样的结果。
+
+    这是"循环输出无用数据"的主防线：`Tool Result Clearing` 会把早期结果换成占位符，
+    模型很可能原样重取同一份，靠这条边界打断。
+    """
+    received = []
+    calls = []
+    _install_fake_chat(monkeypatch, [
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "汉诺塔"}, tc_id="c1")])),
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "汉诺塔"}, tc_id="c2")])),
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "汉诺塔"}, tc_id="c3")])),
+        _resp(_msg(content="综合起来看，汉诺塔的要点是…")),
+    ], received)
+
+    async def _dispatch(tc, kg):
+        calls.append(tc.function.name)
+        return "检索结果正文。"
+
+    monkeypatch.setattr(agent_loop, "execute_kg_tool_async", _dispatch)
+
+    result = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}], kg=object()))
+
+    # 同签名最多放行 2 次；第 3 次被拦下，工具真实执行次数=2
+    assert calls == ["rag_search", "rag_search"]
+    assert result.rounds[2]["ok"] is False
+    assert "重复" in result.rounds[2]["result_head"] or "同样的结果" in result.rounds[2]["result_head"]
+    # 拒绝也必须有 tool 消息回填（协议配对不能断）
+    msgs = received[3]["messages"]
+    tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+    assert [m["tool_call_id"] for m in tool_msgs] == ["c1", "c2", "c3"]
+    # 被拦下的调用不计入失败熔断 → run 仍以自然结束收尾
+    assert result.stop_reason == "natural"
+    denied = [s for s in result.evidence if s["kind"] == "tool_denied"]
+    assert len(denied) == 1 and denied[0]["reason"] == "repeat"
+
+
+def test_tool_call_budget_stops_early(monkeypatch):
+    """工具调用总次数超预算 → 提前收尾（不再把剩下的轮次烧在重试上）。"""
+    received = []
+    calls = []
+    _install_fake_chat(monkeypatch, [
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q1"}, tc_id="c1")])),
+        # 第 2 次 LLM 不会被发起：round 1 进入前预算已耗尽，直接走强制收尾
+        _resp(_msg(content="够了，我先回答到这里。")),
+    ], received)
+
+    async def _dispatch(tc, kg):
+        calls.append(tc.function.name)
+        return "检索结果。"
+
+    monkeypatch.setattr(agent_loop, "execute_kg_tool_async", _dispatch)
+
+    result = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}],
+                                        kg=object(), max_tool_calls=1))
+
+    assert calls == ["rag_search"]              # 只放行 1 次
+    assert result.stop_reason == "call_budget"
+    assert result.text == "够了，我先回答到这里。"
+    # 收尾那次请求不带 tools（模型无法再请求工具）
+    assert len(received) == 2
+    last = received[-1]
+    assert last["tools"] is None
+    assert last["messages"][-1]["role"] == "user"
+    assert "停止调用工具" in last["messages"][-1]["content"]
+
+
+def test_consecutive_failures_circuit_break(monkeypatch):
+    """连续工具失败达阈值 → 熔断提前收尾，不再让模型一路重试到轮数耗尽。"""
+    received = []
+    _install_fake_chat(monkeypatch, [
+        _resp(_msg(tool_calls=[_tc("add_edge", {"from": "a", "to": "b"}, tc_id="c1")])),
+        _resp(_msg(tool_calls=[_tc("add_edge", {"from": "a", "to": "c"}, tc_id="c2")])),
+        _resp(_msg(content="链路多次失败，我先直接回答。")),
+    ], received)
+
+    async def _boom(tc, kg):
+        raise RuntimeError("模拟图谱写入失败")
+
+    monkeypatch.setattr(agent_loop, "execute_kg_tool_async", _boom)
+
+    result = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}],
+                                        kg=object(), max_consecutive_fails=2))
+
+    assert [r["ok"] for r in result.rounds] == [False, False]
+    assert result.stop_reason == "fail_circuit"
+    stop = [s for s in result.evidence if s["kind"] == "loop_stop"][0]
+    assert stop["reason"] == "fail_circuit"
+
+
+def test_stop_reason_reported_to_event(monkeypatch):
+    """终止原因随 AGENT_DONE 事件上报（前端 SSE 与日志能看到"为什么停"）。"""
+    _install_fake_chat(monkeypatch, [
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q1"}, tc_id="c1")])),
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q2"}, tc_id="c2")])),  # 达上限仍要工具
+        _resp(_msg(content="达到轮数上限后的总结。")),
+    ], [])
+    _install_fake_execute(monkeypatch)
+    fake = _CollectEmitter()
+
+    result = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}],
+                                        kg=object(), max_rounds=1, emitter=fake))
+
+    done = fake.events[-1]
+    assert done[0] == AGENT_DONE
+    assert done[1]["stop_reason"] == result.stop_reason == "max_rounds"

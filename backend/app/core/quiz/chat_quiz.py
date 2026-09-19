@@ -23,8 +23,10 @@
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
+from app.core.agent.debug_log import RunLogger
 from app.core.event_bus import QUIZ_READY, publish
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.quiz.quiz_store import quiz_manager
@@ -43,6 +45,11 @@ MASTERY_CORRECT_GAIN = 20
 
 # 同用户后台去重：模型可能连调两次，避免并发出两份题
 _INFLIGHT: dict[int, bool] = {}
+
+# 后台出题墙钟上限（normal ≈40s，留 3 倍余量）：
+# 子任务必须自己封顶 —— LLM 卡住时任务会永久挂着，_INFLIGHT 不释放，
+# 该用户此后调用 quiz_generate 一律得到"已经有一道题在生成中"，再也出不了题。
+CHAT_QUIZ_TIMEOUT_SECS = 120
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -176,10 +183,37 @@ async def generate_and_publish(user_id: int, *, node_id: str,
 
 
 async def _run_guarded(user_id: int, node_id: str, count: int) -> None:
-    """后台任务外壳：无论成败都释放 _INFLIGHT 占位。"""
+    """
+    后台子任务外壳：**无论成败/超时都必须回报主对话**（否则学生永远等不到题目）。
+
+    回报方式 = 推 QUIZ_READY 事件（ok=False 也推），日志带耗时；`finally` 释放 _INFLIGHT，
+    保证同用户的下一次 quiz_generate 不会被永久挡住。
+    """
+    started = time.monotonic()
+    # 后台子任务也走调试日志（scope="bg"）：成败与耗时日后能按 user_id 回看
+    rlog = RunLogger(user_id=user_id)
+    rlog.log("bg", "quiz_bg_start", "后台出题任务启动", node_id=node_id, count=count)
+    ok, reason = True, ""
     try:
-        await generate_and_publish(user_id, node_id=node_id, count=count)
+        await asyncio.wait_for(
+            generate_and_publish(user_id, node_id=node_id, count=count),
+            timeout=CHAT_QUIZ_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        ok, reason = False, "timeout"
+        rlog.log("bg", "quiz_bg_timeout", "后台出题超时", level="ERROR",
+                 node_id=node_id, timeout_secs=CHAT_QUIZ_TIMEOUT_SECS)
+        publish(QUIZ_READY, {"ok": False, "node_id": node_id,
+                             "message": "出题超时了，请稍后再试"}, user_id=user_id)
+    except Exception as e:  # generate_and_publish 已自兜底，这里是双保险
+        ok, reason = False, "error"
+        rlog.log("bg", "quiz_bg_error", "后台出题异常", level="ERROR",
+                 node_id=node_id, error=str(e))
+        publish(QUIZ_READY, {"ok": False, "node_id": node_id,
+                             "message": "出题失败，请稍后再试"}, user_id=user_id)
     finally:
+        rlog.log("bg", "quiz_bg_end", "后台出题任务结束", ok=ok, reason=reason,
+                 node_id=node_id, elapsed=round(time.monotonic() - started, 1))
         _INFLIGHT.pop(user_id, None)
 
 

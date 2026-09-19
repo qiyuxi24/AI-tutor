@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
 
     # ── 启动：确保默认管理员账户存在 ──
     import sqlite3
-    from app.core.auth import get_password_hash
+    from app.core.auth import ensure_user_columns, get_password_hash
 
     db_path = Path(__file__).resolve().parent.parent.parent / "data" / "knowledge" / "knowledge.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,9 +75,16 @@ async def lifespan(app: FastAPI):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
-                created_at TEXT DEFAULT (datetime('now'))
+                created_at TEXT DEFAULT (datetime('now')),
+                status TEXT DEFAULT 'active',
+                role TEXT DEFAULT 'user',
+                last_login_at TEXT
             )
         """)
+        conn.commit()
+
+        # 老库（无上述三列）启动时自动补齐，否则登录会报 no such column
+        ensure_user_columns(conn)
         conn.commit()
 
         existing = conn.execute(
@@ -99,8 +106,8 @@ async def lifespan(app: FastAPI):
     finally:
         conn.close()
 
-    # ── 启动：agent_runs 分层 GC ──
-    from app.core.agent import store as run_store
+    # ── 启动：agent_runs 分层 GC + 调试日志保留清理 ──
+    from app.core.agent import debug_log, store as run_store
 
     async def _daily_prune():
         while True:
@@ -111,6 +118,12 @@ async def lifespan(app: FastAPI):
                     logger.info(f"agent_runs 每日清理: {res}")
             except Exception as e:
                 logger.warning(f"agent_runs 每日清理失败: {e}")
+            try:
+                n = debug_log.prune()
+                if n:
+                    logger.info(f"调试日志每日清理: 删除 {n} 条")
+            except Exception as e:
+                logger.warning(f"调试日志每日清理失败: {e}")
 
     try:
         res = run_store.prune()
@@ -118,6 +131,12 @@ async def lifespan(app: FastAPI):
             logger.info(f"agent_runs 启动清理: {res}")
     except Exception as e:
         logger.warning(f"agent_runs 启动清理失败: {e}")
+    try:
+        n = debug_log.prune()
+        if n:
+            logger.info(f"调试日志启动清理: 删除 {n} 条")
+    except Exception as e:
+        logger.warning(f"调试日志启动清理失败: {e}")
     _gc_task = asyncio.create_task(_daily_prune())
 
     yield

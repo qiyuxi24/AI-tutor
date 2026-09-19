@@ -56,21 +56,22 @@ def get_current_user_from_token(token: str) -> int:
     从原始 token 字符串中解析用户 ID（不通过 Depends）
     用于 SSE 等无法使用 OAuth2 标准头部的场景
     :return: user_id (int)
+    :raises HTTPException: 401 —— token 签名不合法 / 已过期 / payload 缺 sub
     """
-    detail = log_error(ErrorCode.AUTH_TOKEN_INVALID)
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=detail,
-        headers={"WWW-Authenticate": "Bearer"},
-    )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id_str: str | None = payload.get("sub")
         if user_id_str is None:
-            raise credentials_exception
+            raise ValueError("token payload 缺少 sub 字段")
         return int(user_id_str)
-    except (JWTError, ValueError):
-        raise credentials_exception
+    except (JWTError, ValueError) as exc:
+        # 仅鉴权真正失败时才告警（成功路径必须静默，否则日志噪音会掩盖真故障）
+        detail = log_error(ErrorCode.AUTH_TOKEN_INVALID, detail=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=detail,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def get_current_user(token: str = Depends(oauth2_scheme)) -> int:
@@ -80,3 +81,20 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> int:
     :return: user_id (int)
     """
     return get_current_user_from_token(token)
+
+
+# users 表新增列：老库建表时只有 id/username/password_hash/created_at，
+# 登录逻辑需要的 status（账号状态）/ role（角色）/ last_login_at（最后登录时间）需幂等补齐。
+_USER_EXTRA_COLUMNS = (
+    ("status", "TEXT DEFAULT 'active'"),
+    ("role", "TEXT DEFAULT 'user'"),
+    ("last_login_at", "TEXT"),
+)
+
+
+def ensure_user_columns(conn) -> None:
+    """幂等补齐 users 表新增列（老库升级用）。调用方负责 commit。"""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+    for name, ddl in _USER_EXTRA_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")

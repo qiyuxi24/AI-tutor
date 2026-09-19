@@ -75,9 +75,16 @@ class KnowledgeGraph:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
-                    created_at TEXT DEFAULT (datetime('now'))
+                    created_at TEXT DEFAULT (datetime('now')),
+                    status TEXT DEFAULT 'active',
+                    role TEXT DEFAULT 'user',
+                    last_login_at TEXT
                 )
             """)
+
+            # 老库（无上述三列）自动补齐，否则登录会报 no such column
+            from app.core.auth import ensure_user_columns
+            ensure_user_columns(self._conn)
 
             # 2. 节点表（含 user_id 外键）
             self._conn.execute("""

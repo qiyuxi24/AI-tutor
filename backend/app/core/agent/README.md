@@ -19,7 +19,9 @@
 
 | 文件 | 原名 | 职责 | **垄断的不变量**（别在别处做第二遍） |
 |---|---|---|---|
-| `loop.py` | `agent_loop.py` | 主循环：LLM ↔ 工具 多轮串联（纯编排，不碰图谱/RAG 内部） | 唯一决定"要不要再来一轮工具"的地方；护栏（`max_rounds=5`、单工具超时 60s、连续工具轮上限）都在这 |
+| `loop.py` | `agent_loop.py` | 主循环：LLM ↔ 工具 多轮串联（纯编排，不碰图谱/RAG 内部） | 唯一决定"要不要再来一轮工具"的地方；护栏：**轮数** `max_rounds=5`、**单工具超时** 60s，安全边界问 `loop_guard` |
+| `loop_guard.py` | （2026-09-19 拆出） | 工具调用安全边界：`LoopGuard` + 终止原因 `STOP_*` + 拒绝文案 | **只判定不执行**；边界：**调用总次数** 12、**run 墙钟** 180s、**同参数重复** ≤2 次、**连续失败熔断** 3 次 |
+| `debug_log.py` | （2026-09-19 新） | 调试日志：控制台 + SQLite 双写（`agent_debug_logs`），跨 run 按 run_id 回看 | 排查"为什么输出无用数据"的第一站；记录范围见下节，**不记**学生正文与工具全文 |
 | `context.py` | `agent_context.py` | run 内 API 消息序列的持有与写入 + **Tool Result Clearing**（较早工具批次正文换占位符） | **唯一往 `messages` 里 append 的地方**：assistant 带 `tool_calls` 快照、`reasoning_details` 随轮保留、tool 回填按 `tool_call_id` 配对 |
 | `guard.py` | `context_guard.py` | 发送前预算守卫：按预算线裁最旧历史 + 插省略说明 | **唯一裁历史的地方**（入口一次性；loop 内刻意不裁） |
 | `estimator.py` | `token_estimator.py` | 发送前 token 预估：prompt 计数 + completion 预估（历史中位数 / 关键词规则）+ 成本换算 | **唯一做"发送前预估"的地方**；结果进 `AgentRunResult.token_estimate` → `agent_runs.token_estimate` 字段，与真值 `token_usage` 同表可对照 |
@@ -52,15 +54,18 @@ chat_service.process_message_stream(messages, mode, user_id)
  │    run_id = uuid4().hex                      ← 事件与落库共用这一个 id
  │    ctx = AgentContext(prompt, messages)      ← context：消息序列在此累积
  │    estimator.estimate_token_consumption()    ← 发送前预估（带 user_id 走历史中位数）
- │    emit("agent_start")
+ │    guard = _LoopGuard(…)                安全边界建账
  │    ┌── 每轮 ─────────────────────────────────────────┐
+ │    │ 入口先查硬预算（墙钟/次数）→ 耗尽即收尾          │
  │    │ msg = _chat_once(ctx.messages)     真打 LLM     │
  │    │ ctx.append_assistant_turn(msg)     快照（含思考）│
  │    │ for tc in msg.tool_calls:                       │
+ │    │     guard.deny_reason(tc)? → 拒绝文案回填        │
  │    │     execute(tc, kg)  → ctx.append_tool_result() │
- │    │     emit("tool_start"/"tool_result")            │
- │    │ 无 tool_calls → 自然结束 / 达 max_rounds → 强制收尾│
+ │    │     guard.note_result(ok) → 连续失败达阈值即熔断 │
+ │    │ 无 tool_calls → 自然结束 / 达上限 → 强制收尾      │
  │    └─────────────────────────────────────────────────┘
+ │    _build_result → loop_stop 证据 + run 级日志 + AGENT_DONE(stop_reason)
  │    store.save_run(evidence, token_usage, token_estimate, …)   ← 正常 or 异常都落库
  │
  ④ back in chat_service：消费 EventBus 队列 → 转 SSE 给前端
@@ -108,6 +113,51 @@ chat_service.process_message_stream(messages, mode, user_id)
 9. **预估 ≠ 真值**：`token_estimate`（estimator 估的）与 `token_usage`（API usage 真值）不是一回事，业务判断一律用真值（见坑 4），预估值只用于预算参考与事后校准。
 10. **改 `guard.py` 分层规则前先看 `tests/test_history_layering.py` 的四条不变量**：首条 user（任务锚点）永不丢；保留的近端消息**逐字未改**（分层只产出"原文 or 要点行"，不篡改）；裁剪后仍以 user 开头（分层会产生**连续 user** 消息，真机已验证 API 接受）；总 token ≤ 裁剪线。
 11. **改 `context.clear_old_tool_results` 前先确认配对不破**：只改 `tool` 消息的 `content`，`tool_call_id` 与 assistant `tool_calls` 的 id 列表必须逐字保留 —— 破了服务端报 400 `tool result's tool id() not found`。接线在 `loop._loop_core` 每轮 `_chat_once` 之前，`tests/test_agent_loop.py::test_old_tool_results_cleared_across_rounds` 锁住"真的被调用"（防止再次出现"实现了但匹配不到数据"的空转）。
+12. **工具调用被安全边界拦下 ≠ 静默丢弃**：`_execute_tool` 必须回填一条**写明原因**的拒绝文案（`_DENY_MESSAGES`），且仍然 append tool 消息保证 `tool_call_id` 配对 —— 静默跳过会让模型以为工具没执行，进而反复重试同一个调用（这正是"循环输出无用数据"的成因）。
+13. **`stop_reason` 三出同值**：`AgentRunResult.stop_reason` / `AGENT_DONE` 事件 / evidence 的 `loop_stop` 步骤必须一致，所以新增终止路径一律走 `_build_result` 这个唯一出口（并发事项：`_persist_run` 的 error 分支是唯一例外，它对 `loop_core` 抛异常的情况手写 `loop_stop`）。
+
+### 6.1 工具调用安全边界（`loop._LoopGuard`，2026-09-19）
+
+`max_rounds` 只限制"最多问模型几次"，挡不住四类退化，所以逐条设了上限（默认值可经 `run_agent_loop` 参数覆盖）：
+
+| 边界 | 默认值 | 挡住的退化 | 触发后 |
+|---|---|---|---|
+| `max_tool_calls` | 12 | 单轮并行返回 N 个 `tool_calls` → 几轮跑出几十次调用，学生端长时间无输出 | 提前收尾，不再发起新的 LLM 轮 |
+| `max_total_secs` | 180 | LLM 或工具整体变慢，无任何墙钟兜底 | 同上 |
+| `max_identical_calls` | 2 | 同一 `(工具, 参数)` 反复重试 —— **Tool Result Clearing 会诱发**（早期结果换成"需要时请重新调用"占位符，模型就去重取同一份） | 拒绝该调用，回填"再调也一样"的文案 |
+| `max_consecutive_fails` | 3 | 工具连续失败却一路换参重试，五轮烧完只剩固定兜底文案 | 熔断 + 提前收尾 |
+
+终止原因取值：`natural` / `max_rounds` / `time_budget` / `call_budget` / `fail_circuit` / `error`。
+**排查路径**：调试日志（`debug_log.recent(run_id=…)`，见下节）→ `agent_runs` 的 `loop_stop` 证据（同 `stop_reason`）→ SSE `agent_done` 事件。
+
+### 6.2 调试日志（`debug_log.py`，2026-09-19）
+
+控制台 + SQLite 双写，库在 `backend/app/data/agent_debug/debug_log.db`（表 `agent_debug_logs`，
+与 `agent_runs` 同数据根；保留 `_RETENTION_DAYS=14` 天，启动 + 每日 GC 各清一次，见 `main.py`）。
+
+**记录什么**（`scope.event` 清单，**改代码加事件时同步这段**）：
+
+| scope | event（何时记） | 关键 data |
+|---|---|---|
+| `loop` | `run_start` / `run_end`（一次 run 的首尾） | run_end 带 `stop_reason` / rounds / tool_calls / llm_calls / elapsed |
+| `loop` | `round_start` / `round_end`（每轮工具批次） | `tools`（工具名清单）/ `failed` / `duration_ms` |
+| `loop` | `budget_exhausted`（硬预算耗尽，提前收尾）、`force_finish`、`force_finish_failed`、`empty_final_text`、`run_error` | `reason` / `error` / `tool_calls` |
+| `tool` | `tool_result`（每次工具执行完） | `tool` / `ok` / `duration_ms` / `result_head`（前 120 字） |
+| `tool` | `tool_denied`（被安全边界拦下） | `tool` / `reason` |
+| `llm` | `llm_call`（每次 LLM 返回） | `duration_ms` / `prompt_tokens` / `completion_tokens` / `tool_calls` / `has_text` |
+| `context` | `tool_results_cleared`（S8 清理） | `cleared` / `keep_batches` |
+| `bg` | `quiz_bg_start` / `_end` / `_timeout` / `_error`（后台出题子任务） | `node_id` / `ok` / `reason` / `elapsed` |
+
+**不记录什么**（边界，测试锁死）：学生消息正文、系统提示词全文、工具完整返回、密钥。
+文本一律截断（message 2K / data 8K / 单值 500），落库失败只 warning 不抛。
+
+**怎么查**（开发期直接跑，不必开界面）：
+```bash
+cd backend && venv/Scripts/python.exe -c "from app.core.agent import debug_log as d; \
+[print(r['ts'], r['scope'], r['event'], r['message'], r['data']) for r in d.recent(limit=50)]"
+```
+按 run_id 串起一次运行：`d.recent(run_id='<run_id>')`（run_id 可从 SSE `agent_start` 事件拿）。
+生产想关掉：`AGENT_DEBUG_LOG=0`（整体）/ `AGENT_DEBUG_LOG_DB=0`（只关落库）。
 
 ## 7. 自测
 

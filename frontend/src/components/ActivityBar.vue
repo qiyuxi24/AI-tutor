@@ -24,6 +24,7 @@ const { isDark, toggleTheme } = useTheme()
 const authStore = useAuthStore()
 const showUserMenu = ref(false)
 
+// 导航项
 const items = [
   { id: 'chat', title: '对话', icon: 'chat' },
   { id: 'dashboard', title: '学习进度', icon: 'dashboard' },
@@ -89,6 +90,12 @@ function handleUserMenu(action) {
         <svg v-else-if="item.icon === 'quiz'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M9 11l3 3L22 4" />
           <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+        </svg>
+        <!-- 资源采集图标（下载收集） -->
+        <svg v-else-if="item.icon === 'resources'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
         </svg>
         <!-- 资源采集图标（下载收集） -->
         <svg v-else-if="item.icon === 'resources'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

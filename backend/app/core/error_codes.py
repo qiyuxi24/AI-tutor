@@ -75,6 +75,7 @@ class ErrorCode:
     AUTH_RATE_LIMITED        = ("E-AUTH-004", "登录请求过于频繁，请稍后再试")
     AUTH_TOKEN_INVALID       = ("E-AUTH-005", "身份凭证无效或已过期，请重新登录")
     AUTH_VALIDATION_ERROR    = ("E-AUTH-006", "输入格式不符合要求")
+    AUTH_CRYPTO_INVALID      = ("E-AUTH-007", "密码解密失败，请刷新页面后重试")
 
     # ── 前后端通信层 (E-COMM) ──
     # 注意：这些错误码由前端在 catch 块中生成，后端不直接使用

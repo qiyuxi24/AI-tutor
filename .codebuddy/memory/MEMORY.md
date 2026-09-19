@@ -1,7 +1,7 @@
 # 项目记忆
 
 > 只留**跨会话稳定的决策与约束**。命令/坑/文档路由等契约 → 根 `AGENTS.md`（已随每次会话注入，**不在此重复**）；历程/取舍/踩坑档案 → `docs/项目历程_决策与效果记录.md`。
-> 最近整理：2026-09-19（第十四次：并入远程服务器部署通道，压缩篇幅）。
+> 最近整理：2026-09-19（第十五次：新增运维后台独立服务）。
 
 ## 项目概述
 - TutorAgent（原 AI-Tutor）：知识图谱驱动的自适应导学 Agent。前端 Vue3+Vite+D3+Pinia+EP；后端 FastAPI+SQLite+Jinja2+LLM(OpenAI 兼容)。
@@ -15,6 +15,14 @@
 - 远端 Docker 已配镜像加速（`/etc/docker/daemon.json`：daocloud + 1ms.run；直连 DockerHub 被重置）。sudo 密码=登录密码，无免密（每条 `echo pw | sudo -S -k`）。
 - Windows OpenSSH 9.5p2 **支持 `SSH_ASKPASS`**，`.cmd` 可直接当 askpass（`SSH_ASKPASS_REQUIRE=force`）→ 非交互密码登录的通用解法。
 
+## 运维后台（独立服务，2026-09-19 落地；同日补齐账户管理）
+- **独立进程与端口**：前端 `frontend-admin/` :5174，后端 `backend-admin/` :8001，由 `start.ps1` 一并启动与清理。与主系统 5173/8000 完全分开 —— 用户明确要求**管理入口不能与用户端同一入口**。
+- 账号体系独立：`admin_users` / `admin_audit_logs` 建在同一个 `data/knowledge/knowledge.db`；初始超管 `admin` / `admin123`（`ADMIN_DEFAULT_PASSWORD` 可覆盖），JWT 用 `ADMIN_SECRET_KEY`（与主系统 token 互不通用）。
+- 后端约定：纯 `sqlite3`（无 ORM）+ dataclass/os.getenv 配置（**不用 pydantic-settings**）+ `bcrypt`（同主系统）+ 同步 `def` 路由（避免阻塞事件循环）。业务更新与审计日志**同一事务**提交。
+- **主系统内嵌方案已下线**：`backend/app/api/v1/admin.py`、`frontend/src/views/AdminView.vue`、`/admin` 路由、ActivityBar 菜单项均已删除，避免两套 API 写同一张表。
+- 测试：`backend-admin/tests/test_admin_api.py`（30 例，临时 sqlite + tmp 数据目录冒充主系统库）；跑法 `cd backend-admin && ..\backend\venv\Scripts\python.exe -m pytest tests -q`。
+- **账户管理（2026-09-19 补）**：① 管理员 CRUD = `api/v1/admin/admins.py`，权限 `require_super_admin()`（普通 admin 管不了同行），保守三条自锁规则（禁自我禁用/降级/删除 + 必须留至少一个启用超管）。② 用户补齐 `POST /users`、`DELETE /users/{id}?confirm=<用户名>`、`GET /users/{id}/stats`。③ **删号顺序铁律**：`delete_user_rows()`（同事务不 commit）→ 审计 → `conn.commit()` → `purge_user_storage()`（对话/agent_runs 行 + 三处用户目录），文件删除不可回滚，顺序反了会半残。④ 数据统计 `db.user_data_summary()` 跨 4 个库 `_count()` 缺表回 0（主系统库是"用到才建"）。
+
 ## 协作 / 仓库 / 环境
 - `origin` = `qiyuxi24/AI-tutor`；`github-desktop-zhuzixuan2007` = 同学（子轩 朱）仓库（**只读，push 被拒**），其提交（含 `8d2230e` 出题模块大改）已全部在 main。
 - **并发写入是常态**：提交必须路径限定，内容与预期不符先查 mtime；**整理/审计类任务不擅自 commit**；确需提交按文件族拆、测试与修复同提交、提交前跑离线全量。
@@ -24,13 +32,15 @@
 
 ## 硬约束（AGENTS.md 未覆盖的）
 - **嵌入两条线（2026-09-15 收口）**：检索侧 `llm/embed.py::embed_texts`（async、无兜底）；语义去重侧 `kb/embedder.py::ApiEmbedder`（同步 + hash 兜底，服务 `graph_generator` / `prerequisite` / `api/v1/knowledge.py`）。共用 `EMBEDDING_MODEL`/`EMBED_BATCH_SIZE`/`MAX_EMBED_CHARS` 与失败语义。**不合并调用路径**：同步桥会在 FastAPI 里跑新事件循环 → AsyncOpenAI 单例报 "Event loop is closed"。
-- ⚠️ **`agent_runs` 落盘目录 ≠ compose 挂载（未修）**：实际 = `backend/app/data/agent_runs`（`store._DEFAULT_DB_DIR = parents[2]`），compose 挂 `./backend/data` → 容器内不在卷里，重建即丢审计记录。修法：改 compose 或路径改回 `backend/data`（需迁移，旧库有 9/13 残留）。
+- ⚠️ 主系统存储布局（2026-09-19 实测校正）：图谱/用户 = 根 `data/knowledge/knowledge.db` + `data/knowledge/nodes/{uid}/`（`nodes.file_path` 只是装饰性相对串，**不能 unlink**）；对话 = 根 `data/conversations/conversations.db`（单库按 user_id 分区）；知识库/向量 = `backend/data/{kb,rag}/{uid}/`；**agent_runs = `backend/data/agent_runs/agent_runs.db`（在 compose 挂载卷内，旧记忆"不在卷里"已过时）**；仍挂载外的只有 `backend/app/data/agent_debug/`。
 - **新建节点唯一出口** `KnowledgeGraph.create_node_with_content(node_data, content, origin)`：4 条写路径全走它，MD 模板唯一来源 = `knowledge_graph.ORIGIN_NOTES`；调用方**禁**自己写节点 MD。守卫 `tests/test_node_write_paths.py`。
 - **同名并轨**：`knowledge_writer._find_same_name` —— ID 不同但中文名相同 → 走更新模式不建重复节点（只做精确同名；语义去重未做）。
 - **SSE 事件白名单**：`chat_service._consume_agent_events` 是 if/elif **无 else**，新事件不同步透传就静默丢弃。
 
 ## 架构要点
-- **对话 = Agent Loop**：`core/agent/loop.py::run_agent_loop`（纯编排；max_rounds=5 / 工具超时 60s / temp 0.3）。配套：context / guard / events（run_id + per-user 路由）/ store（运行记录唯一事实源）/ estimator（预估不参与决策）。
+- **对话 = Agent Loop**：`core/agent/loop.py::run_agent_loop`（纯编排；max_rounds=5 / 工具超时 60s / temp 0.3）。配套：context / guard / events（run_id + per-user 路由）/ store（运行记录唯一事实源）/ estimator（预估不参与决策）/ **loop_guard**（安全边界，2026-09-19 拆出）/ **debug_log**（调试日志双写落库，2026-09-19 新增）。
+- **🔍 排查 agent 行为的第一站 = 调试日志**（2026-09-19）：`core/agent/debug_log.py`，控制台 + SQLite `backend/app/data/agent_debug/debug_log.db`，`recent(run_id=)` 按 run_id 回看一次运行的完整流水（loop/tool/llm/context/bg 五类 scope），保留 14 天（main.py 启动 + 每日 GC）。**不记**学生正文/提示词全文/工具全文/密钥（截断 2K/8K/单值 500，测试锁死）。开关 `AGENT_DEBUG_LOG=0`。
+- **⚠️ max_rounds 不等于防循环**（2026-09-19 补）：它只限制"最多问模型几次"，挡不住单轮并行 tool_calls 与**同参数反复重试**（`Tool Result Clearing` 还会诱发 —— 早期结果变占位符后模型去重取同一份）。真正的安全边界在同文件 `_LoopGuard`：调用总次数 12 / run 墙钟 180s / 同参数重复 ≤2 / 连续失败熔断 3。排查"输出无用数据"看 run 级日志 `[run xxxxxxxx]` 与 `stop_reason`（结果的 `AgentRunResult.stop_reason` = 事件 `AGENT_DONE.stop_reason` = evidence `loop_stop.reason`）。
 - **工具系统 = 一个目录** `core/agent_tools/`：`registry.py` 契约（零 import）/ `dispatch.py` / `tools/`（一工具一文件五段式）/ `net_guard.py` / `mcp_host.py`。文案 SSOT = `chat_service.TOOL_CAPABILITY_PROMPT`（`tests/test_tools_registry.py` 锁死）。**禁令**：领域模块禁 import `agent_tools`。
 - **⚠️ 异步入口**：agent_loop 用 `execute_kg_tool_async`；同步 `execute_kg_tool` 无法执行协程 handler（工作线程无运行 loop）。
 - MCP 搜索后端 = Bing RSS 主 + ddgs 兜底（"无结果" ≠ "失败"）。

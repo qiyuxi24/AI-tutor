@@ -12,6 +12,8 @@
     estimator.py ← core/token_estimator.py  发送前 token 预估（prompt/completion/成本）
     events.py    ← core/agent_events.py     事件发射：run_id 注入 + per-user 路由
     store.py     ← core/agent_run_store.py  agent_runs 落库（运行记录唯一事实源）
+    loop_guard.py（2026-09-19 新）          工具调用安全边界：预算/重复指纹/熔断/终止原因
+    debug_log.py（2026-09-19 新）           调试日志：控制台 + SQLite 双写，跨 run 可回看
 
 调用链（谁调谁）：
     chat_service.process_message_stream()
@@ -19,6 +21,8 @@
       └─ loop.run_agent_loop(prompt, messages, kg, user_id)
              ├─ context.AgentContext                     每条消息的唯一写入点（协议约束单点）
              │   └─ clear_old_tool_results()              每轮发送前：较早工具批次正文换占位符
+             ├─ loop_guard.LoopGuard                     每层工具调用的安全边界（判定，不执行）
+             ├─ debug_log.RunLogger                      全程流水落库（run_id 串联，可事后回看）
              ├─ estimator.estimate_token_consumption     发送前预估（Layer 1，带 user_id 走历史）
              ├─ events.AgentEventEmitter                 逐事件推 SSE（带 run_id）
              └─ store.save_run                           结束（正常 or 异常）自动落库，
@@ -32,10 +36,12 @@
   （`core/event_bus.py`）各自独立，本包只消费它们。
 """
 from app.core.agent.context import AgentContext, assistant_snapshot
+from app.core.agent.debug_log import RunLogger
 from app.core.agent.estimator import TokenEstimate, estimate_token_consumption
 from app.core.agent.events import AgentEventEmitter
 from app.core.agent.guard import trim_history_to_budget
 from app.core.agent.loop import AgentRunResult, run_agent_loop
+from app.core.agent.loop_guard import LoopGuard
 
 __all__ = [
     "run_agent_loop",
@@ -46,4 +52,6 @@ __all__ = [
     "AgentEventEmitter",
     "estimate_token_consumption",
     "TokenEstimate",
+    "LoopGuard",
+    "RunLogger",
 ]

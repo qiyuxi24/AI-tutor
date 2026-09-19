@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { apiClient } from '../api/index.js'
+import { encryptPassword } from '../utils/crypto.js'
 import { formatError } from '../utils/errorCodes.js'
 
 const STORAGE_KEY_TOKEN = 'ai_tutor_token'
@@ -37,15 +38,28 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  // ─── 带传输加密的登录/注册请求（密码 RSA 加密后提交） ───
+  async function _postWithEncryptedPassword(url, username, password) {
+    const encrypted = await encryptPassword(password)
+    try {
+      return await apiClient.post(url, { username, password: encrypted })
+    } catch (err) {
+      // 服务端密钥可能已轮换（如容器重建）：刷新公钥重试一次
+      const detail = String(err.response?.data?.detail || '')
+      if (err.response?.status === 400 && detail.includes('E-AUTH-007')) {
+        const retryEncrypted = await encryptPassword(password, { refresh: true })
+        return await apiClient.post(url, { username, password: retryEncrypted })
+      }
+      throw err
+    }
+  }
+
   // ─── 注册 ───
   async function register(username, password) {
     loginLoading.value = true
     loginError.value = ''
     try {
-      const { data } = await apiClient.post('/api/v1/auth/register', {
-        username,
-        password,
-      })
+      const { data } = await _postWithEncryptedPassword('/api/v1/auth/register', username, password)
       setToken(data.token)
       setUser(data.user)
       return true
@@ -62,10 +76,7 @@ export const useAuthStore = defineStore('auth', () => {
     loginLoading.value = true
     loginError.value = ''
     try {
-      const { data } = await apiClient.post('/api/v1/auth/login', {
-        username,
-        password,
-      })
+      const { data } = await _postWithEncryptedPassword('/api/v1/auth/login', username, password)
       setToken(data.token)
       setUser(data.user)
       return true

@@ -159,6 +159,26 @@ def test_quiz_generate_rejects_missing_node_id():
     assert "需要指定 node_id" in out
 
 
+def test_background_task_reports_timeout_and_releases_slot(monkeypatch):
+    """后台子任务超时必须回报主对话（推 ok=False）并释放占位 —— 否则该用户永远出不了题。"""
+    published = []
+
+    async def _hang(user_id, *, node_id, count=1):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(chat_quiz, "generate_and_publish", _hang)
+    monkeypatch.setattr(chat_quiz, "CHAT_QUIZ_TIMEOUT_SECS", 0.05)
+    monkeypatch.setattr(chat_quiz, "publish",
+                        lambda t, d, user_id: published.append((t, d, user_id)))
+
+    _run(chat_quiz._run_guarded(7, "bt", 1))
+
+    assert chat_quiz._INFLIGHT == {}                 # 占位释放 → 后续可以再出题
+    assert len(published) == 1
+    _type, data, uid = published[0]
+    assert uid == 7 and data["ok"] is False and "超时" in data["message"]
+
+
 def test_quiz_generate_dedupes_concurrent_trigger(monkeypatch):
     """已有出题任务在跑时，第二次触发被拒（模型可能连调两次）。"""
     async def fake_generate(user_id, *, node_id, count=1):
