@@ -1,0 +1,31 @@
+diff --git a/frontend/src/components/MessageBubble.vue b/frontend/src/components/MessageBubble.vue
+index cf0afb5..8cad637 100644
+--- a/frontend/src/components/MessageBubble.vue
++++ b/frontend/src/components/MessageBubble.vue
+@@ -231,19 +231,22 @@ watch(renderedContent, () => {
+ }
+ 
+ .ai-bubble {
+-  background: var(--color-bg-surface);
++  /* 无气泡：AI 回复直接平铺在页面上 */
++  background: none;
++  padding: 0;
++  border-radius: 0;
+   color: var(--color-text-primary);
+-  border-bottom-left-radius: 4px;
+ }
+ 
+ .text {
+   white-space: pre-wrap;
+ }
+ 
+-/* ─── 工具活动区 ─── */
++/* ─── 工具活动区（按调用顺序纵向排列） ─── */
+ .tool-area {
+   display: flex;
+-  flex-wrap: wrap;
++  flex-direction: column;
++  align-items: flex-start;
+   gap: 6px;
+   margin-bottom: 8px;
+ }

@@ -1,0 +1,112 @@
+diff --git a/frontend/src/components/MessageBubble.vue b/frontend/src/components/MessageBubble.vue
+index cf0afb5..7563761 100644
+--- a/frontend/src/components/MessageBubble.vue
++++ b/frontend/src/components/MessageBubble.vue
+@@ -135,23 +135,24 @@ watch(renderedContent, () => {
+     <div class="bubble" :class="{ 'user-bubble': isUser, 'ai-bubble': !isUser }" ref="bubbleRef">
+       <div v-if="isUser" class="text">{{ message.content }}</div>
+       <template v-else>
+-        <!-- 工具活动区 -->
++        <!-- 工具活动区：按调用顺序逐条列出 -->
+         <div v-if="hasTools" class="tool-area">
+           <div
+             v-for="(tool, idx) in message.tools"
+             :key="idx"
+-            class="tool-chip"
++            class="tool-line"
+             :class="{
+               'tool-running': tool.status === 'running',
+               'tool-done': tool.status === 'done',
+               'tool-error': tool.status === 'error',
+             }"
+           >
++            <span class="tool-index">{{ idx + 1 }}</span>
+             <span class="tool-icon">{{ getToolIcon(tool.tool) }}</span>
+             <span class="tool-name">{{ getToolDisplayName(tool.tool) }}</span>
+             <span v-if="tool.status === 'running'" class="tool-spinner"></span>
+             <span v-else-if="tool.status === 'done'" class="tool-status">✓ {{ tool.result?.duration_ms }}ms</span>
+-            <span v-else-if="tool.status === 'error'" class="tool-status tool-status-error">✗</span>
++            <span v-else-if="tool.status === 'error'" class="tool-status tool-status-error">✗ 失败</span>
+           </div>
+         </div>
+ 
+@@ -231,56 +232,60 @@ watch(renderedContent, () => {
+ }
+ 
+ .ai-bubble {
+-  background: var(--color-bg-surface);
++  /* 无气泡：AI 回复直接平铺在页面上 */
++  background: none;
++  padding: 0;
++  border-radius: 0;
+   color: var(--color-text-primary);
+-  border-bottom-left-radius: 4px;
+ }
+ 
+ .text {
+   white-space: pre-wrap;
+ }
+ 
+-/* ─── 工具活动区 ─── */
++/* ─── 工具活动区（按调用顺序纵向列出） ─── */
+ .tool-area {
+   display: flex;
+-  flex-wrap: wrap;
+-  gap: 6px;
+-  margin-bottom: 8px;
++  flex-direction: column;
++  align-items: flex-start;
++  gap: 4px;
++  margin-bottom: 10px;
+ }
+ 
+-.tool-chip {
++.tool-line {
+   display: inline-flex;
+   align-items: center;
+-  gap: 4px;
+-  padding: 3px 10px;
+-  border-radius: 12px;
++  gap: 6px;
+   font-size: 12px;
+   font-weight: 500;
+-  transition: all 0.2s ease;
++  color: var(--color-text-secondary);
++  transition: color 0.2s ease;
+   animation: chipFadeIn 0.25s ease;
+ }
+ 
+ @keyframes chipFadeIn {
+-  from { opacity: 0; transform: scale(0.85); }
+-  to   { opacity: 1; transform: scale(1); }
++  from { opacity: 0; transform: translateY(-2px); }
++  to   { opacity: 1; transform: translateY(0); }
++}
++
++.tool-index {
++  min-width: 12px;
++  text-align: right;
++  font-size: 10px;
++  opacity: 0.5;
++  font-weight: 400;
+ }
+ 
+ .tool-running {
+-  background: var(--color-accent-light);
+   color: var(--color-accent);
+-  border: 1px solid var(--color-accent);
+ }
+ 
+ .tool-done {
+-  background: rgba(16, 185, 129, 0.1);
+   color: rgb(5, 150, 105);
+-  border: 1px solid rgba(16, 185, 129, 0.3);
+ }
+ 
+ .tool-error {
+-  background: rgba(239, 68, 68, 0.1);
+   color: rgb(220, 38, 38);
+-  border: 1px solid rgba(239, 68, 68, 0.3);
+ }
+ 
+ .tool-icon {
