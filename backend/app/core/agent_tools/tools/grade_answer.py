@@ -1,7 +1,7 @@
 """工具 `grade_answer` —— 给学生刚作答的题判分（**掌握度的唯一主信号**）。
 
 **规则判分**：single / multiple / judge / fill 四种题型全部 0 token、瞬时返回
-（实现见 `core/quiz/chat_quiz.py::grade_pending_answer`）。
+（实现见 `core/quiz/chat_grade.py::grade_pending_answer`）。
 
 答对 → 该知识点掌握度**确定性 +20**（`mastery_bucket()` 分档：WEAK 30 / MASTERED 70）。
 这是掌握度更新的**唯一主信号**（`update_mastery` 只处理 3 种硬证据，见 `update_mastery.py`）。
@@ -39,8 +39,8 @@ GUIDANCE = """
 
 
 async def handler(args, kg) -> str:
-    """协程 handler：`chat_quiz.grade_pending_answer` 是 async，由 dispatch 直接 await。"""
-    from app.core.quiz.chat_quiz import grade_pending_answer
+    """协程 handler：`chat_grade.grade_pending_answer` 是 async，由 dispatch 直接 await。"""
+    from app.core.quiz.chat_grade import grade_pending_answer
 
     user_answer = str(args.get("user_answer", "") or "").strip()
     if not user_answer:

@@ -10,21 +10,26 @@
                 → 出好入库 + 推 QUIZ_READY 事件（约 40s 后到达）
                 → 前端追加一条带题目的消息
 
+职责边界（出题与判分已分离）
+    chat_quiz.py   出题：**后台异步**、重 LLM（~40s）、失败推 `QUIZ_READY(ok=False)`
+    chat_grade.py  判分：**同步**、规则、0 token、瞬时返回文案
+    grader.py      判分规则本身（题型分发 single/multiple/judge/fill/short_answer）
+
 闭环
     quiz_generate（本模块）
       → [学生作答]
-      → grade_answer（agent_tools）→ grader 规则判分（0 token、瞬时）
+      → grade_answer（agent_tools）→ **判分在 `quiz/chat_grade.py`**
       → 答对则确定性抬升该节点的 mastery（进度模块）
 
 为什么题目 id 不给模型
     题目是后台异步生成的，模型调 `quiz_generate` 时题目还不存在，所以它不可能知道
-    题库 id。判分靠 `QuizStore.get_pending_question()` 反查"最近一道待作答的题"。
+    题库 id。判分靠 `QuizStore.get_pending_question()` 反查"最近一道待作答的题"
+    （实现见 `chat_grade.py`）。
 """
 
 import asyncio
 import logging
 import time
-from typing import Optional
 
 from app.core.agent.debug_log import RunLogger
 from app.core.event_bus import QUIZ_READY, publish
@@ -39,9 +44,6 @@ CHAT_QUIZ_TOP_K = 3
 # 只出客观题：规则判分（0 token、瞬时、可复核）。简答题要调 LLM 判分且需要长文本作答，
 # 不适合"对话里顺手答一句"的场景。
 CHAT_QUIZ_TYPES = ["single", "multiple", "judge", "fill"]
-
-# 答对一道题的确定性掌握度增益（"答对就直接更新进度"）
-MASTERY_CORRECT_GAIN = 20
 
 # 同用户后台去重：模型可能连调两次，避免并发出两份题
 _INFLIGHT: dict[int, bool] = {}
@@ -235,88 +237,3 @@ def start_background_generation(user_id: int, *, node_id: str,
     _INFLIGHT[user_id] = True
     asyncio.create_task(_run_guarded(user_id, node_id, count))
     return True
-
-
-# ══════════════════════════════════════════════════════════════════
-#  判分（学生作答后）
-# ══════════════════════════════════════════════════════════════════
-
-def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
-                               correct: bool) -> str:
-    """
-    判分后**确定性**更新掌握度（这就是"答对就直接更新进度"）。
-
-    规则（刻意简单可解释）：
-      - 答对 → mastery = min(100, 当前 + MASTERY_CORRECT_GAIN)
-      - 答错 → **不变**。不做惩罚性扣分：答错说明还没学牢，交给 AI 用苏格拉底追问补救，
-        扣分只会打击学生。
-
-    返回一句给模型看的状态描述（空字符串 = 没更新）。
-    """
-    if not node_id or not correct:
-        return ""
-    node = kg.get_node(node_id)
-    if node is None:
-        return ""
-    current = int(node.get("mastery", 0) or 0)
-    name = node.get("name") or node_id
-    if current >= 100:
-        return f"「{name}」掌握度已是满值 100，无需再提升。"
-    new = min(100, current + MASTERY_CORRECT_GAIN)
-    try:
-        kg.update_node_info(node_id, {"mastery": new}, caller="ai")
-    except Exception as e:
-        # 人类创建的节点 AI 无权改（PermissionError）——判分照常返回，只是不改进度
-        logger.warning(f"判分后更新掌握度失败（{node_id}）: {e}")
-        return ""
-    logger.info(f"判分答对 → 掌握度 {node_id}: {current} → {new}")
-    return f"已把「{name}」的掌握度从 {current} 提升到 {new}。"
-
-
-async def grade_pending_answer(kg: KnowledgeGraph, user_answer: str) -> str:
-    """
-    判分"最近一道待作答的对话题"，返回给模型的结果描述。
-
-    规则判分（single/multiple/judge/fill）不调 LLM —— 0 token、瞬时、结果可复核。
-    """
-    from app.core.quiz.grader import grade_question
-    from app.core.quiz.schema import QuizGradeRequest
-
-    store = quiz_manager._get_store(kg.user_id)
-    q = store.get_pending_question()
-    if not q:
-        return ("当前没有等待作答的题目。请确认学生是否在回答你出的题；"
-                "如果还没出过题，先调用 quiz_generate 出一道。")
-
-    result = await grade_question(QuizGradeRequest(
-        question_id=q["id"],
-        question=q["question"],
-        type=q["type"],
-        user_answer=user_answer,
-        answer=q.get("answer") or [],
-        points=q.get("points", 10),
-        analysis=q.get("analysis", ""),
-        comment_prompt=q.get("comment_prompt", ""),
-    ))
-    store.record_attempt(q["id"], user_answer, result["score"], result["max_score"],
-                         bool(result["correct"]), result["comment"])
-
-    # 用题目关联的知识点回写进度（题目 source="chat" 时 knowledge_point = 图谱节点 id）
-    mastery_note = apply_mastery_after_answer(
-        kg, q.get("knowledge_point") or "", bool(result["correct"]),
-    )
-
-    lines = [
-        f"判分结果：{'答对' if result['correct'] else '答错'}"
-        f"（{result['score']}/{result['max_score']} 分）。{result['comment']}",
-        f"题目：{q['question']}",
-    ]
-    if q.get("analysis"):
-        lines.append(f"参考答案/解析：{q['analysis']}")
-    if mastery_note:
-        lines.append(mastery_note)
-    lines.append(
-        "接下来：答对 → 简短肯定 + 点出关键要点，然后自然推进到下一步；"
-        "答错 → **不要直接给出答案**，回到苏格拉底式追问，把学生引到正确思路上。"
-    )
-    return "\n".join(lines)

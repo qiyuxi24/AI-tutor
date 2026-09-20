@@ -1,11 +1,11 @@
 """
 对话内出题（P0）测试 —— 全部离线，不调 LLM。
 
-覆盖：
+覆盖（**出题侧**；判分侧见 `test_chat_grade.py`）：
 - 工具分发：协程 handler 被 await（不再走线程池）、同步 handler 行为不变、单工具超时按 spec 覆盖
 - quiz_generate 工具：立即返回 + 起后台任务；节点不存在 / 重复触发 的友好降级
-- 判分链路：待作答题目反查 → 规则判分 → 记录作答 → 答对确定性抬升掌握度
 - 后台出题任务：成功推 quiz_ready（且**不含答案**）、失败推 ok=False
+- 待作答题目反查（`QuizStore.get_pending_question`）与跨调用去重
 """
 import asyncio
 import json
@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core import agent_tools
-from app.core.agent_tools.tools import grade_answer, quiz_generate
+from app.core.agent_tools.tools import quiz_generate
 from app.core.quiz import chat_quiz
 from app.core.quiz.quiz_store import QuizManager
 
@@ -378,67 +378,3 @@ def test_filter_questions_excludes_already_asked():
     # 标点差异不影响判定（归一化比较）
     kept, _ = filter_questions([_mk(old.replace("，", ""))], avoid_texts=[old])
     assert len(kept) == 0
-
-
-# ══════════════════════════════════════════════════════════════════
-#  判分 → 更新掌握度
-# ══════════════════════════════════════════════════════════════════
-
-def test_grade_answer_correct_grades_and_raises_mastery(tmp_path, monkeypatch):
-    """答对 → 判满分、记作答、掌握度 +20，并把解析交给模型。"""
-    _patch_store(monkeypatch, tmp_path)
-    store = chat_quiz.quiz_manager._get_store(7)
-    _seed_question(store, source="chat", question_text="栈的特点是什么？",
-                   knowledge_point="stack")
-
-    kg = _FakeKg({"stack": {"id": "stack", "name": "栈", "mastery": 20}})
-    out = _run(chat_quiz.grade_pending_answer(kg, "A"))
-
-    assert "答对" in out and "10/10" in out
-    assert "解析" in out
-    assert "20 提升到 40" in out
-    assert kg.mastery_updates == [("stack", 40)]
-    assert store.get_pending_question() is None      # 已作答，不再待答
-
-
-def test_grade_answer_wrong_keeps_mastery(tmp_path, monkeypatch):
-    """答错 → 0 分、掌握度**不变**（不做惩罚性扣分），并要求模型继续追问。"""
-    _patch_store(monkeypatch, tmp_path)
-    store = chat_quiz.quiz_manager._get_store(7)
-    _seed_question(store, source="chat", question_text="栈的特点是什么？",
-                   knowledge_point="stack")
-
-    kg = _FakeKg({"stack": {"id": "stack", "name": "栈", "mastery": 40}})
-    out = _run(chat_quiz.grade_pending_answer(kg, "D"))
-
-    assert "答错" in out
-    assert kg.mastery_updates == []                  # 不扣分
-    assert "不要直接给出答案" in out
-
-
-def test_grade_answer_mastery_capped_at_100():
-    """掌握度封顶 100。"""
-    kg = _FakeKg({"stack": {"id": "stack", "name": "栈", "mastery": 95}})
-    note = chat_quiz.apply_mastery_after_answer(kg, "stack", correct=True)
-    assert kg.mastery_updates == [("stack", 100)]
-    assert "100" in note
-
-
-def test_grade_answer_mastery_permission_error_is_silent():
-    """人类创建的节点 AI 无权改 → 判分照常，只是不改进度、不报错。"""
-    kg = _FakeKg({"stack": {"id": "stack", "name": "栈", "mastery": 10}},
-                 mastery_fails=True)
-    assert chat_quiz.apply_mastery_after_answer(kg, "stack", correct=True) == ""
-
-
-def test_grade_answer_without_pending_question(tmp_path, monkeypatch):
-    """没有待作答题目 → 友好文案（并提示先出题）。"""
-    _patch_store(monkeypatch, tmp_path)
-    out = _run(chat_quiz.grade_pending_answer(_FakeKg(), "A"))
-    assert "没有等待作答的题目" in out
-
-
-def test_grade_answer_requires_answer_text():
-    """空作答不发判分。"""
-    out = _run(grade_answer.handler({"user_answer": "  "}, _FakeKg()))
-    assert "缺少 user_answer" in out

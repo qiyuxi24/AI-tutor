@@ -29,9 +29,9 @@ from app.core import agent_tools  # noqa: E402
 from app.core.agent_tools.tools import grade_answer, quiz_generate  # noqa: E402
 from app.core.event_bus import get_user_queue  # noqa: E402
 from app.core.knowledge_graph import KnowledgeGraph  # noqa: E402
-from app.core.quiz.chat_quiz import (  # noqa: E402
-    MASTERY_CORRECT_GAIN, _INFLIGHT, quiz_manager,
-)
+from app.core.quiz.chat_grade import MASTERY_CORRECT_GAIN  # noqa: E402
+from app.core.quiz.chat_quiz import _INFLIGHT  # noqa: E402
+from app.core.quiz.quiz_store import quiz_manager  # noqa: E402
 
 WAIT_SECONDS = 180   # 等 quiz_ready 的上限（单题 ~40s，留足重试余量）
 
