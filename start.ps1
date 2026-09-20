@@ -174,7 +174,7 @@ if (-not (Test-Path (Join-Path $adminBackendDir "venv"))) {
 }
 
 # 安装运维后端依赖
-$adminReqCheck = & $adminVenvPython -c "import fastapi, uvicorn" 2>&1
+$adminReqCheck = & $adminVenvPython -c "import fastapi, uvicorn" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[运维后端] 安装依赖..." -ForegroundColor Yellow
     Push-Location $adminBackendDir
