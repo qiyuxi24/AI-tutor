@@ -215,12 +215,12 @@ npm run dev
 
 ## 质量与测试
 
-- **零网络用例 533 通过**（mock 掉 LLM / embedding 网络调用，无外网依赖；共收集 540 项，其中 7 个真实 API 用例按 `llm_api` 标记排除）：
+- **零网络用例 745 通过**（mock 掉 LLM / embedding 网络调用，无外网依赖；共收集 752 项，其中 7 个真实 API 用例按 `llm_api` 标记排除）：
   分块 / 融合 / 父级扩展 / 路由 / pipeline 异常隔离 / 稀疏索引 / 图谱切片 / 先修关系推断 / 掌握度分档 / rag_search 工具 / 上传检索全链路 / 用户隔离 / 采集注册表 / 商用过滤 / Agent Loop 与运行记录等各模块。
   复现命令（cwd = `backend`）：
 
   ```bash
-  backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"   # → 533 passed, 7 deselected
+  backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"   # → 745 passed, 7 deselected
   ```
 
 - **离线评测集**（复用 CMRC2018，256 文档/1000 查询）：`backend/scripts/eval_rag.py`
@@ -232,6 +232,7 @@ npm run dev
 
 ## 文档索引
 
+- [项目 Wiki](https://github.com/qiyuxi24/AI-tutor/wiki) — 分模块导读：快速开始 / 架构总览 / Agent 运行内核 / 知识图谱与学习路径 / 知识库与混合检索 / API 参考 / 常见问题与坑
 - [README 编写规范](docs/README_编写规范.md)（v3：门面模板 / 双语维护 / 贡献指南规范） ｜ [贡献指南](CONTRIBUTING.md) ｜ [English README](README.en.md)
 - [开发参考手册 AGENTS.md](AGENTS.md) — 架构契约、模块职责与新增工具/端点的接入点
 - [RAG 去耦合与目录检索调研](docs/RAG_去耦合与目录检索调研.md) ｜ [RAG 召回与重排优化调研](docs/RAG_召回与重排优化调研.md) ｜ [Agentic RAG 调研](docs/RAG_参考资料与学习路线.md)

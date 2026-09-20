@@ -139,6 +139,23 @@
 
 ---
 
+## 六、实现状态对照（2026-09-20 核对）
+
+本文档是**设计调研稿**，落地时做了裁剪。以下差异以 `backend/app/core/quiz/` 源码为准：
+
+| 设计稿提出 | 落地状态 |
+|---|---|
+| `Question` schema 含 `difficulty`（0~1）与 `cognitive_level`（布鲁姆） | ❌ 未落地：`schema.py` 的 `Question` 无这两个字段；难度只存在于**请求层** `QuizGenerateRequest.difficulty`（字符串 `easy/medium/hard`） |
+| 质量管道「正确性过滤器」= LLM 自我验证答案 | ⚠️ 形式改变：实现为**取值合法性校验**（单选/判断题答案必须落在选项/合法取值内），在 `generator.py` 中做，不是 LLM 自验证 |
+| 质量管道「重复检测器」= embedding 语义相似度 >0.85 | ⚠️ 降级实现：`quality.py::_deduplicate` 用**文本归一化**去重（源码注释明确「进阶可做语义相似度」） |
+| 「难度一致性过滤器」 | ❌ 未实现 |
+| `templates.py` 母题模板库 | ❌ 未实现 |
+| `quiz_questions` 表含 `cognitive_level` 列 | ❌ 实际表结构见 `quiz/quiz_store.py` |
+
+**已落地**：RAG grounding 出题（依据检索片段）、Pydantic 结构化输出、长度 / 自包含过滤、文本去重、LLM 判分 + 规则判分、简答题评分量规（`comment_prompt`）。
+
+---
+
 ## 六、待确认的决策点
 
 1. **出题依据来源**：是否优先从「上传教材知识库」检索，还是先只用「图谱节点内容」？（建议两者都支持，可切换）

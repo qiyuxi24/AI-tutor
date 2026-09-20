@@ -13,13 +13,13 @@
 
 1. 先读三份文档，按此顺序：
    1. `docs/上下文工程_预算框架.md` —— **配额 SSOT**（B=48K / 九段 S1–S9 / 让位顺序 / 触发阶梯）
-   2. `backend/app/core/agent/README.md` —— 代码结构（六模块职责 + 一次 run 时序 + 改码 10 坑）
+   2. `backend/app/core/agent/README.md` —— 代码结构（八模块职责 + 一次 run 时序 + 改码 10 坑）
    3. `docs/上下文工程_调研与差距审计.md` —— 现状审计 + 论文依据 + §10–§12 实施记录
 2. 跑一次探针拿到当前基线（**改任何东西前先跑，改完再跑对比**）：
    ```bash
    backend\venv\Scripts\python.exe reports\probe_context_budget.py
    ```
-3. 回归基线（2026-09-15 本轮结束时实测 **711 passed, 7 deselected**）：
+3. 回归基线（2026-09-20 实测 **745 passed, 7 deselected**）：
    ```bash
    backend\venv\Scripts\python.exe -m pytest backend/tests -q -m "not llm_api"
    ```

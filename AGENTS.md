@@ -98,6 +98,6 @@
 
 ## 6. 提交与测试纪律
 
-- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **711 passed, 7 deselected**（2026-09-15 实测，29s；另一会话改动多时先重跑确认）。
+- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **745 passed, 7 deselected**（2026-09-20 实测；另一会话改动多时先重跑确认）。
 - 提交按**文件族**拆；单文件跨主题按**依赖方向**排序（先被调用方）；测试与其修复同一提交；不混无关改动。
 - 与其他 AI 会话共存：提交前 `git status` 看清别人 WIP，**路径限定 add**。

@@ -79,7 +79,7 @@ venv\Scripts\python.exe -m pytest tests -q -m "not llm_api"
 **Expected output**:
 
 ```
-517 passed, 7 deselected
+745 passed, 7 deselected
 ```
 
 - `7 deselected` are the real-API cases marked `llm_api` (`tests/test_agent_loop_real_api.py`): they need real keys plus `pytest-asyncio`, so do not force them locally without keys; CI excludes them with the very same command.
@@ -155,7 +155,7 @@ Requirements:
 (linked issue: Closes #xx; or the pain point)
 
 ## How it was verified
-- [ ] `backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"` → 517 passed, 7 deselected
+- [ ] `backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"` → 745 passed, 7 deselected
 - [ ] Manual path: (describe the screens or endpoints you exercised)
 
 ## Impact

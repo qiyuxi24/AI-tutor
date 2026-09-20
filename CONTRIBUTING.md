@@ -77,7 +77,7 @@ venv\Scripts\python.exe -m pytest tests -q -m "not llm_api"
 **期望输出**：
 
 ```
-517 passed, 7 deselected
+745 passed, 7 deselected
 ```
 
 - `7 deselected` = 标记为 `llm_api` 的真实 API 用例（`tests/test_agent_loop_real_api.py`）：需要真实 key + `pytest-asyncio`，本地无 key 时不要强行运行；CI 用同一条命令排除它们。
@@ -153,7 +153,7 @@ venv\Scripts\python.exe scripts/eval_rag.py --embed mock
 （对应 Issue：Closes #xx；或说明痛点）
 
 ## 怎么验证
-- [ ] `backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"` → 517 passed, 7 deselected
+- [ ] `backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"` → 745 passed, 7 deselected
 - [ ] 手动路径：（描述你点过 / 调过的界面或端点）
 
 ## 影响面

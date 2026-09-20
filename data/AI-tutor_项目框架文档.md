@@ -1,6 +1,13 @@
 # TutorAgent 项目框架文档
 
 > 本文档由代码 review 自动生成，记录 TutorAgent 项目的完整架构、核心设计决策、API 清单和 Review 报告。
+>
+> ⚠️ **文档状态（2026-09-20 核对）**：本文档基于 2026 年 8 月中旬的代码快照，此后项目经历多轮重构，**部分内容已与代码不符**。已知漂移（§三数据库 Schema 已按源码校正，其余章节请以权威文档为准）：
+> - 对话主模型现为 **MiniMax-M3**（OpenAI 兼容 + function calling，带主备回退链），不再是「阿里云千问（DashScope）」直连
+> - `core/llm_client.py` 已拆并为 `core/llm/` 原语包（clients / embed / messages / retry / fallback / call）
+> - 用户画像已从单文件 `core/user_profile.py` 拆为 `core/profile/` 包（schema / store / markdown / manager）
+> - 对话编排在 `services/chat_service.py`（已不在 `core/` 下），并接入后台 Agent Loop
+> - 权威文档：[README](../README.md) ｜ [AGENTS.md](../AGENTS.md) ｜ [项目 Wiki](https://github.com/qiyuxi24/AI-tutor/wiki)
 
 ---
 
@@ -88,37 +95,41 @@ AI-tutor/
 | id | INTEGER | 主键，自增 |
 | username | TEXT UNIQUE | 用户名 |
 | password_hash | TEXT | bcrypt 哈希（截断 >72 字节密码） |
-| created_at | REAL | Unix 时间戳 |
+| created_at | TEXT | ISO 时间字符串，默认 `datetime('now')` |
+| status | TEXT | 账号状态，默认 `active` |
+| role | TEXT | 角色，默认 `user` |
+| last_login_at | TEXT | 最近登录时间 |
 
 ### 3.2 知识节点表（nodes）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | TEXT | 主键，英文下划线 ID |
-| user_id | INTEGER | 所属用户 ID |
+| id | TEXT | 主键，英文下划线 ID（**全局唯一**，不是按用户复合） |
 | name | TEXT | 中文名称 |
-| tags | TEXT | JSON 数组，如 ["数据结构", "树"] |
 | file_path | TEXT | 对应 MD 文件相对路径 |
+| tags | TEXT | JSON 数组，如 ["数据结构", "树"] |
+| board | TEXT | 所属板块（学科切片用），默认 `''` |
 | summary | TEXT | 一句话摘要 |
-| difficulty | INTEGER | 难度 1-5 |
-| estimated_minutes | INTEGER | 预估学习分钟数 |
-| mastery | REAL | 掌握度 0.0-1.0 |
+| mastery | INTEGER | 掌握度 **0~100 整数**（默认 0） |
+| difficulty | INTEGER | 难度 1-5（默认 3） |
+| estimated_minutes | INTEGER | 预估学习分钟数（默认 15） |
 | added_by | TEXT | "human" 或 "ai" |
-| created_at | REAL | 创建时间 |
-| updated_at | REAL | 更新时间 |
+| created_at | TEXT | 创建时间（ISO 字符串） |
+| confidence | REAL | AI 生成内容的置信度（可空） |
+| user_id | INTEGER | 所属用户 ID（外键 → users.id） |
 
 ### 3.3 知识关系表（edges）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | id | INTEGER | 主键，自增（用于精确 CRUD） |
-| user_id | INTEGER | 所属用户 ID |
-| from_node | TEXT | 源节点 ID |
-| to_node | TEXT | 目标节点 ID |
+| from_node | TEXT | 源节点 ID（外键 → nodes.id，级联删除） |
+| to_node | TEXT | 目标节点 ID（外键 → nodes.id，级联删除） |
 | relation | TEXT | prerequisite/related/confusion/extension |
 | label | TEXT | 关系标签 |
 | added_by | TEXT | "human" 或 "ai" |
-| created_at | REAL | 创建时间 |
+| confidence | REAL | AI 推断的置信度（可空） |
+| user_id | INTEGER | 所属用户 ID（外键 → users.id） |
 
 ### 3.4 对话表（conversations，独立数据库）
 

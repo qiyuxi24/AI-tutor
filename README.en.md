@@ -219,12 +219,12 @@ npm run dev
 
 ## Quality and testing
 
-- **533 offline tests pass** (LLM / embedding network calls are mocked, so no internet is required; 540 tests are collected in total, of which 7 real-API tests are excluded by the `llm_api` marker):
+- **745 offline tests pass** (LLM / embedding network calls are mocked, so no internet is required; 752 tests are collected in total, of which 7 real-API tests are excluded by the `llm_api` marker):
   chunking / fusion / parent expansion / routing / pipeline exception isolation / sparse index / graph slicing / prerequisite inference / mastery bucketing / the `rag_search` tool / the full upload-and-retrieve path / user isolation / collector registry / commercial-mode filtering / Agent Loop and run records.
   Reproduce with (cwd = `backend`):
 
   ```bash
-  backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"   # → 533 passed, 7 deselected
+  backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"   # → 745 passed, 7 deselected
   ```
 
 - **Offline evaluation set** (reusing CMRC2018, 256 documents / 1000 queries): `backend/scripts/eval_rag.py`
@@ -236,6 +236,7 @@ npm run dev
 
 ## Documentation index
 
+- [Project Wiki](https://github.com/qiyuxi24/AI-tutor/wiki) — module-by-module guide: quick start / architecture / agent kernel / knowledge graph / hybrid retrieval / API reference / FAQ (in Chinese)
 - [README writing spec](docs/README_编写规范.md) (v3: facade template / bilingual maintenance / contribution guide, in Chinese) ｜ [Contributing](CONTRIBUTING.en.md) ｜ [中文 README](README.md)
 - [AGENTS.md development handbook](AGENTS.md) — architecture contracts, module responsibilities, and where to plug in new tools/endpoints (in Chinese)
 - [RAG decoupling & directory retrieval research](docs/RAG_去耦合与目录检索调研.md) ｜ [RAG recall & rerank research](docs/RAG_召回与重排优化调研.md) ｜ [Agentic RAG research](docs/RAG_参考资料与学习路线.md) (in Chinese)
