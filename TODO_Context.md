@@ -19,7 +19,7 @@
    ```bash
    backend\venv\Scripts\python.exe reports\probe_context_budget.py
    ```
-3. 回归基线（2026-09-20 实测 **745 passed, 7 deselected**）：
+3. 回归基线（2026-09-22 实测 **835 passed, 7 deselected**）：
    ```bash
    backend\venv\Scripts\python.exe -m pytest backend/tests -q -m "not llm_api"
    ```

@@ -234,7 +234,7 @@
 3. **任何对 mastery 字段的改动必须先看** `AGENTS.md` §1 硬约束中"掌握度更新的唯一主信号 = 出题判分"
 4. **任何对 `agent_tools/tools/` 的改动必须先看** `core/agent_tools/tools/README.md`「一工具一文件 + 三条硬约定 + 检查清单」
 5. **不主动 commit**（项目硬约束）：按文件族拆、测试与修复同提交、提交前跑离线全量；并发时 `git status` 先看清别人 WIP
-6. **测试基准**：`pytest backend/tests -q -m "not llm_api"` → 期望 **745 passed, 7 deselected**（2026-09-20 实测）
+6. **测试基准**：`pytest backend/tests -q -m "not llm_api"` → 期望 **835 passed, 7 deselected**（2026-09-22 实测）
 7. **Python 必须用** `backend/venv/Scripts/python.exe`（系统 Python fastapi 过旧会导入失败）
 8. **uvicorn 必须 `--workers 1`**（EventBus 用户队列与进程内定时 GC 依赖单进程）
 9. **`.env` 只有根目录一份**，不要在 `backend/` 下另建

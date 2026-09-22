@@ -224,7 +224,7 @@ npm run dev
   Reproduce with (cwd = `backend`):
 
   ```bash
-  backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"   # → 745 passed, 7 deselected
+  backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"   # → 835 passed, 7 deselected
   ```
 
 - **Offline evaluation set** (reusing CMRC2018, 256 documents / 1000 queries): `backend/scripts/eval_rag.py`
