@@ -1,6 +1,6 @@
 """Agent 主循环（Agent Loop）—— 替换旧的"两段式固定脚本"
 
-设计依据：docs/AgentLoop_重构设计讨论.md（路线 A）+ docs/AgentLoop_业界调研与学习路线.md
+设计依据：docs/AgentLoop/AgentLoop_重构设计讨论.md（路线 A）+ docs/AgentLoop/AgentLoop_业界调研与学习路线.md
 语义（业界共识骨架，见调研文档 §1）：
     LLM(带 tools) → 无 tool_calls → 自然结束
                     → 有 tool_calls → 快照 assistant → 逐个执行工具（超时护栏 + 异常隔离）
@@ -56,6 +56,7 @@ from app.core.agent_tools import KG_TOOLS, execute_kg_tool_async, tool_timeout_s
 from app.core.llm.clients import MODEL_NAME
 from app.core.llm.fallback import chat_create as _chat_create
 from app.core.llm.thinking import LLM_EXTRA_BODY as _LLM_EXTRA_BODY, strip_think_tags as _strip_think_tags
+from app.core.llm.usage import record as _record_llm_usage
 from app.core.token_counter import (
     TokenUsage,
     count_messages_tokens,
@@ -148,6 +149,11 @@ async def _chat_once(api_messages: list[dict], *, temperature: float,
     if tools:
         kwargs["tools"] = tools
     return await _chat_create(**kwargs)
+
+
+def _resp_model(resp) -> str:
+    """响应里回显的实际模型名（主模型失败会静默降级到备用，只有响应里的才是真身）。"""
+    return getattr(resp, "model", "") or MODEL_NAME
 
 
 def _usage_prompt_tokens(resp) -> int:
@@ -271,6 +277,11 @@ async def _finish_without_tools(ctx: AgentContext, *, temperature: float,
     context_tokens += usage.prompt_tokens
     token_usage = token_usage or TokenUsage()
     token_usage = token_usage.add(usage)
+    if resp is not None:
+        _record_llm_usage("agent_loop", _resp_model(resp), usage,
+                          user_id=getattr(emitter, "user_id", None),
+                          run_id=getattr(emitter, "run_id", None),
+                          db_dir=rlog.db_dir)   # 与 agent_runs 同库（测试注入 tmp 目录）
     text = _strip_think_tags(resp.choices[0].message.content or "").strip() if resp is not None else ""
     if not text:
         text = "本轮工具调用已达上限。你可以把请求拆小后再试，我会接着帮你完成。"
@@ -377,6 +388,10 @@ async def _loop_core(
         usage = extract_usage(resp)
         context_tokens += usage.prompt_tokens
         token_usage = token_usage.add(usage)
+        _record_llm_usage("agent_loop", _resp_model(resp), usage,
+                          user_id=getattr(emitter, "user_id", None),
+                          run_id=getattr(emitter, "run_id", None),
+                          duration_ms=llm_ms, db_dir=db_dir)
         msg = resp.choices[0].message
         rlog.log("llm", "llm_call", f"round {round_idx} LLM 返回",
                  duration_ms=llm_ms, prompt_tokens=usage.prompt_tokens,

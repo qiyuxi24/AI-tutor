@@ -21,6 +21,8 @@
 import logging
 
 from app.core.llm.clients import embed_client
+from app.core.llm.usage import record as record_llm_usage
+from app.core.token_counter import TokenUsage
 
 logger = logging.getLogger("ai-tutor")
 
@@ -29,6 +31,18 @@ EMBEDDING_MODEL = "text-embedding-v4"
 MAX_EMBED_CHARS = 6000
 # 单次请求最多条数（DashScope 限制 10 条，2026-09-14 踩坑：超限报 400）
 EMBED_BATCH_SIZE = 10
+
+
+def _record_usage(resp) -> None:
+    """嵌入用量记账：DashScope 兼容模式只回 total_tokens，全部算作输入 token。
+
+    每个批次一次 HTTP 调用，故在循环内逐批记（嵌入没有 completion，别按对话口径读）。
+    """
+    usage = getattr(resp, "usage", None)
+    tokens = int(getattr(usage, "total_tokens", 0) or 0)
+    if tokens:
+        record_llm_usage("embedding", EMBEDDING_MODEL,
+                         TokenUsage(prompt_tokens=tokens, total_tokens=tokens))
 
 
 async def embed_texts(texts: list[str],
@@ -55,6 +69,7 @@ async def embed_texts(texts: list[str],
             )
             for item in resp.data:
                 vectors[start + item.index] = item.embedding
+            _record_usage(resp)
     except Exception as e:
         logger.error(f"嵌入调用失败: {e}")
         return []

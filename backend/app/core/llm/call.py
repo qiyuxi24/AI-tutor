@@ -12,7 +12,8 @@ logger = logging.getLogger("ai-tutor")
 from app.core.llm.fallback import chat_create
 from app.core.llm.messages import build_api_messages
 from app.core.llm.thinking import extra_body, strip_think_tags
-from app.core.token_counter import extract_usage
+from app.core.llm.usage import record as record_llm_usage
+from app.core.token_counter import TokenUsage, extract_usage
 
 # 空回复重试次数。空回复不是"模型不会"，而是思考把输出预算烧光（见 thinking.py docstring）——
 # 思考长度是随机的，重发一次通常就有正文了。
@@ -23,7 +24,8 @@ _EMPTY_RETRY_TOKENS = 8000
 
 
 async def call_llm(system_prompt: str, messages: list,
-                   max_tokens: int = 2000, thinking: bool = True) -> str:
+                   max_tokens: int = 2000, thinking: bool = True,
+                   kind: str = "oneshot", user_id: int | None = None) -> str:
     """
     调用大模型 API —— 纯文本/JSON 分析场景（不带工具）。
 
@@ -35,6 +37,10 @@ async def call_llm(system_prompt: str, messages: list,
             （2026-09-14 真机踩坑：completion 正好等于上限）。
         thinking: 是否允许模型思考（默认 True）。思考与正文**共享** max_tokens 预算，
             批量结构化抽取请传 False，否则可能整条响应只有思考、正文为空。
+        kind: 用量记账的功能标签（默认 "oneshot"）。**调用方应传具体值**
+            （quiz_generate / quiz_grade / graph_analyze / kb_graph_extract …），
+            否则 token 消耗无法按功能归因（见 llm/usage.py）。
+        user_id: 可选用户 id，仅用于用量记账，不影响调用本身。
 
     返回:
         AI 的回复文本
@@ -51,6 +57,8 @@ async def call_llm(system_prompt: str, messages: list,
     api_messages = build_api_messages(system_prompt, messages)
     text = ""
     response = None
+    # 真值累积：空回复会重发一次，那次烧掉的思考 token 同样计费 —— 只记最后一次会漏
+    usage = TokenUsage()
     # M3 思考型模型偶发空回复：根因是思考阶段耗尽 max_tokens、正文一字未写。
     # 第一次空回复 → 加大输出预算后重试一次。统一放在本层，出题 / 判分 /
     # 图谱分析等所有一次性调用都能自动消化（2026-09-14 踩坑）。
@@ -62,6 +70,7 @@ async def call_llm(system_prompt: str, messages: list,
             max_tokens=attempt_tokens,
             extra_body=extra_body(thinking),
         )
+        usage = usage.add(extract_usage(response))
         choice = response.choices[0]
         finish = getattr(choice, "finish_reason", None)
         # 撞顶截断：**即便 text 非空也要告警** —— JSON 类响应已被硬切断，
@@ -90,14 +99,15 @@ async def call_llm(system_prompt: str, messages: list,
         user_msg = log_error(ErrorCode.LLM_RESPONSE_EMPTY, detail="AI返回空内容")
         raise RuntimeError(user_msg)
 
-    # token 使用量日志（可观测性）—— 带上 finish_reason，便于区分"撞顶截断"与"模型自己停"
-    usage = extract_usage(response)
+    # token 使用量日志 + 用量记账（可观测性）—— 带上 finish_reason，便于区分"撞顶截断"与"模型自己停"
     if usage.total_tokens > 0:
         logger.info(
             f"call_llm token usage: prompt={usage.prompt_tokens} "
             f"completion={usage.completion_tokens} total={usage.total_tokens} "
             f"finish={getattr(response.choices[0], 'finish_reason', None)}"
         )
+        record_llm_usage(kind, getattr(response, "model", "") or "", usage,
+                         user_id=user_id)
     # finish_reason 非 stop/length 说明输出被硬截断 / 异常终止：出题 JSON"写一半"时
     # 光看"解析失败"无法判断根因（撞顶 length？还是模型自己 stop 但 JSON 不完整？），
     # 这里显式告警（2026-09-14 真机排查用）。length 已在循环内单独告警，此处不重复。

@@ -1,6 +1,4 @@
 import asyncio
-import logging
-from logging.handlers import RotatingFileHandler
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,34 +17,11 @@ from app.api.v1.collector import router as collector_router
 from app.api.v1.agent_runs import router as agent_runs_router
 from app.core.config import settings
 from app.core.error_codes import ErrorCode, log_error
+from app.core.logging_setup import setup_logging
 
-# 结构化日志：控制台 + 文件轮转（双输出）
-_log_fmt = logging.Formatter(
-    "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logging.basicConfig(
-    level=settings.log_level,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-
-# 文件轮转：LOG_DIR 下 tutor.log + .1/.2/... 备份
-_log_dir = Path(settings.log_dir)
-_log_dir.mkdir(parents=True, exist_ok=True)
-_file_handler = RotatingFileHandler(
-    _log_dir / "tutor.log",
-    maxBytes=settings.log_max_bytes,
-    backupCount=settings.log_backup_count,
-    encoding="utf-8",
-)
-_file_handler.setFormatter(_log_fmt)
-_file_handler.setLevel(settings.log_level)
-
-# 挂到 "ai-tutor" logger（所有模块共用此名）
-logger = logging.getLogger("ai-tutor")
-logger.setLevel(settings.log_level)
-logger.addHandler(_file_handler)
+# 日志配置已收口到 core/logging_setup（并由 app/__init__.py 自动初始化，
+# 脚本直跑同样生效）；这里只取回句柄。级别/轮转/落点见该模块 docstring。
+logger = setup_logging()
 
 # ════════════════════════════════════════════
 #  Lifespan：启动/关闭生命周期管理（替代旧 on_event）
@@ -106,37 +81,34 @@ async def lifespan(app: FastAPI):
     finally:
         conn.close()
 
-    # ── 启动：agent_runs 分层 GC + 调试日志保留清理 ──
+    # ── 记录库过期清理（启动一次 + 每日一次）──
+    # 唯一落点：新增记录表只需在 _JOBS 加一行，不必再抄一遍"启动 + 每日"两段。
     from app.core.agent import debug_log, store as run_store
+    from app.core.llm import usage as llm_usage
+
+    _JOBS = (
+        ("agent_runs", run_store.prune),   # 分层：30 天全量 / 180 天摘 evidence / 180+ 删
+        ("调试日志", debug_log.prune),      # 14 天
+        ("用量明细", llm_usage.prune),      # 365 天
+    )
+
+    def _prune_once(tag: str) -> None:
+        for name, job in _JOBS:
+            try:
+                res = job()
+            except Exception as e:
+                logger.warning(f"{name} {tag}清理失败: {e}")
+                continue
+            touched = (res["deleted"] + res["stripped"]) if isinstance(res, dict) else res
+            if touched:
+                logger.info(f"{name} {tag}清理: {res}")
 
     async def _daily_prune():
         while True:
             await asyncio.sleep(24 * 3600)
-            try:
-                res = run_store.prune()
-                if res["deleted"] or res["stripped"]:
-                    logger.info(f"agent_runs 每日清理: {res}")
-            except Exception as e:
-                logger.warning(f"agent_runs 每日清理失败: {e}")
-            try:
-                n = debug_log.prune()
-                if n:
-                    logger.info(f"调试日志每日清理: 删除 {n} 条")
-            except Exception as e:
-                logger.warning(f"调试日志每日清理失败: {e}")
+            _prune_once("每日")
 
-    try:
-        res = run_store.prune()
-        if res["deleted"] or res["stripped"]:
-            logger.info(f"agent_runs 启动清理: {res}")
-    except Exception as e:
-        logger.warning(f"agent_runs 启动清理失败: {e}")
-    try:
-        n = debug_log.prune()
-        if n:
-            logger.info(f"调试日志启动清理: 删除 {n} 条")
-    except Exception as e:
-        logger.warning(f"调试日志启动清理失败: {e}")
+    _prune_once("启动")
     _gc_task = asyncio.create_task(_daily_prune())
 
     yield

@@ -9,7 +9,7 @@
 
 设计:
 - EPUB/FB2 本质是 zip/XML，标准库足够，不引入 ebooklib / pandoc 等依赖
-  （选型对比见 docs/RAG_文档解析模块_调研与去耦合设计.md）。
+  （选型对比见 docs/RAG/RAG_文档解析模块_调研与去耦合设计.md）。
 - 章节按 OPF spine（阅读顺序）而非 zip 内存储顺序；章标题取 XHTML <title>，
   输出【第 N 章：标题】行，供分块器提取 heading。
 - 块级标签转成换行（而非空格）：保留段落边界，让分块器按段切分而不是滑窗硬切。

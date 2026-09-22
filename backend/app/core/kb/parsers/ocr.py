@@ -1,7 +1,7 @@
 """
 OCR 能力层（本地引擎）：解析器共用的「渲染 → 识别」接口。
 
-背景（2026-09-13 抽层，见 docs/RAG_文档解析模块_调研与去耦合设计.md §2.2 缺陷 #3）：
+背景（2026-09-13 抽层，见 docs/RAG/RAG_文档解析模块_调研与去耦合设计.md §2.2 缺陷 #3）：
 原先 `pdf.py` 直接 `from ...parsers.image import RapidOcrEngine, _have_rapidocr`——
 跨模块引用私有符号，换引擎要改两个文件。现在 pdf / image 解析器只依赖本层的公开入口，
 引擎实现可插拔：任何提供 `ocr(img_bytes) -> list[str]` 的实现都能接入

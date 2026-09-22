@@ -95,10 +95,16 @@ class RagManager:
 
         content = _extract_node_content(kg, node)
         if not content.strip():
+            # 以下三个 return 0 原先**完全没有日志**：节点"没进索引"只能靠猜（2026-09-20 补）
+            logger.info(f"RAG 索引跳过节点 {node['id']}（{node.get('name', '')}）：正文为空")
             return 0
 
         chunks = chunk_markdown(node["id"], node.get("name", ""), content)
         if not chunks:
+            logger.info(
+                f"RAG 索引跳过节点 {node['id']}（{node.get('name', '')}）："
+                f"分块为空（正文 {len(content)} 字符）"
+            )
             return 0
 
         # 先删除旧索引，再批量写入
@@ -108,6 +114,10 @@ class RagManager:
         texts = [c["content"] for c in chunks]
         embeddings = await self._embed(texts)
         if not embeddings:
+            logger.warning(
+                f"RAG 索引节点 {node['id']}（{node.get('name', '')}）失败：嵌入返回空"
+                f"（{len(texts)} 段）——该节点未进向量索引，之后只能靠 BM25 召回"
+            )
             return 0
 
         for chunk, emb in zip(chunks, embeddings):
@@ -135,6 +145,7 @@ class RagManager:
 
             indexed = 0
             total_chunks = 0
+            skipped = 0
             nodes = kg.nodes
             # 分批处理，避免一次性塞太多到 embedding API
             for i in range(0, len(nodes), 5):
@@ -147,6 +158,18 @@ class RagManager:
                     if r > 0:
                         indexed += 1
                         total_chunks += r
+                    else:
+                        skipped += 1
+            # 汇总一行：逐节点原因见 index_node，这里给"整体掉了多少"（原先看不到）
+            if skipped:
+                logger.warning(
+                    f"RAG 全量索引 user={user_id}：{indexed}/{len(nodes)} 个节点成功，"
+                    f"{skipped} 个被跳过（原因见上文各条）"
+                )
+            else:
+                logger.info(
+                    f"RAG 全量索引 user={user_id} 完成：{indexed} 节点 / {total_chunks} 片段"
+                )
             return {"indexed": indexed, "chunks": total_chunks}
         finally:
             kg.close()
@@ -180,6 +203,10 @@ class RagManager:
             return []
         embeddings = await self._embed([query])
         if not embeddings:
+            logger.warning(
+                f"RAG 检索降级：query 嵌入失败（user={user_id}），本次返回空"
+                "——检查嵌入 API 额度 / DASHSCOPE_API_KEY"
+            )
             return []
         store = self._get_store(user_id)
         results = store.search(user_id, embeddings[0], top_k=top_k)

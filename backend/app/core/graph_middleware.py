@@ -109,7 +109,7 @@ def list_boards(kg, subject: str) -> list[dict]:
 # 前端节点配色（ForceGraph.masteryLevel）与统计分布（DashboardView）必须与此一致。
 # 历史坑：后端曾只有三档（1~69 统称 learning），导致 1~29 分的节点在图谱上显示为
 # 红色"薄弱"、在仪表盘里被计入"学习中"；本模块注释当时还谎称"与前端四色一致"。
-# 详见 docs/知识图谱_模块结构与封装调研.md P0-2。
+# 详见 docs/知识图谱/知识图谱_模块结构与封装调研.md P0-2。
 MASTERY_WEAK = 30         # 1 ~ 29 薄弱（已开始学但未入门）
 MASTERY_MASTERED = 70     # ≥70 已掌握
 

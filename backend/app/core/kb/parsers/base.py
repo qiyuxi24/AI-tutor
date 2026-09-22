@@ -20,7 +20,7 @@ logger = logging.getLogger("ai-tutor")
 # ── 页标记（统一输出契约）────────────────────────────────────────────
 # 分页文档（PDF 等）逐页输出时在页首插一行 `<<<PAGE n>>>`：
 # - 分块器剥离标记并把页码记入 chunk["page"]（不再污染检索正文）
-# - 交叉校验 / 失败定位 / 增量重跑以此为最小单位（见 docs/RAG_视觉解析策略_调研与实施方案.md §4.6）
+# - 交叉校验 / 失败定位 / 增量重跑以此为最小单位（见 docs/RAG/RAG_视觉解析策略_调研与实施方案.md §4.6）
 PAGE_MARKER_TMPL = "<<<PAGE {n}>>>"
 PAGE_MARKER_RE = re.compile(r"^<<<PAGE\s+(\d+)>>>\s*$", re.MULTILINE)
 

@@ -111,7 +111,7 @@ EMPTY_GRAPH_PROMPT = """
 #  Prompt 构建
 # ══════════════════════════════════════════════════════════════════
 
-# 固定段（S2–S7 = 整个 system prompt）预算线，见 docs/上下文工程_预算框架.md §3.2 / 不变量 B-3
+# 固定段（S2–S7 = 整个 system prompt）预算线，见 docs/上下文工程/上下文工程_预算框架.md §3.2 / 不变量 B-3
 FIXED_SEGMENT_WARN_RATIO = 0.40      # 超此线记 warning：固定成本开始挤压 S8 历史
 FIXED_SEGMENT_DEGRADE_RATIO = 0.45   # 超此线强制重建图谱注入（唯一还能压的可还原段）
 
@@ -367,8 +367,12 @@ async def _analyze_and_apply(user_message: str, ai_reply: str,
     返回: {"suggestions": [...], "applied": [...], "pending": [...]}
     """
     result = {"suggestions": [], "applied": [], "pending": []}
-    kg = KnowledgeGraph(user_id=user_id)
+    kg = None
     try:
+        # 构造也必须在 try 内：本函数由 asyncio.create_task 火忘式调用，
+        # 在 try 外抛异常会变成 "Task exception was never retrieved"（只进 stderr，
+        # 不进 tutor.log、不进任何库），是排查时最难看见的一类失败。
+        kg = KnowledgeGraph(user_id=user_id)
         analyzer = GraphAnalyzer(kg)
         analysis = await analyzer.analyze_conversation(user_message, ai_reply)
         suggestions = analysis.get("suggestions", [])
@@ -422,7 +426,8 @@ async def _analyze_and_apply(user_message: str, ai_reply: str,
         )
         publish_error_event(ErrorCode.CHAT_ANALYZE_FAILED, user_msg, "chat_service", str(e)[:200])
     finally:
-        kg.close()
+        if kg is not None:
+            kg.close()
 
     return result
 

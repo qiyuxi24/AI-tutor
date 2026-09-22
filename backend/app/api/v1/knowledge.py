@@ -227,8 +227,13 @@ async def create_node(data: dict = Body(...), user_id: int = Depends(get_current
 
         await assign_taxonomy(kg, node_data)
 
-        # 建库 + 写 MD 一次完成（模板收口在 KnowledgeGraph）
-        kg.create_node_with_content(node_data, data.get("content") or "", origin="manual")
+        # 建库 + 写 MD 一次完成（模板收口在 KnowledgeGraph）。
+        # 返回的是**实际落点**的 ID：同名并轨命中已有节点时是已有节点的 ID，
+        # 回执必须用它，否则前端拿到一个不存在的 id。
+        real_id = kg.create_node_with_content(node_data, data.get("content") or "",
+                                              origin="manual")
+        node_data["id"] = real_id
+        node_data["file"] = f"nodes/{real_id}.md"
 
         publish("graph_updated")
         return {"status": "ok", "node": node_data}
@@ -517,10 +522,11 @@ async def decompose_question(request: DecomposeRequest,
                 "confidence": node.get("confidence"),
             }
             await assign_taxonomy(kg, node_data)  # 未指定学科/板块时自动判定
-            # 建库 + 写空白骨架 MD（模板收口在 KnowledgeGraph）
-            kg.create_node_with_content(node_data, origin="decompose")
-
-            created_nodes.append(node_id)
+            # 建库 + 写空白骨架 MD（模板收口在 KnowledgeGraph）。
+            # 用返回值：同名并轨命中已有节点时落点是已有 ID，回执不能报没建出来的 id。
+            created_nodes.append(
+                kg.create_node_with_content(node_data, origin="decompose")
+            )
 
         # 创建边
         created_edges = 0

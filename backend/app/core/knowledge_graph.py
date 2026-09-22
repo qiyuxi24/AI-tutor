@@ -16,6 +16,7 @@
 import json
 import re
 import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
@@ -23,7 +24,7 @@ from datetime import datetime
 # 新节点 MD 的「来源标注」唯一真值。
 # 原先「写一个节点 MD」有 4 套内联模板散在 knowledge_writer / kb/graph_generator /
 # api/v1/knowledge.py（create_node、decompose）里，新增写路径就会长出第 5 套 ——
-# 收口见 docs/知识图谱_模块结构与封装调研.md §7 第二步。
+# 收口见 docs/知识图谱/知识图谱_模块结构与封装调研.md §7 第二步。
 ORIGIN_NOTES = {
     "ai": "由 AI 自动创建",
     "book": "由 AI 从学科书籍自动生成",
@@ -31,6 +32,43 @@ ORIGIN_NOTES = {
     "decompose": "由 AI 通过问题拆解自动创建（学习路径框架节点）",
 }
 ORIGIN_DEFAULT = "manual"
+
+# 同名并轨（去重 L1 档）的判定键 = 归一化后的 name。
+# 归一化只做字符串层处理，不做语义判断（语义去重在 kb/graph_generator.py 的
+# 嵌入粗筛 + LLM 复核）。实测漏合并的写法有两类：字面完全相同（同名重复）与
+# 碎片后缀（`_extended` / `_review` / 「（复习）」），后者剥掉尾缀即可归并。
+_NAME_SUFFIX_RE = re.compile(
+    r"[（(\[【_\-]*"
+    r"(?:extended|extension|review|reviewed|summary|overview|ext|复习|小结|回顾|总结|摘要|扩展|延伸)"
+    r"[）)\]】_\-]*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_node_name(name: str) -> str:
+    """节点名归一化 —— 同名并轨的判定键（返回空串表示名称无效，不参与判重）。
+
+    全角转半角（NFKC）→ 去掉全部空白 → 小写 → 反复剥掉「碎片类」尾缀。
+
+    失败语义：字面不同就不合并（宁可漏合并，不可误合并）；整名就是碎片词
+    （如「复习」）时原样返回，不剥成空串。
+    """
+    s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", name or "")).lower()
+    while True:
+        stripped = _NAME_SUFFIX_RE.sub("", s)
+        if not stripped or stripped == s:
+            return s
+        s = stripped
+
+
+def is_fragment_name(name: str) -> bool:
+    """名字带「（复习）/（小结）/_extended」这类碎片尾缀（归一化会把它剥掉）。
+
+    用途：存量同名合并时优先保留非碎片节点（id 更干净），以及后续入库拦截碎片节点。
+    """
+    plain = re.sub(r"\s+", "", unicodedata.normalize("NFKC", name or "")).lower()
+    return normalize_node_name(name) != plain
+
 
 
 class KnowledgeGraph:
@@ -208,6 +246,26 @@ class KnowledgeGraph:
             (node_id, self.user_id)
         ).fetchone()
         return self._row_to_node_dict(row) if row else None
+
+    def find_node_by_name(self, name: str, subject: str = "") -> Optional[dict]:
+        """按**归一化名称**找已有节点（同名并轨的唯一判定实现），找不到返回 None。
+
+        学科已知时只在同学科或未归档（学科为空）的节点里找 —— 不同学科的「树」
+        是两个概念，不能并轨；学科为空则不限。
+
+        调用方：`create_node_with_content`（写入层护栏）与
+        `knowledge_writer._find_same_name`（Agent 写路径）—— 别再各写一份比较逻辑。
+        """
+        key = normalize_node_name(name)
+        if not key:
+            return None
+        for node in self.nodes:
+            if normalize_node_name(node.get("name", "")) != key:
+                continue
+            if subject and self.node_subject(node) not in ("", subject):
+                continue
+            return node
+        return None
 
     def get_prerequisites(self, node_id: str) -> list[str]:
         """
@@ -733,21 +791,35 @@ class KnowledgeGraph:
         self._invalidate_cache()
 
     def create_node_with_content(self, node_data: dict, content: str = "",
-                                 origin: str = ORIGIN_DEFAULT) -> None:
+                                 origin: str = ORIGIN_DEFAULT) -> str:
         """
         建节点 + 写节点 MD 文件（原子操作：调用方不再自己 open() 文件，也不自带模板）。
 
         「写一个节点」的四条路径（Agent 工具写层 / 学科书籍建图 / 手动建节点 API /
         问题拆解）**唯一落点**；它们之间的差异只剩 origin 一个参数，不再是四套模板。
 
+        **同名并轨（去重 L1 档，写入层护栏）**：ID 不同但归一化名称相同（同用户、
+        同学科或未归档）→ 不新建节点，只把新正文并入已有节点的 MD。因此调用方
+        **必须使用返回值** 作为节点 ID（建边、回执都用它），不要再用自己传进来的 id。
+
         参数:
             node_data: 同 add_node（必须含 id、name）
             content:   Markdown 正文；以 # 开头视为完整文档，原样落盘
             origin:    ORIGIN_NOTES 的键（决定 MD 里的来源标注）
 
+        返回:
+            实际落点的节点 ID（并轨命中时是**已有节点**的 ID）
+
         异常:
             ValueError: 与 add_node 相同（ID 缺失或已存在）—— 此时**不落 MD 文件**
         """
+        name = (node_data.get("name") or "").strip()
+        existing = self.find_node_by_name(name, self.node_subject(node_data)) if name else None
+        if existing is not None:
+            node_id = existing["id"]
+            self._merge_content_into(node_id, content)
+            return node_id
+
         self.add_node(node_data)  # 先写库：ID 冲突在此抛出，不会留下孤儿 MD
         node_id = node_data["id"]
         content = (content or "").strip()
@@ -762,6 +834,25 @@ class KnowledgeGraph:
 
         (self.nodes_dir / f"{node_id}.md").write_text(md_content, encoding="utf-8")
         self.invalidate_content_cache(node_id)
+        return node_id
+
+    def _merge_content_into(self, node_id: str, content: str) -> bool:
+        """同名并轨：把正文/摘要并入已有节点（已包含则不重复追加），返回是否写入。
+
+        幂等是必要的：同一本书重跑一遍，同一段正文不能叠两遍（节点 MD 会线性膨胀）。
+        人类创建的节点静默跳过（`update_node_content` 的 AI 权限护栏），但**不再造重复节点**。
+        """
+        content = (content or "").strip()
+        md_path = self.nodes_dir / f"{node_id}.md"
+        if not content or not md_path.exists():
+            return False
+        if content in md_path.read_text(encoding="utf-8"):
+            return False
+        try:
+            self.update_node_content(node_id, content, mode="append", caller="ai")
+        except PermissionError:
+            return False
+        return True
 
     def remove_node(self, node_id: str, caller: str = "human") -> int:
         """

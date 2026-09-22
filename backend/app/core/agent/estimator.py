@@ -17,7 +17,7 @@
 历史数据源（2026-09-08 迁移）：旧 jsonl trace 已退役，统一从 agent/store.py 的
   agent_runs 表读取（run_agent_loop 内部落库）。
 
-设计依据：docs/token_consumption_prediction_research.md
+设计依据：docs/上下文工程/token_consumption_prediction_research.md
 
 独立使用（脚本/探针）：
   from app.core.agent.estimator import estimate_token_consumption

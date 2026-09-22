@@ -43,24 +43,17 @@ def save_suggestions(data_dir: Path, suggestions: list) -> None:
 
 def _find_same_name(kg: KnowledgeGraph, node_name: str, subject: str) -> str:
     """
-    在本人图谱里找**中文名完全相同**的节点 ID（同名并轨，返回空串表示没有）。
+    在本人图谱里找同名节点的 ID（同名并轨，返回空串表示没有）。
 
-    学科已知时只在同学科（或未归档）节点里找 —— 不同学科的「树」是两个概念，不能并轨。
+    判定逻辑（归一化 + 学科过滤）的唯一实现在 `KnowledgeGraph.find_node_by_name`，
+    这里只是"取 id"的薄壳 —— 写入层（create_node_with_content）用的是同一份判定。
 
-    ponytail: 只做精确同名，不做嵌入语义去重（那要在 Agent 热路径上多付一次嵌入 + LLM
-    二次确认，且当前嵌入 API 欠费）。要升级就复用 `kb/graph_generator.py` 的
+    ponytail: 只做字符串层同名，不做嵌入语义去重（那要在 Agent 热路径上多付一次嵌入 +
+    LLM 二次确认，且当前嵌入 API 欠费）。要升级就复用 `kb/graph_generator.py` 的
     `_find_dedup_candidates` + `_confirm_synonyms` 双闸。
     """
-    name = (node_name or "").strip()
-    if not name:
-        return ""
-    for node in kg.nodes:
-        if (node.get("name") or "").strip() != name:
-            continue
-        if subject and KnowledgeGraph.node_subject(node) not in ("", subject):
-            continue
-        return node["id"]
-    return ""
+    node = kg.find_node_by_name(node_name or "", subject)
+    return node["id"] if node else ""
 
 
 def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
@@ -78,7 +71,7 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
 
     **同名并轨**：ID 不同但**中文名完全相同**（同一学科内）时也走更新模式 ——
     模型每轮都可能给同一个概念编出不同 ID（实测：`harmony_dev_intro` / `harmonyos_intro`
-    同名「鸿蒙开发入门」并存，见 `docs/知识图谱_模块结构与封装调研.md` §7）。
+    同名「鸿蒙开发入门」并存，见 `docs/知识图谱/知识图谱_模块结构与封装调研.md` §7）。
 
     参数:
         kg:               KnowledgeGraph 实例（已绑定 user_id）

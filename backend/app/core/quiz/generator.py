@@ -255,6 +255,7 @@ async def _generate_batch(system_prompt: str, user_prompt: str,
                 system_prompt,
                 [{"role": "user", "content": user_prompt}],
                 max_tokens=QUIZ_BATCH_MAX_TOKENS,
+                kind="quiz_generate",
             )
         except Exception as e:
             # 空回复（思考吃满 token）是思考型模型的常见可恢复故障 → 再赌一次；

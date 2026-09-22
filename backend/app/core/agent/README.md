@@ -88,7 +88,7 @@ chat_service.process_message_stream(messages, mode, user_id)
 
 **预估不介入裁剪决策**：`estimator` 只产出"这一次大概花多少"（prompt/completion/成本），不改变任何行为；裁不裁仍由 `guard` 的精确计数与预算线决定。预估值随 run 落库，是事后校准 Phase 2 历史中位数、以及回看 S1/S8 配额的依据（预估 vs 真值同表）。
 
-> 各段的配额、让位顺序、触发阶梯见 **`docs/上下文工程_预算框架.md`**（配额 SSOT）。
+> 各段的配额、让位顺序、触发阶梯见 **`docs/上下文工程/上下文工程_预算框架.md`**（配额 SSOT）。
 
 ## 5. 不装什么（边界）
 
@@ -109,7 +109,7 @@ chat_service.process_message_stream(messages, mode, user_id)
 5. **`user_id=None` 是纯测试模式**：不推事件、不落库 —— 写测试时用它，别 mock 整个 event_bus。
 6. **每个 `KnowledgeGraph` 实例用毕 `close()`**，别跨协程共享（`chat_service` 已经踩过 use-after-close）。
 7. **事件类型是白名单**：`chat_service._format_agent_sse` 是 if/elif 无 else，新增事件类型必须同步加透传，否则会被静默丢弃。
-8. **改 `store.py` 的表结构要同步** `prune()` 的分层保留策略（≤30 天全量 / >30 天摘 evidence / >180 天整行删）与 `api/v1/agent_runs.py` 的字段假设。**新增列必须落到 `store._migrate()` 的老库补列**——`CREATE TABLE IF NOT EXISTS` 不会给已存在的表补字段（`token_estimate` 就是这么加的）。
+8. **改 `store.py` 的表结构要同步** `prune()` 的分层保留策略（≤30 天全量 / >30 天摘 evidence / >180 天整行删）与 `api/v1/agent_runs.py` 的字段假设。**新增列必须写进 `store._COLUMN_MIGRATIONS`**（由 `core/records.py::ensure_columns` 就地补）——`CREATE TABLE IF NOT EXISTS` **不会**给已存在的表补字段（`token_estimate` 就是这么加的）。库路径 / 连接 / 建表 / 过期清理也统一走 `core/records.py`，别再自己写一份 `_connect`。
 9. **预估 ≠ 真值**：`token_estimate`（estimator 估的）与 `token_usage`（API usage 真值）不是一回事，业务判断一律用真值（见坑 4），预估值只用于预算参考与事后校准。
 10. **改 `guard.py` 分层规则前先看 `tests/test_history_layering.py` 的四条不变量**：首条 user（任务锚点）永不丢；保留的近端消息**逐字未改**（分层只产出"原文 or 要点行"，不篡改）；裁剪后仍以 user 开头（分层会产生**连续 user** 消息，真机已验证 API 接受）；总 token ≤ 裁剪线。
 11. **改 `context.clear_old_tool_results` 前先确认配对不破**：只改 `tool` 消息的 `content`，`tool_call_id` 与 assistant `tool_calls` 的 id 列表必须逐字保留 —— 破了服务端报 400 `tool result's tool id() not found`。接线在 `loop._loop_core` 每轮 `_chat_once` 之前，`tests/test_agent_loop.py::test_old_tool_results_cleared_across_rounds` 锁住"真的被调用"（防止再次出现"实现了但匹配不到数据"的空转）。
@@ -177,9 +177,9 @@ backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"
 
 | 文档 | 管什么 |
 |---|---|
-| `docs/上下文工程_预算框架.md` | **配额 SSOT**：九段配额、让位顺序、触发阶梯 |
-| `docs/上下文工程_调研与差距审计.md` | 现状审计 + 业界/学术调研 + 实施记录 |
-| `docs/AgentLoop_重构设计讨论.md` | loop 的设计决策（路线 A、护栏、事件/记录整合） |
-| `docs/AgentLoop_业界调研与学习路线.md` | 业界 Agent 模式调研 |
+| `docs/上下文工程/上下文工程_预算框架.md` | **配额 SSOT**：九段配额、让位顺序、触发阶梯 |
+| `docs/上下文工程/上下文工程_调研与差距审计.md` | 现状审计 + 业界/学术调研 + 实施记录 |
+| `docs/AgentLoop/AgentLoop_重构设计讨论.md` | loop 的设计决策（路线 A、护栏、事件/记录整合） |
+| `docs/AgentLoop/AgentLoop_业界调研与学习路线.md` | 业界 Agent 模式调研 |
 | `AGENTS.md` §3 | 本包的内部契约与已知耦合（对外索引） |
 | `backend/app/core/agent_tools/README.md` | 上游：工具注册表与执行 |

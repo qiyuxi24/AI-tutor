@@ -38,10 +38,14 @@ import sqlite3
 import time
 from pathlib import Path
 
+from app.core import records
+
 logger = logging.getLogger("ai-tutor.debug")
 
-# 默认库目录（与 agent_runs 同根：backend/app/data/agent_debug）
-_DEFAULT_DB_DIR = Path(__file__).resolve().parents[2] / "data" / "agent_debug"
+# 库落点由 core/records.py 统一解析（= backend/app/data/agent_debug）。
+# 独立成库（而不是与 agent_runs 同库）：开发流水写量大、且能由 AGENT_DEBUG_LOG=0
+# 整体关闭，分开做写放大隔离，也避免它被清理策略绑死。
+_DB_FOLDER = "agent_debug"
 _DB_FILE = "debug_log.db"
 
 # 总开关：环境变量 AGENT_DEBUG_LOG=0 可整体关闭（生产排查完可关，避免每 run 多行写放大）
@@ -77,18 +81,8 @@ CREATE INDEX IF NOT EXISTS idx_debug_logs_user ON agent_debug_logs(user_id, ts D
 """
 
 
-def _db_path(db_dir: Path | None) -> Path:
-    return Path(db_dir or _DEFAULT_DB_DIR) / _DB_FILE
-
-
 def _connect(db_dir: Path | None) -> sqlite3.Connection:
-    path = _db_path(db_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(_SCHEMA)
-    return conn
+    return records.connect(_DB_FOLDER, _DB_FILE, _SCHEMA, db_dir)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -211,10 +205,7 @@ def prune(days: int = _RETENTION_DAYS, db_dir=None) -> int:
     """删掉超过保留窗口的调试日志，返回删除条数（由启动/每日 GC 触发）。"""
     conn = _connect(db_dir)
     try:
-        with conn:
-            cur = conn.execute("DELETE FROM agent_debug_logs WHERE ts < ?",
-                               (time.time() - days * 86400,))
-            return cur.rowcount
+        return records.prune_older_than(conn, "agent_debug_logs", days)
     finally:
         conn.close()
 
@@ -230,4 +221,4 @@ def clear(db_dir=None) -> None:
 
 
 def default_db_dir() -> Path:
-    return _DEFAULT_DB_DIR
+    return records.default_dir(_DB_FOLDER)

@@ -130,6 +130,7 @@ async def _grade_short_answer(
         raw = await call_llm(
             system_prompt,
             [{"role": "user", "content": user_prompt}],
+            kind="quiz_grade",
         )
         # 提取 JSON
         m = re.search(r"\{[\s\S]*\}", raw or "")

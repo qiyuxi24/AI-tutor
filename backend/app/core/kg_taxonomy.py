@@ -1,7 +1,7 @@
 """节点归属自动判定（学科 subject / 知识板块 board）。
 
 背景：写节点有 4 条路径，其中 3 条既不写 board、也常缺学科标签
-（见 `docs/知识图谱_模块结构与封装调研.md` §3.3）→ 新建节点大量落进「未分类」/「未分组」，
+（见 `docs/知识图谱/知识图谱_模块结构与封装调研.md` §3.3）→ 新建节点大量落进「未分类」/「未分组」，
 前端学科栏与板块栏因此经常空白。
 
 本模块是归属判定的唯一入口：建节点前调用一次，**规则优先、LLM 兜底**，就地补 tags 与 board。
@@ -117,7 +117,8 @@ async def _ask_llm(kg: KnowledgeGraph, node_data: dict, subject: str,
             "- 确实判断不了就填空字符串\n"
             '只输出 JSON：{"subject": "...", "board": "..."}'
         )
-        raw = await call_llm(_SYSTEM_PROMPT, [{"role": "user", "content": prompt}])
+        raw = await call_llm(_SYSTEM_PROMPT, [{"role": "user", "content": prompt}],
+                             kind="taxonomy")
         matched = re.search(r"\{.*\}", raw, re.S)
         data = json.loads(matched.group(0)) if matched else {}
         return {

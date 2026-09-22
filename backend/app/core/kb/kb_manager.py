@@ -119,6 +119,7 @@ def _make_chunk(content: str, page: Optional[int],
     return {
         "content": content,
         "heading": " / ".join(path) if path else _extract_heading(content),
+        "path": list(path),   # 真实标题层级（空 = 无标题结构）；供"按章节重组"的调用方使用
         "chunk_index": 0,
         "page": page,
     }
@@ -263,7 +264,7 @@ class KbManager:
             )
 
         # verbose=True 取回完整 ParseResult：meta 记录解析方式/页数/OCR 页数/乱码率
-        # （解析契约见 parsers/base.py 与 docs/RAG_视觉解析策略_调研与实施方案.md §4.6）
+        # （解析契约见 parsers/base.py 与 docs/RAG/RAG_视觉解析策略_调研与实施方案.md §4.6）
         parsed = parse_document(filename, content, verbose=True)
         text = parsed.text
         if parsed.meta:

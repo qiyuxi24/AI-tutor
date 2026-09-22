@@ -22,6 +22,7 @@
 | `call.py` | 一次性调用 | `call_llm` | 不带工具的纯文本/JSON：出题 / 判分 / 图谱分析 |
 | `embed.py` | 嵌入（**检索侧**） | `embed_texts` `EMBEDDING_MODEL` `EMBED_BATCH_SIZE` `MAX_EMBED_CHARS` | **检索侧嵌入唯一出口**（kb 向量化 / 图谱 RAG）；语义去重侧 `kb/embedder.py::ApiEmbedder` 共用同名常量与失败语义 |
 | `json_extract.py` | 结构化抽取 | `extract_json` | **JSON 提取唯一出口**：三策略定位 + 引号兜底修复 |
+| `usage.py` | 用量记账 | `record` `summary` | **token 审计唯一出口**：一次真实调用一行（kind / model / tokens），落在 `agent_runs.db` 的 `llm_usage` 表；**新增 LLM 出口时同步调一次 `record()`** |
 
 ---
 
@@ -56,7 +57,7 @@ kb.embedder.ApiEmbedder ─→ 同步 OpenAI（同一模型；语义去重专用
 - **不触发回退的错误**：`400` / `404` / `422` 等"请求本身错了"（换模型也没用），
   以及非 401/402/403/429/5xx 的 `APIStatusError`。回退条件见 `should_fallback`。
 
-### 3.2 `call_llm(system_prompt, messages, max_tokens=2000, thinking=True)` —— 一次性文本
+### 3.2 `call_llm(system_prompt, messages, max_tokens=2000, thinking=True, kind=..., user_id=...)` —— 一次性文本
 
 **必须记住的一条**：M3 的**思考与正文共享 `max_tokens` 预算**（见 §4.1）。
 所以：
@@ -144,6 +145,6 @@ venv/Scripts/python.exe -m pytest tests/test_agent_loop_real_api.py -q -m llm_ap
 | 位置 | 关系 |
 |---|---|
 | `../../agent/loop.py` | 带工具的多轮调用方（唯一使用 `chat_create` 的业务路径） |
-| `docs/AgentLoop_业界调研与学习路线.md` · `docs/AgentLoop_重构设计讨论.md` | Agent Loop 侧设计 |
-| `docs/token_consumption_prediction_research.md` | token 计费与预估（`agent/estimator.py` 的依据） |
+| `docs/AgentLoop/AgentLoop_业界调研与学习路线.md` · `docs/AgentLoop/AgentLoop_重构设计讨论.md` | Agent Loop 侧设计 |
+| `docs/上下文工程/token_consumption_prediction_research.md` | token 计费与预估（`agent/estimator.py` 的依据） |
 | `AGENTS.md` §0 | 三段 key / 模型配置的真值位置 |

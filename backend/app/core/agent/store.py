@@ -35,12 +35,19 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from app.core import records
+
 logger = None  # 惰性导入避免启动开销，见 _log()
 
-# 默认库目录 backend/data/agent_runs（与 kb/quiz 索引同数据根，随 Docker
-# ./backend/data 卷持久化；旧位置「根 data/agent_runs」已废弃，迁移前无残留数据）
-_DEFAULT_DB_DIR = Path(__file__).resolve().parents[2] / "data" / "agent_runs"
+# 库落点由 core/records.py 统一解析（= backend/app/data/agent_runs）。
+# ⚠️ 不在 Docker 的 ./backend/data 卷里 —— 靠 docker-compose 单挂 ./backend/app/data
+#    持久化（2026-09-20 补挂，此前容器重建即丢运行记录）。
+_DB_FOLDER = "agent_runs"
 _DB_FILE = "agent_runs.db"
+
+# 老库补列清单：**新增列必须写在这里**（CREATE TABLE IF NOT EXISTS 不会给老表加字段，
+# 回归见 tests/test_agent_run_store.py::test_legacy_db_gets_token_estimate_column）。
+_COLUMN_MIGRATIONS = {"token_estimate": "TEXT NOT NULL DEFAULT '{}'"}
 
 # 单条 tool 结果/参数存库上限（防御失控工具写爆 DB；正常工具结果远小于此。
 # ponytail: 简单截断护栏，真需要全量时调大即可）
@@ -78,29 +85,10 @@ def _log():
     return logger
 
 
-def _db_path(db_dir: Path | None) -> Path:
-    return Path(db_dir or _DEFAULT_DB_DIR) / _DB_FILE
-
-
 def _connect(db_dir: Path | None) -> sqlite3.Connection:
-    path = _db_path(db_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(_SCHEMA)
-    _migrate(conn)
+    conn = records.connect(_DB_FOLDER, _DB_FILE, _SCHEMA, db_dir)
+    records.ensure_columns(conn, "agent_runs", _COLUMN_MIGRATIONS)
     return conn
-
-
-def _migrate(conn: sqlite3.Connection) -> None:
-    """给已存在的老库就地补列（CREATE TABLE IF NOT EXISTS 不会补新字段）。幂等。"""
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(agent_runs)")}
-    if "token_estimate" not in cols:
-        with conn:
-            conn.execute(
-                "ALTER TABLE agent_runs ADD COLUMN token_estimate TEXT NOT NULL DEFAULT '{}'"
-            )
 
 
 def _truncate(text: str, limit: int = _RECORD_TEXT_LIMIT) -> str:
@@ -336,7 +324,7 @@ def run_stats(user_id: int, db_dir: Path | None = None) -> dict:
 
 def default_db_dir() -> Path:
     """默认库目录（供调用方/脚本显式传参）。"""
-    return _DEFAULT_DB_DIR
+    return records.default_dir(_DB_FOLDER)
 
 
 def ts_now() -> float:

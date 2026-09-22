@@ -139,5 +139,5 @@ venv/Scripts/python.exe -m pytest tests/ -q -m "not llm_api"
 |---|---|
 | `../core/agent_tools/mcp_host.py` | 宿主层实现（本模块的另一半） |
 | `../core/agent_tools/README.md` | 工具机制层：注册表 / 分发 / 不变量 |
-| `docs/MCP_网页搜索工具_调研与实施方案.md` | 选型与实施方案（为什么 MCP、为什么 Bing RSS） |
+| `docs/RAG/MCP_网页搜索工具_调研与实施方案.md` | 选型与实施方案（为什么 MCP、为什么 Bing RSS） |
 | `../requirements.txt` | `mcp` 依赖声明 |
