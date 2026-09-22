@@ -169,7 +169,7 @@ venv\Scripts\python.exe scripts/eval_rag.py --embed mock
 | `data/`（图谱 / 画像 / 对话 / KB 索引）、`backend/data/` | 本地运行时数据，可重建 |
 | `logs/`、`*.bak`、`whoosh_index/` | 生成物 |
 | `.research/` | 外部对标仓库（clone 的第三方源码） |
-| `docs/比赛/官方材料/` | 一手材料的版权与用途限制 |
+| `docs/比赛/国创/官方材料/`、`docs/比赛/AI教育/官方材料/` | 一手材料的版权与用途限制 |
 | `venv/`、`node_modules/`、`dist/` | 依赖与构建产物 |
 
 > 例外：`data/prompts/*.j2`（提示词模板）与 `data/*.md`（文档）是**需要入库**的。
@@ -185,7 +185,7 @@ venv\Scripts\python.exe scripts/eval_rag.py --embed mock
 | `README.md` | `README.en.md` |
 | `CONTRIBUTING.md` | `CONTRIBUTING.en.md` |
 
-规则（完整规范见 [`docs/README_编写规范.md`](docs/README_编写规范.md) 第 6 章）：
+规则（完整规范见 [`docs/工程实践/README_编写规范.md`](docs/工程实践/README_编写规范.md) 第 6 章）：
 
 1. **只改主语言文件是不够的**：章节增删改、命令、端口、环境变量、测试数字，都必须**在同一个 commit 同步镜像**。
 2. 镜像的**章节编号 / 顺序 / 表格行数 / 代码块**必须与主文件一一对应。

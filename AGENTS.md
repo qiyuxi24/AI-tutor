@@ -3,7 +3,7 @@
 > **定位**（依 [agents.md](https://agents.md/) 规范）：本文件是**给 agent 的操作手册**，不是项目百科。
 > 只写三类：① **可直接执行的命令** ② **不写就会做错的硬约束/坑** ③ **文档路由**。
 > 架构说明、模块职责、端点 schema **刻意不写在这里** —— 权威依次为：代码 `docstring` → 各包 `README.md` → `docs/*.md` → 运行后的 `http://localhost:8000/docs`。
-> 为什么这么瘦：AGENTS.md 能把 agent 的运行时间中位降低 **~28.6%**、输出 token 降低 **~16.6%**（arXiv 2601.20404），但**仓库概览型内容不提升成功率、反而让成本 +>20%**（ETH arXiv 2602.11988）→ 只留可执行信息。取舍经过见 `docs/AI编码Skill_ponytail实测与通用Skill选型.md`。
+> 为什么这么瘦：AGENTS.md 能把 agent 的运行时间中位降低 **~28.6%**、输出 token 降低 **~16.6%**（arXiv 2601.20404），但**仓库概览型内容不提升成功率、反而让成本 +>20%**（ETH arXiv 2602.11988）→ 只留可执行信息。取舍经过见 `docs/工程实践/AI编码Skill_ponytail实测与通用Skill选型.md`。
 > 冲突裁决：用户对话中的显式指令 > 本文件。
 
 ---
@@ -26,17 +26,18 @@
 - **`.env` 只有根目录一份**，不要在 `backend/` 下另建。
 - **`nodes.id` 是全局 TEXT 主键**（非 per-user）；脚本/测试建节点前先 `INSERT OR IGNORE INTO users`。
 - **用户隔离**：图谱/画像/RAG/记录全按 `user_id` 分区；`KnowledgeGraph(user_id)` 每次新建、用毕 `close()`，别跨协程共享实例。
-- **agent_runs 表加列必须同时改 `core/agent/store.py::_migrate()`**：`CREATE TABLE IF NOT EXISTS` 不会给老库补列（`token_estimate` 就是靠它补的；回归 `test_legacy_db_gets_token_estimate_column`）。
+- **记录型库（`agent_runs` / `llm_usage` / `agent_debug_logs`）统一走 `core/records.py`**：连接 / 建表 / 补列 / 过期清理的唯一实现，三张表分属两个库（`agent_runs.db`、`debug_log.db`）。**加表 = 写自己的 schema + 调 `records.connect` + 在 `main.py::_prune_once` 的 `_JOBS` 加一行**，别另抄一套连接代码。**加列 = 写进该模块的补列清单**（如 `store._COLUMN_MIGRATIONS`，由 `records.ensure_columns` 就地补）：`CREATE TABLE IF NOT EXISTS` 既不会给老表加字段、也不会自动接线（`token_estimate` 就是这么加的；回归 `test_legacy_db_gets_token_estimate_column`）。
 - **🔴 Jinja2 占位符必须双花括号**（单花括号是字面文本，**不报错**）：`data/prompts/system_prompt_common.j2` 曾把 `{knowledge_graph_summary}` / `{user_profile}` 写错 → adaptive/free_talk 下 AI **完全看不到图谱与画像**，曾被误判为"模型幻觉"，排查成本极高。改模板/加载器后**断言"值被注入"**，而不是"占位符名字出现"；诊断脚本 `backend/scripts/probe_graph_prompt.py`；回归 `backend/tests/test_prompt_loader.py`。
 - **loop 默认值**：`max_rounds=5` / 单工具超时 `60s` / 循环内 `temperature=0.3` / 工具调用总次数 `12` / run 墙钟 `180s` / 同参数重复 `≤2` / 连续失败熔断 `3`（改默认值 = 改 `core/agent/loop.py` 常量 + 同步 `run_agent_loop` 签名、测试与文档）。**`max_rounds` 挡不住模型用相同参数反复重试**（`Tool Result Clearing` 还会诱发它），那一类由 `loop._LoopGuard` 拦。
 - **排查"输出无用数据"**：调试日志 `core/agent/debug_log.py`（控制台 + SQLite `data/agent_debug/debug_log.db`，`recent(run_id=)` 回看，保留 14 天）+ 终止原因 `stop_reason`（`natural`/`max_rounds`/`time_budget`/`call_budget`/`fail_circuit`/`error`，同一取值出现在 `AGENT_DONE` 事件与 `agent_runs` 证据的 `loop_stop`）。安全边界规则在 `core/agent/loop_guard.py`。
+- **日志**：唯一配置在 `core/logging_setup.py`，由 `app/__init__.py` **导入即初始化**（所以 `python scripts/xxx.py` 直跑也有日志——曾整段配置写在 `main.py`，脚本直跑时 INFO 全丢）；落点 `backend/logs/tutor.log`，`LOG_DIR` 是相对路径时按 **backend 目录**解析（不随 CWD 漂移；曾同时写出项目根与 backend 两份 `tutor.log`）。排查三入口：`tutor.log`（全局）/ `GET /agent/logs?run_id=`（agent 流水）/ `GET /agent/usage`（token 账）。**加日志只记"判定了什么、放弃了什么、为什么"**，不要记每次成功的流水。
 - **git 与并发**：不主动 commit/push；本仓库**常有多个 AI 会话并发写** → 提交必须**路径限定**（禁 `git add -A` / `commit -a`），内容与预期不符先查 mtime。
 - **代理残留**：注册表 `ProxyEnable=1` 残留在代理退出后会让 pip 报 `ProxyError`（httpx 也读注册表）；装包前 `$env:NO_PROXY="*"`；推 GitHub 前 `$env:HTTPS_PROXY="http://127.0.0.1:7897"`。
 
 ## 2. 项目特有约定（非标准实践，照做）
 
 - **单一事实源 / 唯一出口**：LLM 原语在 `core/llm/`（**检索侧**嵌入 `embed.py::embed_texts` —— 语义去重侧另走 `kb/embedder.py::ApiEmbedder`，共用其常量与失败语义；JSON 提取 `json_extract.py::extract_json`；`chat_create` 是唯一带 fallback 的出口；真打 LLM 仅 `agent/loop._chat_once` 与 `call_llm`）；运行记录 `core/agent/store.py`（**唯一写入方 = loop**）；工具注册表 `core/agent_tools/registry.py`；token 计量 `core/token_counter.py`。
-- **新建节点只有一个出口** `KnowledgeGraph.create_node_with_content(node_data, content, origin)`：4 条写路径（Agent 工具写层 `knowledge_writer` / 书籍建图 `graph_generator` / 手动 API / 问题拆解）全部走它，MD 模板唯一来源 = `knowledge_graph.ORIGIN_NOTES`。**禁止**在调用方自己 `open(kg.nodes_dir/...)` 写节点 MD；新增写路径时守住 `tests/test_node_write_paths.py`（逐条断言 origin，加了新路径而没复用模板就会红）。
+- **新建节点只有一个出口** `KnowledgeGraph.create_node_with_content(node_data, content, origin)`：4 条写路径（Agent 工具写层 `knowledge_writer` / 书籍建图 `graph_generator` / 手动 API / 问题拆解）全部走它，MD 模板唯一来源 = `knowledge_graph.ORIGIN_NOTES`。**禁止**在调用方自己 `open(kg.nodes_dir/...)` 写节点 MD；新增写路径时守住 `tests/test_node_write_paths.py`（逐条断言 origin，加了新路径而没复用模板就会红）。**同名并轨也在这一层**（2026-09-20）：命中同名（`normalize_node_name` + 同用户同学科，判重唯一实现 = `KnowledgeGraph.find_node_by_name`）则不新建、只并入正文，**返回实际落点 ID** —— 调用方必须用返回值建边/回执，别再自己写一份同名比较。建图语义去重状态 `dedup_status`（`ok`/`degraded` hash 兜底/`unavailable` 欠费）随 aggregate 带出。
 - **LLM 调用边界**：所有对话走 `run_agent_loop`（带 KG_TOOLS）；一次性文本/JSON（出题/判分/图谱生成）走 `call_llm`（不带工具）。
 - **M3 三段坑**：思考与正文**共享** `max_tokens` 预算 → 批量结构化抽取必须 `thinking=False`，长 JSON 显式调大 max_tokens（否则"空正文 / 硬截断"交替出现）。
 - **加工具 = 1 个新模块 + 1 行注册 + 3 份产物自动生成**：在 `core/agent_tools/tools/` 下**复制任一模块**（一工具一文件），改 `DESCRIPTION` / `PARAMETERS` / `GUIDANCE` / `handler` / `SPEC` 五处，再在 `tools/__init__.py` 的 `NATIVE_SPECS` 加一行；`KG_TOOLS`、执行分发、提示词「工具调用指南」全自动生效，**不要再手写第四份说明**（曾双源漂移：MCP 关闭后提示词仍教模型调不存在的工具）。编写规范/检查清单见 `core/agent_tools/tools/README.md`，一致性由 `backend/tests/test_tools_registry.py` 锁死。**MCP 工具不用改本仓库任何文件**：`core/agent_tools/mcp_host.py::_SERVERS` 加 `(前缀, 模块路径)` 即入注册表。
@@ -45,7 +46,7 @@
 - **掌握度更新的唯一主信号 = 出题判分**：`grade_answer` 答对确定性 +20；`update_mastery` 只认 3 种硬证据（实测模型**从不主动调用**它）。触发类提示词必须写成**铁律**并写明"**不要**用追问代替出题"（对立表述），否则会被更强的既有教学原则盖过；出题必须跨调用去重（`avoid_questions=`），否则重答同题可刷掌握度。
 - **错误码**：`core/error_codes.py` 定义 `ErrorCode.*`；异常信息以 `[E-XXX]` 开头并走 `log_error()`。
 - **请求结构**：`ChatRequest.messages = [{role, content}]`，另带 `mode`（adaptive/free_talk/recursive）与可选 `current_node`/`kb_node_ids`；RAG 检索前读 `UserProfile.get_usage_mode()`。
-- **README 纪律**：根 README 依 `docs/README_编写规范.md`（中文 SSOT，英文派生镜像）；本文件与 README 视角不同，**别互相复制**。
+- **README 纪律**：根 README 依 `docs/工程实践/README_编写规范.md`（中文 SSOT，英文派生镜像）；本文件与 README 视角不同，**别互相复制**。
 
 ## 3. 写代码的纪律（已装 skill，按场景选一个）
 
@@ -59,7 +60,7 @@
 
 **永不让步（任何 skill 都不得简化掉）**：输入校验、错误处理、安全、可访问性、用户明确要求的东西。
 **外部 skill 与本文件冲突时，以本文件为准**（例：`brainstorming`/`writing-plans` 里的 "frequent commits" ✗ 本项目"不主动 commit"；`ponytail` 的"测试也 YAGNI" ✗ 中大型改动走 TDD）。
-实测与选型依据：`docs/AI编码Skill_ponytail实测与通用Skill选型.md`（结论：ponytail 省的是 **diff**，不是 token，回本阈值 ≈ 不省则要多写 >2K token 的代码）。
+实测与选型依据：`docs/工程实践/AI编码Skill_ponytail实测与通用Skill选型.md`（结论：ponytail 省的是 **diff**，不是 token，回本阈值 ≈ 不省则要多写 >2K token 的代码）。
 
 ## 4. 改架构前必读的坑（每条一句，细节在链接里）
 
@@ -84,14 +85,15 @@
 | **LLM 原语包（客户端 / 思考 / 回退 / 嵌入 / JSON 提取）** | `backend/app/core/llm/README.md` |
 | **MCP 模块（server 本体 + 宿主接线 / 搜索后端降级链）** | `backend/app/mcp_servers/README.md` |
 | 模块级最新契约 | 对应模块 `*.py` 的 **docstring**（代码优先于文档） |
-| Agent Loop 设计决策 / 业界调研 | `docs/AgentLoop_重构设计讨论.md`、`docs/AgentLoop_业界调研与学习路线.md` |
-| 上下文工程（预算 / 裁剪 / 预估） | `docs/上下文工程_调研与差距审计.md`、`docs/上下文工程_预算框架.md`、`TODO_Context.md` |
-| 知识图谱（**唯一参照 = 参照系契约**） | `docs/知识图谱_参照系契约.md` + `_模块结构与封装调研` / `_P0实现方案与核心思路` / `_P1扩跳与AB对照实验` / `_多资料综合维护调研` |
-| RAG / 文档解析 / 检索 / 出题 | `docs/RAG_*.md`、`docs/QUIZ_出题逻辑调研.md` |
-| MCP 网页搜索 | `docs/MCP_网页搜索工具_调研与实施方案.md` |
-| 采集模块 | `docs/教育资料采集模块_设计讨论.md` + `TODO_Collector.md` |
-| 部署与运维 | `deploy/README.md` → `docs/Docker_学习路径与工程化部署.md` → `docs/运维_生产上线与日常运营指南.md` |
-| AI 编码 skill 的效果实测与选型 | `docs/AI编码Skill_ponytail实测与通用Skill选型.md` |
+| Agent Loop 设计决策 / 业界调研 | `docs/AgentLoop/AgentLoop_重构设计讨论.md`、`docs/AgentLoop/AgentLoop_业界调研与学习路线.md` |
+| 上下文工程（预算 / 裁剪 / 预估） | `docs/上下文工程/上下文工程_调研与差距审计.md`、`docs/上下文工程/上下文工程_预算框架.md`、`TODO_Context.md` |
+| 知识图谱（**唯一参照 = 参照系契约**） | `docs/知识图谱/知识图谱_参照系契约.md` + `docs/知识图谱/知识图谱_模块结构与封装调研` / `docs/知识图谱/知识图谱_P0实现方案与核心思路` / `docs/知识图谱/知识图谱_P1扩跳与AB对照实验` / `docs/知识图谱/知识图谱_多资料综合维护调研` |
+| 图谱质量体检 / 存量同名合并 | `backend/scripts/inspect_graph_quality.py`（`--user N` 单用户、`--fix-dupes [--apply]` 合并，默认只读）；指标口径与验收基线见 `TODO_Graph_Quality.md` §0.1 |
+| RAG / 文档解析 / 检索 / 出题 | `docs/RAG/RAG_*.md`、`docs/教学模块/QUIZ_出题逻辑调研.md` |
+| MCP 网页搜索 | `docs/RAG/MCP_网页搜索工具_调研与实施方案.md` |
+| 采集模块 | `docs/教育资料采集/教育资料采集模块_设计讨论.md` + `TODO_Collector.md` |
+| 部署与运维 | `deploy/README.md` → `docs/运维部署/Docker_学习路径与工程化部署.md` → `docs/运维部署/运维_生产上线与日常运营指南.md` |
+| AI 编码 skill 的效果实测与选型 | `docs/工程实践/AI编码Skill_ponytail实测与通用Skill选型.md` |
 | 历程 / 决策 / 踩坑总表 | `docs/项目历程_决策与效果记录.md` |
 | 跨会话决策与硬约束（AI 会话必读） | `.codebuddy/memory/MEMORY.md` |
 | 未完成项 | `TODO.md`、`TODO_Collector.md`、`done.md`（完成侧归档） |

@@ -1,4 +1,4 @@
-<!-- base: README.md @ c54d571 (2026-09-12). English mirror of the Chinese README — keep both in sync; spec: docs/README_编写规范.md §6. -->
+<!-- base: README.md @ c54d571 (2026-09-12). English mirror of the Chinese README — keep both in sync; spec: docs/工程实践/README_编写规范.md §6. -->
 
 # TutorAgent — A Knowledge-Graph-Driven Adaptive Tutoring Agent
 
@@ -237,13 +237,13 @@ npm run dev
 ## Documentation index
 
 - [Project Wiki](https://github.com/qiyuxi24/AI-tutor/wiki) — module-by-module guide: quick start / architecture / agent kernel / knowledge graph / hybrid retrieval / API reference / FAQ (in Chinese)
-- [README writing spec](docs/README_编写规范.md) (v3: facade template / bilingual maintenance / contribution guide, in Chinese) ｜ [Contributing](CONTRIBUTING.en.md) ｜ [中文 README](README.md)
+- [README writing spec](docs/工程实践/README_编写规范.md) (v3: facade template / bilingual maintenance / contribution guide, in Chinese) ｜ [Contributing](CONTRIBUTING.en.md) ｜ [中文 README](README.md)
 - [AGENTS.md development handbook](AGENTS.md) — architecture contracts, module responsibilities, and where to plug in new tools/endpoints (in Chinese)
-- [RAG decoupling & directory retrieval research](docs/RAG_去耦合与目录检索调研.md) ｜ [RAG recall & rerank research](docs/RAG_召回与重排优化调研.md) ｜ [Agentic RAG research](docs/RAG_参考资料与学习路线.md) (in Chinese)
-- [Agent Loop redesign](docs/AgentLoop_重构设计讨论.md) ｜ [Agent Loop industry research](docs/AgentLoop_业界调研与学习路线.md) (in Chinese)
-- [Knowledge-graph frame-of-reference contract](docs/知识图谱_参照系契约.md) ｜ [Knowledge-graph module structure research](docs/知识图谱_模块结构与封装调研.md) (in Chinese)
-- [AI quiz generation research](docs/QUIZ_出题逻辑调研.md) ｜ [Collector design discussion](docs/教育资料采集模块_设计讨论.md) (in Chinese)
-- [Docker learning path & engineering deployment](docs/Docker_学习路径与工程化部署.md) ｜ [Production launch & daily operations guide](docs/运维_生产上线与日常运营指南.md) ｜ [Benchmark project comparison](docs/标杆项目对标分析.md) (in Chinese)
+- [RAG decoupling & directory retrieval research](docs/RAG/RAG_去耦合与目录检索调研.md) ｜ [RAG recall & rerank research](docs/RAG/RAG_召回与重排优化调研.md) ｜ [Agentic RAG research](docs/RAG/RAG_参考资料与学习路线.md) (in Chinese)
+- [Agent Loop redesign](docs/AgentLoop/AgentLoop_重构设计讨论.md) ｜ [Agent Loop industry research](docs/AgentLoop/AgentLoop_业界调研与学习路线.md) (in Chinese)
+- [Knowledge-graph frame-of-reference contract](docs/知识图谱/知识图谱_参照系契约.md) ｜ [Knowledge-graph module structure research](docs/知识图谱/知识图谱_模块结构与封装调研.md) (in Chinese)
+- [AI quiz generation research](docs/教学模块/QUIZ_出题逻辑调研.md) ｜ [Collector design discussion](docs/教育资料采集/教育资料采集模块_设计讨论.md) (in Chinese)
+- [Docker learning path & engineering deployment](docs/运维部署/Docker_学习路径与工程化部署.md) ｜ [Production launch & daily operations guide](docs/运维部署/运维_生产上线与日常运营指南.md) ｜ [Benchmark project comparison](docs/调研对标/标杆项目对标分析.md) (in Chinese)
 
 ## Contributing
 

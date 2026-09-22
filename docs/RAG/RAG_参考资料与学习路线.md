@@ -1,7 +1,7 @@
 # RAG 系统学习参考资料与学习路线（补充）
 
 > 创建：2026-08-30
-> 定位：作为 `docs/RAG_去耦合与目录检索调研.md` 的**通识/进阶补充**——那边解决"我们项目怎么改"，这份解决"RAG 整体怎么学、外面有什么好东西"。
+> 定位：作为 `docs/RAG/RAG_去耦合与目录检索调研.md` 的**通识/进阶补充**——那边解决"我们项目怎么改"，这份解决"RAG 整体怎么学、外面有什么好东西"。
 > 用法：按"方面"分类，每条标注了**类型**（综述/开源/博客）与**对应本项目已实现的模块**，学习时可对照代码。
 
 ---
@@ -10,7 +10,7 @@
 
 | 材料 | 位置 | 内容 |
 |------|------|------|
-| RAG 架构决策调研 | `docs/RAG_去耦合与目录检索调研.md` | Agentic RAG / RAPTOR / Parent-Child 等论文与工程调研 + 落地阶段规划 |
+| RAG 架构决策调研 | `docs/RAG/RAG_去耦合与目录检索调研.md` | Agentic RAG / RAPTOR / Parent-Child 等论文与工程调研 + 落地阶段规划 |
 | 图谱 RAG 源码 | `backend/app/core/rag/`（chunker / manager / vector_store） | 图谱 MD 分块 → text-embedding-v4 向量化 → 余弦检索 |
 | 混合检索 | `backend/app/core/hybrid_search/`（whoosh BM25 + fusion） | 向量 + BM25 双路召回 + 加权融合（业界主流 RRF 思路） |
 | RAG 路由器（去耦合） | `backend/app/core/rag_pipeline/`（sources / router / pipeline） | 多数据源注册 + 按需开关 + 跨源融合，正是"RAG 中间件"落地 |
@@ -45,7 +45,7 @@ RAG 学习的第一站：搞清 **Naive RAG → Advanced RAG → Modular RAG →
 | [RAG 检索策略：分块、多路召回、rerank](https://blog.csdn.net/qq_62234605/article/details/162636585) | 博客 | 中文实战，分块→多路召回→精排完整链路 |
 | [深入理解 RAG：知识增强架构](https://blog.csdn.net/hyc010110/article/details/148873611) | 博客 | HyDE / 混合检索 / 重排的中文入门 |
 
-> 本项目对照：`backend/app/core/rag/chunker.py`（图谱 MD 分块）+ `kb/` 文档分块。进阶方向是 **Parent-Child 分块**（小 chunk 检索 + 大 chunk 返回），`docs/RAG_去耦合与目录检索调研.md` 阶段 B 已规划。
+> 本项目对照：`backend/app/core/rag/chunker.py`（图谱 MD 分块）+ `kb/` 文档分块。进阶方向是 **Parent-Child 分块**（小 chunk 检索 + 大 chunk 返回），`docs/RAG/RAG_去耦合与目录检索调研.md` 阶段 B 已规划。
 
 ---
 
@@ -91,7 +91,7 @@ RAG 学习的第一站：搞清 **Naive RAG → Advanced RAG → Modular RAG →
 | [RAGAS 从 0.79 到 0.85 的完整复盘](https://blog.csdn.net/weixin_53902256/article/details/158208275) | 博客 | 检索质量决定生成质量上限，中文实战复盘 |
 | [RAGAS 4 个指标一测便知](https://juejin.cn/post/7615551904537919530) | 博客 | 上下文精度/召回率通俗解读（"别拿垃圾信息污染生成器"） |
 
-> 本项目对照：`docs/RAG_去耦合与目录检索调研.md` 评审维度已引用 context_precision 等指标；项目目前无自动化评测，接 RAGAS 可作为 P2 加分项。
+> 本项目对照：`docs/RAG/RAG_去耦合与目录检索调研.md` 评审维度已引用 context_precision 等指标；项目目前无自动化评测，接 RAGAS 可作为 P2 加分项。
 
 ---
 
@@ -138,7 +138,7 @@ RAG 学习的第一站：搞清 **Naive RAG → Advanced RAG → Modular RAG →
 ```
 第 1 步  通识：读「综述与范式演进」→ 建立 Naive/Advanced/Modular/Agentic 心智模型
 第 2 步  对照代码：读 backend/app/core/rag + hybrid_search + rag_pipeline 三份源码
-         （配合 docs/RAG_去耦合与目录检索调研.md 理解为什么这么设计）
+         （配合 docs/RAG/RAG_去耦合与目录检索调研.md 理解为什么这么设计）
 第 3 步  深入检索：学「检索增强」+「分块策略」→ 对照自己的 chunker / router
 第 4 步  加精排：实现 cross-encoder rerank（hybrid_search 之后接一层）
          → 这是当前项目性价比最高的下一步

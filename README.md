@@ -226,20 +226,20 @@ npm run dev
 - **离线评测集**（复用 CMRC2018，256 文档/1000 查询）：`backend/scripts/eval_rag.py`
   mock 基线：vector R@1=0.470 / BM25 0.964 / hybrid(RRF) 0.766 / fuse(加权 α=0.6) 0.818（真实 text-embedding-v4 额度恢复后 `--embed api` 复跑）。
 - **编码准则**：YAGNI 最小实现 + 提示词模板外置（Jinja2）+ 单一配置源（根 .env）+ 统一错误码。
-- **方法学自证**：mock 仅替换 LLM / embedding 的**网络调用**，用于零外网、可重复的 CI 回归；分块、检索、图谱、Agent Loop 等链路逻辑全部真实。真实模型端到端（对话 / 流式 / 工具调用）与真实嵌入评测在含 API key 的部署环境单独执行，完整评测口径与评审证据模块见 [国创技术报告（校评支撑版）](docs/国创技术报告_校评支撑版.md)。
+- **方法学自证**：mock 仅替换 LLM / embedding 的**网络调用**，用于零外网、可重复的 CI 回归；分块、检索、图谱、Agent Loop 等链路逻辑全部真实。真实模型端到端（对话 / 流式 / 工具调用）与真实嵌入评测在含 API key 的部署环境单独执行，完整评测口径与评审证据模块见 [国创技术报告（校评支撑版）](docs/比赛/国创/国创技术报告.md)。
 
 ---
 
 ## 文档索引
 
 - [项目 Wiki](https://github.com/qiyuxi24/AI-tutor/wiki) — 分模块导读：快速开始 / 架构总览 / Agent 运行内核 / 知识图谱与学习路径 / 知识库与混合检索 / API 参考 / 常见问题与坑
-- [README 编写规范](docs/README_编写规范.md)（v3：门面模板 / 双语维护 / 贡献指南规范） ｜ [贡献指南](CONTRIBUTING.md) ｜ [English README](README.en.md)
+- [README 编写规范](docs/工程实践/README_编写规范.md)（v3：门面模板 / 双语维护 / 贡献指南规范） ｜ [贡献指南](CONTRIBUTING.md) ｜ [English README](README.en.md)
 - [开发参考手册 AGENTS.md](AGENTS.md) — 架构契约、模块职责与新增工具/端点的接入点
-- [RAG 去耦合与目录检索调研](docs/RAG_去耦合与目录检索调研.md) ｜ [RAG 召回与重排优化调研](docs/RAG_召回与重排优化调研.md) ｜ [Agentic RAG 调研](docs/RAG_参考资料与学习路线.md)
-- [Agent Loop 重构设计](docs/AgentLoop_重构设计讨论.md) ｜ [Agent Loop 业界调研](docs/AgentLoop_业界调研与学习路线.md)
-- [知识图谱参照系契约](docs/知识图谱_参照系契约.md) ｜ [知识图谱模块结构调研](docs/知识图谱_模块结构与封装调研.md)
-- [AI 出题逻辑调研](docs/QUIZ_出题逻辑调研.md) ｜ [资源采集设计讨论](docs/教育资料采集模块_设计讨论.md)
-- [Docker 学习路径与工程化部署](docs/Docker_学习路径与工程化部署.md) ｜ [生产上线与日常运营指南](docs/运维_生产上线与日常运营指南.md) ｜ [标杆项目对标分析](docs/标杆项目对标分析.md)
+- [RAG 去耦合与目录检索调研](docs/RAG/RAG_去耦合与目录检索调研.md) ｜ [RAG 召回与重排优化调研](docs/RAG/RAG_召回与重排优化调研.md) ｜ [Agentic RAG 调研](docs/RAG/RAG_参考资料与学习路线.md)
+- [Agent Loop 重构设计](docs/AgentLoop/AgentLoop_重构设计讨论.md) ｜ [Agent Loop 业界调研](docs/AgentLoop/AgentLoop_业界调研与学习路线.md)
+- [知识图谱参照系契约](docs/知识图谱/知识图谱_参照系契约.md) ｜ [知识图谱模块结构调研](docs/知识图谱/知识图谱_模块结构与封装调研.md)
+- [AI 出题逻辑调研](docs/教学模块/QUIZ_出题逻辑调研.md) ｜ [资源采集设计讨论](docs/教育资料采集/教育资料采集模块_设计讨论.md)
+- [Docker 学习路径与工程化部署](docs/运维部署/Docker_学习路径与工程化部署.md) ｜ [生产上线与日常运营指南](docs/运维部署/运维_生产上线与日常运营指南.md) ｜ [标杆项目对标分析](docs/调研对标/标杆项目对标分析.md)
 
 ## 贡献
 

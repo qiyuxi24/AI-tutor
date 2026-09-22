@@ -1,8 +1,8 @@
 # 对话 Agent 循环（Agent Loop）重构 — 设计讨论
 
-> 状态：**Batch1 已实施（2026-09-06），Batch2+ 待排期**；调研与学习资料见 `docs/AgentLoop_业界调研与学习路线.md`
+> 状态：**Batch1 已实施（2026-09-06），Batch2+ 待排期**；调研与学习资料见 `docs/AgentLoop/AgentLoop_业界调研与学习路线.md`
 > 创建：2026-09-05
-> 关联：docs/比赛/COMPETITION.md（AIC 技术纵深叙事）、TODO.md、docs/教育资料采集模块_设计讨论.md（结构范式）
+> 关联：docs/比赛/COMPETITION.md（AIC 技术纵深叙事）、TODO.md、docs/教育资料采集/教育资料采集模块_设计讨论.md（结构范式）
 > 一句话定位：把 TutorAgent 的"两阶段固定脚本"升级为**可观测、有边界、单循环驱动**的真 Agent 循环
 
 ---
@@ -249,7 +249,7 @@ Agent 循环解决的是"**怎么把一次任务跑对**"，不解决"**这一�
 
 ## 12. 决策记录
 
-- **决策 #1（2026-09-06，范围节奏）**：先调研后实现。产出 `docs/AgentLoop_业界调研与学习路线.md`（业界共识骨架 + 逐家拆解 + 六事实对照 + Batch1 增量建议）。实施范围选 **Batch1（路线 A）**；Batch3 依赖 qwen 流式 tools 真网验证（DASHSCOPE 403 未恢复）暂缓，Batch2/Batch4 后置。
+- **决策 #1（2026-09-06，范围节奏）**：先调研后实现。产出 `docs/AgentLoop/AgentLoop_业界调研与学习路线.md`（业界共识骨架 + 逐家拆解 + 六事实对照 + Batch1 增量建议）。实施范围选 **Batch1（路线 A）**；Batch3 依赖 qwen 流式 tools 真网验证（DASHSCOPE 403 未恢复）暂缓，Batch2/Batch4 后置。
 - **决策 #2（循环语义）**：`run_agent_loop` = LLM↔工具多轮串联，二次 tool_calls 不再丢弃。`max_rounds=5`（工具执行轮上限）；达上限**不再执行新工具**，追加"立即停止调用工具"的 user 指令 + 空 tools 强制模型自然收尾（参考 Votek agent_loop）；强制轮空文本/LLM 失败时兜底友好文案。
 - **决策 #3（参数/护栏）**：循环内统一 `temperature=0.3`（放弃旧"后台 0.3/文本 0.7"两档）；单工具 `asyncio.wait_for` 超时 60s（to_thread 执行，不阻塞事件循环）；单工具异常/超时隔离为错误文案回填，循环不炸。
 - **决策 #4（观测/trace）**：rounds 随循环长出（round/tool/args_head/ok/duration_ms/result_head）；`context_tokens` 取各轮 `usage.prompt_tokens` **真值累加**；`save_trace` 落 `backend/data/traces/{user_id}/{run_id}.jsonl`（无工具动作不落盘；落盘失败仅 warning）。

@@ -1,4 +1,4 @@
-<!-- base: CONTRIBUTING.md @ c54d571 (2026-09-12). English mirror of the Chinese contribution guide — keep both in sync; spec: docs/README_编写规范.md §6. -->
+<!-- base: CONTRIBUTING.md @ c54d571 (2026-09-12). English mirror of the Chinese contribution guide — keep both in sync; spec: docs/工程实践/README_编写规范.md §6. -->
 
 # Contributing to TutorAgent
 
@@ -171,7 +171,7 @@ Requirements:
 | `data/` (graph / profile / conversations / KB index), `backend/data/` | Local runtime data, rebuildable |
 | `logs/`, `*.bak`, `whoosh_index/` | Generated artefacts |
 | `.research/` | External benchmark repositories (cloned third-party sources) |
-| `docs/比赛/官方材料/` | Licence and usage restrictions on first-hand material |
+| `docs/比赛/国创/官方材料/`、`docs/比赛/AI教育/官方材料/` | Licence and usage restrictions on first-hand material |
 | `venv/`, `node_modules/`, `dist/` | Dependencies and build output |
 
 > Exceptions: `data/prompts/*.j2` (prompt templates) and `data/*.md` (documents) **are** committed.
@@ -187,7 +187,7 @@ The facade documents are maintained in both Chinese and English:
 | `README.md` | `README.en.md` |
 | `CONTRIBUTING.md` | `CONTRIBUTING.en.md` |
 
-Rules (full spec: [`docs/README_编写规范.md`](docs/README_编写规范.md), section 6):
+Rules (full spec: [`docs/工程实践/README_编写规范.md`](docs/工程实践/README_编写规范.md), section 6):
 
 1. **Editing only the master file is not enough**: added/removed/renamed sections, commands, ports, environment variables and test counts must be mirrored **in the same commit**.
 2. Section numbering / order, table row counts and code blocks must correspond one-to-one.

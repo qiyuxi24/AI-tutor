@@ -3,7 +3,7 @@
 > 创建日期：2026-09-05
 > 调研人：TutorAgent 团队（AI 辅助）
 > 状态：**已搁置** —— 报告结论已沉淀；未进入代码落地，待备赛后期按需取用
-> 关联文档：`docs/标杆项目对标分析.md`（功能矩阵）、`docs/OPENMAIC_借鉴方案.md`（已落地借鉴）、`docs/教育资料采集模块_设计讨论.md`（采集模块设计）
+> 关联文档：`docs/调研对标/标杆项目对标分析.md`（功能矩阵）、`docs/调研对标/OPENMAIC_借鉴方案.md`（已落地借鉴）、`docs/教育资料采集/教育资料采集模块_设计讨论.md`（采集模块设计）
 > Star 数据：GitHub API 查询，2026-09-05
 
 ---
@@ -17,7 +17,7 @@
 2. GitHub API 核实各仓库真实 star / 语言 / 协议 / 体量，剔除低 star 与无关项目
 3. codeload zip / git shallow clone 落地仓库（github git 协议时通时断，codeload zip 最稳）
 4. 派出 code-explorer 子代理通读源码，输出"模块 - 功能 - 源码路径 - 可移植性"
-5. 结论映射回 TutorAgent 现状（对标 `docs/标杆项目对标分析.md` 功能矩阵与 TODO.md）
+5. 结论映射回 TutorAgent 现状（对标 `docs/调研对标/标杆项目对标分析.md` 功能矩阵与 TODO.md）
 
 ---
 
@@ -26,7 +26,7 @@
 | 项目 | Star | 定位 | 协议 | 是否拉取 | 结论 |
 |------|------|------|------|---------|------|
 | **HKUDS/DeepTutor** | 38,773 | 港大"终身个性化 AI 私教"，Agent-Native 学习工作台（Chat/Quiz/Research/Visualize/Mastery Path/Reading），多智能体 + 多引擎 RAG | Apache-2.0 | ✅ 源码全量落地 | **重点分析对象**，5 个可移植点 |
-| **THU-MAIC/OpenMAIC** | 31,660 | 清华多智能体互动课堂（AI 老师 + AI 同学 + 课件/测验/回放） | MIT（v0.3.0 起从 AGPL-3.0 调整） | ⚠️ 克隆中断未重拉 | 已有 `docs/OPENMAIC_借鉴方案.md` 全覆盖，quiz 已落地 |
+| **THU-MAIC/OpenMAIC** | 31,660 | 清华多智能体互动课堂（AI 老师 + AI 同学 + 课件/测验/回放） | MIT（v0.3.0 起从 AGPL-3.0 调整） | ⚠️ 克隆中断未重拉 | 已有 `docs/调研对标/OPENMAIC_借鉴方案.md` 全覆盖，quiz 已落地 |
 | **ECNU-ICALK/EduChat** | 968 | 华东师大开源中英教育对话大模型（模型 + 训练数据） | 侧重微调 | ❌ | 需 GPU 训练，与本项目"阿里云 API"架构无关 |
 | **flysheep-ai/education-skills** | 92 | 中国高考 6 科导师 Skills（苏格拉底式教学） | MIT | ✅ 已落地 | 教学法 prompt 金矿 |
 | **hezkvectory/hermes-edu-skills** | 87 | **170 个中文教育 Skill**（教材同步/备考/错题复盘/教师工具等 8 大类） | 见 LICENSE | ✅ 已落地 | 出题/批改/错题流程可抄 |
@@ -91,7 +91,7 @@
 
 ## 五、OpenMAIC（复用既有方案，不重复调研）
 
-- 31.7k★，多智能体课堂。**AI 出题模块（quiz/）已由本项目借鉴落地**（`docs/OPENMAIC_借鉴方案.md`）
+- 31.7k★，多智能体课堂。**AI 出题模块（quiz/）已由本项目借鉴落地**（`docs/调研对标/OPENMAIC_借鉴方案.md`）
 - 该文档已给出完整模块清单与优先级（两阶段流水线、动作引擎、服务商抽象、AI 同学多角色等），本次不重复
 - 若后续需要看源码，用 codeload zip 补拉即可
 
@@ -133,7 +133,7 @@
 
 ## 七、与 TutorAgent 现状映射与落地建议
 
-> 参照 `docs/标杆项目对标分析.md` 功能差距表。以下为调研新增/强化的建议，按性价比排序。
+> 参照 `docs/调研对标/标杆项目对标分析.md` 功能差距表。以下为调研新增/强化的建议，按性价比排序。
 
 | # | 建议 | 来源 | 落点（TutorAgent） | 成本 |
 |---|------|------|-------------------|------|
@@ -154,7 +154,7 @@
 - 2026-09-05：用户确认此话题**先搁置**，不进入代码落地。
 - 已保留资产（随时可取用）：
   - `.research/edu-repos/` 下 3 个仓库源码（DeepTutor 250MB / Hermes 170 skills / flysheep 6 skills）
-  - 本报告 + `docs/标杆项目对标分析.md` + `docs/OPENMAIC_借鉴方案.md`
+  - 本报告 + `docs/调研对标/标杆项目对标分析.md` + `docs/调研对标/OPENMAIC_借鉴方案.md`
 - 后续若重启：建议从上表 #1/#2/#4 任一项切入，均不与在研的"教育资料采集模块"冲突。
 
 ---

@@ -2,7 +2,7 @@
 
 > 创建：2026-09-15 ｜ 本轮口径：**B = 48K**（v2 定案）
 > 定位：**只列未完成项**；已完成项见文末「已完成」表（**不要重做**）。
-> ⚠️ `reports/` 在 `.gitignore` 里：探针脚本 `reports/probe_context_budget.py` 只存在于本工作区，**新克隆的仓库没有它**（需要时按 `docs/上下文工程_预算框架.md` §2.4 的表重建）。
+> ⚠️ `reports/` 在 `.gitignore` 里：探针脚本 `reports/probe_context_budget.py` 只存在于本工作区，**新克隆的仓库没有它**（需要时按 `docs/上下文工程/上下文工程_预算框架.md` §2.4 的表重建）。
 > 铁律（用户）：**不要动其他模块**；复用已有组件；改动必须可机器复核。
 > 标记约定：`[改]` 改现有文件 ／ `[新文件]` ／ `[需API]` 需真实外部服务 ／ `[待议]` 需用户先定
 > 每项含「落点 + 做法 + 验收 + 依赖」，验收一律可离线跑。
@@ -12,9 +12,9 @@
 ## 0. 新窗口从这里开始（30 秒交接）
 
 1. 先读三份文档，按此顺序：
-   1. `docs/上下文工程_预算框架.md` —— **配额 SSOT**（B=48K / 九段 S1–S9 / 让位顺序 / 触发阶梯）
+   1. `docs/上下文工程/上下文工程_预算框架.md` —— **配额 SSOT**（B=48K / 九段 S1–S9 / 让位顺序 / 触发阶梯）
    2. `backend/app/core/agent/README.md` —— 代码结构（八模块职责 + 一次 run 时序 + 改码 10 坑）
-   3. `docs/上下文工程_调研与差距审计.md` —— 现状审计 + 论文依据 + §10–§12 实施记录
+   3. `docs/上下文工程/上下文工程_调研与差距审计.md` —— 现状审计 + 论文依据 + §10–§12 实施记录
 2. 跑一次探针拿到当前基线（**改任何东西前先跑，改完再跑对比**）：
    ```bash
    backend\venv\Scripts\python.exe reports\probe_context_budget.py
@@ -51,7 +51,7 @@
 
 ### P2-① 运行时分段记账 `[改]`
 - 现状只有静态探针；框架不变量 B-1~B-7 需要运行时可见。
-- **落点**：`agent/store.py` 的 `agent_runs` 表（**扩展字段，不新建表；加列必须落 `_migrate()`**）+ `agent/loop.py` 落库处；`chat_service` 把分段体量传进去。
+- **落点**：`agent/store.py` 的 `agent_runs` 表（**扩展字段，不新建表；加列必须写进 `store._COLUMN_MIGRATIONS`**）+ `agent/loop.py` 落库处；`chat_service` 把分段体量传进去。
 - **验收**：`GET /agent/runs/{run_id}` 能看到该次 run 的各段 token；跑 20 轮对话可以取 P95。
 
 ### P2-② 用实测拐点替换文献值 `[需API]`
@@ -98,7 +98,7 @@
 | 2026-09-15 | 删 recursive 模式重复图谱注入块（三模式统一由 `{{ knowledge_graph_summary }}` 注入；实测 -58%） | 调研审计 §12 |
 | 2026-09-15 | 工具说明双源收口（注册表 `guidance` 生成提示词段落） | `core/agent_tools/README.md` |
 | 2026-09-15 | **`core/agent/` 包重构**（loop/context/guard/events/store + README） | `core/agent/README.md` |
-| 2026-09-15 | **预算框架 v2**（B=48K、九段、让位顺序、触发阶梯、不变量 B-1~B-7） | `docs/上下文工程_预算框架.md` |
+| 2026-09-15 | **预算框架 v2**（B=48K、九段、让位顺序、触发阶梯、不变量 B-1~B-7） | `docs/上下文工程/上下文工程_预算框架.md` |
 | 2026-09-15 | **P0-① 预算口径对齐**：`LLM_CTX_BUDGET` 32000→48000（config 两处 + `.env.example`）、`guard.OUTPUT_RESERVE` 2000→3000 | `tests/test_context_guard.py::test_budget_defaults_match_framework` |
 | 2026-09-15 | **P0-② 固定段占比告警（B-3）**：`_build_system_prompt` 每轮记固定段占比，越 40%×B 记 warning（点名告警线与降级入口） | `tests/test_fixed_segment_budget.py` |
 | 2026-09-15 | **P0-③ 固定段越线强制降级**：越 45%×B 时按当前体量**减半重建**图谱注入；仍越线记 error 照发（`guard` 裁不动字符串 → 落点在组装侧） | 同上 |

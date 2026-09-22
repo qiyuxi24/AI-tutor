@@ -84,7 +84,7 @@ rag_pipeline 上传入库 ──────────────────
 | **Calibre `ebook-convert`** | 重（外部程序） | 全格式互转，事实标准 | ⚠️ 可选外部能力（探测 `ebook-convert`） |
 | `pandoc` / `pypandoc` | 中（外部二进制） | EPUB→HTML/Markdown 质量好 | ⛔ 不引入：多一个外部二进制的部署成本，标准库已覆盖 |
 | `unstructured` / `docling` / `markitdown` | 很重（torch/onnx/模型） | 版面、表格、公式、多模态 | ⛔ 不引入（见 §1.4）；`markitdown` 的「格式→转换器注册表」思路与本包同构，可作参考 |
-| PDF 专项（PyMuPDF4LLM / Marker / MinerU / olmOCR） | 各自独立 | 版面还原、公式、表格 | 保持现状；未来若做 PDF 专项再单点评估（对比见 `docs/RAG_召回与重排优化调研.md`、`RAG_参考资料与学习路线.md`） |
+| PDF 专项（PyMuPDF4LLM / Marker / MinerU / olmOCR） | 各自独立 | 版面还原、公式、表格 | 保持现状；未来若做 PDF 专项再单点评估（对比见 `docs/RAG/RAG_召回与重排优化调研.md`、`RAG_参考资料与学习路线.md`） |
 
 ### 3.3 业界做法印证
 

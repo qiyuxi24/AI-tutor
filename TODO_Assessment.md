@@ -5,10 +5,10 @@
 > 状态：调研已完成、**建设未启动**
 
 **设计依据**：
-- `docs/QUIZ_出题逻辑调研.md`（2026-08-29）—— 难度评估方案（IRT 2PL / LLM 模拟自评）
-- `docs/学习进度仪表盘设计.md`（2026-08-31）—— 展示层（图谱科技树化 + 仪表盘 v1，与评价耦合但未与分析打通）
+- `docs/教学模块/QUIZ_出题逻辑调研.md`（2026-08-29）—— 难度评估方案（IRT 2PL / LLM 模拟自评）
+- `docs/教学模块/学习进度仪表盘设计.md`（2026-08-31）—— 展示层（图谱科技树化 + 仪表盘 v1，与评价耦合但未与分析打通）
 - `docs/比赛/COMPETITION.md` §5.2 —— 痛点 2 评价反馈（学完没有反馈，看不到进度）
-- `docs/比赛/商业计划书_v2_任务分解.md` —— "多维度评价反馈"作为差异化
+- `docs/比赛/国创/商业计划书_v2_任务分解.md` —— "多维度评价反馈"作为差异化
 
 **标记约定**：
 - `[改]` 改现有文件 / `[新文件]` / `[复用]` / `[需API]` 需真实外部服务 / `[待议]` 需建设者先定
@@ -45,7 +45,7 @@
 | `backend/app/core/quiz/`（8 文件） | `grader.py`(判分)、`chat_quiz.py`(出题判分主入口)、`quality.py`(质量过滤管道)、`schema.py`/`generator.py`/`quiz_store.py`/`exporter.py` | 模块名"quiz"但**已超出出题语义** |
 | `agent_tools/tools/grade_answer.py` | 答对自动 +20（**掌握度唯一主信号**） | 入口给 Agent 工具 |
 | `agent_tools/tools/update_mastery.py` | 手动调，**仅 3 种硬证据**（早就会 / 没学过 / 自己纠正） | 触发面已收口 |
-| `docs/学习进度仪表盘设计.md` | 前端展示层（图谱科技树化 v1 已落地） | **只展示不分析** |
+| `docs/教学模块/学习进度仪表盘设计.md` | 前端展示层（图谱科技树化 v1 已落地） | **只展示不分析** |
 
 ### 缺的（评价体系真正的核心）
 
@@ -215,13 +215,13 @@
 | **Agent 内核逐模块 / 改码坑** | `backend/app/core/agent/README.md` |
 | **工具系统（一工具一文件、三条硬约定）** | `backend/app/core/agent_tools/tools/README.md` |
 | **LLM 原语包** | `backend/app/core/llm/README.md` |
-| 上下文工程（预算 / 裁剪 / 预估） | `docs/上下文工程_预算框架.md` + `TODO_Context.md` |
-| 知识图谱（**唯一参照 = 参照系契约**） | `docs/知识图谱_参照系契约.md` |
-| RAG / 文档解析 / 检索 / 出题 | `docs/RAG_*.md`、`docs/QUIZ_出题逻辑调研.md` |
+| 上下文工程（预算 / 裁剪 / 预估） | `docs/上下文工程/上下文工程_预算框架.md` + `TODO_Context.md` |
+| 知识图谱（**唯一参照 = 参照系契约**） | `docs/知识图谱/知识图谱_参照系契约.md` |
+| RAG / 文档解析 / 检索 / 出题 | `docs/RAG/RAG_*.md`、`docs/教学模块/QUIZ_出题逻辑调研.md` |
 | 实施模式参照 | `TODO_Context.md`（P0/P1/P2 + 30 秒交接 + 测试验收） |
 | 顶层总览 | `TODO.md` |
 | 采集模块参照 | `TODO_Collector.md`（Batch 划分 + 里程碑表） |
-| 部署运维 | `deploy/README.md` → `docs/Docker_*.md` → `docs/运维_*.md` |
+| 部署运维 | `deploy/README.md` → `docs/运维部署/Docker_*.md` → `docs/运维部署/运维_*.md` |
 | 历程 / 决策 / 踩坑 | `docs/项目历程_决策与效果记录.md` |
 | 跨会话决策与硬约束 | `.codebuddy/memory/MEMORY.md` |
 
