@@ -26,7 +26,7 @@ def kg(tmp_path):
 
 def _patch_llm(monkeypatch, reply=None, calls=None):
     """替换 call_llm：calls 记录调用；reply=None 表示抛异常（模拟 LLM 不可用）"""
-    async def fake(system_prompt, messages):
+    async def fake(system_prompt, messages, **kw):
         if calls is not None:
             calls.append(messages)
         if reply is None:

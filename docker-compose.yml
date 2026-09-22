@@ -48,6 +48,11 @@ services:
       - ./data/profiles:/app/data/profiles
       # 上传知识库(RAG) + 出题数据（backend/data 下）
       - ./backend/data:/app/backend/data
+      # 运行记录库（agent_runs / agent_debug）实际落在 backend/app/data，不在上面
+      # 那条卷内 —— 不挂的话容器一重建，排查用的历史记录全丢
+      - ./backend/app/data:/app/backend/app/data
+      # 应用日志（tutor.log + 轮转备份）
+      - ./backend/logs:/app/backend/logs
 
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]

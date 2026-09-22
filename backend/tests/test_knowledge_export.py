@@ -2,7 +2,7 @@
 
 历史 bug：学科过滤写成 `n.get("subject") == subject`，但 nodes 表没有 subject 列、
 节点 dict 里也没有 "subject" 键（学科是从 tags 推导的），
-因此**任何带 subject 参数的导出都返回空文件**（见 docs/知识图谱_模块结构与封装调研.md P0-1）。
+因此**任何带 subject 参数的导出都返回空文件**（见 docs/知识图谱/知识图谱_模块结构与封装调研.md P0-1）。
 
 修复：改用 `kg.node_subject(n)`（唯一权威实现）。
 本测试直接调用路由函数（不经过 HTTP/JWT），用 FakeKG 隔离数据库。

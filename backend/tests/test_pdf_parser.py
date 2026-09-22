@@ -1,7 +1,7 @@
 """
 PDF 解析器单元测试：逐页探针 + 页级 OCR 路由。
 
-覆盖（对齐 docs/RAG_视觉解析策略_调研与实施方案.md §2.2 缺陷 #1）：
+覆盖（对齐 docs/RAG/RAG_视觉解析策略_调研与实施方案.md §2.2 缺陷 #1）：
 - 混合型 PDF（部分页扫描）不再「整份文档级」判定 → 只有扫描页走 OCR，其余页文本层保留；
 - 页标记 `<<<PAGE n>>>` 与 meta（pages / scanned_pages / ocr_pages / via）契约；
 - OCR 不可用时不报错、不丢其他页（meta 记 ocr_missing）；

@@ -285,7 +285,7 @@ def test_generate_quiz_success(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return materials
 
-    async def fake_call_llm(system, messages, max_tokens=None):
+    async def fake_call_llm(system, messages, max_tokens=None, **kw):
         return llm_output
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -323,7 +323,7 @@ def test_generate_quiz_rejects_bad_question(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages, max_tokens=None):
+    async def fake_call_llm(system, messages, max_tokens=None, **kw):
         return llm_output
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -342,7 +342,7 @@ def test_generate_quiz_json_parse_failure(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages, max_tokens=None):
+    async def fake_call_llm(system, messages, max_tokens=None, **kw):
         return "完全不是JSON"
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -360,7 +360,7 @@ def test_generate_quiz_llm_failure(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages, max_tokens=None):
+    async def fake_call_llm(system, messages, max_tokens=None, **kw):
         raise RuntimeError("LLM 不可用")
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -393,7 +393,7 @@ def test_generate_quiz_dedup(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages, max_tokens=None):
+    async def fake_call_llm(system, messages, max_tokens=None, **kw):
         return llm_output
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -424,7 +424,7 @@ def test_generate_quiz_markdown_wrapped_json(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages, max_tokens=None):
+    async def fake_call_llm(system, messages, max_tokens=None, **kw):
         return llm_output
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -487,7 +487,7 @@ def test_generate_quiz_splits_into_batches(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return ["栈是后进先出的线性数据结构，支持 push 和 pop。"]
 
-    async def fake_call_llm(system, messages, max_tokens=None):
+    async def fake_call_llm(system, messages, max_tokens=None, **kw):
         calls.append(messages[0]["content"])
         # 每批返回互不相同的题（模拟真实"不同批次出不同题"）
         batch = [_q_dict(counter["n"] + i) for i in range(3)]
@@ -513,7 +513,7 @@ def test_generate_quiz_topup_when_first_round_short(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages, max_tokens=None):
+    async def fake_call_llm(system, messages, max_tokens=None, **kw):
         calls.append(messages[0]["content"])
         if "补题" in messages[0]["content"]:
             return json.dumps([_q_dict(i) for i in range(100, 104)])  # 补题一次给 4 道
@@ -538,7 +538,7 @@ def test_generate_quiz_salvages_truncated_json_then_tops_up(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages, max_tokens=None):
+    async def fake_call_llm(system, messages, max_tokens=None, **kw):
         return _truncated_output()
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -556,7 +556,7 @@ def test_generate_quiz_shortfall_is_reported(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages, max_tokens=None):
+    async def fake_call_llm(system, messages, max_tokens=None, **kw):
         return json.dumps([_q_dict(1)])           # 无论怎么补都只给 1 道
 
     monkeypatch.setattr(generator, "_search_materials", fake_search)
@@ -579,7 +579,7 @@ def test_generate_quiz_isolates_failed_batch(monkeypatch):
     async def fake_search(uid, subj, nid, top_k=8):
         return []
 
-    async def fake_call_llm(system, messages, max_tokens=None):
+    async def fake_call_llm(system, messages, max_tokens=None, **kw):
         prompt = messages[0]["content"]
         if "第 1/2 批" in prompt:          # 这一批永远失败（模拟空回复）
             raise RuntimeError("[E-LLM-006] AI返回了空回复，请重试")

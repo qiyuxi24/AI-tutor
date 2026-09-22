@@ -300,11 +300,12 @@ def test_user_stats_404_for_missing_user(client):
 
 # ---------- 删除用户 ----------
 
-def test_delete_user_requires_matching_confirm(client):
+def test_delete_user_needs_no_extra_confirmation(client):
+    """防误删只靠前端一次确认弹窗，接口不再要求重填用户名"""
     headers = _auth(client)
-    r = client.delete("/api/v1/admin/users/1?confirm=bob", headers=headers)
-    assert r.status_code == 400
-    assert client.get("/api/v1/admin/users/1", headers=headers).status_code == 200
+    r = client.delete("/api/v1/admin/users/1", headers=headers)
+    assert r.status_code == 200, r.text
+    assert client.get("/api/v1/admin/users/1", headers=headers).status_code == 404
 
 
 def test_delete_user_removes_rows_and_files(client, tmp_path):
@@ -318,7 +319,7 @@ def test_delete_user_removes_rows_and_files(client, tmp_path):
         path.mkdir(parents=True, exist_ok=True)
         (path / "leftover.txt").write_text("x", encoding="utf-8")
 
-    r = client.delete("/api/v1/admin/users/1?confirm=alice", headers=headers)
+    r = client.delete("/api/v1/admin/users/1", headers=headers)
     assert r.status_code == 200, r.text
     assert r.json()["deleted"]["nodes"] == 2
     assert r.json()["deleted"]["agent_runs"] == 2
@@ -347,11 +348,137 @@ def test_delete_user_removes_rows_and_files(client, tmp_path):
 
 def test_delete_user_is_audited(client):
     headers = _auth(client)
-    client.delete("/api/v1/admin/users/2?confirm=bob", headers=headers)
+    client.delete("/api/v1/admin/users/2", headers=headers)
 
     logs = client.get("/api/v1/admin/audit-logs?action=delete_user", headers=headers).json()
     assert logs["logs"][0]["target_username"] == "bob"
     assert "nodes=1" in logs["logs"][0]["details"]
+
+
+# ---------- 批量删除用户 ----------
+
+def _make_user_leftovers(user_id: int) -> tuple[Path, ...]:
+    """造出某用户遗留在磁盘上的数据，用于验证批量删除会一并清掉"""
+    roots = (
+        Path(settings.db_path).parent / "nodes" / str(user_id),
+        Path(settings.backend_data_dir) / "kb" / str(user_id),
+        Path(settings.backend_data_dir) / "rag" / str(user_id),
+    )
+    for path in roots:
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "leftover.txt").write_text("x", encoding="utf-8")
+    return roots
+
+
+def test_batch_delete_rejects_oversized_selection(client):
+    """单次上限 100：防误点全选把库和磁盘一起清空"""
+    headers = _auth(client)
+    r = client.post(
+        "/api/v1/admin/users/batch-delete",
+        json={"user_ids": list(range(1, 102))},
+        headers=headers,
+    )
+    assert r.status_code == 422
+    assert client.get("/api/v1/admin/users", headers=headers).json()["total"] == 2
+
+
+def test_batch_delete_removes_only_selected_users_and_their_files(client):
+    headers = _auth(client)
+    roots = _make_user_leftovers(1)
+
+    r = client.post(
+        "/api/v1/admin/users/batch-delete",
+        json={"user_ids": [1]},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["message"] == "已删除 1 个用户"
+    assert body["deleted"][0]["username"] == "alice"
+    assert body["deleted"][0]["data"]["nodes"] == 2
+    assert body["not_found"] == []
+
+    assert client.get("/api/v1/admin/users/1", headers=headers).status_code == 404
+    assert client.get("/api/v1/admin/users/2", headers=headers).status_code == 200
+    for path in roots:
+        assert not path.exists()
+
+    conn = sqlite3.connect(settings.db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM nodes WHERE user_id = 1").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM edges WHERE user_id = 1").fetchone()[0] == 0
+        # 别人的图谱数据不能跟着陪葬
+        assert conn.execute("SELECT COUNT(*) FROM nodes WHERE user_id = 2").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+    runs_db = Path(settings.backend_data_dir) / "agent_runs" / "agent_runs.db"
+    conn = sqlite3.connect(str(runs_db))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM agent_runs WHERE user_id = 1").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM agent_runs WHERE user_id = 2").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_batch_delete_handles_multiple_users_and_dedupes_ids(client):
+    headers = _auth(client)
+    r = client.post(
+        "/api/v1/admin/users/batch-delete",
+        json={"user_ids": [1, 2, 1]},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["message"] == "已删除 2 个用户"
+    assert client.get("/api/v1/admin/users", headers=headers).json()["total"] == 0
+
+
+def test_batch_delete_reports_unknown_ids_as_not_found(client):
+    headers = _auth(client)
+    r = client.post(
+        "/api/v1/admin/users/batch-delete",
+        json={"user_ids": [1, 999]},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["not_found"] == [999]
+    assert client.get("/api/v1/admin/users/1", headers=headers).status_code == 404
+
+
+def test_batch_delete_404_when_nothing_exists_and_rejects_empty_list(client):
+    headers = _auth(client)
+    missing = client.post(
+        "/api/v1/admin/users/batch-delete",
+        json={"user_ids": [999]},
+        headers=headers,
+    )
+    assert missing.status_code == 404
+
+    empty = client.post(
+        "/api/v1/admin/users/batch-delete",
+        json={"user_ids": []},
+        headers=headers,
+    )
+    assert empty.status_code == 422
+
+
+def test_batch_delete_audits_each_user(client):
+    headers = _auth(client)
+    client.post(
+        "/api/v1/admin/users/batch-delete",
+        json={"user_ids": [1, 2]},
+        headers=headers,
+    )
+
+    logs = client.get("/api/v1/admin/audit-logs?action=delete_user", headers=headers).json()
+    assert {log["target_username"] for log in logs["logs"]} == {"alice", "bob"}
+    assert all("批量删除(共2人)" in log["details"] for log in logs["logs"])
+    assert all(log["admin_username"] == "admin" for log in logs["logs"])
+
+
+def test_batch_delete_requires_token(client):
+    r = client.post("/api/v1/admin/users/batch-delete", json={"user_ids": [1]})
+    assert r.status_code == 401
 
 
 # ---------- 管理员账户 CRUD ----------

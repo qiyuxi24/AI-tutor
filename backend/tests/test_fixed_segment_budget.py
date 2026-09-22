@@ -1,6 +1,6 @@
 """固定段（S2–S7）预算守卫：越 40%×B 告警、越 45%×B 强制降级图谱注入。
 
-依据 `docs/上下文工程_预算框架.md` §3.2 与不变量 B-3（`TODO_Context.md` P0-②③）。
+依据 `docs/上下文工程/上下文工程_预算框架.md` §3.2 与不变量 B-3（`TODO_Context.md` P0-②③）。
 
 为什么落点在 `chat_service._build_system_prompt` 而不是 guard：
 guard 只能裁 `messages`，而 `system_prompt` 是入参**字符串**，它裁不动 ——

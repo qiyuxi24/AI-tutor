@@ -49,6 +49,12 @@ class UpdateRoleRequest(BaseModel):
     role: Role
 
 
+class BatchDeleteUsersRequest(BaseModel):
+    """批量删号：一次最多 100 个（防误点全表 / 打满事务）"""
+
+    user_ids: list[int] = Field(min_length=1, max_length=100)
+
+
 def _get_user(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row:
     row = conn.execute(f"SELECT {_COLUMNS} FROM users WHERE id = ?", (user_id,)).fetchone()
     if not row:
@@ -219,18 +225,15 @@ def reset_password(
 def delete_user(
     user_id: int,
     request: Request,
-    confirm: str = Query(..., description="重填一次用户名，防误删"),
     conn: sqlite3.Connection = Depends(get_db),
     admin: CurrentAdmin = Depends(get_current_admin),
 ):
     """彻底删除用户及其全部数据（图谱/对话/知识库）。
 
-    不可恢复，故要求 confirm 精确等于用户名；删除量与账号信息一并返回，便于留痕。
+    防误删只靠前端一次确认弹窗 + 管理员身份校验，不再要求重填用户名（填名字太费事）。
+    删除量与账号信息一并返回，便于留痕。
     """
     user = _get_user(conn, user_id)
-    if confirm.strip() != user["username"]:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "确认用户名不匹配，已取消删除")
-
     summary = user_data_summary(user_id)
     delete_user_rows(conn, user_id)
     add_audit_log(
@@ -246,6 +249,58 @@ def delete_user(
     conn.commit()
     purge_user_storage(user_id)
     return {"message": f"用户 {user['username']} 已删除", "deleted": summary}
+
+
+@router.post("/users/batch-delete")
+def batch_delete_users(
+    body: BatchDeleteUsersRequest,
+    request: Request,
+    conn: sqlite3.Connection = Depends(get_db),
+    admin: CurrentAdmin = Depends(get_current_admin),
+):
+    """批量彻底删除用户及其全部数据（图谱/对话/知识库/运行记录）。
+
+    与单删同一套防误删口径：前端一次确认弹窗 + 管理员身份校验，不额外要求填确认词。
+    事务边界与单删一致：行删除 + 审计日志同事务提交，磁盘文件（对话与 agent_runs 行、
+    节点/知识库/向量目录）在提交后逐个清理 —— 文件操作不可回滚，顺序反了会留半残数据。
+    查不到的 id 不报错、只回填在 not_found 里，方便页面提示"部分已不存在"。
+    """
+    ids = list(dict.fromkeys(body.user_ids))  # 去重，保持前端选择顺序
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT {_COLUMNS} FROM users WHERE id IN ({placeholders})", ids
+    ).fetchall()
+    if not rows:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "选中的用户都不存在")
+
+    ip = _client_ip(request)
+    deleted: list[dict] = []
+    for row in rows:
+        summary = user_data_summary(row["id"])
+        delete_user_rows(conn, row["id"])
+        add_audit_log(
+            conn,
+            admin.id,
+            admin.username,
+            AuditAction.DELETE_USER,
+            target_user_id=row["id"],
+            target_username=row["username"],
+            ip_address=ip,
+            details=f"批量删除(共{len(rows)}人)；"
+            + "；".join(f"{k}={v}" for k, v in summary.items()),
+        )
+        deleted.append({"id": row["id"], "username": row["username"], "data": summary})
+
+    conn.commit()
+    for item in deleted:
+        purge_user_storage(item["id"])
+
+    found = {item["id"] for item in deleted}
+    return {
+        "message": f"已删除 {len(deleted)} 个用户",
+        "deleted": deleted,
+        "not_found": [i for i in ids if i not in found],
+    }
 
 
 @router.post("/users/{user_id}/role")

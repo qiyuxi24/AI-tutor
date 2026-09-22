@@ -67,7 +67,7 @@ def test_db_failure_never_breaks_caller(tmp_path, monkeypatch):
 
     monkeypatch.setattr(debug_log, "_connect", _boom)
     debug_log.log("loop", "run_end", "结束", run_id="r4", db_dir=tmp_path)  # 不抛
-    assert not debug_log._db_path(tmp_path).exists()  # 库都没建，说明走的是失败分支
+    assert not list(tmp_path.glob("*.db"))  # 库都没建，说明走的是失败分支
 
 
 def test_prune_and_clear(tmp_path):

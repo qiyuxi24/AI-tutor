@@ -188,7 +188,7 @@ def test_grade_fill_multiple_acceptable():
 
 def test_grade_short_answer_llm_success(monkeypatch):
     raw = json.dumps({"score": 8, "comment": "回答较好，但缺少复杂度分析"})
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, **kw):
         return raw
     monkeypatch.setattr("app.core.quiz.grader.call_llm", fake_call_llm)
 
@@ -204,7 +204,7 @@ def test_grade_short_answer_llm_success(monkeypatch):
 
 def test_grade_short_answer_full_score(monkeypatch):
     raw = json.dumps({"score": 10, "comment": "完美"})
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, **kw):
         return raw
     monkeypatch.setattr("app.core.quiz.grader.call_llm", fake_call_llm)
 
@@ -215,7 +215,7 @@ def test_grade_short_answer_full_score(monkeypatch):
 
 def test_grade_short_answer_score_clamp(monkeypatch):
     raw = json.dumps({"score": 999, "comment": "溢出"})
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, **kw):
         return raw
     monkeypatch.setattr("app.core.quiz.grader.call_llm", fake_call_llm)
 
@@ -224,7 +224,7 @@ def test_grade_short_answer_score_clamp(monkeypatch):
 
 
 def test_grade_short_answer_llm_failure_degrades(monkeypatch):
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, **kw):
         raise RuntimeError("LLM 不可用")
     monkeypatch.setattr("app.core.quiz.grader.call_llm", fake_call_llm)
 
@@ -235,7 +235,7 @@ def test_grade_short_answer_llm_failure_degrades(monkeypatch):
 
 
 def test_grade_short_answer_llm_invalid_json(monkeypatch):
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, **kw):
         return "这不是JSON"
     monkeypatch.setattr("app.core.quiz.grader.call_llm", fake_call_llm)
 
@@ -244,7 +244,7 @@ def test_grade_short_answer_llm_invalid_json(monkeypatch):
 
 
 def test_grade_short_answer_llm_json_with_extra_text(monkeypatch):
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, **kw):
         return f'好的，评分如下：{json.dumps({"score": 7, "comment": "不错"})}'
     monkeypatch.setattr("app.core.quiz.grader.call_llm", fake_call_llm)
 
@@ -281,7 +281,7 @@ def test_grade_question_fill():
 
 def test_grade_question_short_answer(monkeypatch):
     raw = json.dumps({"score": 6, "comment": "基本正确"})
-    async def fake_call_llm(system, messages):
+    async def fake_call_llm(system, messages, **kw):
         return raw
     monkeypatch.setattr("app.core.quiz.grader.call_llm", fake_call_llm)
 

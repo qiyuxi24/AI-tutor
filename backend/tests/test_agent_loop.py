@@ -1,7 +1,7 @@
 """
 Agent Loop 单元测试（全部离线，mock _chat_once 与 execute_kg_tool_async）。
 
-覆盖（对齐 docs/AgentLoop_重构设计讨论.md §8）：
+覆盖（对齐 docs/AgentLoop/AgentLoop_重构设计讨论.md §8）：
 - 三种终止：无工具自然结束 / 达 max_rounds 强制收尾 / 工具异常（超时）隔离后继续
 - 协议顺序：assistant(含 tool_calls) 快照 → tool 一一对应回填
 - 二次 tool_calls 不丢（两轮以上工具链）

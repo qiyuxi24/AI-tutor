@@ -58,6 +58,23 @@ def test_call_llm_raises_when_always_empty(monkeypatch):
     assert len(seen) == call_mod.EMPTY_RESPONSE_RETRIES + 1
 
 
+def test_call_llm_records_usage_with_kind(monkeypatch):
+    """接线验证：记账带 kind（按功能归因），且**累积**空回复重试那一次的消耗。"""
+    seen = []
+    monkeypatch.setattr(call_mod, "record_llm_usage",
+                        lambda kind, model, usage, **kw: seen.append((kind, usage)))
+    _patch(monkeypatch, [_resp("", finish="length"), _resp("正文")])
+
+    asyncio.run(call_mod.call_llm("sys", [{"role": "user", "content": "hi"}],
+                                  kind="quiz_generate"))
+
+    assert len(seen) == 1
+    kind, usage = seen[0]
+    assert kind == "quiz_generate"
+    # 两次调用各 10+5 → 累加 20+10；只记最后一次会漏掉空回复那次的思考 token
+    assert (usage.prompt_tokens, usage.completion_tokens) == (20, 10)
+
+
 def test_call_llm_returns_text_on_length_truncation(monkeypatch):
     """截断只告警不重试（重发同样会撞上限，由调用方决定是否调大 max_tokens）"""
     seen = _patch(monkeypatch, [_resp('{"nodes":[', finish="length")])
