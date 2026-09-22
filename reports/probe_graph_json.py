@@ -17,9 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 logging.basicConfig(level=logging.INFO, format="    %(levelname)s %(message)s")
 
-from app.core.kb.kb_manager import chunk_text                      # noqa: E402
 from app.core.kb.graph_generator import (                          # noqa: E402
-    GRAPH_CHUNK_CHARS, GRAPH_MAX_TOKENS, GraphGenerator,
+    GRAPH_MAX_TOKENS, GraphGenerator, build_section_tree, collect_units,
 )
 
 DB = ROOT / "backend" / "data" / "kb" / "5" / "kb.db"
@@ -30,27 +29,28 @@ USER_ID = 5
 async def main(limit: int, offset: int = 0) -> None:
     con = sqlite3.connect(DB)
     text = con.execute("select extract_text from documents where node_id=5").fetchone()[0]
-    chunks = chunk_text(text, chunk_size=GRAPH_CHUNK_CHARS)
-    window = chunks[offset:offset + limit]
-    print(f"分块总数={len(chunks)}，扫描 [{offset}, {offset + len(window)})  "
-          f"分块={GRAPH_CHUNK_CHARS}字 max_tokens={GRAPH_MAX_TOKENS} thinking=False\n")
+    units = collect_units(build_section_tree(text))
+    window = units[offset:offset + limit]
+    print(f"生成单元总数={len(units)}，扫描 [{offset}, {offset + len(window)})  "
+          f"max_tokens={GRAPH_MAX_TOKENS} thinking=False\n")
 
     gen = GraphGenerator(user_id=USER_ID)
     ok = fail = 0
     nodes = edges = 0
-    for i, ch in enumerate(window, start=offset):
-        result = await gen._call_generator_llm(SUBJECT, ch["content"], [])
+    for i, unit in enumerate(window, start=offset):
+        result = await gen._call_generator_llm(SUBJECT, unit["text"], [],
+                                               section=unit["title"])
         if result is None:
             fail += 1
-            print(f"[{i:3d}] 入={len(ch['content']):5d} -> 失败（已跳过该块）")
+            print(f"[{i:3d}] 入={len(unit['text']):5d} -> 失败（已跳过该单元）")
             continue
         ok += 1
         nodes += len(result["nodes"])
         edges += len(result["edges"])
-        print(f"[{i:3d}] 入={len(ch['content']):5d} -> 节点 {len(result['nodes']):3d} "
+        print(f"[{i:3d}] 入={len(unit['text']):5d} -> 节点 {len(result['nodes']):3d} "
               f"边 {len(result['edges']):3d}")
 
-    print(f"\n总计 {len(window)} 块: 成功 {ok} / 失败 {fail}；累计节点 {nodes} 边 {edges}")
+    print(f"\n总计 {len(window)} 个单元: 成功 {ok} / 失败 {fail}；累计节点 {nodes} 边 {edges}")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """探针：system prompt 各段的真实体量 —— 给「上下文预算框架」提供基线数据。
 
-口径：单一预算 B = 48K、九段配额见 docs/上下文工程_预算框架.md §1.2。
+口径：单一预算 B = 48K、九段配额见 docs/上下文工程/上下文工程_预算框架.md §1.2。
 用法：backend/venv/Scripts/python.exe reports/probe_context_budget.py
 """
 import json

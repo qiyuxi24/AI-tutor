@@ -108,6 +108,26 @@
 - 代价：注入后系统提示词 ~3k → **14.4k tokens**（57 节点 / 图谱摘要 22141 字符）；
   `LLM_CTX_BUDGET=32000` 下留给历史 ≈ 15.6k，待决策项见 `TODO.md`
 
+### 4.3 图谱生成质量 P0：同名并轨 + 去重不静默 + 可复现体检（2026-09-20，GQ-1~3）
+- 由来：对 user 5 的书籍建图结果全量审计（311 节点 / 659 边 / 23 组同名重复 / 42.5% 空壳），
+  结论与量化目标见 `TODO_Graph_Quality.md`。
+- **GQ-1 写入层精确同名合并**：`knowledge_graph.normalize_node_name()`（NFKC + 去空白 + 剥
+  「（复习）/_extended/小结…」碎片尾缀）与 `KnowledgeGraph.find_node_by_name(name, subject)`
+  是判重**唯一实现**，`create_node_with_content` 命中已有节点则并轨（**返回实际落点 ID**，
+  调用方用它建边/回执），`knowledge_writer._find_same_name` 退化为薄壳。
+  原先并轨只存在于 Agent 写路径 → 书籍建图走 `create_node_with_content` 绕过（原漏洞 #4）。
+  `graph_generator._write_to_graph` 增加 `node_id_alias`：边引用被合并掉的 id 时改指落点
+  （原先只按 name 记映射，边按 id 引用 → 漏建边）；并轨幂等（同段正文不叠两遍）。
+- **GQ-2 嵌入失败不得静默**：`_find_dedup_candidates` 拿不到向量时 `logger.warning` +
+  `dedup_status = unavailable`；hash 兜底记 `degraded`；状态经 `_write_to_graph` → `_generate`
+  aggregate 带出（原状：欠费 → 返回 `{}` → 零合并且零告警）。
+- **GQ-3 质检脚本**：`backend/scripts/inspect_graph_quality.py`（默认只读）：规模/深度、
+  L1 同名组 + L2 字符串相似对（不依赖嵌入）、空壳率、结构健康（悬空边/自环/重复边/前置环/
+  孤立/连通分量）、tags 分布异常、字段填充、拓扑。**体检基线口径由脚本固化**（与手工审计
+  的差异原因见 `TODO_Graph_Quality.md` §0.1）。
+- 证据：`tests/test_node_write_paths.py`（14 例，含建图路径并轨/幂等/学科隔离/去重状态）、
+  `tests/test_graph_quality_script.py`（4 例，判重边界 + 合并动作）；全量 `770 passed, 7 deselected`。
+
 ## 5. RAG / 知识库
 - 知识库目录树（递归多级 + 上传/删除/检索/上下文选择）
 - 解析器注册表去耦合（text 30+ / pdf / docx / pptx / image-OCR / legacy / 电子书 epub+fb2，可选依赖降级）
