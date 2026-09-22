@@ -7,6 +7,7 @@
   GET  /collector/tasks/{id}        - 任务进度（供前端轮询）
   POST /collector/tasks/{id}/cancel - 协作式取消（决策 #21）
   GET  /collector/stats             - 采集覆盖率（学段→学科 已采/缺口，§4.3 可视化数据源）
+  GET  /collector/stats/sources     - 来源质量统计（B3.3：按采集来源列出被 RAG 引用次数排行）
 
 对外契约（对齐前端 api/collector.js）：
 - 任务 status 领域值 pending/processing 翻译为 UI 值 queued/running，
@@ -215,3 +216,18 @@ async def stats(user_id: int = Depends(get_current_user),
     """采集覆盖率：学段→学科 已采/缺口（§4.3，前端 api/collector.js 契约）"""
     store = manager.store_mgr._get_store(user_id)
     return {"coverage": _coverage_out(store)}
+
+
+@router.get("/collector/stats/sources")
+async def source_stats(user_id: int = Depends(get_current_user),
+                       manager: CollectorManager = Depends(get_manager)):
+    """来源质量统计（B3.3）：按采集来源列出被 RAG 引用次数排行（降序）
+
+    口径（见 CollectorStore.source_reference_stats）：
+    - 只统计**文档类**资源（已入库 KB 文档，file_node_id 非空）；
+      每行带 resource_type="document" 让调用方知道当前口径。
+    - dataset_quiz 题目源入库走 quiz_id、无 file_node_id，**暂不计入**（后续另开项）。
+    - 未命中过的来源也在榜内（times_referenced=0），便于看出"采了却没被用过"的源。
+    """
+    store = manager.store_mgr._get_store(user_id)
+    return {"sources": store.source_reference_stats()}

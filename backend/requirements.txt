@@ -33,3 +33,6 @@ tiktoken>=0.7.0
 mcp>=2,<3
 # 网页搜索后端：ddgs（MIT，零 API key）。实测走 bing 后端可用；配 SEARXNG_URL 可切自建实例
 ddgs>=9.16
+# 采集 B3.2 网页正文抽取：trafilatura 主用（Apache 2.0，v1.8.0 起）+ readability-lxml 后备
+trafilatura>=1.8
+readability-lxml>=0.8.1

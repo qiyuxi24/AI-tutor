@@ -161,6 +161,43 @@ class CollectorStore:
                 (status, content_hash, file_node_id, error, _now(), rid),
             )
 
+    def increment_times_referenced(self, file_node_ids, delta: int = 1) -> int:
+        """
+        RAG 命中累计引用次数（B3.3）：按入库 KB 节点 ID 批量 +delta，返回命中行数。
+
+        - 入参可为单个 int 或 int 列表：一次检索命中多篇文档时合并成**一条** UPDATE。
+        - 匹配键是 `file_node_id`（入库时写入的 kb nodes.id），**不是** RagHit.source
+          （那只是源类型 "kb"）；真来源是 `resources.source`（适配器名）。
+        - 未入库（file_node_id 为空）或未知节点 → 返回 0，不报错。
+        """
+        ids = [file_node_ids] if isinstance(file_node_ids, int) else list(file_node_ids or [])
+        if not ids:
+            return 0
+        marks = ",".join("?" for _ in ids)
+        with self._conn:
+            cur = self._conn.execute(
+                f"UPDATE resources SET times_referenced = times_referenced + ?"
+                f" WHERE file_node_id IN ({marks})",
+                (delta, *ids),
+            )
+        return cur.rowcount
+
+    def source_reference_stats(self) -> list[dict]:
+        """
+        按来源聚合 RAG 引用次数排行（B3.3，降序；同次数按来源名稳定排序）。
+
+        口径：**只统计文档类资源**（`file_node_id` 非空 = 已入库 KB 文档）。
+        dataset_quiz 题目源入库走 `quiz_id`、无 file_node_id → 暂不计入，故每行固定
+        带 `resource_type="document"` 供调用方识别（未来覆盖题目源另开一项，不塞进 B3.3）。
+        """
+        rows = self._conn.execute(
+            "SELECT source, COUNT(*) AS resource_count,"
+            " COALESCE(SUM(times_referenced), 0) AS times_referenced"
+            " FROM resources WHERE file_node_id IS NOT NULL"
+            " GROUP BY source ORDER BY times_referenced DESC, source"
+        ).fetchall()
+        return [{**dict(r), "resource_type": "document"} for r in rows]
+
     def delete_resource(self, rid: int) -> bool:
         with self._conn:
             cur = self._conn.execute(

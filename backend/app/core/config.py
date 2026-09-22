@@ -82,6 +82,9 @@ class Settings:
     # 自建 SearXNG 实例地址（如 http://localhost:8888）；留空则用 ddgs（零 key）
     searxng_url: str = ""
 
+    # ─── 题库存储配额（B3.1：防批量导入撑爆磁盘；每用户题目数，0=不限制）───
+    quiz_storage_quota: int = 50_000
+
     # ─── 日志 ───
     log_level: str = "INFO"
     log_dir: str = "logs"
@@ -120,6 +123,7 @@ class Settings:
             default_admin_password=os.getenv("DEFAULT_ADMIN_PASSWORD", ""),
             web_search_enabled=_parse_bool(os.getenv("WEB_SEARCH_ENABLED"), True),
             searxng_url=os.getenv("SEARXNG_URL", ""),
+            quiz_storage_quota=int(os.getenv("QUIZ_STORAGE_QUOTA", str(50_000))),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_dir=os.getenv("LOG_DIR", "logs"),
             log_max_bytes=int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024))),

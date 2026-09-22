@@ -68,14 +68,18 @@ def test_builtin_adapters_registered():
     assert "wikipedia" in reg.names()
     assert "wikibooks" in reg.names()
     assert "oiwiki" in reg.names()
+    assert "web_page" in reg.names()
     assert get_adapter("wikipedia") is reg.get("wikipedia")
-    assert {a.name for a in reg.all()} == {"wikipedia", "wikibooks", "oiwiki"}
+    assert {a.name for a in reg.all()} == {"wikipedia", "wikibooks", "oiwiki",
+                                           "web_page"}
 
 
 def test_builtin_license_level_l0():
     assert get_adapter("wikipedia").license_level == "L0"
     assert get_adapter("wikibooks").license_level == "L0"
     assert get_adapter("oiwiki").license_level == "L0"
+    # web_page 未登记站点默认 L2（合理使用·个人学习），站点级授权在候选上覆盖
+    assert get_adapter("web_page").license_level == "L2"
 
 
 def test_abstract_adapter_raises():

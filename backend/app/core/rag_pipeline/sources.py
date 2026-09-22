@@ -5,12 +5,14 @@ RAG 管道：检索数据源（RagSource）与内置数据源实现。
 - RagSource 是协议（Protocol），定义统一检索接口。新增数据源 = 实现该协议 + 注册进 pipeline，不改上层。
 - GraphRagSource：知识图谱 RAG 源（数据来自 knowledge_graph 节点 MD，经 rag_manager 语义检索）
 - KbRagSource：上传文档知识库源（数据来自 kb_manager，支持目录范围 node_ids 过滤）
+  —— 命中后累计来源引用次数（B3.3）：异步落库不阻塞，统计失败绝不影响检索。
 
 鲁棒性：
 - 每个源的检索异常由 pipeline 统一 try/except 隔离；源自身只负责"尽力返回"，失败时允许抛错。
 - 检索是增强而非必需，任何失败都不应阻塞主对话。
 """
 
+import asyncio
 import logging
 from typing import Optional, Protocol, runtime_checkable
 
@@ -72,6 +74,44 @@ class GraphRagSource:
         return hits
 
 
+def _bump_reference_stats(user_id: int, node_ids: list) -> None:
+    """
+    RAG 命中后累计来源引用次数（B3.3）：**有运行中的事件循环 → 后台任务；否则同步写一行**。
+
+    为什么分两路：检索既可能跑在长期存活的请求循环（chat_service → pipeline.run），
+    也可能跑在 `rag_search` 同步桥的**临时 loop**（tools/rag_search._run_async →
+    asyncio.run）。临时 loop 关闭时会取消尚未执行的 pending 任务，实测（2026-09-20）：
+    后台协程**写库前有 await 就必丢**，直接写（无 await）能落地 —— 所以
+    `_write_reference_stats_async` 里**不得在写库前 await**。
+    无 loop 时（脚本/测试直调）同步写一行 UPDATE，本地 sqlite 微秒级，不构成阻塞。
+
+    统计是增强而非必需：任何异常都在 _write_reference_stats 内吞掉，绝不影响检索结果。
+    """
+    ids = sorted({int(n) for n in node_ids if n is not None})
+    if not ids:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _write_reference_stats(user_id, ids)
+    else:
+        loop.create_task(_write_reference_stats_async(user_id, ids))
+
+
+def _write_reference_stats(user_id: int, node_ids: list[int]) -> None:
+    """落库（同步）：按入库 kb 节点 ID 批量 +1；异常吞掉并记日志（统计不影响检索）。"""
+    try:
+        from app.core.collector.manager import collector_manager
+        collector_manager.store_mgr._get_store(user_id).increment_times_referenced(node_ids)
+    except Exception as e:
+        logger.warning(f"引用次数累计失败（已忽略，不影响检索）: {e}")
+
+
+async def _write_reference_stats_async(user_id: int, node_ids: list[int]) -> None:
+    """后台任务外壳。⚠️ 写库前**不得有 await**（临时 loop 关闭会取消未执行的任务）。"""
+    _write_reference_stats(user_id, node_ids)
+
+
 class KbRagSource:
     """
     上传文档知识库源。
@@ -79,6 +119,9 @@ class KbRagSource:
     ctx.kb 存在即触发知识库检索：
     - ctx.kb.node_ids 非空 → 只在指定目录范围内检索（目录展开为文件列表后混合检索）
     - ctx.kb.node_ids 为空/None → 检索该用户全部上传文档
+
+    命中后累计来源引用次数（B3.3，见 _bump_reference_stats）：按命中片段的 node_id
+    累加 resources.times_referenced（同一文档多片段命中只计 1 次引用）。
     """
 
     name = "kb"
@@ -132,6 +175,8 @@ class KbRagSource:
                     "kb_name": kb_name,
                 },
             ))
+        # B3.3：命中即累计来源引用次数（kb_manager.search 返回非空 = 命中；去重后按文档计）
+        _bump_reference_stats(ctx.user_id, [h.metadata.get("node_id") for h in hits])
         return hits
 
     @staticmethod

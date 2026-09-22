@@ -1,7 +1,7 @@
 # TutorAgent 教育资源采集模块（Collector）— 未完成 TODO
 
 > 设计依据：`docs/教育资料采集模块_设计讨论.md`（决策 #1-25 + §11 里程碑）
-> 创建：2026-09-05 ｜ 上次整理：2026-09-13
+> 创建：2026-09-05 ｜ 上次整理：2026-09-20
 > **✅ Batch 1（B1.1-B1.8）与 Batch 2（B2.1-B2.5）已完成，整体搬到 `done.md` §7；本文件只留未完成项。**
 > 铁律（用户）：**去耦合、独立测试（尽量）、复用已有组件**
 > 标记约定：
@@ -33,9 +33,14 @@
 - [ ] 测试：`test_web_page_adapter.py`（mock HTML：抽取成功/失败回退/超时）
 
 ### B3.3 来源质量统计 [改]
-- [ ] RAG 命中时 `times_referenced += 1`（KbRagSource.retrieve 命中即累计，异步落库，不阻塞）
-- [ ] `GET /collector/stats/sources`：按来源统计引用次数排行
-- [ ] 测试：`test_source_stats.py`
+- [x] RAG 命中时 `times_referenced += 1`（`KbRagSource.retrieve` 命中即累计，见 `rag_pipeline/sources.py::_bump_reference_stats`）
+  - 口径：**同一文档多片段只计 1 次**（按 `node_id` 去重）——避免"分块粒度"污染排行
+  - 落库：有事件循环 → `create_task` 后台任务；无 → 同步写一行（均不阻塞）。⚠️ **后台协程写库前不得 `await`**：`rag_search` 的同步桥跑在 `asyncio.run` 临时 loop 里，loop 关闭会取消未执行的任务（2026-09-20 实测：写前 await 必丢、直接写能落地；回归 `test_bump_persists_inside_transient_loop`）
+  - 统计失败静默（吞异常 + warning），绝不影响检索结果
+- [x] `GET /collector/stats/sources`：按来源统计引用次数排行（降序）
+  - 口径：**只统计文档类资源**（`file_node_id` 非空），每行带 `resource_type="document"`；`dataset_quiz` 题目源走 `quiz_id` 暂不计入（将来另开项，不塞进 B3.3）
+  - 未命中过的来源也在榜内（`times_referenced=0`），便于看出"采了却没人用"的源
+- [x] 测试：`test_source_stats.py`（19 例：store 累加/批量/排行/空库/排除题目源 + sources 命中/未命中/同文档去重/落库失败不抛/双路径/临时 loop + api 契约/空库/用户隔离/不遮蔽既有路由）
 
 **Batch 3 验收**：开放题集灌入 quiz 可练；网页抓取 2-3 站可入库；来源排行可查。
 
@@ -80,4 +85,5 @@
 | B4 | playwright/agent-browser、sentence-transformers+torch | torch 体积大，仅可选启用 |
 
 ## 遗留技术债（登记未修的已知小项）
+- [ ] **#3 采集库 `busy_timeout` 未收紧（B3.3 复核项，2026-09-20 登记）**：`collector/store.py` 用 sqlite3 默认 `busy_timeout`（5s），而 B3.3 的引用计数 UPDATE 跑在**事件循环线程**上 → 极端情况下（并发采集持写锁）可能把 loop 卡住最长 5s。**未当场收紧的理由（反向证据，别照着"一行 PRAGMA"去改）**：`PRAGMA busy_timeout` 是**连接级**设置，而 `CollectorStore` 这条单连接同时服务采集任务自身的写入 → 调小会把"瞬时锁等待"变成 `database is locked` 异常，被 `manager.run_task` 的 `except` 写成 `RESOURCE_FAILED`（该候选永久失败，比卡 5s 更糟）。**正确修法**：给引用计数另开一条只写连接（或走独立线程/队列），而不是全局调 busy_timeout；B3.3 已保证异常被吞掉 + 记 warning，最坏情况是丢统计、不影响检索。
 - [ ] **#2 试卷拆分器 `quiz_splitter.py` 已就绪但零引用（未接入任何链路）**（2026-09-12 发现）：`collector/quiz_splitter.py`（整卷非结构化文本 → 逐题结构：题号/大题/选项/答案回填/解析，纯函数零 LLM）已可用且有 `tests/test_quiz_splitter.py` 9 例覆盖，但**全库零调用**（只在自身 `__main__` 自检里跑），属"能用但没人用"的库。**待决策（入口形态三选一）**：① `/kb/upload` 命中试卷形态后自动拆分；② 独立 `POST /quiz/import`（上传整卷 → 拆分 → 人工校对 → 入库）；③ 与 B3.1 `dataset_quiz` 合并做（同属"题库导入"，但形态不同：B3.1=结构化 JSON，本项=非结构化试卷文本，不要混在一支适配器里）。**接入时必须注意**：`quiz_store.save_questions` 收 `Question` **对象**而非 dict（须写 `Question(**q.to_question_dict())`）；DB `id` 自增，拆分产物的 `q1/q2` 重号入库无害。
