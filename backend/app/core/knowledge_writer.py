@@ -13,13 +13,21 @@
 本模块只负责"建什么节点"（字段与归属），不负责"文件长什么样"。
 """
 
+import hashlib
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 from app.core.kg_taxonomy import assign_taxonomy_sync
 from app.core.knowledge_graph import KnowledgeGraph
 
-__all__ = ["create_node_from_ai", "apply_suggestion", "load_suggestions", "save_suggestions"]
+__all__ = ["create_node_from_ai", "create_node_from_webpage",
+           "apply_suggestion", "load_suggestions", "save_suggestions"]
+
+# 网页存档节点正文上限：防超长页面把节点 MD 撑到数 MB（前端 marked 渲染也吃力）
+_WEB_NODE_MAX_CHARS = 50_000
+# 节点名（页面标题）长度上限，避免超长 <title> 撑坏图谱视图
+_WEB_NODE_NAME_MAX_LEN = 120
 
 
 def load_suggestions(data_dir: Path) -> list:
@@ -208,6 +216,64 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
                 pass
 
     return f"已创建节点「{node_name}」(ID: {node_id})，关联 {edge_count} 条边"
+
+
+def _web_node_id(user_id: int, url: str) -> str:
+    """网页节点 ID：由 URL 派生（确定性 → 天然幂等）；带 user_id 因 nodes.id 是全局主键"""
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+    return f"web_{user_id}_{digest}"
+
+
+def create_node_from_webpage(kg: KnowledgeGraph, url: str, title: str = "",
+                             content: str = "") -> str:
+    """
+    把 AI 联网抓取到的网页正文存档为一个图谱节点（origin="web"）。
+
+    与 `create_node_from_ai` 的区别（**刻意不复用它**）：
+    - **不并轨、不追加**：节点 ID 由 URL 派生，同一 URL 第二次抓取直接跳过 ——
+      重复抓取不该重写节点，也不该和人类编辑打架；而 create_node_from_ai 带
+      "同名并轨 + 存在即追加内容"语义，会把网页误并到同名知识点上。
+    - 归属不做 LLM 判定（省一次调用）：tags = ["网页", <host>]，学科因此派生为「网页」。
+    - 只负责首次落档；要"刷新正文"另开接口（避免每次抓取都重写节点）。
+
+    参数:
+        kg:      KnowledgeGraph 实例（已绑定 user_id）
+        url:     网页地址（幂等键；空则直接返回，不写任何东西）
+        title:   页面标题（取不到时用 URL 兜底）
+        content: Markdown 正文（超 `_WEB_NODE_MAX_CHARS` 截断并注明）
+
+    返回:
+        结果描述字符串（供工具层回填给模型）
+    """
+    url = (url or "").strip()
+    if not url:
+        return "未提供网址，网页未存档。"
+
+    node_id = _web_node_id(kg.user_id, url)
+    if kg.get_node(node_id) is not None:
+        return f"该网页已在图谱中（节点 ID: {node_id}），未重复写入。"
+
+    md = (content or "").strip()
+    if len(md) > _WEB_NODE_MAX_CHARS:
+        md = md[:_WEB_NODE_MAX_CHARS] + f"\n\n……（网页正文过长，已截断，共 {len(md)} 字符）"
+
+    host = urlparse(url).hostname or ""
+    name = ((title or "").strip() or url)[:_WEB_NODE_NAME_MAX_LEN]
+    node_data = {
+        "id": node_id,
+        "name": name,
+        "file": f"nodes/{node_id}.md",
+        "tags": [t for t in ("网页", host) if t],
+        "board": "",
+        "summary": f"来源：{url}",
+        "mastery": 0,
+        "difficulty": 3,
+        "estimated_minutes": 15,
+        "added_by": "ai",
+    }
+    # 建库 + 写 MD 一次完成（模板与来源标注的唯一来源在 KnowledgeGraph）
+    kg.create_node_with_content(node_data, md, origin="web")
+    return (f"已存档为图谱节点「{name}」(ID: {node_id})，可在图谱中双击查看。")
 
 
 def apply_suggestion(kg: KnowledgeGraph, suggestion: dict) -> str:

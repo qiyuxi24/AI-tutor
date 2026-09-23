@@ -1,19 +1,26 @@
-"""工具 `fetch_webpage` —— 抓网页正文，剥离 HTML 后返回纯文本（**只读，不落盘**）。
+"""工具 `fetch_webpage` —— 抓网页正文，剥离 HTML 后返回纯文本（**只读**，模型侧不落盘）。
 
 与 `download_resource` 的分工（都抓 URL，但目的不同）：
-- fetch_webpage    ：**只读看一眼**。网页正文 → 文本返回给模型，不落盘。
+- fetch_webpage    ：**只读看一眼**。网页正文 → 文本返回给模型；同时把这份网页
+                     **存档为一个图谱节点**（origin="web"，可在图谱中双击查看）。
 - download_resource：**长期留存**。下载 bytes → 解析 → 入知识库，之后可被 `rag_search` 检索到。
 
-这个分工同时写进了两条 spec 的 description / guidance，模型侧才不会混用。
+给模型看的 `DESCRIPTION` / `GUIDANCE` **保持不变**（对模型而言本工具仍不是"入库后可检索"的
+正规途径，改了反而会让它当 download_resource 用）；只有人手写的注释同步了存档行为。
 
 安全与限额：SSRF 检查走 `..net_guard`（唯一实现）；单次请求 10s 超时；
 返回文本截断到 `max_chars`（默认 3000，上限 20000）。
+
+存档（2026-09-22 追加，失败静默）：HTML → Markdown 复用采集模块的
+`collector.adapters.web_page.extract_main_text`（trafilatura → readability，**全库唯一实现**）。
+因 `web_page` 反过来 import 了本包 `net_guard`，此处**必须在函数内惰性 import** 以避开包级环。
 
 ponytail: 正则剥标签（`_RE_BLOCK` / `_RE_TAG`）不是完整 HTML 解析器 —— 对正文抽取够用，
       引入 readability/bs4 收益不抵一个新依赖；遇到结构特别怪的站点再换。
 """
 
 import html
+import logging
 import re
 
 import httpx
@@ -22,6 +29,8 @@ from app.core.error_codes import ErrorCode, log_error
 
 from ..net_guard import is_blocked_url
 from ..registry import _spec
+
+logger = logging.getLogger("ai-tutor")
 
 # 抓取超时（秒）
 _FETCH_TIMEOUT = 10.0
@@ -55,13 +64,31 @@ def _html_to_text(raw: str) -> str:
     return text.strip()
 
 
-def fetch_webpage(url: str, max_chars: int = 3000) -> str:
+def _archive_webpage(kg, url: str, raw_html: str) -> None:
+    """把抓到的网页存档为图谱节点（增量副作用；失败只 warning，绝不影响工具返回）。
+
+    HTML → Markdown → 图谱节点的统一实现在 `../web_archive.py`
+    （与「联网搜索后自动存档结果页」共用同一份代码，避免长出第二套）。
+    """
+    if kg is None:
+        return
+    try:
+        from ..web_archive import archive_html
+
+        archive_html(kg, url, raw_html)
+    except Exception as exc:  # 存档是副作用：任何失败都不该影响抓取结果
+        logger.warning("网页存档为图谱节点失败（不影响抓取返回）: %s", exc)
+
+
+def fetch_webpage(url: str, max_chars: int = 3000, kg=None) -> str:
     """
     抓取网页正文并返回可读文本（MCP 风格网页查询工具）。
 
     参数:
         url:       要查询的网页完整 URL（http/https）
         max_chars: 返回文本最大字符数
+        kg:        KnowledgeGraph 实例（可选）。给了就把该网页存档为图谱节点（origin="web"）；
+                   None（既有调用方/测试）→ 行为与改动前完全一致
 
     返回:
         网页可读文本；失败时返回带错误说明的**友好提示**（不抛异常，让 LLM 直接使用）
@@ -91,6 +118,8 @@ def fetch_webpage(url: str, max_chars: int = 3000) -> str:
         text = _html_to_text(resp.text)
         if not text:
             return "该网页正文为空，未提取到可读文本。"
+
+        _archive_webpage(kg, url, resp.text)  # 增量：存档为图谱节点（失败静默）
 
         if len(text) > max_chars:
             text = text[:max_chars] + f"\n\n……（内容过长，已截断，共 {len(text)} 字符）"
@@ -129,7 +158,7 @@ GUIDANCE = """
 
 
 def handler(args, kg) -> str:
-    return fetch_webpage(args["url"], max_chars=int(args.get("max_chars", 3000)))
+    return fetch_webpage(args["url"], max_chars=int(args.get("max_chars", 3000)), kg=kg)
 
 
 SPEC = _spec("fetch_webpage", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE)

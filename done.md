@@ -177,6 +177,32 @@
 - **B2.4 `doc_chunks.embedding` 可空**：BM25-only 支持 + `search` 只对非空向量行算相似度 + 幂等迁移 `scripts/migrate_embedding_nullable.py` —— `test_bm25_only_index.py`
 - **B2.5 切章入库管线**：`collector/pipeline_ingest.py::ingest_book_chapters`（`VECTORIZE_MIN_CHARS = CHUNK_SIZE(500)` 决定是否向量化，残章跳过，`_safe_name` 净化）—— 6 用例
 
+### 7.3 只采开源来源（2026-09-23）
+- 背景：五条「按 URL 取内容」的路径里只有采集模块有授权判定，**AI 联网三条（搜索存档 / `fetch_webpage` / `download_resource`）零判定** —— 非开源内容会被落成图谱节点或进 KB 被 `rag_search` 检索。
+- 唯一判定出口 **`core/open_source.py`**（纯 stdlib 叶子模块，零跨包依赖，放 core 根以避开 `collector ↔ agent_tools` 包级环）：开放来源表 + 关闭来源表（盗版分发 / 付费墙 / 明确禁止）+ 页面许可声明识别（CC 链接、`rel=license`、CC0/公有领域、SPDX 风格文本）；出口**直接复用既有 `L0/L1/L2/L3`**（`types.py` 里 L3 本就是「版权不明」），不新造第二套分级；**fail-closed：判不出来一律 L3 不可采**。
+- 三个接线点（各 2~6 行，全部加法）：
+  - `collector/adapters/web_page.py`：来源表改为 import `open_source.SITE_LEVELS`（保留 `_SITE_LICENSE` 同名别名以兼容既有测试 patch）；**未登记站点默认 L2 → L3**；
+  - `agent_tools/web_archive.py`：`fetch_and_archive` 按 URL 预筛（非开放来源**不发请求**）+ `archive_html` 按页面许可声明复核 → 一次覆盖「联网搜索存档」与「`fetch_webpage` 存档」，**`mcp_host.py` / `tools/fetch_webpage.py` 零改动**；
+  - `agent_tools/tools/download_resource.py`：下载前 `is_open(url)`，非开放来源不下载不入库（fail-closed）。
+- 严格度取舍：非开源网页**仍可只读查看**（`fetch_webpage` 返回文本逐字不变），只是**不留存**；要连"看"都拦需另改 `tools/fetch_webpage.py`（本次未做）。
+- 总开关 `open_source.OPEN_SOURCE_ONLY=False` → 回到旧行为（刻意内联，**不新增 `config.py` 字段**、不动 `collector/types.py`）。
+- **口径变更（非回归）**：`test_web_page_adapter.py` 5 处（L2→L3 / 未登记构造不出候选）、`test_collector_adapters_registry.py` 1 处（web_page 兜底等级 L2→L3）。
+- 夹具适配：`test_web_archive.py` / `test_webpage_node_bridge.py` 加 autouse fixture、`test_download_tool.py` 扩 `_install()` —— 把夹具域名列入开放来源，否则 fail-closed 会先拦掉，测不到各自机制本身。
+- 测试：`test_open_source.py` 25 例（判定）+ `test_open_source_paths.py` 6 例（接线）；离线全量 **859 passed, 7 deselected**（新增 31 例，既有 828 例全绿、无转红）。
+- 方案 / 禁区 / 未做项（robots、留痕、搜索侧过滤）：`docs/采集与联网查阅_只采开源来源_计划.md`。
+
+### 7.4 正文预览 + 维基正文修复（2026-09-23）
+- **知识库正文预览**（用户："那些 md 看不到内容"）：`GET /kb/node/{node_id}/text` + `kb_manager.get_document_text`（读正文唯一出口）+ `KbTextPreviewDialog.vue`；`KbPanel` 文件节点「查看正文」按钮与**双击文件**两个入口。落点较原方案 §4 改为知识库侧直读（同样覆盖手动上传文件），详见 `docs/采集_网页正文Markdown预览_方案.md` §12。
+- **`wikitext_to_md` 修「字有问题」**（真网《贪心算法》原文 `'''贪心算法'''（{{langx|en|greedy algorithm}}）` 被整段丢模板 → 入库成「贪心算法（）」）：内容型模板（`lang*` / `transl` / `nowrap` / `nobr` / `ipa` / `langue` / `rtl-lang`）改取**末个非空参数**，维护型（`{{Expand}}`/`{{NoteTA}}`…）仍整体丢弃；顺带清 `__NOTOC__` 等魔术字、HTML 注释/标签（`<code>` → 行内代码）、图片链接（`[[File:]]`/`[[文件:]]` 整条丢）、空列表项与游离 `[[`/`]]`。
+- 真网前后对比（只读核对）：《贪心算法》`（）` → `（greedy algorithm）`；《树 (数据结构)》`（）` → `（tree）` 且 9471→8376 字（图片说明等噪声被清）；《数据结构与算法术语列表》`__NOTOC__` 消失。
+- 测试：`test_wikipedia_adapter.py` 新增 4 例（内容型模板保留 / 维护型仍丢 / 魔术字与 HTML 残渣 / 图片链接整条丢）。
+- **简繁统一**（用户确认「字有问题」指简繁混排）：源页面普遍简繁混写，MediaWiki **只在渲染时**按变体转换，`prop=revisions`（wikitext）路径绕过了它（实测 `action=parse&prop=wikitext&variant=zh-cn` 对正文无效）。方案：加依赖 **`zhconv`**（纯 Python 转换表，MIT），在 `wikitext_to_md` 出口统一为大陆简体（`_VARIANT_TARGET = "zh-cn"`，比 `zh-hans` 多一层地区词：軟體→软件、雷射→激光）；未装则原样返回不阻断采集。
+  - 已排除的两条替代路径（实测）：`prop=extracts&explaintext&variant=zh-cn` 简繁完美且模板被服务端展开（「（英语：tree）」），但**丢列表符号、公式烂掉**（《快速排序》72 处 `{\displaystyle…}` 残骸）；渲染态 HTML 同理伤公式。
+  - 真网验证（只读）：三页重转后 `zhconv.convert(md) == md`（**待转换字符 0**）；库内旧文本《贪心算法》有 **824** 字符需转换（正是截图里的混排量）、《树》21、《术语列表》3；公式 `$…$` 与标题层级（40/12/7 行）不受影响。
+- 测试：`test_wikipedia_adapter.py` 共 17 例（简繁统一 / 公式不被转换 / zhconv 缺失降级 各 1 例）；离线全量 **874 passed, 7 deselected**。
+- **正文外链可点**（用户问「网页里面的链接也能打开吧」）：实测库里正文 `](http` 计数为 **0** —— 维基外链 `[http://x 说明]` 原样入库只是方括号文字，网页存档走 trafilatura 也只留锚文本。修法两处：① `wikitext_to_md` 把 `[url 说明]` → `[说明](url)`（裸 URL、`[1]` 脚注不动，真网《计算机科学》20 / 《数据结构》4 / 《遗传算法》2 处全部转成链接、零残留）；② `KbTextPreviewDialog` 拦截正文里的 `<a>` 点击 → `window.open(..., '_blank', 'noopener,noreferrer')` —— 因为 **DOMPurify 默认放行 `href`/`rel` 但不放行 `target`**（实测当前版本），靠 `target=_blank` 无效；且不改共享的 `utils/markdown.js`（对话/图谱/画像三处共用）。全量 **875 passed**，`npm run build` 通过。
+- **遗留**：已入库的 11 个采集文件仍是旧文本 —— 要看到修复效果需「删除 KB 文件 + 重置 `resources` 状态（indexed → pending）后重采」（`start_task` 对已 indexed 的 URL 会直接跳过，故不能在采集页重采；重采需重跑一次嵌入）。
+
 ## 8. 测试与评测
 - 单元 + 集成 + collector 系列；**2026-09-13 离线集 580 passed, 7 deselected**（`-m "not llm_api"`）
 - CMRC2018 离线评测集（mock：vector R@1 0.470 / bm25 0.964 / RRF 0.766 / fuse 0.818）

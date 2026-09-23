@@ -36,3 +36,6 @@ ddgs>=9.16
 # 采集 B3.2 网页正文抽取：trafilatura 主用（Apache 2.0，v1.8.0 起）+ readability-lxml 后备
 trafilatura>=1.8
 readability-lxml>=0.8.1
+# 采集 B1.2 维基正文简繁统一（出口统一为大陆简体；源页面普遍简繁混写，MediaWiki 只在渲染时转换）
+# 纯 Python 转换表（MIT），不装则跳过转换、不阻断采集
+zhconv>=1.4

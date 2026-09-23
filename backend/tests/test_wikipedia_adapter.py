@@ -196,6 +196,121 @@ def test_wikitext_variant_markup_stripped():
     assert "链表|数组" not in md
 
 
+def test_wikitext_inline_templates_keep_content():
+    """内容型模板**保留参数**，不再整段丢弃（2026-09-23 真网遗留债 #2）：
+
+    真网《贪心算法》原文 `'''贪心算法'''（{{langx|en|greedy algorithm}}）` 里整个模板被删，
+    入库正文变成「贪心算法（）」——英文名/缩写丢失，是**信息损坏**而非样式问题。
+    """
+    md = wikitext_to_md(
+        "'''贪心算法'''（{{langx|en|greedy algorithm}}），又称'''贪婪算法'''。\n"
+        "'''栈'''（{{lang-en|stack}}）是{{nowrap|后进先出}}的[[抽象数据类型]]。\n"
+        "缩写{{lang|en|ADT}}，读音{{IPA|en|/stæk/}}。\n"
+    )
+    assert "**贪心算法**（greedy algorithm）" in md
+    assert "（stack）" in md
+    assert "后进先出" in md and "nowrap" not in md
+    assert "ADT" in md and "/stæk/" in md
+    assert "（）" not in md                       # 不再留空括号
+    assert "{{" not in md and "}}" not in md      # 花括号不残留
+
+
+def test_wikitext_drops_maintenance_templates_entirely():
+    """维护/元信息模板仍**整体丢弃**：不能因为"保留内容"把 {{Expand}}/{{NoteTA}} 灌进正文"""
+    md = wikitext_to_md(
+        "{{Expand|time=2013-03-12T12:00:06+00:00}}\n"
+        "{{NoteTA|G1=IT}}\n"
+        "{{unreferenced|time=2016-03-13T14:53:32+00:00}}\n"
+        "正文第一段。\n"
+    )
+    assert md.strip() == "正文第一段。"
+    assert "Expand" not in md and "unreferenced" not in md
+
+
+def test_wikitext_cleans_magic_words_html_and_empty_items():
+    """魔术字 / HTML 注释 / 展示标签 / 空列表项 / 游离链接括号（真网遗留债 #3）"""
+    md = wikitext_to_md(
+        "__NOTOC__\n"
+        "<!-- 这是维护注释 -->\n"
+        "调用 <code>push</code> 入栈。<div class=\"center\">居中说明</div>\n"
+        "*     \n"
+        "* 有效项\n"
+        "[[数据结构]]条目里残留的 ]] 尾巴\n"
+    )
+    assert "NOTOC" not in md and "__" not in md
+    assert "维护注释" not in md and "<!--" not in md
+    assert "`push`" in md and "<code>" not in md
+    assert "居中说明" in md and "<div" not in md
+    assert [ln for ln in md.splitlines() if ln.strip() == "*"] == []   # 空列表项已删
+    assert " * 有效项" in md or md.count("* 有效项") == 1
+    assert "]]" not in md and "[[" not in md
+
+
+def test_wikitext_drops_file_links_whole():
+    """图片/文件链接整条丢弃（含中文前缀）：不留 `thumb|说明` 之类的碎片"""
+    md = wikitext_to_md(
+        "[[File:Treedatastructure.png|300px|thumb|一棵树]]\n"
+        "[[文件:Stack.png|thumb|栈示意]]\n"
+        "正文。\n"
+    )
+    assert "Treedatastructure" not in md and "Stack.png" not in md
+    assert "thumb" not in md and "一棵树" not in md
+    assert "正文。" in md
+
+
+def test_wikitext_unifies_traditional_and_simplified():
+    """简繁统一：源页面普遍简繁混写，出口统一为大陆简体（2026-09-23 用户反馈「字有问题」）
+
+    背景：MediaWiki 只在**渲染时**按变体转换，走 `prop=revisions`（wikitext）路径会绕过它 ——
+    真网《树 (数据结构)》整段繁体、《贪心算法》半简半繁，入库后同一篇里两种字形并存。
+    """
+    md = wikitext_to_md(
+        "在計算機科學中，'''樹'''（{{langx|en|tree}}）是一種抽象資料型別，"
+        "用來模擬具有樹狀結構性質的資料集合。\n"
+        "本段本来就是简体字，不应被改动。\n"
+    )
+    assert "在计算机科学中，**树**（tree）是一种抽象" in md
+    assert "計算機" not in md and "樹狀結構" not in md and "資料" not in md
+    assert "本来就是简体字" in md
+
+
+def test_wikitext_variant_conversion_keeps_math_intact():
+    """简繁转换不得动公式：$…$ 里的 LaTeX 必须逐字保留"""
+    md = wikitext_to_md(
+        "期望值：<math>E = \\sum_{i=1}^n i</math>，另有 $\\frac{1}{2}$。\n"
+        "'''資料'''是繁體字。\n"
+    )
+    assert "$E = \\sum_{i=1}^n i$" in md
+    assert "$\\frac{1}{2}$" in md
+    assert "**资料**" in md
+
+
+def test_wikitext_variant_conversion_degrades_without_zhconv(monkeypatch):
+    """zhconv 未安装 → 原样返回不抛错（与 trafilatura/readability「装则启用」同约定）"""
+    import app.core.collector.adapters.wikipedia as wp
+
+    monkeypatch.setattr(wp, "_zhconv", None)
+    md = wp.wikitext_to_md("'''樹'''是一種資料結構。")
+    assert "資料結構" in md                    # 未转换，但没有报错
+
+
+def test_wikitext_external_links_become_markdown_links():
+    """外部链接 `[url 说明]` → Markdown 链接（预览里可点）；裸 URL 与脚注标注不动
+
+    维基外链语法不是 Markdown，原样入库时只是一对方括号文字（预览点不了）。
+    转成 `[说明](url)` 不新增噪声（URL 本来就在正文里），只是换个写法让它能点。
+    """
+    md = wikitext_to_md(
+        "参考[http://example.com/a 官方文档]与[https://example.org]两条。\n"
+        "裸链接 https://plain.example.com 保持原样。\n"
+        "脚注标注[1]与数值[2,3]都不动。\n"
+    )
+    assert "[官方文档](http://example.com/a)" in md
+    assert "[https://example.org](https://example.org)" in md      # 无说明文字时用 URL 兜底
+    assert "裸链接 https://plain.example.com 保持原样。" in md
+    assert "脚注标注[1]与数值[2,3]都不动。" in md
+
+
 def test_fetch_fail_returns_empty_string():
     async def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("mock timeout")

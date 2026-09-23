@@ -29,6 +29,7 @@ ORIGIN_NOTES = {
     "book": "由 AI 从学科书籍自动生成",
     "manual": "手动创建",
     "decompose": "由 AI 通过问题拆解自动创建（学习路径框架节点）",
+    "web": "由 AI 联网抓取",
 }
 ORIGIN_DEFAULT = "manual"
 

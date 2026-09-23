@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from app.core import agent_tools
+from app.core import open_source
 from app.core.agent_tools.tools import download_resource as download_tool
 
 
@@ -60,6 +61,9 @@ def _install(monkeypatch, *, status: int = 200, headers: dict | None = None,
     """打入假 httpx 命名空间；默认同时放行 SSRF 校验（避免测试依赖 DNS）。"""
     if allow_ssrf:
         monkeypatch.setattr(download_tool, "is_blocked_url", lambda url: None)
+    # 夹具域名列为开放来源：默认策略是 fail-closed，未登记域名会先被拦掉，测不到下载链路本身
+    for host in ("example.com", "e.com", "gutenberg.org"):
+        monkeypatch.setitem(open_source.SITE_LEVELS, host, "L0")
     monkeypatch.setattr(download_tool, "httpx", SimpleNamespace(
         Client=lambda **kw: _FakeClient(status, headers or {}, body, exc),
         Headers=httpx.Headers,
