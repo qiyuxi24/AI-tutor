@@ -20,8 +20,8 @@
 | `add_edge` | `add_edge.py` | 图谱 | `KnowledgeGraph` | 关系不明确**不要**连边（质量 > 数量） |
 | `delete_node` | `delete_node.py` | 图谱 | `KnowledgeGraph` | 人类建的删不掉，别重试 |
 | `update_user_profile` | `update_user_profile.py` | 画像 | `core/profile/` | 与已有笔记重复的不要再记 |
-| `fetch_webpage` | `fetch_webpage.py` | 资料 | 本模块（+ `../net_guard.py`） | **只读**，不落盘 |
-| `download_resource` | `download_resource.py` | 资料 | 本模块（+ `../net_guard.py`） | **留存**，入库才能被检索 |
+| `fetch_webpage` | `fetch_webpage.py` | 资料 | 本模块 + `core/knowledge_writer.create_node_from_webpage`（+ `../net_guard.py`、`core/open_source.py`） | **只读**返回；抓到的正文同时存档为图谱节点（origin="web"），但**只存档开放许可来源** |
+| `download_resource` | `download_resource.py` | 资料 | 本模块（+ `../net_guard.py`、`core/open_source.py`） | **留存**，入库才能被检索；**只采开放许可来源**（fail-closed） |
 | `rag_search` | `rag_search.py` | 资料 | `core/rag_pipeline/` | `hops` 只反向补前置，字面不相似但必须先学 |
 | `quiz_generate` | `quiz_generate.py` | 检验 | `core/quiz/chat_quiz.py` | **`async def`** + 后台任务 + `timeout_secs=90` |
 | `grade_answer` | `grade_answer.py` | 检验 | `core/quiz/chat_quiz.py` | **`async def`**；掌握度**唯一主信号** |
@@ -113,6 +113,18 @@ SPEC = _spec("<工具名>", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE)
 
 **新增 URL 类工具必须过 `is_blocked_url`** —— 属于「永不简化」的范畴。
 
+### 5.1 兄弟能力层：`core/open_source.py`（只采开源来源，2026-09-23）
+
+同一批 URL 入口还有第二道横切判定：**这个来源能不能留存**。它同样只有一个实现
+（`core/open_source.py`：开放来源表 / 关闭来源表 / 页面许可声明识别，fail-closed 到 L3）：
+
+- `fetch_webpage` 与「联网搜索后自动存档」→ 判定收口在 **`../web_archive.py`**（唯一存档出口），
+  工具与宿主**零改动**：非开放来源**只看不留**（返回文本不变，建不出图谱节点）；
+- `download_resource` → 下载前 `is_open(url)`，非开放来源回填文案、不下载不入库（它产出的是
+  「可被检索」的内容，属真正的采集，故 fail-closed）。
+
+**新增会留存的 URL 入口必须同时过 `is_blocked_url` 与 `is_open`**，并且**不要另写一份判定**。
+
 ---
 
 ## 6. 同步↔异步桥：四份拷贝，刻意为之
@@ -163,7 +175,7 @@ def _run_async(coro):
 2. [ ] `GUIDANCE` 里有没有写清「**何时别用**」？触发类工具（`quiz_generate`）只写正向条件
        会被更强的既有教学原则盖过 —— 实测踩过。
 3. [ ] 失败分支是否**返回文本**而不是抛异常？
-4. [ ] 新的 URL 入口是否过了 `is_blocked_url`？
+4. [ ] 新的 URL 入口是否过了 `is_blocked_url`？会**留存**内容的还要过 `is_open`（只采开源来源）？
 5. [ ] 慢工具是否显式给了 `timeout_secs`？（默认 60s）
 6. [ ] 模型侧 `PARAMETERS` 的 `required` 是否与 handler 里的 `args[...]` 一致？
 7. [ ] `tools/__init__.py` 的 `NATIVE_SPECS` 加了吗（漏了工具不会注册，静默消失）？

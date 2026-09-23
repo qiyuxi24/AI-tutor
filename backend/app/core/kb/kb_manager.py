@@ -639,6 +639,18 @@ class KbManager:
     def get_node(self, user_id: int, node_id: int) -> Optional[dict]:
         return self._get_store(user_id).get_node(node_id)
 
+    def get_document_text(self, user_id: int, node_id: int) -> str:
+        """
+        读取某文件节点已解析的正文（**读正文的唯一出口**，供预览端点等只读用途）。
+
+        薄委托：用户隔离由 per-user 库保证（`_get_store(user_id)` 就是该用户自己的 kb.db，
+        node_id 也来自该库的目录树），因此不需要在 KbStore 之上再校验一遍归属。
+
+        返回:
+            正文文本；节点不存在 / 无文档记录时返回 ""
+        """
+        return self._get_store(user_id).get_document_text(node_id)
+
     def stats(self, user_id: int) -> dict:
         store = self._get_store(user_id)
         vec_store = self._get_vec_store(user_id)

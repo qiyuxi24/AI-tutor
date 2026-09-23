@@ -6,6 +6,39 @@
 $ErrorActionPreference = "Stop"
 $projectRoot = $PSScriptRoot
 
+# ---------- 原生命令包装（必须用，否则脚本会被自己的偏好杀掉）----------
+# 坑：$ErrorActionPreference = "Stop" 下，原生命令（python / npm / taskkill）只要往 stderr 写
+# 一个字节，且该 stderr 被 2>&1 / 2>$null 重定向，PowerShell 5.1 就会把它包装成**终止性**的
+# NativeCommandError（实测 2>$null 也挡不住）→ 脚本当场中止。若中止点不在 try 内，finally 也
+# 不会执行，最终只见「窗口还开着、服务却少起几个」（曾真机踩到：backend-admin 依赖缺失时
+# 依赖探测命令往 stderr 打印 ModuleNotFoundError，脚本死在运维段之前，8001/5174 永不启动）。
+# 所以：凡"允许失败 / 会往 stderr 写日志"的**被重定向**原生命令，一律走下面三个包装，只认
+# 退出码；**不重定向**的原生命令（pip / npm install 的进度输出要给人看）不受此坑影响，
+# 实测写 stderr 不会抛错，保持原样即可。
+function Invoke-Native {
+    # 统一入口：临时降级偏好执行原生命令，返回 @{ Output = 文本; ExitCode = 退出码 }
+    param([scriptblock]$Command)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $text = & $Command *>&1 | Out-String
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prev }
+    return [pscustomobject]@{ Output = $text.Trim(); ExitCode = $code }
+}
+
+function Invoke-NativeQuiet {
+    # 只取退出码，输出丢弃。用于 taskkill / 依赖探测
+    param([scriptblock]$Command)
+    return (Invoke-Native $Command).ExitCode
+}
+
+function Invoke-NativeCapture {
+    # 只取输出文本（stderr 一并收进来）。用于版本探测
+    param([scriptblock]$Command)
+    return (Invoke-Native $Command).Output
+}
+
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "   TutorAgent - 一键启动" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
@@ -13,18 +46,50 @@ Write-Host ""
 
 # ---------- 检查依赖 ----------
 
-# 检查 Python
-try {
-    $pythonVersion = python --version 2>&1
-    Write-Host "[OK] Python: $pythonVersion" -ForegroundColor Green
-} catch {
-    Write-Host "[ERROR] 未找到 Python，请先安装 Python 3.10+" -ForegroundColor Red
-    exit 1
+# 解析「建 venv 用的解释器」（要求 >= 3.10）
+# 为什么单独解析：脚本正常路径全程只用各 venv 里的 python（backend\venv\Scripts\python.exe、
+# backend-admin\venv\Scripts\python.exe），系统 python 只在 venv 缺失、需要现建时用到。而本机
+# 系统 python 是 3.8 —— 用它建的 venv 装不上新版 fastapi，且报错点离现场很远（下游 pip 里才炸）。
+# 所以按 3.10+ 挑一个，优先用 `py -3.13` 这类启动器；**这里不退出**：venv 已存在时脚本照常启动，
+# 真正的报错留到确实要建 venv 的那两处（见下方与运维段的 exit 1）。
+function Get-PythonInfo {
+    # 解析 "Python 3.13.1"；命令不可用 / 退出码非 0 / 输出不像版本行 → 返回 $null
+    # 必须看退出码：`py -3.13` 在没装 3.13 时也会打印含 "Python 3.13" 的提示，光靠正则会把"没装"读成"装了"。
+    param([scriptblock]$Command)
+    $result = try { Invoke-Native $Command } catch { return $null }
+    if ($result.ExitCode -ne 0) { return $null }
+    $first = ($result.Output -split "\r?\n")[0].Trim()
+    if ($first -notmatch '^Python\s+(\d+)\.(\d+)') { return $null }
+    return [pscustomobject]@{
+        Major = [int]$Matches[1]
+        Minor = [int]$Matches[2]
+        Raw   = $first
+    }
+}
+
+$venvPythonExe = $null   # 如 "py" / "python"
+$venvPythonExtra = @()   # 如 @("-3.13")；与上者拼成完整命令
+foreach ($cand in @("py -3.13", "py -3.12", "py -3.11", "py -3.10", "python3.13", "python3.12", "python")) {
+    $parts = $cand.Split(" ")
+    $exe = $parts[0]
+    $extra = @($parts | Select-Object -Skip 1)
+    if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
+    $info = Get-PythonInfo { & $exe @extra --version }
+    if ($info -and ($info.Major -gt 3 -or ($info.Major -eq 3 -and $info.Minor -ge 10))) {
+        $venvPythonExe = $exe
+        $venvPythonExtra = $extra
+        Write-Host "[OK] Python(建 venv 用): $($info.Raw)  [$cand]" -ForegroundColor Green
+        break
+    }
+    if ($info) { Write-Host "[跳过] $($info.Raw) 低于 3.10，不能用于建 venv" -ForegroundColor DarkYellow }
+}
+if (-not $venvPythonExe) {
+    Write-Host "[WARN] 未找到 3.10+ 的 Python：venv 已存在时不影响启动，缺失时无法自动创建" -ForegroundColor Yellow
 }
 
 # 检查 Node.js
 try {
-    $nodeVersion = node --version 2>&1
+    $nodeVersion = Invoke-NativeCapture { node --version }
     Write-Host "[OK] Node.js: $nodeVersion" -ForegroundColor Green
 } catch {
     Write-Host "[ERROR] 未找到 Node.js，请先安装 Node.js 18+" -ForegroundColor Red
@@ -34,10 +99,19 @@ try {
 # 检查后端依赖
 $venvPath = Join-Path $projectRoot "backend\venv"
 if (-not (Test-Path $venvPath)) {
-    Write-Host "[WARN] 未找到虚拟环境，正在创建..." -ForegroundColor Yellow
+    if (-not $venvPythonExe) {
+        Write-Host "[ERROR] 需要创建 backend\venv，但本机没有 3.10+ 的 Python（低版本建的 venv 装不上依赖）" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[WARN] 未找到虚拟环境，正在创建（解释器: $venvPythonExe $venvPythonExtra）..." -ForegroundColor Yellow
     Push-Location (Join-Path $projectRoot "backend")
-    python -m venv venv
+    & $venvPythonExe @venvPythonExtra -m venv venv
+    $venvExit = $LASTEXITCODE
     Pop-Location
+    if ($venvExit -ne 0) {
+        Write-Host "[ERROR] 虚拟环境创建失败，请检查上面的输出" -ForegroundColor Red
+        exit 1
+    }
     Write-Host "[OK] 虚拟环境创建完成" -ForegroundColor Green
 }
 
@@ -64,7 +138,7 @@ if ($staleProcs) {
     Write-Host "----------------------------------------" -ForegroundColor Cyan
     foreach ($p in $staleProcs) {
         Write-Host "[清理] 结束上轮残留进程 PID $($p.ProcessId)" -ForegroundColor Yellow
-        taskkill /PID $p.ProcessId /T /F 2>&1 | Out-Null
+        Invoke-NativeQuiet { taskkill /PID $p.ProcessId /T /F } | Out-Null
     }
     Start-Sleep -Seconds 2
 }
@@ -76,7 +150,7 @@ foreach ($port in 8000, 5173, 8001, 5174) {
     foreach ($procId in $owners) {
         if ($procId) {
             Write-Host "[清理] 端口 $port 仍被 PID $procId 占用，强制结束" -ForegroundColor Yellow
-            taskkill /PID $procId /T /F 2>&1 | Out-Null
+            Invoke-NativeQuiet { taskkill /PID $procId /T /F } | Out-Null
         }
     }
 }
@@ -93,8 +167,8 @@ Write-Host "----------------------------------------" -ForegroundColor Cyan
 Write-Host "[后端] 启动 FastAPI 服务 (端口 8000)..." -ForegroundColor Yellow
 
 # 检查并安装后端依赖
-$requirementsCheck = & $venvPython -c "import fastapi, uvicorn" 2>&1
-if ($LASTEXITCODE -ne 0) {
+$backendDepsExit = Invoke-NativeQuiet { & $venvPython -c "import fastapi, uvicorn" }
+if ($backendDepsExit -ne 0) {
     Write-Host "[WARN] 后端依赖未安装，正在安装..." -ForegroundColor Yellow
     Push-Location $backendDir
     & $venvPython -m pip install -r requirements.txt -q
@@ -167,15 +241,24 @@ Write-Host "[运维后端] 启动 FastAPI 服务 (端口 8001)..." -ForegroundCo
 
 # 创建运维后端虚拟环境并安装依赖
 if (-not (Test-Path (Join-Path $adminBackendDir "venv"))) {
-    Write-Host "[运维后端] 创建虚拟环境..." -ForegroundColor Yellow
+    if (-not $venvPythonExe) {
+        Write-Host "[ERROR] [运维后端] 需要创建 backend-admin\venv，但本机没有 3.10+ 的 Python" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[运维后端] 创建虚拟环境（解释器: $venvPythonExe $venvPythonExtra）..." -ForegroundColor Yellow
     Push-Location $adminBackendDir
-    python -m venv venv
+    & $venvPythonExe @venvPythonExtra -m venv venv
+    $adminVenvExit = $LASTEXITCODE
     Pop-Location
+    if ($adminVenvExit -ne 0) {
+        Write-Host "[ERROR] [运维后端] 虚拟环境创建失败，请检查上面的输出" -ForegroundColor Red
+        exit 1
+    }
 }
 
 # 安装运维后端依赖
-$adminReqCheck = & $adminVenvPython -c "import fastapi, uvicorn" 2>$null
-if ($LASTEXITCODE -ne 0) {
+$adminDepsExit = Invoke-NativeQuiet { & $adminVenvPython -c "import fastapi, uvicorn" }
+if ($adminDepsExit -ne 0) {
     Write-Host "[运维后端] 安装依赖..." -ForegroundColor Yellow
     Push-Location $adminBackendDir
     & $adminVenvPython -m pip install -r requirements.txt -q
@@ -270,7 +353,7 @@ try {
     # /T 结束整棵进程树：uvicorn 的 spawn worker、vite 的 node 子进程只杀父 PID 会变成孤儿继续占端口
     foreach ($proc in @($backendProcess, $frontendProcess, $adminBackendProcess, $adminFrontendProcess)) {
         if ($proc -and -not $proc.HasExited) {
-            taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
+            Invoke-NativeQuiet { taskkill /PID $proc.Id /T /F } | Out-Null
         }
     }
 

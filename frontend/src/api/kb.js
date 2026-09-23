@@ -25,6 +25,14 @@ export const uploadKbFile = (file, parentId = null) => {
 export const deleteKbNode = (nodeId) =>
   apiClient.delete(`/api/v1/kb/node/${nodeId}`)
 
+/**
+ * 读取文件节点已解析的正文（只读预览，不改库）
+ * resp: { status, node_id, name, markdown, chars, total_chars, truncated }
+ * 超长正文被截断到后端 KB_PREVIEW_MAX_CHARS：chars < total_chars 即"看到的不是全文"
+ */
+export const getKbNodeText = (nodeId) =>
+  apiClient.get(`/api/v1/kb/node/${nodeId}/text`)
+
 /** 在目录范围内语义检索 */
 export const searchKb = (q, nodeId = null, topK = 5) => {
   const params = { q, top_k: topK }

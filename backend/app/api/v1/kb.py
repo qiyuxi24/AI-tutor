@@ -6,6 +6,7 @@
   POST   /kb/folder                  - 新建文件夹
   POST   /kb/upload                  - 上传文件（解析 + 向量化）
   DELETE /kb/node/{node_id}          - 删除文件/文件夹（递归）
+  GET    /kb/node/{node_id}/text     - 读取文件节点正文（预览用，超长截断）
   GET    /kb/search                  - 在目录范围内语义检索
   POST   /kb/context                 - 收集目录范围内的文件节点（进上下文用）
   GET    /kb/stats                   - 索引统计
@@ -45,6 +46,10 @@ class GraphGenerateRequest(BaseModel):
         default_factory=list,
         description="KB 中的文件/文件夹节点 ID 列表（文件夹自动展开）"
     )
+
+
+# 正文预览一次最多下发多少字符：超长书籍/网页不整体塞给前端（marked 渲染会卡）
+KB_PREVIEW_MAX_CHARS = 20_000
 
 
 class ContextRequest(BaseModel):
@@ -107,6 +112,38 @@ async def delete_node(node_id: int, user_id: int = Depends(get_current_user)):
         return {"status": "ok", **result}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/kb/node/{node_id}/text")
+async def get_node_text(node_id: int, user_id: int = Depends(get_current_user)):
+    """
+    读取文件节点已解析的正文（Markdown/纯文本原文），供前端预览弹窗渲染。
+
+    只读、无副作用：不改库、不改索引、不落盘。正文经 `kb_manager.get_document_text`
+    （读正文的唯一出口，带用户隔离），超长截断到 `KB_PREVIEW_MAX_CHARS`；
+    `chars < total_chars` 即表示"看到的不是全文"，由前端提示。
+    """
+    node = kb_manager.get_node(user_id, node_id)
+    if node is None or node.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if node.get("type") != "file":
+        raise HTTPException(status_code=400, detail="该节点是文件夹，请选择一个文件查看正文")
+
+    text = kb_manager.get_document_text(user_id, node_id)
+    if not text or not text.strip():
+        raise HTTPException(status_code=404,
+                            detail="该文件没有可预览的正文（未解析或解析失败）")
+
+    total = len(text)
+    return {
+        "status": "ok",
+        "node_id": node_id,
+        "name": node.get("name", ""),
+        "markdown": text[:KB_PREVIEW_MAX_CHARS],
+        "chars": min(total, KB_PREVIEW_MAX_CHARS),
+        "total_chars": total,
+        "truncated": total > KB_PREVIEW_MAX_CHARS,
+    }
 
 
 @router.get("/kb/search")

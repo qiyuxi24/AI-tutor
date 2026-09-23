@@ -6,9 +6,9 @@
 候选来源与其它适配器不同：没有站点级搜索通道（决策 §8「只用开放 API/白名单源，
 不逆向对抗」），候选由用户直接给定 URL（`candidate_from_url`），因此 `search()` 恒返回 []。
 
-授权等级（§3.2）：按站点映射表 `_SITE_LICENSE` 判定，未登记默认 L2（合理使用·个人学习）；
-L3（付费/登录墙/明确禁止）登记即拒采。个人模式可采 L0~L2、商用仅 L0 —— 判定复用
-`types.ALLOWED_LICENSE`，不在此重复一份模式规则。
+授权等级（§3.2）：按**开放来源表**判定（唯一来源 = `core/open_source.py::SITE_LEVELS`）；
+**未登记站点默认 L3（版权不明 → 一律拒采）**，要采必须先入表（只采开源来源）。
+个人模式可采 L0~L2、商用仅 L0 —— 判定复用 `types.ALLOWED_LICENSE`，不在此重复一份模式规则。
 
 安全：本适配器是唯一「按用户给定 URL 取内容」的采集路径，SSRF 必须过
 `agent_tools.net_guard.is_blocked_url`（全库唯一实现，AGENTS.md「永不简化」项）；
@@ -25,20 +25,19 @@ from urllib.parse import urlparse
 
 from app.core.agent_tools.net_guard import is_blocked_url
 from app.core.collector.adapters.base import BaseAdapter
+from app.core.open_source import SITE_LEVELS
 from app.core.collector.http import CollectorHttp
 from app.core.collector.types import ALLOWED_LICENSE, CollectCandidate
 
 logger = logging.getLogger("ai-tutor")
 
-# 站点授权映射表（域名后缀 → L0~L3，可扩展）：
-# 未登记站点默认 L2；L3 = 付费/登录墙/明确禁止，登记即禁采。
-# 取值依据 docs/教育资料采集模块_设计讨论.md §3.2 与 §4.5 场景矩阵。
-_SITE_LICENSE: dict[str, str] = {
-    "openstax.org": "L0",       # CC BY 开放教材
-    "smartedu.cn": "L1",        # 国家中小学智慧教育平台（官方教育公共服务）
-    "ruankao.org.cn": "L1",     # 软考官方考试大纲
-}
-_DEFAULT_LICENSE = "L2"
+# 站点授权映射表（域名后缀 → L0~L3）：**唯一来源表在 `core/open_source.py`**
+# （采集侧与联网存档侧共用同一份，避免两处漂移；此处保留同名别名以兼容既有测试的 patch 目标）
+_SITE_LICENSE: dict[str, str] = SITE_LEVELS
+
+# 未登记站点 = 版权不明 → L3（一律拒采）。原为 L2（合理使用·个人学习），
+# 2026-09-23 随「只采开源来源」收紧：要采就必须先入开放来源表。
+_DEFAULT_LICENSE = "L3"
 
 # readability 产出 HTML 片段：块级标签转换行，其余标签剔除（正则够用，不做完整解析）
 _RE_BLOCK = re.compile(
