@@ -5,6 +5,7 @@
 import asyncio
 
 import httpx
+import pytest
 
 from app.core.collector.http import CollectorHttp, DEFAULT_UA
 from app.core.collector.adapters.wikipedia import WikipediaAdapter, wikitext_to_md
@@ -264,6 +265,7 @@ def test_wikitext_unifies_traditional_and_simplified():
     背景：MediaWiki 只在**渲染时**按变体转换，走 `prop=revisions`（wikitext）路径会绕过它 ——
     真网《树 (数据结构)》整段繁体、《贪心算法》半简半繁，入库后同一篇里两种字形并存。
     """
+    pytest.importorskip("zhconv", reason="zhconv 是可选依赖，未装则不做简繁统一；本用例验证转换本身")
     md = wikitext_to_md(
         "在計算機科學中，'''樹'''（{{langx|en|tree}}）是一種抽象資料型別，"
         "用來模擬具有樹狀結構性質的資料集合。\n"
@@ -276,6 +278,7 @@ def test_wikitext_unifies_traditional_and_simplified():
 
 def test_wikitext_variant_conversion_keeps_math_intact():
     """简繁转换不得动公式：$…$ 里的 LaTeX 必须逐字保留"""
+    pytest.importorskip("zhconv", reason="zhconv 是可选依赖，未装则不做简繁统一；本用例验证转换本身")
     md = wikitext_to_md(
         "期望值：<math>E = \\sum_{i=1}^n i</math>，另有 $\\frac{1}{2}$。\n"
         "'''資料'''是繁體字。\n"
