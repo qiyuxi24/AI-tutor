@@ -30,7 +30,7 @@ from app.core.kb.kb_store import KbStore
 from app.core.kb.doc_vector_store import DocVectorStore
 from app.core.kb.parsers.base import PAGE_MARKER_RE   # 页标记契约唯一来源（parsers/base.py）
 from app.core.hybrid_search.whoosh_index import SparseIndex
-from app.core.hybrid_search.fusion import rrf_fuse
+from app.core.hybrid_search.fusion import DEFAULT_ALPHA, fuse
 
 logger = logging.getLogger("ai-tutor")
 
@@ -384,12 +384,17 @@ class KbManager:
                      node_ids: list[int] | None = None,
                      top_k: int = 5) -> list[dict]:
         """
-        在指定目录范围（文件节点列表）内混合检索（向量 + whoosh BM25，宽召回 + RRF 融合）。
+        在指定目录范围（文件节点列表）内混合检索（向量 + whoosh BM25，宽召回 + 加权融合）。
 
         流程（对齐 RAG 召回优化标准）：
             宽召回：向量、BM25 各取 RECALL_TOP_K（默认 30）条候选
-              → RRF 融合：基于排名融合成候选池（对权重不敏感，鲁棒）
+              → 加权融合：alpha * 向量分 + (1-alpha) * BM25 分（alpha 见 DEFAULT_ALPHA）
               → 精排取前 top_k（默认 5）条进 LLM
+
+        融合策略定夺（2026-09-23，真实嵌入实测）：CMRC2018 / 1000 query 下加权融合
+        R@1 0.9790 / MRR 0.9878 优于 RRF 的 0.9710 / 0.9828，故生产默认由 RRF 切为加权；
+        RRF 保留在 `fusion.py`（多查询/多路融合时"只看排名、对分数尺度不敏感"仍有用）。
+        证据：`backend/eval_data/report_api.json`（详见 docs/RAG 下的评测报告）。
 
         参数:
             user_id:   用户 ID
@@ -419,9 +424,17 @@ class KbManager:
         sparse = self._get_sparse(user_id)
         sparse_results = sparse.search(query, node_ids=node_ids, top_k=RECALL_TOP_K)
 
-        # RRF 融合：基于排名融合两路候选（对权重/分数尺度不敏感，鲁棒）
-        fused = rrf_fuse([vec_results, sparse_results], min_score=MIN_SCORE)
-        results = fused[:top_k]
+        # 加权融合两路候选（alpha 默认 0.6 向量 / 0.4 BM25；切换依据见 docstring）
+        fused = fuse(vec_results, sparse_results, alpha=DEFAULT_ALPHA)
+
+        # 质量闸门按**各路自己的尺度**判定，而不是卡融合分：单腿命中时融合分只占
+        # alpha 或 (1-alpha) 的份额（"只有 BM25 命中"最高才 0.4），卡融合分会把整条
+        # 腿误杀 —— 这正是从 RRF 切到加权融合后回归测出的坑。BM25 侧有词面匹配即算
+        # 有效（分尺度与余弦不可比，不套余弦阈值），向量侧仍守 MIN_SCORE。
+        bm25_ids = {r.get("chunk_id") for r in sparse_results}
+        vec_ok = {r.get("chunk_id") for r in vec_results if r.get("score", 0) >= MIN_SCORE}
+        results = [r for r in fused if r.get("chunk_id") in bm25_ids or r.get("chunk_id") in vec_ok]
+        results = results[:top_k]
 
         # 附加来源路径（溯源）：为每个命中片段计算其在目录树中的完整路径
         self._attach_paths(user_id, results)

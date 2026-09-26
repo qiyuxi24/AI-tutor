@@ -14,12 +14,15 @@
 """
 
 import json
+import logging
 import re
 import sqlite3
 import unicodedata
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+
+logger = logging.getLogger("ai-tutor")
 
 # 新节点 MD 的「来源标注」唯一真值。
 # 原先「写一个节点 MD」有 4 套内联模板散在 knowledge_writer / kb/graph_generator /
@@ -69,6 +72,22 @@ def is_fragment_name(name: str) -> bool:
     """
     plain = re.sub(r"\s+", "", unicodedata.normalize("NFKC", name or "")).lower()
     return normalize_node_name(name) != plain
+
+
+# 难度档标签（历史遗留）：graph_generator 曾把 difficulty∈{1,2,3} 映射成这三个标签。
+# KG-D2 起不再写入，仅保留在解析侧排除它们 —— 用于兼容存量老数据。
+_DIFFICULTY_TAGS = ("一级", "二级", "三级")
+
+
+def subject_from_tags(tags) -> str:
+    """旧规则：tags 中第一个非难度标签即学科（无则 ''）。
+
+    KG-D1 的一次性回填与 `node_subject` 的列缺失回退共用此实现，别再各写一份。
+    """
+    for tag in tags or []:
+        if tag not in _DIFFICULTY_TAGS:
+            return tag
+    return ""
 
 
 
@@ -125,13 +144,14 @@ class KnowledgeGraph:
             from app.core.auth import ensure_user_columns
             ensure_user_columns(self._conn)
 
-            # 2. 节点表（含 user_id 外键）
+            # 2. 节点表（含 user_id 外键；subject = 学科一等公民，见 KG-D1）
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS nodes (
                     id              TEXT PRIMARY KEY,
                     name            TEXT NOT NULL,
                     file_path       TEXT NOT NULL,
                     tags            TEXT DEFAULT '[]',
+                    subject         TEXT DEFAULT '',
                     board           TEXT DEFAULT '',
                     summary         TEXT DEFAULT '',
                     mastery         INTEGER DEFAULT 0,
@@ -139,6 +159,7 @@ class KnowledgeGraph:
                     estimated_minutes INTEGER DEFAULT 15,
                     added_by        TEXT DEFAULT 'human',
                     created_at      TEXT,
+                    updated_at      TEXT,
                     confidence      REAL,
                     user_id         INTEGER REFERENCES users(id)
                 )
@@ -155,16 +176,50 @@ class KnowledgeGraph:
                     added_by    TEXT DEFAULT 'human',
                     confidence  REAL,
                     user_id     INTEGER REFERENCES users(id),
+                    created_at  TEXT,
+                    updated_at  TEXT,
                     FOREIGN KEY (from_node) REFERENCES nodes(id) ON DELETE CASCADE,
                     FOREIGN KEY (to_node)   REFERENCES nodes(id) ON DELETE CASCADE
                 )
             """)
 
-        # 4. 自动迁移：给旧表（缺少 user_id 列）补上 user_id 列
+            # 4. 别名表（KG-D3，判重 L1.5 档）：同义不同名的零嵌入兜底。
+            # (alias_key, user_id) 主键 = 先到先得；删节点经 FK 级联删别名（连接已开 foreign_keys=ON）。
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS node_aliases (
+                    alias_key  TEXT NOT NULL,
+                    node_id    TEXT NOT NULL,
+                    user_id    INTEGER NOT NULL,
+                    source     TEXT DEFAULT 'ai',
+                    created_at TEXT,
+                    PRIMARY KEY (alias_key, user_id),
+                    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+                )
+            """)
+
+            # 5. 掌握度事件表（KG-D4）：掌握度是**学习状态**，不是知识点本体属性，
+            # 每次变更留一条"谁改的、从多少到多少、凭什么"的证据。写入侧唯一入口见
+            # `update_node_info`（所有 mastery 变更都经它），读取见 `get_mastery_events`。
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS mastery_events (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id    INTEGER NOT NULL,
+                    node_id    TEXT NOT NULL,
+                    delta      INTEGER NOT NULL,
+                    before_val INTEGER NOT NULL,
+                    after_val  INTEGER NOT NULL,
+                    reason     TEXT NOT NULL,
+                    evidence   TEXT DEFAULT '',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+                )
+            """)
+
+        # 6. 自动迁移：给旧表补缺失列（subject/board/user_id/created_at/updated_at）
         self._auto_migrate()
 
     def _auto_migrate(self) -> None:
-        """自动迁移：检测并给旧版 nodes/edges 表添加缺失列"""
+        """自动迁移：检测并给旧版 nodes/edges 表添加缺失列（幂等）"""
         node_cols = [r[1] for r in self._conn.execute("PRAGMA table_info(nodes)").fetchall()]
         if "user_id" not in node_cols:
             with self._conn:
@@ -175,6 +230,36 @@ class KnowledgeGraph:
         if "board" not in node_cols:
             with self._conn:
                 self._conn.execute("ALTER TABLE nodes ADD COLUMN board TEXT DEFAULT ''")
+        if "subject" not in node_cols:
+            # KG-D1：补列 + **紧接着一次性回填**，只在「列刚补上」这一支执行，
+            # 之后启动不会再进这里 → 不做重复全量写。
+            # 回填用旧 tags 规则（第一个非难度标签），不引入新判断；表是全局的，故不带 user_id 过滤。
+            with self._conn:
+                self._conn.execute("ALTER TABLE nodes ADD COLUMN subject TEXT DEFAULT ''")
+                for row in self._conn.execute("SELECT id, tags FROM nodes").fetchall():
+                    try:
+                        tags = json.loads(row[1]) if row[1] else []
+                    except (json.JSONDecodeError, TypeError):
+                        tags = []
+                    subj = subject_from_tags(tags)
+                    if subj:
+                        self._conn.execute(
+                            "UPDATE nodes SET subject = ? WHERE id = ? AND (subject IS NULL OR subject = '')",
+                            (subj, row[0]),
+                        )
+            node_cols = [r[1] for r in self._conn.execute("PRAGMA table_info(nodes)").fetchall()]
+        if "updated_at" not in node_cols:
+            # 变更时间（增量索引/审计"上周改过哪些节点"）。老行回填 = created_at（当时就是最后变更），
+            # 只在补列这一支执行，之后启动不再重复全量写（与 subject 回填同一模式）。
+            with self._conn:
+                self._conn.execute("ALTER TABLE nodes ADD COLUMN updated_at TEXT")
+                self._conn.execute("UPDATE nodes SET updated_at = created_at WHERE updated_at IS NULL")
+
+        # 选片/统计走它；放迁移末尾（列此时必已存在），IF NOT EXISTS 保证幂等
+        with self._conn:
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_nodes_user_subject ON nodes(user_id, subject)"
+            )
 
         edge_cols = [r[1] for r in self._conn.execute("PRAGMA table_info(edges)").fetchall()]
         if "user_id" not in edge_cols:
@@ -182,6 +267,33 @@ class KnowledgeGraph:
                 self._conn.execute(
                     "ALTER TABLE edges ADD COLUMN user_id INTEGER REFERENCES users(id)"
                 )
+        # KG-D6：边的时间维度（增量索引/审计"这条边谁哪天连的"）。老行留 NULL = 未知，不瞎猜。
+        for col in ("created_at", "updated_at"):
+            if col not in edge_cols:
+                with self._conn:
+                    self._conn.execute(f"ALTER TABLE edges ADD COLUMN {col} TEXT")
+
+        # KG-D6：把「重复边检查」从代码提升为**数据库约束**（脚本/并发直写也挡得住）。
+        # 存量若已有重复行，建索引会失败 —— 此时只告警、不阻断启动（否则整个后端起不来），
+        # 由 `scripts/inspect_graph_quality.py` 报出后再人工合并。
+        try:
+            with self._conn:
+                self._conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_unique "
+                    "ON edges(user_id, from_node, to_node, relation)"
+                )
+        except sqlite3.Error as e:
+            logger.warning(
+                f"edges 唯一索引创建失败（存量存在重复边？）：{e} —— "
+                "重复边约束本次未生效，请先跑 inspect_graph_quality.py 合并重复边"
+            )
+
+        # KG-D4：掌握度事件按 (user_id, node_id) 回看历史
+        with self._conn:
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mastery_events_node "
+                "ON mastery_events(user_id, node_id)"
+            )
 
     def _invalidate_cache(self) -> None:
         """写操作后清空缓存"""
@@ -248,11 +360,43 @@ class KnowledgeGraph:
         ).fetchone()
         return self._row_to_node_dict(row) if row else None
 
+    def register_alias(self, alias: str, node_id: str, source: str = "ai") -> bool:
+        """登记别名 → 节点（KG-D3，判重 L1.5 档，零嵌入）。
+
+        先到先得（INSERT OR IGNORE，不覆盖已有映射）。返回是否真的写入。
+
+        参数:
+            alias:   别名（任意写法，内部按 normalize_node_name 归一为判定键）
+            node_id: 别名指向的节点 ID，必须属于当前用户，否则不写
+            source:  'ai'（图谱写回自动登记）/ 'merge'（并轨继承）/ 'human'
+        """
+        key = normalize_node_name(alias)
+        if not key:
+            return False
+        owns = self._conn.execute(
+            "SELECT 1 FROM nodes WHERE id = ? AND user_id = ?", (node_id, self.user_id)
+        ).fetchone()
+        if owns is None:
+            return False
+        with self._conn:
+            before = self._conn.total_changes
+            self._conn.execute(
+                "INSERT OR IGNORE INTO node_aliases"
+                " (alias_key, node_id, user_id, source, created_at) VALUES (?, ?, ?, ?, ?)",
+                (key, node_id, self.user_id, source, datetime.now().isoformat()),
+            )
+            return self._conn.total_changes > before
+
     def find_node_by_name(self, name: str, subject: str = "") -> Optional[dict]:
-        """按**归一化名称**找已有节点（同名并轨的唯一判定实现），找不到返回 None。
+        """找已有节点（同名并轨的唯一判定实现），找不到返回 None。
+
+        判定顺序：
+        1. **别名表**（KG-D3，L1.5 档）：同义不同名（「栈 / 堆栈」）经登记后零嵌入可并轨；
+        2. 回退到**归一化名称**比较（L1 档，只剥后缀/空白/大小写）。
 
         学科已知时只在同学科或未归档（学科为空）的节点里找 —— 不同学科的「树」
-        是两个概念，不能并轨；学科为空则不限。
+        是两个概念，不能并轨；学科为空则不限。别名命中但学科不符时不返回，
+        继续走归一化遍历（同学科下可能另有同名节点）。
 
         调用方：`create_node_with_content`（写入层护栏）与
         `knowledge_writer._find_same_name`（Agent 写路径）—— 别再各写一份比较逻辑。
@@ -260,6 +404,18 @@ class KnowledgeGraph:
         key = normalize_node_name(name)
         if not key:
             return None
+
+        row = self._conn.execute(
+            "SELECT node_id FROM node_aliases WHERE alias_key = ? AND user_id = ?",
+            (key, self.user_id),
+        ).fetchone()
+        if row is not None:
+            aliased = self.get_node(row["node_id"])
+            if aliased is not None and (
+                not subject or self.node_subject(aliased) in ("", subject)
+            ):
+                return aliased
+
         for node in self.nodes:
             if normalize_node_name(node.get("name", "")) != key:
                 continue
@@ -553,11 +709,13 @@ class KnowledgeGraph:
 
     @staticmethod
     def node_subject(node: dict) -> str:
-        """返回节点所属学科（tags 中第一个非难度标签，无则返回 ''）"""
-        for tag in node.get("tags", []) or []:
-            if tag not in ("一级", "二级", "三级"):
-                return tag
-        return ""
+        """返回节点所属学科：优先读 `subject` 列（KG-D1），空则回退 tags 旧规则。
+
+        回退是必要的兼容层：老库刚迁移时列还空着、测试与中间层手工构造的 dict
+        也不带 subject 键 —— 它们仍要能解析出学科。
+        """
+        subj = (node.get("subject") or "").strip()
+        return subj or subject_from_tags(node.get("tags", []))
 
     def get_subjects(self) -> list[str]:
         """返回当前用户知识图谱中已有的所有学科（去重，保持出现顺序）"""
@@ -768,24 +926,33 @@ class KnowledgeGraph:
 
         tags_json = json.dumps(node_data.get("tags", []), ensure_ascii=False)
         file_path = node_data.get("file", f"nodes/{node_id}.md")
+        # KG-D1：subject 兜底 —— 显式 subject 优先，否则用旧 tags 规则推导。
+        # 这样所有写路径（无需逐个改调用方）都能把学科落到 subject 列。
+        subject = (node_data.get("subject") or "").strip() or subject_from_tags(
+            node_data.get("tags", [])
+        )
+        created_at = node_data.get("created_at") or datetime.now().isoformat()
 
         with self._conn:
             self._conn.execute("""
-                INSERT INTO nodes (id, name, file_path, tags, board, summary, mastery,
-                                   difficulty, estimated_minutes, added_by, created_at, confidence, user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO nodes (id, name, file_path, tags, subject, board, summary, mastery,
+                                   difficulty, estimated_minutes, added_by, created_at, updated_at,
+                                   confidence, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 node_id,
                 node_data.get("name", ""),
                 file_path,
                 tags_json,
+                subject,
                 node_data.get("board", ""),
                 node_data.get("summary", ""),
                 node_data.get("mastery", 0),
                 node_data.get("difficulty", 3),
                 node_data.get("estimated_minutes", 15),
                 node_data.get("added_by", "human"),
-                node_data.get("created_at", datetime.now().isoformat()),
+                created_at,
+                created_at,
                 node_data.get("confidence"),
                 self.user_id,
             ))
@@ -818,11 +985,15 @@ class KnowledgeGraph:
         existing = self.find_node_by_name(name, self.node_subject(node_data)) if name else None
         if existing is not None:
             node_id = existing["id"]
+            # KG-D3：被并入的名字登记为保留者的别名 —— 同义不同名从此可累积、可复用
+            self.register_alias(name, node_id, source="merge")
             self._merge_content_into(node_id, content)
             return node_id
 
         self.add_node(node_data)  # 先写库：ID 冲突在此抛出，不会留下孤儿 MD
         node_id = node_data["id"]
+        # KG-D3：新节点把「自名」登记为别名（幂等），让别名表成为完整索引
+        self.register_alias(name, node_id, source="ai")
         content = (content or "").strip()
 
         if content.startswith("#"):
@@ -898,14 +1069,23 @@ class KnowledgeGraph:
         self.invalidate_content_cache(node_id)
         return edge_count
 
-    def update_node_info(self, node_id: str, data: dict, caller: str = "human") -> None:
+    def update_node_info(self, node_id: str, data: dict, caller: str = "human", *,
+                         mastery_reason: str = "manual",
+                         mastery_evidence: str = "") -> None:
         """
         更新节点的基本信息（name, tags, mastery 等），不改变 MD 内容
+
+        **掌握度变更的唯一入口**（KG-D4）：`mastery` 真的变了就在同一事务里补一条
+        `mastery_events` 事件。所有改 mastery 的路径（判分回写 / `update_mastery` 工具 /
+        三个 API 端点）都经这里，所以新增写路径**不需要**自己记账。
 
         参数:
             node_id: 节点 ID
             data: 包含要更新字段的字典
             caller: 调用方标识（"human" 或 "ai"），用于权限检查
+            mastery_reason: 仅当本次真的改了 `mastery` 时生效，写入事件的 reason
+                （quiz_correct=判分答对 / self_report=学生自述硬证据 / manual=人工或前端）
+            mastery_evidence: 证据引用（如 `question:12`），空串表示无外部凭证
 
         异常:
             ValueError: 节点不存在
@@ -919,7 +1099,7 @@ class KnowledgeGraph:
 
         # 动态构建 UPDATE，只改传入的字段
         allowed_fields = {
-            "name", "tags", "board", "summary", "mastery", "difficulty",
+            "name", "tags", "subject", "board", "summary", "mastery", "difficulty",
             "estimated_minutes", "added_by", "confidence"
         }
         updates = {}
@@ -930,9 +1110,25 @@ class KnowledgeGraph:
         if not updates:
             return
 
+        # 掌握度是否真的变了（事件只记"变更"，不记重复赋同值）。
+        # 非法值（如字符串）沿用既有行为原样写库，只是不记事件 —— 不新引入失败路径。
+        event: tuple[int, int] | None = None
+        if "mastery" in updates:
+            try:
+                before = int(node.get("mastery") or 0)
+                after = int(updates["mastery"])
+            except (TypeError, ValueError):
+                pass  # 值不可解析：照旧写库，跳过记账
+            else:
+                if after != before:
+                    event = (before, after)
+
         # tags 需要 JSON 序列化
         if "tags" in updates:
             updates["tags"] = json.dumps(updates["tags"], ensure_ascii=False)
+
+        # 任何字段变更都刷新 updated_at（不是调用方可传字段，故不放进 allowed_fields）
+        updates["updated_at"] = datetime.now().isoformat()
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [node_id, self.user_id]
@@ -942,7 +1138,34 @@ class KnowledgeGraph:
                 f"UPDATE nodes SET {set_clause} WHERE id = ? AND user_id = ?",
                 values
             )
+            # 与节点更新同一事务：不会出现"事件写了但 mastery 没改"的不一致
+            if event:
+                self._record_mastery_event(node_id, event[0], event[1],
+                                           mastery_reason, mastery_evidence)
         self._invalidate_cache()
+
+    def _record_mastery_event(self, node_id: str, before_val: int, after_val: int,
+                              reason: str = "manual", evidence: str = "") -> None:
+        """写一条掌握度变更事件（KG-D4）。**必须在调用方的事务内调用**（自己不开 with）。"""
+        self._conn.execute(
+            "INSERT INTO mastery_events"
+            " (user_id, node_id, delta, before_val, after_val, reason, evidence, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (self.user_id, node_id, after_val - before_val, before_val, after_val,
+             reason or "manual", evidence or "", datetime.now().isoformat()),
+        )
+
+    def get_mastery_events(self, node_id: str, limit: int = 20) -> list[dict]:
+        """某节点的掌握度变更历史（KG-D4，倒序 = 最近在前）。
+
+        用途：回答"为什么是 60 分"（参照系契约的"可审计"要求），合并节点时重放决定取值。
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM mastery_events WHERE node_id = ? AND user_id = ?"
+            " ORDER BY id DESC LIMIT ?",
+            (node_id, self.user_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def update_node_content(self, node_id: str, content: str, mode: str = "append",
                             caller: str = "human") -> None:
@@ -976,7 +1199,14 @@ class KnowledgeGraph:
         else:
             raise ValueError(f"不支持的写入模式：{mode}，仅支持 replace 和 append")
 
+        # 正文变更也算节点变更 → 刷新行的 updated_at（顺带作废节点缓存，否则读到旧时间戳）
+        with self._conn:
+            self._conn.execute(
+                "UPDATE nodes SET updated_at = ? WHERE id = ? AND user_id = ?",
+                (datetime.now().isoformat(), node_id, self.user_id),
+            )
         self.invalidate_content_cache(node_id)
+        self._invalidate_cache()
 
     # ════════════════════════════════════════════
     #  边 CRUD
@@ -1051,19 +1281,29 @@ class KnowledgeGraph:
                         f"{from_id} → {to_id}。如需添加此关系，请手动操作或明确指示 AI。"
                     )
 
+        now = datetime.now().isoformat()
         with self._conn:
-            self._conn.execute("""
-                INSERT INTO edges (from_node, to_node, relation, label, added_by, confidence, user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                from_id,
-                to_id,
-                relation,
-                edge_data.get("label", ""),
-                edge_data.get("added_by", "human"),
-                edge_data.get("confidence"),
-                self.user_id,
-            ))
+            try:
+                self._conn.execute("""
+                    INSERT INTO edges (from_node, to_node, relation, label, added_by,
+                                       confidence, user_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    from_id,
+                    to_id,
+                    relation,
+                    edge_data.get("label", ""),
+                    edge_data.get("added_by", "human"),
+                    edge_data.get("confidence"),
+                    self.user_id,
+                    now,
+                    now,
+                ))
+            except sqlite3.IntegrityError as e:
+                # KG-D6：唯一索引兜底 —— 上面的 SELECT 查重在并发/多进程下可能漏
+                if "UNIQUE" in str(e).upper():
+                    raise ValueError(f"边已存在：{from_id} → {to_id} ({relation})") from e
+                raise
         self._invalidate_cache()
 
     def remove_edge_by_id(self, edge_id: int, caller: str = "human") -> None:
@@ -1132,13 +1372,19 @@ class KnowledgeGraph:
             return
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
-        values = list(updates.values()) + [edge_id, self.user_id]
+        values = list(updates.values()) + [datetime.now().isoformat(), edge_id, self.user_id]
 
         with self._conn:
-            cursor = self._conn.execute(
-                f"UPDATE edges SET {set_clause} WHERE id = ? AND user_id = ?",
-                values
-            )
+            try:
+                cursor = self._conn.execute(
+                    f"UPDATE edges SET {set_clause}, updated_at = ? WHERE id = ? AND user_id = ?",
+                    values
+                )
+            except sqlite3.IntegrityError as e:
+                # 改成的关系与既有边重复（KG-D6 唯一索引）
+                if "UNIQUE" in str(e).upper():
+                    raise ValueError("边已存在：同一起止节点与关系类型的边已有一条") from e
+                raise
             if cursor.rowcount == 0:
                 raise ValueError(f"边不存在或不属于当前用户：id={edge_id}")
         self._invalidate_cache()
@@ -1169,11 +1415,11 @@ class KnowledgeGraph:
             return
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
-        values = list(updates.values()) + [edge["id"], self.user_id]
+        values = list(updates.values()) + [datetime.now().isoformat(), edge["id"], self.user_id]
 
         with self._conn:
             self._conn.execute(
-                f"UPDATE edges SET {set_clause} WHERE id = ? AND user_id = ?",
+                f"UPDATE edges SET {set_clause}, updated_at = ? WHERE id = ? AND user_id = ?",
                 values
             )
         self._invalidate_cache()

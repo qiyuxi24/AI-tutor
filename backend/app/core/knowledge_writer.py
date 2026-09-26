@@ -126,11 +126,14 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
             "name": node_name,
             "summary": summary or existing.get("summary", ""),
             "tags": update_data.get("tags", existing.get("tags", [])),
+            "subject": subject or existing.get("subject", ""),
             "board": board or existing.get("board", ""),
         }
         assign_taxonomy_sync(kg, merged)
         if merged["tags"] != existing.get("tags"):
             update_data["tags"] = merged["tags"]
+        if merged.get("subject") and merged["subject"] != existing.get("subject"):
+            update_data["subject"] = merged["subject"]
         if merged.get("board") and merged["board"] != existing.get("board"):
             update_data["board"] = merged["board"]
 
@@ -178,6 +181,9 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
         "name": node_name,
         "file": f"nodes/{node_id}.md",
         "tags": tags or [],
+        # KG-D1：学科显式落列，不再只依赖「tags 首位被 node_subject 反推」；
+        # 空则 add_node 按 tags 兜底推导（老路径/老调用方无需改动）。
+        "subject": subject,
         "board": board,
         "summary": summary,
         "mastery": 0,

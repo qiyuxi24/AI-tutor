@@ -64,13 +64,14 @@ def chunk_markdown(node_id: str, node_name: str, markdown: str) -> list[dict]:
         current_section = []
         if len(text) < MIN_CHUNK_CHARS:
             return
-        for i, sub in enumerate(_split_long_paragraph(text)):
+        for sub in _split_long_paragraph(text):
             chunks.append({
                 "node_id": node_id,
                 "node_name": node_name,
                 "heading": current_heading,
                 "content": sub,
-                "chunk_index": i,
+                # 节点内全局递增（非段内从 0）→ 让 (node_id, chunk_index) 成为唯一溯源键
+                "chunk_index": len(chunks),
             })
 
     for line in lines:

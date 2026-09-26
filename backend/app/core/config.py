@@ -85,6 +85,11 @@ class Settings:
     # 见 core/agent_tools/web_archive.py：搜索本身只返回标题/链接/摘要，不存档就等于没留下东西
     web_archive_max_pages: int = 2
 
+    # ─── RAG 查询扩展（HyDE，见 core/rag_pipeline/query_expansion.py）───
+    # 每轮检索多一次 LLM 调用换召回，默认关：先评测再定（CMRC2018 字面重叠高，
+    # HyDE 的收益主要体现在口语化提问，离线集上很可能看不到提升）
+    rag_hyde_enabled: bool = False
+
     # ─── 题库存储配额（B3.1：防批量导入撑爆磁盘；每用户题目数，0=不限制）───
     quiz_storage_quota: int = 50_000
 
@@ -127,6 +132,7 @@ class Settings:
             web_search_enabled=_parse_bool(os.getenv("WEB_SEARCH_ENABLED"), True),
             searxng_url=os.getenv("SEARXNG_URL", ""),
             web_archive_max_pages=int(os.getenv("WEB_ARCHIVE_MAX_PAGES", "2")),
+            rag_hyde_enabled=_parse_bool(os.getenv("RAG_HYDE_ENABLED"), False),
             quiz_storage_quota=int(os.getenv("QUIZ_STORAGE_QUOTA", str(50_000))),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_dir=os.getenv("LOG_DIR", "logs"),

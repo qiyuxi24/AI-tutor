@@ -714,20 +714,15 @@ class GraphGenerator:
                 skipped_nodes.append(nid)
                 node_id_by_name[name] = nid
                 continue
-            # tags：学科名（去重）+ 难度标签
-            tags = []
-            if subject and subject not in tags:
-                tags.append(subject)
-            diff = n.get("difficulty")
-            if diff in (1, 2, 3):
-                tags.append({1: "一级", 2: "二级", 3: "三级"}[int(diff)])
-            else:
-                tags.append("二级")
+            # tags：只放学科名（KG-D2：难度档「一级/二级/三级」不再混进 tags，
+            # 难度由独立 difficulty 列承载）；学科另显式落 subject 列（KG-D1）。
+            tags = [subject] if subject else []
             node_data = {
                 "id": nid,
                 "name": name,
                 "file": f"nodes/{nid}.md",
                 "tags": tags,
+                "subject": subject,
                 "board": (board or "").strip(),
                 "summary": n.get("summary", ""),
                 "mastery": 0,

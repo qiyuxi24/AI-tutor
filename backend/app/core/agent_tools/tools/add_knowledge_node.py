@@ -20,7 +20,7 @@ PARAMETERS = {
         "id": {"type": "string", "description": "节点英文ID，如 'hanoi_tower'"},
         "name": {"type": "string", "description": "节点中文名称"},
         "tags": {"type": "array", "items": {"type": "string"},
-                 "description": "标签，含难度级别如 ['三级']（学科请用 subject 字段，别混进 tags）"},
+                 "description": "自由标签（如 ['递归', '分治']）。⚠️ 不要写难度级别（难度用 difficulty 字段）、不要重复填学科（学科用 subject 字段，别混进 tags）"},
         "subject": {"type": "string",
                     "description": "该知识点所属学科（如 '数据结构'）。⚠️ 对话上下文能明确判断时填写，且必须复用已有学科名；不确定就省略，系统会自动判定。"},
         "board": {"type": "string",
@@ -41,6 +41,7 @@ GUIDANCE = """
   不必等学生说"修改"才动手，对话涉及的知识点就该建起来。
 - `from_nodes` 只填**真正的前置知识节点**（必须先学会它才能理解新节点）；没有前置就不传。
 - 能判断学科/板块就一并带上 `subject` / `board`，且**必须复用已有名称**；不确定就省略，系统会自动判定。
+- `tags` 只填自由标签：**不要**写"一级/二级/三级"这类难度（难度有 `difficulty` 字段承载），也不要重复填学科。
 - 例：学生说"帮我加一个汉诺塔节点"，建完后自然回复"已添加！汉诺塔现在关联在递归定义下"。
 """
 

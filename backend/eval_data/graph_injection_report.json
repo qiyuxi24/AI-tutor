@@ -1,6 +1,6 @@
 {
   "user_id": 9902,
-  "embed": "mock",
+  "embed": "api",
   "groups": {
     "off": {
       "rows": [
@@ -8,17 +8,29 @@
           "case": "g1",
           "kind": "general",
           "expect_total": 3,
-          "expect_hit": 0,
-          "hit_names": [],
+          "expect_hit": 1,
+          "hit_names": [
+            "递归"
+          ],
           "mentions": 1,
-          "rag_calls": 1,
-          "rounds": 1,
-          "llm_calls": 2,
-          "tokens": 7598,
-          "answer_len": 79,
-          "answer_head": "好问题！我们一步步来想。  先问你一个基础问题：**当一个函数调用自己的时候，程序底层发生了什么？** 你觉得每次调用是\"原地变身\"，还是会产生什么新的东西？",
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 7670,
+          "answer_len": 62,
+          "answer_head": "好问题。我们先不直接想\"为什么必须有\"，反过来——如果一个递归函数没有终止条件，你想象一下它执行时会怎么走下去？会发生什么？",
+          "answer_text": "好问题。我们先不直接想\"为什么必须有\"，反过来——如果一个递归函数没有终止条件，你想象一下它执行时会怎么走下去？会发生什么？",
           "false_empty": false,
-          "elapsed": 8.0
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 9.7,
+          "expect_located": 1,
+          "located_names": [
+            "递归"
+          ],
+          "mentions_any": 1,
+          "cited_ids": []
         },
         {
           "case": "g2",
@@ -28,50 +40,217 @@
           "hit_names": [
             "递归"
           ],
-          "mentions": 1,
+          "mentions": 2,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 6180,
+          "answer_len": 126,
+          "answer_head": "好问题。先别急着翻书，咱们自己先想一层。  你之前写过递归函数对吧？我问你一个最基本的问题：  **当一个函数调用自己的时候，程序在底层需要\"记住\"哪些东西，才能等递归回来之后接着往下执行？**  你试着列一列——比如参数变了、那还有什么也得跟着保存？",
+          "answer_text": "好问题。先别急着翻书，咱们自己先想一层。\n\n你之前写过递归函数对吧？我问你一个最基本的问题：\n\n**当一个函数调用自己的时候，程序在底层需要\"记住\"哪些东西，才能等递归回来之后接着往下执行？**\n\n你试着列一列——比如参数变了、那还有什么也得跟着保存？",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 2.5,
+          "expect_located": 1,
+          "located_names": [
+            "递归"
+          ],
+          "mentions_any": 2,
+          "cited_ids": []
+        },
+        {
+          "case": "g3",
+          "kind": "general",
+          "expect_total": 2,
+          "expect_hit": 2,
+          "hit_names": [
+            "记忆化搜索",
+            "递归"
+          ],
+          "mentions": 3,
           "rag_calls": 3,
           "rounds": 3,
-          "llm_calls": 3,
-          "tokens": 11602,
-          "answer_len": 132,
-          "answer_head": "好问题！我们先不急着比较，先从最基本的来聊。  你已经写过递归和循环的代码了，那我问你一个直观的感受：**当你调用一个递归函数时，计算机在底层到底做了什么？每次\"递归一层\"的时候，计算机内部发生了什么\"额外的事\"？**  你先说说看，不用很精确，说说你理解的就够。",
+          "llm_calls": 4,
+          "tokens": 25106,
+          "answer_len": 221,
+          "answer_head": "好问题！记忆化搜索正好是从递归走向动态规划的关键桥梁。  不过在直接讲记忆化搜索之前，我想先确认一下你对递归的理解——你之前学过递归的\"终止条件\"，那我们来想一个具体的问题：  假设让你用递归计算斐波那契数列的第 n 项 `fib(n)`（fib(1)=fib(2)=1，fib(n)=fib(n-1)+fib(n-2)），你打算怎么写？动手试试，把递归函数写出来。  写完后我们再聊记忆化搜索的事——我猜你写完之后就会发现一些有趣的问题 😏",
+          "answer_text": "好问题！记忆化搜索正好是从递归走向动态规划的关键桥梁。\n\n不过在直接讲记忆化搜索之前，我想先确认一下你对递归的理解——你之前学过递归的\"终止条件\"，那我们来想一个具体的问题：\n\n假设让你用递归计算斐波那契数列的第 n 项 `fib(n)`（fib(1)=fib(2)=1，fib(n)=fib(n-1)+fib(n-2)），你打算怎么写？动手试试，把递归函数写出来。\n\n写完后我们再聊记忆化搜索的事——我猜你写完之后就会发现一些有趣的问题 😏",
           "false_empty": false,
-          "elapsed": 5.0
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 6.2,
+          "expect_located": 2,
+          "located_names": [
+            "记忆化搜索",
+            "递归"
+          ],
+          "mentions_any": 3,
+          "cited_ids": []
+        },
+        {
+          "case": "g4",
+          "kind": "general",
+          "expect_total": 2,
+          "expect_hit": 0,
+          "hit_names": [],
+          "mentions": 0,
+          "rag_calls": 2,
+          "rounds": 2,
+          "llm_calls": 3,
+          "tokens": 19216,
+          "answer_len": 147,
+          "answer_head": "好问题！这个问题其实藏着计算机最精妙的设计之一。  不过在讲答案之前，我想先问你一个问题——你觉得，当你写下 `func()` 这样一个调用语句时，计算机是怎么\"跳\"到那个函数里去执行的？它需要记住哪些信息，才能在函数执行完之后还能\"回来\"继续跑原来的代码？  你先说说自己的直觉，不用怕说错。",
+          "answer_text": "好问题！这个问题其实藏着计算机最精妙的设计之一。\n\n不过在讲答案之前，我想先问你一个问题——你觉得，当你写下 `func()` 这样一个调用语句时，计算机是怎么\"跳\"到那个函数里去执行的？它需要记住哪些信息，才能在函数执行完之后还能\"回来\"继续跑原来的代码？\n\n你先说说自己的直觉，不用怕说错。",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 7.1,
+          "expect_located": 0,
+          "located_names": [],
+          "mentions_any": 0,
+          "cited_ids": []
+        },
+        {
+          "case": "g5",
+          "kind": "general",
+          "expect_total": 2,
+          "expect_hit": 0,
+          "hit_names": [],
+          "mentions": 0,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 6239,
+          "answer_len": 128,
+          "answer_head": "这是个很好的问题。在深入讨论\"什么情况适合哪种\"之前，我想先确认一下你的理解基础。  你能不能用自己的话，分别说一下： - **自顶向下**这条路，你理解的执行过程是什么样的？ - **自底向上**这条路呢？  不用追求完整，把你脑子里的画面描述出来就行。",
+          "answer_text": "这是个很好的问题。在深入讨论\"什么情况适合哪种\"之前，我想先确认一下你的理解基础。\n\n你能不能用自己的话，分别说一下：\n- **自顶向下**这条路，你理解的执行过程是什么样的？\n- **自底向上**这条路呢？\n\n不用追求完整，把你脑子里的画面描述出来就行。",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 9.8,
+          "expect_located": 0,
+          "located_names": [],
+          "mentions_any": 0,
+          "cited_ids": []
+        },
+        {
+          "case": "g6",
+          "kind": "general",
+          "expect_total": 3,
+          "expect_hit": 1,
+          "hit_names": [
+            "递归"
+          ],
+          "mentions": 1,
+          "rag_calls": 5,
+          "rounds": 5,
+          "llm_calls": 7,
+          "tokens": 44939,
+          "answer_len": 323,
+          "answer_head": "好，咱们不直接给答案，一步步聊清楚。  你说\"调用栈溢出\"，这个词拆开看——\"调用栈\"和\"溢出\"。先聊聊第一个词：  **你能先用自己的话说说，每次递归调用发生时，调用栈上会发生什么吗？** 比如一个函数 `f` 调用 `f(n-1)`，从内存的角度看，栈上多了什么东西？  （不用讲得很专业，你心里怎么想的就怎么说，我想看看你的直觉到了哪一步。）  想清楚这一步之后，\"溢出\"的原因就自然出来了——你再想想，如果一个递归函数**没有终止条件**，或者**终止条件永远碰不到**，调用栈会一直长下去吗？最终会怎样？  至于排查报错，你先猜一猜：如果你在 IDE 里跑一段递归代码触发了栈溢出，**报错",
+          "answer_text": "好，咱们不直接给答案，一步步聊清楚。\n\n你说\"调用栈溢出\"，这个词拆开看——\"调用栈\"和\"溢出\"。先聊聊第一个词：\n\n**你能先用自己的话说说，每次递归调用发生时，调用栈上会发生什么吗？** 比如一个函数 `f` 调用 `f(n-1)`，从内存的角度看，栈上多了什么东西？\n\n（不用讲得很专业，你心里怎么想的就怎么说，我想看看你的直觉到了哪一步。）\n\n想清楚这一步之后，\"溢出\"的原因就自然出来了——你再想想，如果一个递归函数**没有终止条件**，或者**终止条件永远碰不到**，调用栈会一直长下去吗？最终会怎样？\n\n至于排查报错，你先猜一猜：如果你在 IDE 里跑一段递归代码触发了栈溢出，**报错信息里通常会包含什么线索**，能帮你定位问题？",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 12.5,
+          "expect_located": 1,
+          "located_names": [
+            "递归"
+          ],
+          "mentions_any": 1,
+          "cited_ids": []
+        },
+        {
+          "case": "g7",
+          "kind": "general",
+          "expect_total": 3,
+          "expect_hit": 1,
+          "hit_names": [
+            "递归"
+          ],
+          "mentions": 1,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 6285,
+          "answer_len": 100,
+          "answer_head": "好问题！我们一步一步来。  先问你一个直觉上的判断：  你之前写递归函数（比如阶乘、斐波那契）的时候，函数每次调用自己，是怎么\"记住\"自己当前算到哪一步、还没算哪些步的？想想计算机在背后到底做了什么。",
+          "answer_text": "好问题！我们一步一步来。\n\n先问你一个直觉上的判断：\n\n你之前写递归函数（比如阶乘、斐波那契）的时候，函数每次调用自己，是怎么\"记住\"自己当前算到哪一步、还没算哪些步的？想想计算机在背后到底做了什么。",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 5.2,
+          "expect_located": 1,
+          "located_names": [
+            "递归"
+          ],
+          "mentions_any": 1,
+          "cited_ids": []
         },
         {
           "case": "d1",
           "kind": "graph_dependent",
           "expect_total": 3,
-          "expect_hit": 0,
-          "hit_names": [],
-          "mentions": 1,
-          "rag_calls": 6,
-          "rounds": 7,
+          "expect_hit": 1,
+          "hit_names": [
+            "动态规划"
+          ],
+          "mentions": 2,
+          "rag_calls": 4,
+          "rounds": 4,
           "llm_calls": 5,
-          "tokens": 20694,
-          "answer_len": 347,
-          "answer_head": "老实跟你说一下情况：我刚才试了几种方式去查你的知识图谱，但都没有检索到任何节点内容——这说明你目前的知识图谱**可能还是空的，或者还没有我可见的学习记录**。  所以我没办法凭空给你推荐\"下一步该学什么\"，否则就是在瞎猜，浪费你的时间。  想帮你准确判断，我需要你先告诉我以下信息：  1. **你已经学过哪些知识点？**（比如：变量、循环、数组、递归、链表……哪怕只是大致列一下） 2. **哪些是你觉得比较扎实、掌握得不错的？** 哪些是学过但还不太确定的？ 3. **你的学习目标是什么？** 比如备战面试、刷算法题、跟课程进度、还是纯粹兴趣探索？  你可以简单回复，比如\"学过C语言基础、数组",
-          "false_empty": true,
-          "elapsed": 13.0
+          "tokens": 32915,
+          "answer_len": 232,
+          "answer_head": "我试着查了一下你的知识图谱，但目前里面还没有任何已建立的知识点节点——之前的讨论虽然涉及了递归、动态规划这些话题，但还没有形成结构化的学习记录。  这其实是个好契机，我们先不急着\"推荐下一步\"，而是反过来想清楚一件事：  **你觉得自己目前对\"递归\"理解到什么程度了？**  我之所以先问这个，是因为你的学习笔记里提到，你在学习递归时对\"终止条件\"产生了疑问。这个点你想明白了吗？能用自己的话给我讲讲：函数递归调用自己时，为什么必须有一个终止条件？如果没有会怎样？",
+          "answer_text": "我试着查了一下你的知识图谱，但目前里面还没有任何已建立的知识点节点——之前的讨论虽然涉及了递归、动态规划这些话题，但还没有形成结构化的学习记录。\n\n这其实是个好契机，我们先不急着\"推荐下一步\"，而是反过来想清楚一件事：\n\n**你觉得自己目前对\"递归\"理解到什么程度了？**\n\n我之所以先问这个，是因为你的学习笔记里提到，你在学习递归时对\"终止条件\"产生了疑问。这个点你想明白了吗？能用自己的话给我讲讲：函数递归调用自己时，为什么必须有一个终止条件？如果没有会怎样？",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 29.1,
+          "expect_located": 1,
+          "located_names": [
+            "动态规划"
+          ],
+          "mentions_any": 2,
+          "cited_ids": []
         },
         {
           "case": "d2",
           "kind": "graph_dependent",
           "expect_total": 4,
-          "expect_hit": 2,
+          "expect_hit": 1,
           "hit_names": [
-            "递归",
-            "记忆化搜索"
+            "递归"
           ],
           "mentions": 2,
-          "rag_calls": 9,
-          "rounds": 9,
-          "llm_calls": 6,
-          "tokens": 25203,
-          "answer_len": 518,
-          "answer_head": "我尝试了好几种方式检索你的知识图谱，但目前都没有拿到结果——可能是图谱里关于递归的内容还没有被系统检索到，也可能是连接出了点问题。我没法凭空给你编一个分析，那对你不负责任。  不过这倒是个好机会，我们可以一起做一次**自我诊断**。我问你几个问题，你凭印象回答，我们就能大致画出你的递归掌握地图：  **你回忆一下——下面这些话题，哪些你觉得自己\"能讲清楚\"，哪些只是\"听过名字\"，哪些完全没接触过？**  1. **递归的定义**：什么是递归？为什么要用递归？（跟循环比有什么不同？） 2. **递归的两个关键要素**：终止条件 + 递归公式，你能准确地说出它们的作用吗？ 3. **基础递归题目*",
-          "false_empty": false,
-          "elapsed": 23.0
+          "rag_calls": 5,
+          "rounds": 5,
+          "llm_calls": 7,
+          "tokens": 41799,
+          "answer_len": 389,
+          "answer_head": "抱歉，知识图谱这边暂时没检索到完整的节点数据，没法给你一份精确的掌握度清单。但从这几天的教学观察里，我可以先给你一个粗略的判断框架：  从笔记来看，你目前**主动碰过**的递归相关内容主要集中在两块：  - **递归的基本概念与定义**——你之前问过\"终止条件的作用\"，说明这块在脑子里被翻过，但当时是带着疑问的，说明没有完全消化。 - **学习路径/前置关系**——你主动问过递归和动态规划的关系，这说明你在**元认知层面**（即\"知道自己该学什么\"）是清醒的，但在**具体知识点**上可能还没站稳。  至于你到底掌握了几分，与其我凭印象给你打分，不如你来判断一下——  我出个小问题你试试：**你",
+          "answer_text": "抱歉，知识图谱这边暂时没检索到完整的节点数据，没法给你一份精确的掌握度清单。但从这几天的教学观察里，我可以先给你一个粗略的判断框架：\n\n从笔记来看，你目前**主动碰过**的递归相关内容主要集中在两块：\n\n- **递归的基本概念与定义**——你之前问过\"终止条件的作用\"，说明这块在脑子里被翻过，但当时是带着疑问的，说明没有完全消化。\n- **学习路径/前置关系**——你主动问过递归和动态规划的关系，这说明你在**元认知层面**（即\"知道自己该学什么\"）是清醒的，但在**具体知识点**上可能还没站稳。\n\n至于你到底掌握了几分，与其我凭印象给你打分，不如你来判断一下——\n\n我出个小问题你试试：**你能用一句话告诉我，递归和\"循环\"之间最本质的区别是什么吗？**\n\n不用写代码，用你自己的话说就行。我根据你的回答，就能帮你定位当前的位置，也能判断要不要先回补某个基础点再往前走。",
+          "false_empty": true,
+          "false_empty_hits": [
+            "没检索到"
+          ],
+          "mastery_misclaim": [],
+          "state_misclaim": true,
+          "elapsed": 11.7,
+          "expect_located": 1,
+          "located_names": [
+            "递归"
+          ],
+          "mentions_any": 2,
+          "cited_ids": []
         },
         {
           "case": "d3",
@@ -81,50 +260,201 @@
           "hit_names": [
             "动态规划"
           ],
-          "mentions": 1,
-          "rag_calls": 7,
+          "mentions": 2,
+          "rag_calls": 4,
+          "rounds": 4,
+          "llm_calls": 4,
+          "tokens": 25148,
+          "answer_len": 135,
+          "answer_head": "我能从你的学习记录里看到，你在递归这块正打基础，对\"终止条件\"有些疑问还没完全消化。  在分析前置知识够不够之前，我想先听听你的想法：  **你觉得动态规划这个东西，会用到你已经学过的哪些知识？**  不用想得很全面，凭直觉说说就行——你脑子里冒出来的第一个念头是什么？",
+          "answer_text": "我能从你的学习记录里看到，你在递归这块正打基础，对\"终止条件\"有些疑问还没完全消化。\n\n在分析前置知识够不够之前，我想先听听你的想法：\n\n**你觉得动态规划这个东西，会用到你已经学过的哪些知识？**\n\n不用想得很全面，凭直觉说说就行——你脑子里冒出来的第一个念头是什么？",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 12.3,
+          "expect_located": 1,
+          "located_names": [
+            "动态规划"
+          ],
+          "mentions_any": 2,
+          "cited_ids": []
+        },
+        {
+          "case": "d4",
+          "kind": "graph_dependent",
+          "expect_total": 3,
+          "expect_hit": 2,
+          "hit_names": [
+            "动态规划",
+            "递归"
+          ],
+          "mentions": 2,
+          "rag_calls": 4,
+          "rounds": 4,
+          "llm_calls": 4,
+          "tokens": 25270,
+          "answer_len": 104,
+          "answer_head": "知识图谱里目前还没有动态规划相关的节点，不过我看到你正在学递归。  在判断\"会不会太早\"之前，我想先问你几个问题：  你理解的**动态规划**是用来解决什么问题的？能不能举一个你觉得\"应该用动态规划\"的例子？",
+          "answer_text": "知识图谱里目前还没有动态规划相关的节点，不过我看到你正在学递归。\n\n在判断\"会不会太早\"之前，我想先问你几个问题：\n\n你理解的**动态规划**是用来解决什么问题的？能不能举一个你觉得\"应该用动态规划\"的例子？",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 6.6,
+          "expect_located": 2,
+          "located_names": [
+            "动态规划",
+            "递归"
+          ],
+          "mentions_any": 2,
+          "cited_ids": []
+        },
+        {
+          "case": "d5",
+          "kind": "graph_dependent",
+          "expect_total": 3,
+          "expect_hit": 1,
+          "hit_names": [
+            "动态规划"
+          ],
+          "mentions": 2,
+          "rag_calls": 8,
           "rounds": 8,
           "llm_calls": 5,
-          "tokens": 21295,
-          "answer_len": 229,
-          "answer_head": "坦白说，我刚才尝试了几种方式去检索你的知识图谱，都没有拿到数据——可能是检索工具暂时没拿到结果，也可能图谱里目前节点还不多。在直接给你列清单之前，我想换个方式：  **先不急着看图谱，我们用一个问题帮你自己\"摸底\"。**  动态规划的核心思想，是把一个大问题拆成**同类的小问题**，然后把子问题的答案存起来、避免重复算。你觉得，要理解这个思路，最重要的前置能力是什么？  不用想得太复杂，就凭直觉说一个你觉得\"如果这块不行，动态规划肯定学不动\"的概念就行。",
+          "tokens": 34598,
+          "answer_len": 263,
+          "answer_head": "实话说，目前我没办法直接从系统里拉出一张\"所有知识点 × 掌握度\"的完整表格给你排序——这有点像考试前问老师\"我哪科最差\"，老师没有你每次作业和测验的数据时，只能反过来引导你自己想清楚。  不过反过来想，这其实是个**很好的自检机会**。咱们换个角度聊：  **第一个问题：回顾你最近一次做题或写代码时，哪个知识点让你卡得最久？**  不用马上答\"全部都卡\"——你回忆一下：是在写递归的时候反复出错？还是看到动态规划的题目时连\"状态转移方程\"该往哪想都不知道？又或者是别的环节？  （先定位一个最具体的痛点，我们再往回倒推。）",
+          "answer_text": "实话说，目前我没办法直接从系统里拉出一张\"所有知识点 × 掌握度\"的完整表格给你排序——这有点像考试前问老师\"我哪科最差\"，老师没有你每次作业和测验的数据时，只能反过来引导你自己想清楚。\n\n不过反过来想，这其实是个**很好的自检机会**。咱们换个角度聊：\n\n**第一个问题：回顾你最近一次做题或写代码时，哪个知识点让你卡得最久？**\n\n不用马上答\"全部都卡\"——你回忆一下：是在写递归的时候反复出错？还是看到动态规划的题目时连\"状态转移方程\"该往哪想都不知道？又或者是别的环节？\n\n（先定位一个最具体的痛点，我们再往回倒推。）",
           "false_empty": false,
-          "elapsed": 30.1
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 10.8,
+          "expect_located": 1,
+          "located_names": [
+            "动态规划"
+          ],
+          "mentions_any": 2,
+          "cited_ids": []
+        },
+        {
+          "case": "d6",
+          "kind": "graph_dependent",
+          "expect_total": 3,
+          "expect_hit": 1,
+          "hit_names": [
+            "递归"
+          ],
+          "mentions": 1,
+          "rag_calls": 2,
+          "rounds": 2,
+          "llm_calls": 3,
+          "tokens": 18999,
+          "answer_len": 238,
+          "answer_head": "既然图谱是你自己的，那我对里面的具体节点情况不如你清楚。  我想先请你做两件事，然后再一起判断：  **1. 打开图谱，看一眼递归这一块有几个节点？** 大概它们的掌握度分别是什么水平？  **2. 在回忆这些节点的时候，你觉得哪个是你目前最没有把握的？** ——也就是别人一提，你心里会\"咯噔\"一下的那种。  你先告诉我这两个问题的答案，我们再决定从哪儿切入。为什么要先问你这个，而不是我直接给你建议？因为\"你觉得哪里最虚\"这件事，只有你自己最清楚——这往往就是最好的起点。",
+          "answer_text": "既然图谱是你自己的，那我对里面的具体节点情况不如你清楚。\n\n我想先请你做两件事，然后再一起判断：\n\n**1. 打开图谱，看一眼递归这一块有几个节点？** 大概它们的掌握度分别是什么水平？\n\n**2. 在回忆这些节点的时候，你觉得哪个是你目前最没有把握的？** ——也就是别人一提，你心里会\"咯噔\"一下的那种。\n\n你先告诉我这两个问题的答案，我们再决定从哪儿切入。为什么要先问你这个，而不是我直接给你建议？因为\"你觉得哪里最虚\"这件事，只有你自己最清楚——这往往就是最好的起点。",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 10.0,
+          "expect_located": 1,
+          "located_names": [
+            "递归"
+          ],
+          "mentions_any": 1,
+          "cited_ids": []
+        },
+        {
+          "case": "d7",
+          "kind": "graph_dependent",
+          "expect_total": 4,
+          "expect_hit": 3,
+          "hit_names": [
+            "函数调用",
+            "递归",
+            "动态规划"
+          ],
+          "mentions": 3,
+          "rag_calls": 5,
+          "rounds": 5,
+          "llm_calls": 4,
+          "tokens": 25618,
+          "answer_len": 275,
+          "answer_head": "我刚才试了几次检索你图谱里的节点，但没拿到结果——可能是搜索角度的问题。所以我想换个方式，咱们一起来梳理：  **你能不能先告诉我**：从\"函数调用\"开始，到现在为止，你图谱里**已经学过**的、跟这条路径相关的节点有哪些？  不用背全名，凭印象说就行——比如\"函数调用本身\"、\"参数传递\"、\"调用栈\"、\"递归\"……想到啥说啥。  等你说出来，我再帮你看看这些节点之间是怎么连起来的，哪一步是动态规划真正需要的\"前置\"。这样比直接给你一张图更有用——因为你能看到路径上**哪些环节你自己已经踏实了，哪些其实还虚着**。  来吧，从你印象最深的开始说。",
+          "answer_text": "我刚才试了几次检索你图谱里的节点，但没拿到结果——可能是搜索角度的问题。所以我想换个方式，咱们一起来梳理：\n\n**你能不能先告诉我**：从\"函数调用\"开始，到现在为止，你图谱里**已经学过**的、跟这条路径相关的节点有哪些？\n\n不用背全名，凭印象说就行——比如\"函数调用本身\"、\"参数传递\"、\"调用栈\"、\"递归\"……想到啥说啥。\n\n等你说出来，我再帮你看看这些节点之间是怎么连起来的，哪一步是动态规划真正需要的\"前置\"。这样比直接给你一张图更有用——因为你能看到路径上**哪些环节你自己已经踏实了，哪些其实还虚着**。\n\n来吧，从你印象最深的开始说。",
+          "false_empty": true,
+          "false_empty_hits": [
+            "没拿到"
+          ],
+          "mastery_misclaim": [],
+          "state_misclaim": true,
+          "elapsed": 8.3,
+          "expect_located": 3,
+          "located_names": [
+            "函数调用",
+            "递归",
+            "动态规划"
+          ],
+          "mentions_any": 3,
+          "cited_ids": []
         }
       ],
       "by_kind": {
         "ALL": {
-          "cases": 5,
-          "expect": "4/16",
-          "hit_rate": 0.25,
-          "mentions_avg": 1.2,
-          "rag_calls": 26,
-          "llm_calls": 21,
-          "tokens": 86392,
-          "answer_len_avg": 261,
-          "false_empty": 1
+          "cases": 14,
+          "expect": "16/41",
+          "hit_rate": 0.39,
+          "expect_located": "16/41",
+          "located_rate": 0.39,
+          "mentions_avg": 1.57,
+          "mentions_any_avg": 1.57,
+          "rag_calls": 42,
+          "llm_calls": 50,
+          "tokens": 319982,
+          "answer_len_avg": 195,
+          "false_empty": 2,
+          "mastery_misclaim": 0,
+          "misclaim_cases": 2,
+          "misclaim_rate": 0.143,
+          "cited_id_cases": 0
         },
         "general": {
-          "cases": 2,
-          "expect": "1/6",
-          "hit_rate": 0.167,
-          "mentions_avg": 1.0,
-          "rag_calls": 4,
-          "llm_calls": 5,
-          "tokens": 19200,
-          "answer_len_avg": 105,
-          "false_empty": 0
+          "cases": 7,
+          "expect": "6/18",
+          "hit_rate": 0.333,
+          "expect_located": "6/18",
+          "located_rate": 0.333,
+          "mentions_avg": 1.14,
+          "mentions_any_avg": 1.14,
+          "rag_calls": 10,
+          "llm_calls": 18,
+          "tokens": 115635,
+          "answer_len_avg": 158,
+          "false_empty": 0,
+          "mastery_misclaim": 0,
+          "misclaim_cases": 0,
+          "misclaim_rate": 0.0,
+          "cited_id_cases": 0
         },
         "graph_dependent": {
-          "cases": 3,
-          "expect": "3/10",
-          "hit_rate": 0.3,
-          "mentions_avg": 1.33,
-          "rag_calls": 22,
-          "llm_calls": 16,
-          "tokens": 67192,
-          "answer_len_avg": 364,
-          "false_empty": 1
+          "cases": 7,
+          "expect": "10/23",
+          "hit_rate": 0.435,
+          "expect_located": "10/23",
+          "located_rate": 0.435,
+          "mentions_avg": 2.0,
+          "mentions_any_avg": 2.0,
+          "rag_calls": 32,
+          "llm_calls": 32,
+          "tokens": 204347,
+          "answer_len_avg": 233,
+          "false_empty": 2,
+          "mastery_misclaim": 0,
+          "misclaim_cases": 2,
+          "misclaim_rate": 0.286,
+          "cited_id_cases": 0
         }
       }
     },
@@ -142,11 +472,21 @@
           "rag_calls": 0,
           "rounds": 0,
           "llm_calls": 1,
-          "tokens": 4231,
-          "answer_len": 278,
-          "answer_head": "好问题！我们先不急着看答案，来做个思想实验。  假设你现在写了一个递归函数 `func(n)`，它的逻辑里只有一句话：**`return func(n-1)`**，没有别的了。  现在你调用 `func(5)`，你试着在脑子里\"跑\"一遍这个程序：  1. 调用 `func(5)` → 它返回 `func(4)` 2. 调用 `func(4)` → 它返回 `func(3)` 3. 调用 `func(3)` → 它返回 `func(2)` 4. ……  **这个链条会停下来吗？为什么停不下来？**  你从这里能看出，\"终止条件\"在递归里扮演了什么角色？",
+          "tokens": 7742,
+          "answer_len": 203,
+          "answer_head": "好问题。我们不直接给答案，一起来想清楚。  先想一个具体的过程：假设递归函数 `fact(n)` 正在执行 `n=3` 这一层，它调用了 `fact(2)`，进入 `fact(2)` 之后，**原来 `fact(3)` 那一层的计算（比如 `return 3 * fact(2)` 这件事还没做完）** 需要被记下来吗？  如果需要被记住，那如果递归一层层往下走、永远不回头，这些\"被记住的东西\"会怎么样？",
+          "answer_text": "好问题。我们不直接给答案，一起来想清楚。\n\n先想一个具体的过程：假设递归函数 `fact(n)` 正在执行 `n=3` 这一层，它调用了 `fact(2)`，进入 `fact(2)` 之后，**原来 `fact(3)` 那一层的计算（比如 `return 3 * fact(2)` 这件事还没做完）** 需要被记下来吗？\n\n如果需要被记住，那如果递归一层层往下走、永远不回头，这些\"被记住的东西\"会怎么样？",
           "false_empty": false,
-          "elapsed": 9.5
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 13.7,
+          "expect_located": 1,
+          "located_names": [
+            "递归"
+          ],
+          "mentions_any": 1,
+          "cited_ids": []
         },
         {
           "case": "g2",
@@ -156,15 +496,159 @@
           "hit_names": [
             "递归"
           ],
-          "mentions": 1,
-          "rag_calls": 2,
-          "rounds": 2,
-          "llm_calls": 3,
-          "tokens": 12586,
-          "answer_len": 101,
-          "answer_head": "好的，你问了一个很经典的问题。我们一步步来拆解。  先说说你的直觉——你觉得递归调用和 `for`/`while` 循环在\"运行机制\"上，最根本的差别是什么？不用很严谨，说说你脑子里冒出的第一感觉就行。",
+          "mentions": 2,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 7842,
+          "answer_len": 187,
+          "answer_head": "好问题！这个对比很值得搞清楚。  我们先别急着列区别，先想一个最基本的问题：  假设用循环写 `for i in range(1000000)`，和用递归写一个从 1000000 倒数到 0 的函数，在「内存」层面，你觉得这两者有什么本质不同？  提示一下——你之前学过函数调用时会在调用栈上压栈帧，那么递归每调用一次自己，会发生什么？循环反复执行同一段代码，又会发生什么？",
+          "answer_text": "好问题！这个对比很值得搞清楚。\n\n我们先别急着列区别，先想一个最基本的问题：\n\n假设用循环写 `for i in range(1000000)`，和用递归写一个从 1000000 倒数到 0 的函数，在「内存」层面，你觉得这两者有什么本质不同？\n\n提示一下——你之前学过函数调用时会在调用栈上压栈帧，那么递归每调用一次自己，会发生什么？循环反复执行同一段代码，又会发生什么？",
           "false_empty": false,
-          "elapsed": 6.8
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 2.8,
+          "expect_located": 1,
+          "located_names": [
+            "递归"
+          ],
+          "mentions_any": 2,
+          "cited_ids": []
+        },
+        {
+          "case": "g3",
+          "kind": "general",
+          "expect_total": 2,
+          "expect_hit": 1,
+          "hit_names": [
+            "递归"
+          ],
+          "mentions": 1,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 7802,
+          "answer_len": 158,
+          "answer_head": "好问题！你既然已经学过递归了，那我先不直接告诉你答案，咱们一起来把它\"发现\"出来。  先问一个具体的：假设我们要算第 30 个斐波那契数 `fib(30)`，用你学过的递归怎么写？  你能不能先在脑子里（或纸上）把 `fib(5)` 这个小例子展开一下，看看递归调用了几次 `fib(3)`、几次 `fib(2)`？",
+          "answer_text": "好问题！你既然已经学过递归了，那我先不直接告诉你答案，咱们一起来把它\"发现\"出来。\n\n先问一个具体的：假设我们要算第 30 个斐波那契数 `fib(30)`，用你学过的递归怎么写？\n\n你能不能先在脑子里（或纸上）把 `fib(5)` 这个小例子展开一下，看看递归调用了几次 `fib(3)`、几次 `fib(2)`？",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 2.9,
+          "expect_located": 1,
+          "located_names": [
+            "递归"
+          ],
+          "mentions_any": 1,
+          "cited_ids": []
+        },
+        {
+          "case": "g4",
+          "kind": "general",
+          "expect_total": 2,
+          "expect_hit": 0,
+          "hit_names": [],
+          "mentions": 0,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 7720,
+          "answer_len": 191,
+          "answer_head": "好问题。我们来一步步想清楚。  先看一个最简单的场景：  ```python def square(x):     return x * x  a = square(3) print(a) ```  当程序执行到 `square(3)` 这一行、准备跳进 `square` 函数的那一刻，你想想看——为了让函数执行完之后还能**回到原来的地方继续往下走**，内存至少得记下哪一件事？",
+          "answer_text": "好问题。我们来一步步想清楚。\n\n先看一个最简单的场景：\n\n```python\ndef square(x):\n    return x * x\n\na = square(3)\nprint(a)\n```\n\n当程序执行到 `square(3)` 这一行、准备跳进 `square` 函数的那一刻，你想想看——为了让函数执行完之后还能**回到原来的地方继续往下走**，内存至少得记下哪一件事？",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 2.6,
+          "expect_located": 0,
+          "located_names": [],
+          "mentions_any": 0,
+          "cited_ids": []
+        },
+        {
+          "case": "g5",
+          "kind": "general",
+          "expect_total": 2,
+          "expect_hit": 0,
+          "hit_names": [],
+          "mentions": 0,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 7803,
+          "answer_len": 75,
+          "answer_head": "好问题。在回答之前，我想先确认一下你的起点——  你还记得这两条路线的**核心思路**分别是什么吗？试着说说看，不用很精确，说出你印象中的关键词就行。",
+          "answer_text": "好问题。在回答之前，我想先确认一下你的起点——\n\n你还记得这两条路线的**核心思路**分别是什么吗？试着说说看，不用很精确，说出你印象中的关键词就行。",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 2.8,
+          "expect_located": 0,
+          "located_names": [],
+          "mentions_any": 0,
+          "cited_ids": []
+        },
+        {
+          "case": "g6",
+          "kind": "general",
+          "expect_total": 3,
+          "expect_hit": 1,
+          "hit_names": [
+            "递归"
+          ],
+          "mentions": 2,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 7777,
+          "answer_len": 153,
+          "answer_head": "好问题，我们一步步来。  先问你一个简单的基础问题：你之前学过函数调用，知道每次函数被调用时，内存里会发生什么？（提示一下，跟\"栈帧\"有关）  你觉得递归调用 `factorial(n)` 计算 `5!` 的时候，内存里会同时存在几个 `factorial` 函数的栈帧？每个栈帧里存的 `n` 值相同吗？",
+          "answer_text": "好问题，我们一步步来。\n\n先问你一个简单的基础问题：你之前学过函数调用，知道每次函数被调用时，内存里会发生什么？（提示一下，跟\"栈帧\"有关）\n\n你觉得递归调用 `factorial(n)` 计算 `5!` 的时候，内存里会同时存在几个 `factorial` 函数的栈帧？每个栈帧里存的 `n` 值相同吗？",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 2.7,
+          "expect_located": 1,
+          "located_names": [
+            "递归"
+          ],
+          "mentions_any": 2,
+          "cited_ids": []
+        },
+        {
+          "case": "g7",
+          "kind": "general",
+          "expect_total": 3,
+          "expect_hit": 2,
+          "hit_names": [
+            "递归",
+            "递归调用栈"
+          ],
+          "mentions": 3,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 7965,
+          "answer_len": 133,
+          "answer_head": "好问题！咱们不急着下结论，先回到你已经学过的东西上想一想。  你之前学过「函数调用」和「递归调用栈」——你应该还记得，每次函数调用（包括递归调用自己）都会在内存里发生一件什么事？  你能不能先用自己的话说说：**递归和迭代最根本的差别在哪里**？不急，想到哪说到哪。",
+          "answer_text": "好问题！咱们不急着下结论，先回到你已经学过的东西上想一想。\n\n你之前学过「函数调用」和「递归调用栈」——你应该还记得，每次函数调用（包括递归调用自己）都会在内存里发生一件什么事？\n\n你能不能先用自己的话说说：**递归和迭代最根本的差别在哪里**？不急，想到哪说到哪。",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 7.8,
+          "expect_located": 2,
+          "located_names": [
+            "递归",
+            "递归调用栈"
+          ],
+          "mentions_any": 3,
+          "cited_ids": []
         },
         {
           "case": "d1",
@@ -172,93 +656,259 @@
           "expect_total": 3,
           "expect_hit": 1,
           "hit_names": [
-            "递归调用栈"
+            "动态规划"
           ],
-          "mentions": 4,
-          "rag_calls": 10,
-          "rounds": 10,
-          "llm_calls": 6,
-          "tokens": 28926,
-          "answer_len": 501,
-          "answer_head": "让我先梳理一下我在你的知识图谱里看到了什么：  我检索到了 **3 个核心节点**，它们都围绕「递归」展开：  | 节点 | 我看到的核心内容 | |------|------------------| | **函数调用** | 调用栈帧、返回地址、局部变量空间 | | **递递归终止条件** | if 终止判断、为什么必须存在 | | **递归调用栈** | 深度与栈帧的关系、栈溢出、后进先出 |  这三个节点构成了一条很清晰的学习链： **函数调用 → 递归终止条件 → 递归调用栈**  这说明你已经从\"递归是什么\"走到了\"递归在内存里怎么运作\"的层面，理论框架相当扎实了。  ---  在",
+          "mentions": 1,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 8939,
+          "answer_len": 184,
+          "answer_head": "好问题。要回答它，最快的办法不是我说结论，而是你看着自己的图谱自己推导出来——这样你下次面对类似选择也能复用。  第一步：请你先看图谱里 `ab_dp`（动态规划）这个节点。它的 incoming 边里，有几条 `prerequisite`？这些 `prerequisite` 分别指向哪些节点？  你先把这三个前置节点的名字列出来，我就知道你怎么理解这张图的结构了。",
+          "answer_text": "好问题。要回答它，最快的办法不是我说结论，而是你看着自己的图谱自己推导出来——这样你下次面对类似选择也能复用。\n\n第一步：请你先看图谱里 `ab_dp`（动态规划）这个节点。它的 incoming 边里，有几条 `prerequisite`？这些 `prerequisite` 分别指向哪些节点？\n\n你先把这三个前置节点的名字列出来，我就知道你怎么理解这张图的结构了。",
           "false_empty": false,
-          "elapsed": 28.6
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 17.5,
+          "expect_located": 1,
+          "located_names": [
+            "动态规划"
+          ],
+          "mentions_any": 1,
+          "cited_ids": [
+            "ab_dp"
+          ]
         },
         {
           "case": "d2",
           "kind": "graph_dependent",
           "expect_total": 4,
-          "expect_hit": 4,
+          "expect_hit": 1,
           "hit_names": [
-            "递归",
-            "递归终止条件",
-            "递归调用栈",
-            "记忆化搜索"
+            "递归"
           ],
-          "mentions": 5,
-          "rag_calls": 5,
-          "rounds": 6,
-          "llm_calls": 7,
-          "tokens": 32200,
-          "answer_len": 436,
-          "answer_head": "根据刚才的检索，我在你的知识图谱中找到了以下与**递归**相关的节点：  | 节点 | 在递归中的角色 | |------|--------------| | **递归** | 核心概念：终止条件 + 递推关系 | | **递归终止条件** | base case，递归何时停止 | | **递归调用栈** | 栈帧、深度、栈溢出、LIFO 返回 | | **记忆化搜索** | 用缓存消除重复子问题（如 `@lru_cache` 优化斐波那契） | | **函数调用** | 递归的前置知识：每次调用产生独立栈帧 |  坦白说，我刚才尝试读取每个节点的掌握度数值时接口没返回成功，所以**没法直接给",
+          "mentions": 1,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 7674,
+          "answer_len": 121,
+          "answer_head": "与其我直接告诉你，不如你自己先分析一遍——这样印象更深。  你先回答我一个问题：**在你图谱里和递归相关的节点中，你觉得哪个节点的概念最\"虚\"——也就是说，数字看着还可以，但你心里其实没什么底？**  说出节点名和你的感觉就行，不用解释太多。",
+          "answer_text": "与其我直接告诉你，不如你自己先分析一遍——这样印象更深。\n\n你先回答我一个问题：**在你图谱里和递归相关的节点中，你觉得哪个节点的概念最\"虚\"——也就是说，数字看着还可以，但你心里其实没什么底？**\n\n说出节点名和你的感觉就行，不用解释太多。",
           "false_empty": false,
-          "elapsed": 24.8
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 2.5,
+          "expect_located": 1,
+          "located_names": [
+            "递归"
+          ],
+          "mentions_any": 1,
+          "cited_ids": []
         },
         {
           "case": "d3",
           "kind": "graph_dependent",
           "expect_total": 3,
+          "expect_hit": 0,
+          "hit_names": [],
+          "mentions": 0,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 8113,
+          "answer_len": 147,
+          "answer_head": "好问题！在动笔之前，我们先一起看看图谱里跟 `ab_dp` 直接相连的「前置」边。能告诉我——`ab_dp` 有哪几条 prerequisite 边，它们分别指向哪些前置节点吗？  提示一下：你只需要看那些箭头**指向** `ab_dp` 的边（也就是说\"必须先学 X 才能学 DP\"的那种）。",
+          "answer_text": "好问题！在动笔之前，我们先一起看看图谱里跟 `ab_dp` 直接相连的「前置」边。能告诉我——`ab_dp` 有哪几条 prerequisite 边，它们分别指向哪些前置节点吗？\n\n提示一下：你只需要看那些箭头**指向** `ab_dp` 的边（也就是说\"必须先学 X 才能学 DP\"的那种）。",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 3.8,
+          "expect_located": 1,
+          "located_names": [
+            "动态规划"
+          ],
+          "mentions_any": 1,
+          "cited_ids": [
+            "ab_dp"
+          ]
+        },
+        {
+          "case": "d4",
+          "kind": "graph_dependent",
+          "expect_total": 3,
+          "expect_hit": 0,
+          "hit_names": [],
+          "mentions": 0,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 8034,
+          "answer_len": 182,
+          "answer_head": "好问题，与其我直接告诉你答案，不如你自己从图谱里找找看。  先做一个简单的观察练习：  打开你的图谱，找到 `ab_dp` 这个节点，看一下有几条指向它的 **prerequisite** 边——也就是\"必须先学谁才能学我\"的箭头。  你能数出来几条？它们分别来自哪几个节点？  然后再看一眼：**这些前置节点的掌握度分别是多少？**  你觉得哪个数字最让你犹豫？",
+          "answer_text": "好问题，与其我直接告诉你答案，不如你自己从图谱里找找看。\n\n先做一个简单的观察练习：\n\n打开你的图谱，找到 `ab_dp` 这个节点，看一下有几条指向它的 **prerequisite** 边——也就是\"必须先学谁才能学我\"的箭头。\n\n你能数出来几条？它们分别来自哪几个节点？\n\n然后再看一眼：**这些前置节点的掌握度分别是多少？**\n\n你觉得哪个数字最让你犹豫？",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 4.1,
+          "expect_located": 1,
+          "located_names": [
+            "动态规划"
+          ],
+          "mentions_any": 1,
+          "cited_ids": [
+            "ab_dp"
+          ]
+        },
+        {
+          "case": "d5",
+          "kind": "graph_dependent",
+          "expect_total": 3,
+          "expect_hit": 1,
+          "hit_names": [
+            "动态规划"
+          ],
+          "mentions": 1,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 8378,
+          "answer_len": 129,
+          "answer_head": "先不直接给你排序表——我想先问一个问题。  你图谱里 `ab_dp`（动态规划）掌握度是 0，乍一看是最薄弱的。你觉得现在直接去补它，效果会好吗？为什么？  （提示：你可以翻一下图谱里 `ab_dp` 的前置关系，思考一下\"补一个知识点\"这件事受什么影响。）",
+          "answer_text": "先不直接给你排序表——我想先问一个问题。\n\n你图谱里 `ab_dp`（动态规划）掌握度是 0，乍一看是最薄弱的。你觉得现在直接去补它，效果会好吗？为什么？\n\n（提示：你可以翻一下图谱里 `ab_dp` 的前置关系，思考一下\"补一个知识点\"这件事受什么影响。）",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 8.9,
+          "expect_located": 1,
+          "located_names": [
+            "动态规划"
+          ],
+          "mentions_any": 1,
+          "cited_ids": [
+            "ab_dp"
+          ]
+        },
+        {
+          "case": "d6",
+          "kind": "graph_dependent",
+          "expect_total": 3,
           "expect_hit": 3,
           "hit_names": [
-            "动态规划",
-            "记忆化搜索",
-            "循环与迭代"
+            "递归调用栈",
+            "递归终止条件",
+            "递归"
           ],
-          "mentions": 6,
-          "rag_calls": 3,
-          "rounds": 3,
-          "llm_calls": 3,
-          "tokens": 13552,
-          "answer_len": 213,
-          "answer_head": "根据你的知识图谱，动态规划节点本身就标注了它需要的前置基础：  > 递归思维、终止条件与递推关系、记忆化（缓存重叠子问题）  图谱里这几个节点你都已有：**递归、递归终止条件、记忆化搜索、循环与迭代、函数调用**。  看起来\"工具\"是齐的。但——  我先不急着给你下判断。你自己摸一遍才靠谱。  先从最底层开始：**你能用一两句话说清楚\"递归\"的核心机制是什么吗？** 比如，为什么一个函数调用自己，最终还能停下来并给出结果？",
+          "mentions": 4,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 8060,
+          "answer_len": 189,
+          "answer_head": "好问题。先看看图谱里和递归相关的节点和当前掌握度：  - **递归终止条件**：85 - **递归**：70 - **递归调用栈**：35 - **记忆化搜索**：20  你觉得这四个里，哪个是你写递归时最容易卡住的地方？是**写不出递推关系**，还是**不理解递归到底在内存里干了什么**，又或者是**明明写出了朴素递归但效率很差**？  说说你的判断，我们再决定从哪里切入。",
+          "answer_text": "好问题。先看看图谱里和递归相关的节点和当前掌握度：\n\n- **递归终止条件**：85\n- **递归**：70\n- **递归调用栈**：35\n- **记忆化搜索**：20\n\n你觉得这四个里，哪个是你写递归时最容易卡住的地方？是**写不出递推关系**，还是**不理解递归到底在内存里干了什么**，又或者是**明明写出了朴素递归但效率很差**？\n\n说说你的判断，我们再决定从哪里切入。",
           "false_empty": false,
-          "elapsed": 10.8
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 3.6,
+          "expect_located": 3,
+          "located_names": [
+            "递归调用栈",
+            "递归终止条件",
+            "递归"
+          ],
+          "mentions_any": 4,
+          "cited_ids": []
+        },
+        {
+          "case": "d7",
+          "kind": "graph_dependent",
+          "expect_total": 4,
+          "expect_hit": 0,
+          "hit_names": [],
+          "mentions": 0,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 8198,
+          "answer_len": 142,
+          "answer_head": "好问题，咱们不直接画，先自己推。  图谱里的 `prerequisite` 边表达的就是「必须先学 A 才能学 B」这种先后关系。你现在试着做一件事：从 `ab_function_call` 这个节点出发，沿着 `prerequisite` 边往外走——它直接指向的下一个节点是哪个？",
+          "answer_text": "好问题，咱们不直接画，先自己推。\n\n图谱里的 `prerequisite` 边表达的就是「必须先学 A 才能学 B」这种先后关系。你现在试着做一件事：从 `ab_function_call` 这个节点出发，沿着 `prerequisite` 边往外走——它直接指向的下一个节点是哪个？",
+          "false_empty": false,
+          "false_empty_hits": [],
+          "mastery_misclaim": [],
+          "state_misclaim": false,
+          "elapsed": 3.9,
+          "expect_located": 1,
+          "located_names": [
+            "函数调用"
+          ],
+          "mentions_any": 1,
+          "cited_ids": [
+            "ab_function_call"
+          ]
         }
       ],
       "by_kind": {
         "ALL": {
-          "cases": 5,
-          "expect": "10/16",
-          "hit_rate": 0.625,
-          "mentions_avg": 3.4,
-          "rag_calls": 20,
-          "llm_calls": 20,
-          "tokens": 91495,
-          "answer_len_avg": 305,
-          "false_empty": 0
+          "cases": 14,
+          "expect": "12/41",
+          "hit_rate": 0.293,
+          "expect_located": "15/41",
+          "located_rate": 0.366,
+          "mentions_avg": 1.14,
+          "mentions_any_avg": 1.36,
+          "rag_calls": 0,
+          "llm_calls": 14,
+          "tokens": 112047,
+          "answer_len_avg": 156,
+          "false_empty": 0,
+          "mastery_misclaim": 0,
+          "misclaim_cases": 0,
+          "misclaim_rate": 0.0,
+          "cited_id_cases": 5
         },
         "general": {
-          "cases": 2,
-          "expect": "2/6",
+          "cases": 7,
+          "expect": "6/18",
           "hit_rate": 0.333,
-          "mentions_avg": 1.0,
-          "rag_calls": 2,
-          "llm_calls": 4,
-          "tokens": 16817,
-          "answer_len_avg": 189,
-          "false_empty": 0
+          "expect_located": "6/18",
+          "located_rate": 0.333,
+          "mentions_avg": 1.29,
+          "mentions_any_avg": 1.29,
+          "rag_calls": 0,
+          "llm_calls": 7,
+          "tokens": 54651,
+          "answer_len_avg": 157,
+          "false_empty": 0,
+          "mastery_misclaim": 0,
+          "misclaim_cases": 0,
+          "misclaim_rate": 0.0,
+          "cited_id_cases": 0
         },
         "graph_dependent": {
-          "cases": 3,
-          "expect": "8/10",
-          "hit_rate": 0.8,
-          "mentions_avg": 5.0,
-          "rag_calls": 18,
-          "llm_calls": 16,
-          "tokens": 74678,
-          "answer_len_avg": 383,
-          "false_empty": 0
+          "cases": 7,
+          "expect": "6/23",
+          "hit_rate": 0.261,
+          "expect_located": "9/23",
+          "located_rate": 0.391,
+          "mentions_avg": 1.0,
+          "mentions_any_avg": 1.43,
+          "rag_calls": 0,
+          "llm_calls": 7,
+          "tokens": 57396,
+          "answer_len_avg": 156,
+          "false_empty": 0,
+          "mastery_misclaim": 0,
+          "misclaim_cases": 0,
+          "misclaim_rate": 0.0,
+          "cited_id_cases": 5
         }
       }
     }

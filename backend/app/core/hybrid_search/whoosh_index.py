@@ -1,10 +1,12 @@
 """
-whoosh 稀疏全文索引：为上传知识库提供 BM25 关键词检索
+whoosh 稀疏全文索引：为 RAG 检索提供 BM25 关键词检索（kb 上传库 + 图谱节点共用）
 
 设计决策：
 - 使用 whoosh（纯 Python 全文检索引擎）提供倒排索引 + BM25F 打分
 - 每个用户独立索引目录，与 kb 用户隔离策略一致
-- 以 doc_chunks.id（chunk_id）作为文档主键，与向量检索统一主键
+- 以 chunk_id 作为文档主键，与向量检索统一主键：
+    kb 通路  = doc_chunks.id（NUMERIC）
+    图谱通路 = "{node_id}#{chunk_index}"（ID 字符串，图谱 node_id 本身是 TEXT）
 - 中英文分字段存储：
     content_zh：自定义中文分析器（CJK 字符 bigram 切分，零额外依赖）
     content_en：StemmingAnalyzer（英文词干），检索时双路查询取并集打分
@@ -14,8 +16,13 @@ whoosh 稀疏全文索引：为上传知识库提供 BM25 关键词检索
 说明：whoosh 2.7.4 无内置中文分析器，这里用 NgramFilter(2,2) 对中文字符做
 bigram 切分（对中文检索友好），英文走词干化，兼顾中英文且零第三方分词依赖。
 
+⚠️ whoosh 的 schema 存在索引文件里、打开即定型，所以主键类型由 `text_ids` 参数
+决定（kb 用 NUMERIC 老索引不迁移；图谱用 ID），检索/写入一律以**索引自带 schema**
+为准，不用模块常量覆盖。
+
 索引目录：
-    data/kb/{user_id}/whoosh_index/
+    data/kb/{user_id}/whoosh_index/     （kb 通路）
+    data/rag/{user_id}/whoosh_index/    （图谱通路）
 """
 
 import logging
@@ -31,10 +38,9 @@ from whoosh.analysis import (
     StemFilter,
     StopFilter,
 )
-from whoosh.fields import NUMERIC, STORED, TEXT, Schema
+from whoosh.fields import ID, NUMERIC, STORED, TEXT, Schema
 from whoosh.qparser import MultifieldParser, OrGroup
 from whoosh.query import And, Every, Or, Term
-from whoosh.writing import AsyncWriter
 
 logger = logging.getLogger("ai-tutor")
 
@@ -57,37 +63,72 @@ _EN_ANALYZER = (
     | StemFilter(lang="en")
 )
 
-# 定义索引 schema
-_SCHEMA = Schema(
-    chunk_id=NUMERIC(stored=True, unique=True),   # doc_chunks.id，主键
-    node_id=NUMERIC(stored=True),                  # KbStore nodes.id（文件节点），用于范围过滤
-    doc_id=NUMERIC(stored=True),                   # 文档标识
-    chunk_index=NUMERIC(stored=True),              # 分块序号
-    heading=STORED,                                # 片段标题（透传）
-    content=STORED,                                # 片段原文（透传，供融合后返回）
-    content_zh=TEXT(analyzer=_ZH_ANALYZER),        # 中文索引字段（bigram）
-    content_en=TEXT(analyzer=_EN_ANALYZER),        # 英文索引字段（词干化）
-)
+def _make_schema(text_ids: bool = False) -> Schema:
+    """
+    构建索引 schema。
+
+    :param text_ids: False（kb 通路）= chunk_id/node_id 用 NUMERIC；
+                     True（图谱通路）= 改用 ID（不分词的字符串主键）。
+
+    图谱 node_id 是 TEXT（如 "stack"），NUMERIC 字段写入/查询都会直接报错；
+    而 whoosh schema 存在索引文件里、见 schema 即定型，所以只能参数化分叉 ——
+    好处是**存量 kb 索引（NUMERIC）无需迁移**。图谱 schema 额外挂 node_name，
+    让 BM25 命中时不必回查图谱就能给出节点展示名。
+    """
+    fields: dict = dict(
+        chunk_id=ID(stored=True, unique=True) if text_ids else NUMERIC(stored=True, unique=True),
+        node_id=ID(stored=True) if text_ids else NUMERIC(stored=True),
+        doc_id=NUMERIC(stored=True),                   # 文档标识（图谱侧未用，占位 0）
+        chunk_index=NUMERIC(stored=True),              # 分块序号
+        heading=STORED,                                # 片段标题（透传）
+        content=STORED,                                # 片段原文（透传，供融合后返回）
+        content_zh=TEXT(analyzer=_ZH_ANALYZER),        # 中文索引字段（bigram）
+        content_en=TEXT(analyzer=_EN_ANALYZER),        # 英文索引字段（词干化）
+    )
+    if text_ids:
+        fields["node_name"] = STORED                   # 节点展示名（kb 侧无此字段，保持老 schema）
+    return Schema(**fields)
+
+
+# kb 通路 schema（NUMERIC 主键，与存量索引一致）
+_SCHEMA = _make_schema()
 
 
 class SparseIndex:
     """
     whoosh 稀疏索引（按用户隔离）
 
-    :param data_dir: 用户 kb 数据目录（索引放在其下 whoosh_index/）
+    :param data_dir: 用户数据目录（索引放在其下 whoosh_index/）
+    :param text_ids: 主键类型开关 —— False=kb（NUMERIC node_id），True=图谱（TEXT node_id）
     """
 
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, text_ids: bool = False):
         self.data_dir = Path(data_dir)
         self.index_dir = self.data_dir / "whoosh_index"
         self.index_dir.mkdir(parents=True, exist_ok=True)
+        self._text_ids = text_ids
         self._ix = self._open_or_create()
+        # 以索引自带 schema 为准（老 kb 索引是 NUMERIC，被常量覆盖会导致词条编码不匹配 → 静默查不到）
+        self._schema = self._ix.schema
+        self._has_node_name = "node_name" in self._schema.names()
         self._pending: "AsyncWriter | None" = None  # 延迟提交模式的共享 writer
 
     def _open_or_create(self):
         if whoosh_index.exists_in(str(self.index_dir)):
             return whoosh_index.open_dir(str(self.index_dir))
-        return whoosh_index.create_in(str(self.index_dir), _SCHEMA)
+        return whoosh_index.create_in(str(self.index_dir), _make_schema(self._text_ids))
+
+    def _doc_fields(self, chunk_id, node_id, doc_id, chunk_index,
+                    heading: str, content: str, node_name: str | None = None) -> dict:
+        """组装待写入字段（node_name 仅在 schema 含该字段时携带，kb 侧 schema 没有）。"""
+        fields = dict(
+            chunk_id=chunk_id, node_id=node_id, doc_id=doc_id,
+            chunk_index=chunk_index, heading=heading, content=content,
+            content_zh=content, content_en=content,
+        )
+        if node_name is not None and self._has_node_name:
+            fields["node_name"] = node_name or ""
+        return fields
 
     def close(self) -> None:
         try:
@@ -108,7 +149,7 @@ class SparseIndex:
         注意：不调用 begin_deferred 时行为不变（每次操作独立提交）。
         """
         if self._pending is None:
-            self._pending = AsyncWriter(self._ix)
+            self._pending = self._ix.writer()
 
     def is_deferred(self) -> bool:
         return self._pending is not None
@@ -119,11 +160,19 @@ class SparseIndex:
             self._pending.commit()
             self._pending = None
 
-    def _writer(self) -> "AsyncWriter":
-        return self._pending if self._pending is not None else AsyncWriter(self._ix)
+    def _writer(self):
+        """
+        取当前 writer：延迟模式复用 `_pending`，否则新建一个**同步** writer。
 
-    def _commit(self, writer: "AsyncWriter") -> None:
-        """非延迟模式下立即提交；延迟模式下由 flush() 统一提交"""
+        为什么不用 whoosh 的 AsyncWriter：它的 commit() 是"另起线程 replay"，
+        方法返回时索引未必可见/顺序未必正确 —— 而本项目的用法是"索引完立刻检索"
+        （图谱节点增量索引 → 下一轮对话就查），会静默漏召回。同步 writer 把这次
+        commit 落到调用栈上，语义与 SQLite 索引侧一致。
+        """
+        return self._pending if self._pending is not None else self._ix.writer()
+
+    def _commit(self, writer) -> None:
+        """非延迟模式下立即同步提交；延迟模式下由 flush() 统一提交"""
         if self._pending is None:
             writer.commit()
 
@@ -131,8 +180,9 @@ class SparseIndex:
     #  写入
     # ────────────────────────────────────────────
 
-    def upsert_chunk(self, chunk_id: int, node_id: int, doc_id: int,
-                     chunk_index: int, heading: str, content: str) -> None:
+    def upsert_chunk(self, chunk_id, node_id, doc_id: int,
+                     chunk_index: int, heading: str, content: str,
+                     node_name: str = "") -> None:
         """
         写入/更新单个片段（chunk_id 唯一，重复写自动覆盖）
 
@@ -141,16 +191,9 @@ class SparseIndex:
         """
         writer = self._writer()
         try:
-            writer.update_document(
-                chunk_id=chunk_id,
-                node_id=node_id,
-                doc_id=doc_id,
-                chunk_index=chunk_index,
-                heading=heading,
-                content=content,
-                content_zh=content,
-                content_en=content,
-            )
+            writer.update_document(**self._doc_fields(
+                chunk_id, node_id, doc_id, chunk_index, heading, content, node_name,
+            ))
             self._commit(writer)
         except Exception as e:
             logger.error(f"whoosh 写入片段失败 (chunk_id={chunk_id}): {e}")
@@ -164,23 +207,17 @@ class SparseIndex:
         """
         批量写入/更新多个片段（一次 writer、一次 commit，避免逐条 commit 的段合并开销）
 
-        :param docs: [{chunk_id, node_id, doc_id, chunk_index, heading, content}, ...]
+        :param docs: [{chunk_id, node_id, doc_id, chunk_index, heading, content[, node_name]}, ...]
         """
         if not docs:
             return
         writer = self._writer()
         try:
             for d in docs:
-                writer.update_document(
-                    chunk_id=d["chunk_id"],
-                    node_id=d["node_id"],
-                    doc_id=d["doc_id"],
-                    chunk_index=d["chunk_index"],
-                    heading=d["heading"],
-                    content=d["content"],
-                    content_zh=d["content"],
-                    content_en=d["content"],
-                )
+                writer.update_document(**self._doc_fields(
+                    d["chunk_id"], d["node_id"], d["doc_id"], d["chunk_index"],
+                    d["heading"], d["content"], d.get("node_name"),
+                ))
             self._commit(writer)
         except Exception as e:
             logger.error(f"whoosh 批量写入片段失败 ({len(docs)} 条): {e}")
@@ -190,8 +227,8 @@ class SparseIndex:
                 except Exception:
                     pass
 
-    def delete_node_chunks(self, node_id: int) -> None:
-        """删除某文件节点的全部分块"""
+    def delete_node_chunks(self, node_id) -> None:
+        """删除某节点（kb 文件节点 / 图谱节点）的全部分块"""
         writer = self._writer()
         try:
             writer.delete_by_query(Term("node_id", node_id))
@@ -199,7 +236,7 @@ class SparseIndex:
         except Exception as e:
             logger.error(f"whoosh 删除节点索引失败 (node_id={node_id}): {e}")
 
-    def delete_chunks(self, node_ids: list[int]) -> None:
+    def delete_chunks(self, node_ids: list) -> None:
         """删除一批文件节点（含子节点）的全部分块"""
         if not node_ids:
             return
@@ -223,25 +260,25 @@ class SparseIndex:
     #  检索
     # ────────────────────────────────────────────
 
-    def search(self, query: str, node_ids: list[int] | None = None,
+    def search(self, query: str, node_ids: list | None = None,
                top_k: int = 5) -> list[dict]:
         """
         BM25 稀疏检索。
 
         参数:
             query:    查询文本
-            node_ids: 限定范围的文件节点 ID 列表（None=检索全部）
+            node_ids: 限定范围的节点 ID 列表（None=检索全部；kb 传 int，图谱传 str）
             top_k:    返回条数
 
         返回:
-            [{chunk_id, node_id, doc_id, chunk_index, heading, content, score}, ...]
+            [{chunk_id, node_id, doc_id, chunk_index, heading, content, score[, node_name]}, ...]
             按 BM25 分数降序。score 已归一化到 (0,1] 便于与向量分数加权。
         """
         if not query.strip():
             return []
 
         qp = MultifieldParser(
-            ["content_zh", "content_en"], schema=_SCHEMA, group=OrGroup
+            ["content_zh", "content_en"], schema=self._schema, group=OrGroup
         )
         try:
             parsed = qp.parse(query)
@@ -264,7 +301,7 @@ class SparseIndex:
                     score = hit.score if hit.score > 0 else 0.0
                     # BM25 分数归一化：线性压到 (0,1]
                     norm = min(1.0, score / (score + 1.0)) if score else 0.0
-                    results.append({
+                    item = {
                         "chunk_id": hit["chunk_id"],
                         "node_id": hit["node_id"],
                         "doc_id": hit["doc_id"],
@@ -272,7 +309,10 @@ class SparseIndex:
                         "heading": hit["heading"],
                         "content": hit["content"],
                         "score": round(norm, 4),
-                    })
+                    }
+                    if self._has_node_name:
+                        item["node_name"] = hit["node_name"] or ""
+                    results.append(item)
         except Exception as e:
             logger.error(f"whoosh 检索失败: {e}")
             return []

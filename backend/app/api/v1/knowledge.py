@@ -193,7 +193,7 @@ async def create_node(data: dict = Body(...), user_id: int = Depends(get_current
 
     支持两种调用方式：
     1. 手动创建（前端）：只需传 name, tags, content，ID 自动生成
-       例: {"name": "二叉树", "tags": ["数据结构", "二级"], "content": "# 二叉树\n..."}
+       例: {"name": "二叉树", "tags": ["数据结构", "递归"], "content": "# 二叉树\n..."}
     2. AI function calling：传完整的 id, name, tags, content 等
        例: {"id": "binary_tree", "name": "二叉树", ...}
 
@@ -410,7 +410,11 @@ async def update_edge(edge_id: int, request: UpdateEdgeRequest,
         publish("graph_updated")
         return {"status": "ok", "edge_id": edge_id, "edge": updated_edge}
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        msg = str(e)
+        # 改成的关系与既有边重复（KG-D6 唯一索引）→ 409，与 create_edge 口径一致
+        if "已存在" in msg:
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=404, detail=msg)
     finally:
         kg.close()
 
