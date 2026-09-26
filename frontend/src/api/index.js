@@ -13,10 +13,21 @@ export const apiClient = axios.create({
 /**
  * 401 时的统一处理：清除凭据 + 跳转登录页
  * axios 拦截器和 fetch 流式请求共用此逻辑
+ *
+ * ⚠️ localStorage 与 Pinia **必须一起清**：authStore 的 token 只在初始化时读过一次
+ * localStorage，只清 localStorage 的话 isLoggedIn 仍为 true → 路由守卫判定"已登录"
+ * 会把 #/login 弹回首页 → 用户既看不到登录页、也看不到任何报错，只表现为"发了消息没反应"。
  */
-function handleUnauthorized() {
+async function handleUnauthorized() {
   localStorage.removeItem('ai_tutor_token')
   localStorage.removeItem('ai_tutor_user')
+  try {
+    // 动态 import 打断 api ↔ store 的静态循环依赖（调用时两边都已加载完毕）
+    const { useAuthStore } = await import('../stores/authStore.js')
+    useAuthStore().logout()
+  } catch {
+    // 无活跃 pinia 的场合忽略：localStorage 已清，守卫按 localStorage 重算状态
+  }
   if (window.location.hash !== '#/login') {
     window.location.hash = '#/login'
   }
@@ -119,12 +130,16 @@ export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = 
     .then(async (response) => {
       if (!response.ok) {
         if (response.status === 401) {
+          // 必须先给 UI 一个交代：只 return 的话 onError/onDone 都不触发，
+          // chatStore.loading 永远为 true（发送按钮永久禁用、气泡停在"AI 思考中…"），
+          // 用户侧就是"对话没反应"（2026-09-26 修）。
+          onError?.(fmt(ErrorDefs.COMM.UNKNOWN_RESPONSE,
+                        { status: response.status, detail: '登录已过期，请重新登录' }))
           handleUnauthorized()
           return
         }
         // 流式错误使用统一的错误码映射
         const text = await response.text().catch(() => '')
-        const mockErr = { response: { status: response.status, data: { detail: text || undefined } } }
         onError?.(fmt(ErrorDefs.COMM.UNKNOWN_RESPONSE, { status: response.status, detail: text || undefined }))
         return
       }
@@ -174,9 +189,6 @@ export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = 
             }
             else if (parsed.type === 'agent_done') {
               onAgentDone?.(parsed)
-            }
-            else if (parsed.type === 'graph_updated') {
-              // 图谱更新：前端知识树刷新由 knowledgeStore 独立 SSE 处理，此处忽略
             }
             else if (parsed.error) {
               onError?.(parsed.error)

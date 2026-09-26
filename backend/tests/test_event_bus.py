@@ -12,11 +12,13 @@ import asyncio
 import json
 
 from app.core import event_bus
+from app.core.agent.events import AgentEventEmitter
 from app.core.event_bus import (
     publish, subscribe, get_user_queue,
     GRAPH_UPDATED, ERROR, TOOL_START, TOOL_RESULT,
     THINKING, TEXT_DELTA, AGENT_START, AGENT_DONE,
 )
+from app.services.chat_service import _consume_agent_events
 
 
 def _drain_events(gen, count, timeout=1.0):
@@ -293,6 +295,155 @@ def test_consumer_handles_agent_exception():
     assert collected[0]["type"] == TEXT_DELTA
     assert collected[0]["text"] == "partial"
     _reset_state()
+
+
+# ── 新增：对话流与常驻长连接的队列隔离（2026-09-26 故障回归）──
+
+
+def test_chat_stream_not_starved_by_long_lived_subscriber():
+    """/knowledge/events 长连接常驻时，/chat/stream 仍必须拿到 text_delta。
+
+    故障现象（2026-09-26 实测）：两者共用 event_bus 的同一条 per-user 队列，
+    常驻长连接把 text_delta 抢走（它只认 graph_updated/quiz_ready，正文被丢弃），
+    对话消费方拿到空流 → 前端 fullReply 恒为空 → onDone('') 删掉 AI 气泡
+    → 用户侧"对话没有反应"（后端 agent_runs 却有完整回复）。
+
+    修法：对话事件走本请求私有队列（AgentEventEmitter(queue=...)），
+    不再占用 per-user 广播队列；该队列留给常驻长连接（quiz_ready/graph_updated）。
+    """
+    _reset_state()
+    chat_sse = []
+    ks_events = []
+
+    async def _run():
+        # 常驻长连接：等价前端 chatStore.connectSSE()（进对话页即建立并常驻）
+        ks_task = asyncio.ensure_future(
+            _collect_all(subscribe(user_id=1), ks_events, max_events=99)
+        )
+        await asyncio.sleep(0.05)  # 让它先挂起在 q.get() 上，形成"抢事件"的竞争
+
+        event_queue = asyncio.Queue()
+
+        async def fake_agent():
+            em = AgentEventEmitter("r1", user_id=1, queue=event_queue)
+            em.emit(THINKING, text="想想")
+            em.emit(TEXT_DELTA, text="正文")
+            em.emit(AGENT_DONE, rounds=1, total_llm_calls=1)
+
+        agent_task = asyncio.ensure_future(fake_agent())
+        async for sse in _consume_agent_events(event_queue, agent_task):
+            chat_sse.append(sse)
+
+        ks_task.cancel()
+        try:
+            await ks_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    asyncio.run(asyncio.wait_for(_run(), timeout=2.0))
+
+    payloads = [json.loads(s.replace("data: ", "").strip()) for s in chat_sse]
+    # text_delta 在 SSE 上以旧兼容格式 {"token": ...} 承载（前端 parsed.token 消费）
+    assert any(p.get("token") == "正文" for p in payloads), f"对话流没拿到正文: {payloads}"
+    assert [p["type"] for p in payloads if "type" in p] == ["thinking", "agent_done"]
+    assert ks_events == [], f"常驻长连接抢到了对话事件: {ks_events}"
+    _reset_state()
+
+
+# ── 新增：请求内事件的路由不变量守卫（2026-09-26 故障）──
+
+
+def test_request_scoped_event_bypasses_user_broadcast_queue():
+    """AgentEventEmitter(queue=...) 的事件走私有队列，绝不进 per-user 广播队列。
+
+    锁死的不变量：传了私有 queue → 事件直投该队列，既不入 event_bus 的 per-user
+    队列，常驻长连接（subscribe(user_id=...)）也收不到。若 events.py 的
+    `if self.queue is not None:` 分支被移除，emit 会回落到 publish(..., user_id=1)，
+    本测试三条断言全变红。
+    """
+    _reset_state()
+    ks_events = []
+
+    async def _run():
+        # 常驻长连接（等价前端进对话页即建立的 /knowledge/events），先挂起在 q.get() 上
+        ks_task = asyncio.ensure_future(
+            _collect_all(subscribe(user_id=1), ks_events, max_events=1)
+        )
+        await asyncio.sleep(0.05)
+
+        q = asyncio.Queue()
+        em = AgentEventEmitter("r1", user_id=1, queue=q)
+        em.emit(TEXT_DELTA, text="正文")
+
+        # 给"错误路径"（publish → call_soon_threadsafe）一个调度窗口：
+        # 若事件真进了 per-user 队列，常驻长连接会在此窗口内收到并结束
+        await asyncio.sleep(0.1)
+        ks_task.cancel()
+        try:
+            await ks_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        return q
+
+    q = asyncio.run(asyncio.wait_for(_run(), timeout=2.0))
+
+    # 1) 事件进了私有队列
+    assert q.qsize() == 1, f"私有队列没拿到事件: {q.qsize()}"
+    assert q.get_nowait() == {"type": TEXT_DELTA, "run_id": "r1", "text": "正文"}
+    # 2) 没有进 per-user 广播队列
+    assert get_user_queue(1).empty(), "请求内事件串进了 per-user 广播队列"
+    # 3) 常驻长连接收不到
+    assert ks_events == [], f"常驻长连接抢到了请求内事件: {ks_events}"
+    _reset_state()
+
+
+def test_non_stream_chat_also_passes_private_queue(monkeypatch):
+    """非流式 POST /chat 也必须给 agent 传私有队列（2026-09-26 收口）。
+
+    它和 /chat/stream 的差别只在"没人消费事件"，不在"该不该推"：不传队列时
+    emitter 会回落到 publish(user_id=...)，把 thinking/text_delta 灌进 per-user
+    广播队列 → 被常驻长连接抢走并污染通知流。若 chat_service.process_message
+    里的 event_queue 参数被删掉，本测试变红。
+    """
+    from app.services import chat_service
+
+    captured = {}
+
+    async def fake_loop(prompt, messages, *, kg=None, user_id=None, event_queue=None, db_dir=None):
+        captured["queue"] = event_queue
+        captured["user_id"] = user_id
+
+        class _Result:
+            text = "ok"
+
+        return _Result()
+
+    async def fake_prompt(*args, **kwargs):
+        return "sys", "hello"
+
+    async def fake_analyze(*args, **kwargs):
+        await asyncio.sleep(0)
+
+    class FakeKG:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(chat_service, "run_agent_loop", fake_loop)
+    monkeypatch.setattr(chat_service, "_build_system_prompt", fake_prompt)
+    monkeypatch.setattr(chat_service, "trim_history_to_budget", lambda prompt, msgs: (msgs, None))
+    monkeypatch.setattr(chat_service, "KnowledgeGraph", FakeKG)
+    monkeypatch.setattr(chat_service, "_analyze_and_apply", fake_analyze)
+
+    reply, mode, _ = asyncio.run(chat_service.process_message(
+        user_id=1, messages=[{"role": "user", "content": "hi"}], mode="free_talk"))
+
+    assert reply == "ok"
+    assert captured.get("queue") is not None, \
+        "非流式路径没传私有队列 → 请求内事件会污染 per-user 广播队列"
 
 
 # ── helpers ──

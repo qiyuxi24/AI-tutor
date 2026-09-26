@@ -101,30 +101,43 @@ class ConversationStore:
             "updated_at": row["updated_at"],
         }
 
-    def save_conversation(self, conv: dict) -> None:
+    def save_conversation(self, conv: dict) -> float:
         """
         保存/更新对话（upsert：相同 id+user_id 则覆盖）
-        :param conv: 对话对象 {id, title, messages, created_at}
+
+        :param conv: 对话对象 {id, title, messages, created_at, updated_at?}
                       messages 为 list[dict] 格式
+        :return: 实际落库的 updated_at（供全量同步回填排序键 —— 默认值只在**这一处**定义，
+                 避免调用方各写一份、写出 0 或 created_at）
+
+        时间戳语义（2026-09-26 修）：
+        - 缺省或为 0（api/v1/conversations.py 传的就是 0）→ 服务端当前时间。
+          **不得退化成 created_at**：那会让"刚聊过的老对话"排序键仍是创建时刻、在列表里沉底。
+        - messages 内容没变 → 不推进 updated_at：全量同步每次 persist 都会重传所有对话，
+          无条件刷新会把它们刷成同一时刻，排序同样失效。
         """
-        now = conv.get("updated_at", conv.get("created_at", time.time()))
+        now = time.time()
         with self._conn:
-            self._conn.execute(
+            row = self._conn.execute(
                 """INSERT INTO conversations (id, user_id, title, messages, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id, user_id) DO UPDATE SET
                        title = excluded.title,
                        messages = excluded.messages,
-                       updated_at = excluded.updated_at""",
+                       updated_at = CASE WHEN conversations.messages = excluded.messages
+                                         THEN conversations.updated_at
+                                         ELSE excluded.updated_at END
+                   RETURNING updated_at""",
                 (
                     conv["id"],
                     self.user_id,
                     conv.get("title", "新对话"),
                     json.dumps(conv.get("messages", []), ensure_ascii=False),
-                    conv.get("created_at", now),
-                    now,
+                    conv.get("created_at") or now,
+                    conv.get("updated_at") or now,
                 ),
-            )
+            ).fetchone()
+        return row["updated_at"] if row else now
 
     def delete_conversation(self, conv_id: str) -> bool:
         """
@@ -141,12 +154,12 @@ class ConversationStore:
 
     def sync_from_client(self, conversations: list[dict]) -> dict:
         """
-        全量同步：前端传来的对话列表与后端合并
-        策略：后端已有的对话（同 id）保留，前端新增的写入后端，
-              后端有但前端没有的也返回给前端（多设备同步场景）
+        全量同步：前端传来的对话列表与后端合并。
+        策略：前端传来的（同 id）**覆盖**写入后端；后端有但前端没有的一并返回（多设备场景）。
 
         :param conversations: 前端当前所有对话 [{id, title, messages, createdAt}, ...]
-        :return: {conversations: [...合并后的完整列表...]}
+                              （前端不传 updatedAt，落库时间由 save_conversation 定）
+        :return: {conversations: [...合并后的完整列表，按 updatedAt 倒序...]}
         """
         # 1. 获取后端所有对话
         backend_rows = self._conn.execute(
@@ -170,19 +183,22 @@ class ConversationStore:
             conv_id = conv.get("id")
             if not conv_id:
                 continue
-            self.save_conversation({
+            created_at = conv.get("createdAt") or conv.get("created_at") or 0
+            # 用**实际落库**的 updated_at 回填排序键：旧实现写 conv.get("updatedAt", 0)，
+            # 而前端根本不传 updatedAt → 排序键恒为 0，返回列表的顺序形同随机。
+            written_at = self.save_conversation({
                 "id": conv_id,
                 "title": conv.get("title", "新对话"),
                 "messages": conv.get("messages", []),
-                "created_at": conv.get("createdAt", conv.get("created_at", 0)),
+                "created_at": created_at,
             })
             # 更新 backend_map
             backend_map[conv_id] = {
                 "id": conv_id,
                 "title": conv.get("title", "新对话"),
                 "messages": conv.get("messages", []),
-                "createdAt": conv.get("createdAt", conv.get("created_at", 0)),
-                "updatedAt": conv.get("updatedAt", conv.get("updated_at", 0)),
+                "createdAt": created_at or written_at,
+                "updatedAt": written_at,
             }
 
         # 3. 返回合并后的完整列表（按更新时间倒序）

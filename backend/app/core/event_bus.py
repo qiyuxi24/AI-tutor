@@ -139,17 +139,40 @@ def publish(event_type: str, data: dict | None = None,
     """
     发布事件到订阅者。
 
+    ⚠️ 路由语义（哪类事件走哪条队列 —— 2026-09-26 故障后钉死，改代码前必读）：
+
+    A. 不带 user_id（广播）= **复制**到全局队列 + **每个已存在的** per-user 队列。
+       语义是"每个队列各投一份"，不是"投一份进池子让人抢" —— 所有订阅者都会收到。
+       仅投给**已存在**的队列；未订阅的用户队列不存在 → 收不到（惰性创建，见
+       _get_user_queue）。
+
+    B. 带 user_id=X = **只**投该用户的常驻通知队列（per-user 广播队列）。这条路径
+       只服务"与具体请求无关的通知类事件"：
+         - GRAPH_UPDATED（图谱变更）
+         - QUIZ_READY   （对话内出题完成，约 40s 后异步到达）
+         - ERROR        （后端错误）
+       队列不存在 = 该用户未订阅 → 静默丢弃。
+
+    C. **请求内事件禁止走本函数**：AGENT_START / THINKING / TOOL_START / TOOL_RESULT /
+       TEXT_DELTA / AGENT_DONE 属于"某次请求的流"，必须走 `AgentEventEmitter(queue=...)`
+       的**本请求私有队列**（见 core/agent/events.py），不得经 publish。
+       为什么：per-user 广播队列有**两个消费者** —— 对话流(chat_service) 与常驻长连接
+       (/knowledge/events)。若请求内事件也丢进这条队列，常驻长连接会把 TEXT_DELTA 整段
+       抢走并丢弃（它只认 graph_updated/quiz_ready）→ 对话侧拿到空流 → 前端 onDone('')
+       → 用户侧"对话没有反应"（后端 agent_runs 里却是完整的）。回归测试见
+       tests/test_event_bus.py::test_chat_stream_not_starved_by_long_lived_subscriber。
+
     参数:
         event_type: 事件类型（见模块顶部常量）
         data:       可选附加数据
-        user_id:    用户 ID。传入时只投递到该用户队列；
-                    不传时全局广播（兼容旧调用）。
+        user_id:    None = 全局广播（复制到全局队列 + 所有已有 per-user 队列）；
+                    =X   = 只投 X 的常驻通知队列。
 
-    用法:
-        from app.core.event_bus import publish, GRAPH_UPDATED
-        publish(GRAPH_UPDATED)                          # 全局广播
-        publish(GRAPH_UPDATED, {"node_id": "recursion"})# 全局广播 + 数据
-        publish("tool_start", {"tool": "rag_search"}, user_id=1)  # 精准路由
+    用法（仅通知类事件走本函数；请求内事件请用 AgentEventEmitter(queue=...)）:
+        from app.core.event_bus import publish, GRAPH_UPDATED, QUIZ_READY
+        publish(GRAPH_UPDATED)                                     # 全局广播
+        publish(GRAPH_UPDATED, {"node_id": "recursion"})           # 全局广播 + 数据
+        publish(QUIZ_READY, {"ok": True, "questions": []}, user_id=1)  # 精准路由到常驻长连接
     """
     event: dict = {"type": event_type}
     if data:

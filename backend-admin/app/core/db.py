@@ -138,6 +138,13 @@ def user_data_summary(user_id: int) -> dict:
         "edges": _count(
             settings.db_path, "SELECT COUNT(*) FROM edges WHERE user_id = ?", (user_id,)
         ),
+        # 主题层级（KG-T1）：themes=主题条目数，theme_assignments=节点↔主题归属数
+        "themes": _count(
+            settings.db_path, "SELECT COUNT(*) FROM themes WHERE user_id = ?", (user_id,)
+        ),
+        "theme_assignments": _count(
+            settings.db_path, "SELECT COUNT(*) FROM node_themes WHERE user_id = ?", (user_id,)
+        ),
         "conversations": _count(
             settings.conversations_db,
             "SELECT COUNT(*) FROM conversations WHERE user_id = ?",
@@ -158,19 +165,49 @@ def user_data_summary(user_id: int) -> dict:
     }
 
 
+# 删号时要清空的 knowledge.db 表，顺序 = 「先叶子后主表」。
+# 见 delete_user_rows 的 docstring：本连接未开 FK 级联，顺序只能自己保证。
+# 参数化 SQL 里统一用 ? 占位，users 走 id、其余走 user_id（调用处传 user_id 即可）。
+_USER_ROW_DELETES: tuple[tuple[str, str], ...] = (
+    ("node_themes", "DELETE FROM node_themes WHERE user_id = ?"),
+    ("node_aliases", "DELETE FROM node_aliases WHERE user_id = ?"),
+    ("mastery_events", "DELETE FROM mastery_events WHERE user_id = ?"),
+    ("themes", "DELETE FROM themes WHERE user_id = ?"),
+    ("edges", "DELETE FROM edges WHERE user_id = ?"),
+    ("nodes", "DELETE FROM nodes WHERE user_id = ?"),
+    ("users", "DELETE FROM users WHERE id = ?"),
+)
+
+
 def delete_user_rows(conn: sqlite3.Connection, user_id: int) -> None:
-    """删掉 users 行 + 该用户在 knowledge.db 的图谱数据。
+    """删掉 users 行 + 该用户在 knowledge.db 的全部数据（图谱 / 主题 / 别名 / 掌握度事件）。
 
     刻意不 commit：调用方把「删号 + 审计日志」放在同一事务里一次提交，与
     _set_status 等写操作保持同一约定。
+
+    为什么必须逐表显式删：本连接来自 get_db()，**没有开 PRAGMA foreign_keys**，
+    ON DELETE CASCADE 不生效 —— 删 users/nodes 不会顺带清掉 node_aliases /
+    mastery_events / themes / node_themes，漏一行就是永久脏数据（还会与新号撞
+    nodes.id 全局主键）。顺序按「先叶子后主表」：node_themes → node_aliases →
+    mastery_events → themes → edges → nodes → users。
+
+    老库可能还没有 themes/node_themes/node_aliases/mastery_events（建表时间晚于老库），
+    先探 sqlite_master，缺表直接跳过 —— 与 _count 的「缺表按 0 处理」同口径，
+    绝不让"某张新表还没建"把删号整个打挂。
     """
-    conn.execute("DELETE FROM edges WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM nodes WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    existing = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    for table, sql in _USER_ROW_DELETES:
+        if table in existing:
+            conn.execute(sql, (user_id,))
 
 
 def purge_user_storage(user_id: int) -> None:
-    """清掉该用户遗留的磁盘数据（对话行、知识库/向量目录、节点 MD 目录）。
+    """清掉该用户遗留的磁盘数据（对话行、知识库/向量目录、题库目录、节点 MD 目录）。
 
     必须排在事务提交之后调用：这些写入与文件删除**无法参与事务回滚**，顺序反了
     会出现「连接回滚了、文件却已删掉」的半残状态。
@@ -199,6 +236,9 @@ def purge_user_storage(user_id: int) -> None:
         Path(settings.db_path).parent / "nodes" / str(user_id),
         _user_dir("kb", user_id),
         _user_dir("rag", user_id),
+        # 题库（`core/quiz/quiz_store.py::_QUIZ_DIR` = backend/data/quiz/<uid>）：
+        # 与 kb/rag 同数据根，删号必须一并清 —— 漏了会残留该用户的题目与判分记录。
+        _user_dir("quiz", user_id),
     )
     for path in roots:
         shutil.rmtree(path, ignore_errors=True)

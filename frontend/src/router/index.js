@@ -14,6 +14,12 @@ const routes = [
     component: () => import('../views/HomeView.vue'),
     meta: { requiresAuth: true },
   },
+  // 兜底：未知路径（老书签 #/chat、手输地址、LoginView 回跳的非法 redirect）→ 回首页。
+  // 没有它，vue-router 匹配不到路由就渲染空页面（白屏且无任何提示）。
+  {
+    path: '/:pathMatch(.*)*',
+    redirect: '/',
+  },
 ]
 
 const router = createRouter({
