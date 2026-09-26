@@ -65,6 +65,7 @@ data/ai_suggestions.json
 
 # RAG 评测临时索引（可每次重建；评测集 cmrc2018_trial.json 保留）
 backend/eval_data/kb_eval/
+backend/eval_data/graph_eval/
 backend/eval_data/prof_test/
 backend/eval_data/prof_sparse/
 backend/eval_data/prof_writer/
@@ -75,6 +76,8 @@ backend/eval_data/prof_writer/
 # 仅排除第三方插件、本机配置与个人日志
 # ════════════════════════════════════════════
 .trae/
+# 本机 AI/编辑器配置（settings.json + 备份，非项目产物）
+.arts/
 
 .playwright-cli/
 # Playwright 页面快照（根目录临时文件）
