@@ -14,7 +14,6 @@
 
 - [ ] **真实向量链路验证（阿里 embedding 额度恢复后）**
   - [ ] `scripts/seed_collector.py --embed api` 真实向量灌库
-  - [ ] `scripts/eval_rag.py --embed api` 真实重跑 → 定夺 RRF vs 加权融合（当前 mock 结论：加权 0.818 > RRF 0.766）
 - [ ] **quiz 简答 LLM 判分端到端联调**（走 call_llm 纯文本，MiniMax key 可用即可验，不依赖 embedding）
 - [ ] **OI-wiki 真网联调**（原 B2.1 收尾）：`search("数据结构与算法")` 应返回 ds/算法基础板块候选、fetch 首页正文入库无 MkDocs 残留语法 —— 普通联网即可验（无需 DASHSCOPE），**待议**（2026-09-05 暂缓，待用户定时间）
 - [ ] **演示数据 + 脚本**：填充 1 个完整学科图谱（15-20 节点 + prerequisite 边）；写 2-3 条预演对话路径
@@ -56,7 +55,6 @@
 ## 遗留技术债（2026-09-08 盘点，非功能项、优先低）
 
 - [ ] **试卷拆分器 `quiz_splitter.py` 已实现但零引用（未接入上传链路）**（2026-09-12 发现，详见 `TODO_Collector.md` 遗留技术债 #2）：需先定入口形态（`/kb/upload` 自动拆 / 独立 `POST /quiz/import` / 并入 B3.1）。
-- [ ] **图谱 RAG 未接入 hybrid_search 双检索**（2026-09-11 调研发现）：图谱侧只有向量检索（`rag/manager.search`），未享 BM25 稀疏路。**评估结论：不是小改** —— `hybrid_search/whoosh_index.py` 的 schema 把 `node_id` 定为 `NUMERIC`（KB 文件节点 int），图谱 node_id 是 TEXT，复用需改 schema + 老索引迁移/双 schema 兼容。收益（图谱写回 BM25 召回）与成本需先量化，暂缓。
 - [ ] **`collector/pipeline_ingest.py` + `chapterizer.py` 零引用（2026-09-15 core 审计）**：整书切章入库链路（`ingest_book_chapters`）已实现且 6 例测试通过，但采集链路 `manager.run_task` 直接调 `kb_manager.upload_and_index`，**未接此管线**（`chapterizer` 只被它引用，同属链内）。需定入口：采集任务整书入库 / 手动导入 / 判定不用后删除。
 - [ ] **conversations 内嵌 tools/thinking 去留 + run 与会话无关联键**（9/8 起挂着，**待决策**）：需定"是否为 agent_runs 加 conversation 外键/会话 id 字段（动 schema）"，或接受现状。
 
