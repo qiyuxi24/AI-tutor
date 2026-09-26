@@ -349,7 +349,7 @@ $$\text{Height}(T) = 1 + \max(h_L, h_R)$$
 | **P2** | 图表抽取 + caption 几何配对 + `qwen3-vl-plus` 描述 + figure chunk | 一本 ≈ ¥0.2 | P1 稳定 | 实验组 3；「识图」能力从零到有 |
 | **P3** | DashScope 内置任务（`table_parsing` / `formula_recognition`）按元素分派；表格结构增强；doc 级成本配额；`qwen3.5-ocr` 评估 | — | P2 数据表明表格/公式仍是短板 | 结构精度提升 |
 
-**P1 的三道前置闸门（缺一不可）**：① P0 的探针与基线可用；② 后端能异步返回进度；③ `DASHSCOPE_API_KEY` 的欠费状态已解决（**当前阻塞项** —— 已知 `text-embedding-v4` 因 `Arrearage` 导致向量检索降级为 BM25/空，说明该账号存在余额问题；云 OCR 走同一账号）。
+**P1 的三道前置闸门（缺一不可）**：① P0 的探针与基线可用；② 后端能异步返回进度；③ ~~`DASHSCOPE_API_KEY` 欠费~~ → **已解除**（2026-09-26 用户确认充值，账号可用；云 OCR 与嵌入走同一账号）。
 
 ---
 

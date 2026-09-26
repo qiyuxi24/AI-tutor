@@ -12,7 +12,7 @@
 
 ## P0 — 收尾就绪（演示不翻车 + 材料可信）
 
-- [ ] **真实向量链路验证（阿里 embedding 额度恢复后）**
+- [ ] **真实向量链路验证**（阿里 embedding 2026-09-26 已充值，可跑）
   - [ ] `scripts/seed_collector.py --embed api` 真实向量灌库
 - [ ] **quiz 简答 LLM 判分端到端联调**（走 call_llm 纯文本，MiniMax key 可用即可验，不依赖 embedding）
 - [ ] **OI-wiki 真网联调**（原 B2.1 收尾）：`search("数据结构与算法")` 应返回 ds/算法基础板块候选、fetch 首页正文入库无 MkDocs 残留语法 —— 普通联网即可验（无需 DASHSCOPE），**待议**（2026-09-05 暂缓，待用户定时间）
@@ -37,7 +37,7 @@
   - [x] 4 套写路径 → 唯一 `KnowledgeGraph.create_node_with_content()`（2026-09-15）
   - [x] MD 模板统一 → `ORIGIN_NOTES` 一张表（2026-09-15，来源标注降级为 `origin` 参数）
   - [x] 精确同名并轨 → `knowledge_writer._find_same_name`（2026-09-15，实测重名证据：`harmony_dev_intro`/`harmonyos_intro`）
-  - [ ] **嵌入语义去重**（栈/堆栈 这类同名不同字）：Agent 热路径上要多付一次嵌入 + LLM 二次确认，且当前嵌入 API 欠费 → 待嵌入恢复后量化收益再定；实现路径 = 复用 `graph_generator._find_dedup_candidates` + `_confirm_synonyms`
+  - [ ] **嵌入语义去重**（栈/堆栈 这类同名不同字）：Agent 热路径上要多付一次嵌入 + LLM 二次确认，（嵌入已恢复，可量化收益后再定）；实现路径 = 复用 `graph_generator._find_dedup_candidates` + `_confirm_synonyms`
   - [ ] 权限守卫：**新建路径本就不触发** `_guard_human_content`（调研 §8 已核实），仅当将来新增"AI 覆盖已有节点"入口时才需要 —— 那时走 `update_node_content(caller="ai")` 即可
 
 ## P2 — 功能路线图（比赛可选项 / 有真实 key 后）
@@ -52,11 +52,44 @@
 
 ---
 
+## 架构待决（2026-09-26 对话「没反应」故障复盘）
+
+> 根因：`event_bus` 的 per-user 队列被**两个消费者共享**（对话流 `_consume_agent_events` + 常驻长连接 `/knowledge/events`），
+> `text_delta`（正文）被长连接抢走丢弃 → 对话侧拿到空流 → 前端 `onDone('')` 删掉 AI 气泡。
+> 已修：对话事件改走本请求私有队列（`core/agent/events.py` + `chat_service._consume_agent_events`），
+> 回归测试 `tests/test_event_bus.py::test_chat_stream_not_starved_by_long_lived_subscriber`。下列是**同源或同症状**的剩余项。
+
+- [ ] **[P0] SSE 通道分层**（本次只修掉"对话流"这一处冲突，同模型下还有别的）
+  - 不变量已钉进 `event_bus.publish` docstring：通知类（`graph_updated`/`quiz_ready`/`error`）走 per-user 队列；请求内 6 事件（`agent_start`/`thinking`/`tool_*`/`text_delta`/`agent_done`）必须走 `AgentEventEmitter(queue=...)` 私有队列
+  - 剩余缺口：同一 user 开两个标签页 = 两条 `subscribe(user_id)`，`quiz_ready` 仍随机进其一（队列层面无解，要 per-connection 投递才能解）
+  - **待决策**：a) 按通道分队列（改动集中在 `event_bus.py`，**推荐**）／b) per-connection 队列 + 订阅路由表（能解多标签页，改动最大）／c) 维持现状
+  - 验收：加"同一 user 多连接订阅"测试，断言通知类事件按预期投递
+- [ ] **[P1] 「流式」名不副实：回复只在最后一次性到达**
+  - `core/agent/loop.py` 两处 `emitter.emit(TEXT_DELTA, text=整段)`（自然收尾 + `_force_finish`）：`_chat_once` 未开 `stream=True`，流式只到**事件粒度**、不到 token 粒度
+  - 后果：长回答首屏等待 = **整段生成时间**（实测 205 字 3.9s；2000 token 级回答 = 40s+ 的「AI 思考中…」然后整段蹦出）
+  - 代价：`strip_think_tags` 要从"整段正则"改成**流式状态机**（`<think>` 会跨 chunk 边界）+ `agent_runs` 证据收集 / token 计量 / fallback 重试链都要跟着改
+  - **待决策**：先只做下面那条观测性（首字延迟可观测），再定要不要全链路改造
+- [ ] **[P1] 观测性缺口：无法回答"回复到底送到前端没有"**
+  - 后端证据齐（`agent_runs` / `debug_log`），**前端零**：一个 token 没收到时只在控制台静默（本次已改成留可见错误，但那是补丁不是观测）
+  - 落点：一次 run 的**首字节延迟 / 写出事件数 / 写出字节数**（`chat_service` 消费侧计数 → `agent_runs` 或日志）
+  - 附带：uvicorn access log 没进 `logs/tutor.log` → "请求到没到后端"只能翻库反推（本次排查就是这么查的）
+  - 验收：给定 run_id 能直接看出"发了几条事件、前端有没有拿到"
+- [ ] **[P2] 双写持久化：两条真相来源没有裁决规则**
+  - `syncToBackend` 每次 persist **全量重传所有对话**（O(全部历史) payload）；删除不传播（本地删了另一设备还在）；缺版本向量 / "最后写入者"仲裁 → 多设备必然漂移
+  - 已修部分：`updated_at` 语义（缺省=服务端当前时间、内容未变不推进、`sync_from_client` 回填真实值）→ `tests/test_conversation_store.py`
+- [ ] **[P2] 前端 store 耦合：图谱长连接决定对话可用性**
+  - `stores/chatStore.js` 同管对话 + 图谱 + SSE + 同步 + 出题回流；长连接生命周期由 `HomeView.onMounted → store.init()` 决定
+  - 本次故障能潜伏很久正因为这个耦合（图谱通道能吞掉对话正文）
+  - **待决策**：是否按关注点拆 store；不拆则至少把「**通道只管送到、渲染只有一份**」写成约定
+
+---
+
 ## 遗留技术债（2026-09-08 盘点，非功能项、优先低）
 
 - [ ] **试卷拆分器 `quiz_splitter.py` 已实现但零引用（未接入上传链路）**（2026-09-12 发现，详见 `TODO_Collector.md` 遗留技术债 #2）：需先定入口形态（`/kb/upload` 自动拆 / 独立 `POST /quiz/import` / 并入 B3.1）。
 - [ ] **`collector/pipeline_ingest.py` + `chapterizer.py` 零引用（2026-09-15 core 审计）**：整书切章入库链路（`ingest_book_chapters`）已实现且 6 例测试通过，但采集链路 `manager.run_task` 直接调 `kb_manager.upload_and_index`，**未接此管线**（`chapterizer` 只被它引用，同属链内）。需定入口：采集任务整书入库 / 手动导入 / 判定不用后删除。
 - [ ] **conversations 内嵌 tools/thinking 去留 + run 与会话无关联键**（9/8 起挂着，**待决策**）：需定"是否为 agent_runs 加 conversation 外键/会话 id 字段（动 schema）"，或接受现状。
+- [ ] **守卫测试有一条断言不可靠**（2026-09-26）：`tests/test_event_bus.py::test_request_scoped_event_bypasses_user_broadcast_queue` 里「per-user 队列为空」那条断言，在破坏态下会因事件被长连接消费掉而**误绿**；改成 monkeypatch `publish` 断言其**未被调用**才精确（约 5 行）。
 
 ## 进度速览（2026-09-13）
 - 代码层工程化 ~85%（架构✓ 测试✓ 部署✓ 文档✓ CI✓ 运维✓ 限流✓ 日志✓ Agent Loop✓）

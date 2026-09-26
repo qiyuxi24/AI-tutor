@@ -13,7 +13,7 @@
 
 ## 待 API / 真网验证（B1/B2 收尾，其余子项已完成）
 
-- [ ] **B1.6 真实嵌入灌库**：`venv/Scripts/python.exe scripts/seed_collector.py --user <演示账号> --embed api`（阿里 text-embedding-v4 需非欠费），40 词条入库后 `stats` 正常，替换 mock 哈希向量（真向量召回质量是检索指标前提）
+- [ ] **B1.6 真实嵌入灌库**：`venv/Scripts/python.exe scripts/seed_collector.py --user <演示账号> --embed api`（阿里 text-embedding-v4 2026-09-26 已充值），40 词条入库后 `stats` 正常，替换 mock 哈希向量（真向量召回质量是检索指标前提）
 - [ ] **Batch 1 端到端对话引用**：灌库后对话中挂载「自动采集」目录提问 DSA 概念 → 回答带 KB 引用（先完成上一条；对话侧 MiniMax-M3 已可用）
 - [ ] **B2.1 OI-wiki 真网联调**：`search("数据结构与算法")` 应返回 OI-wiki 数据结构/算法基础板块候选，fetch 首页正文入库无 MkDocs 残留语法（2026-09-05 已转 `TODO.md` P0 待议，暂缓）
 
