@@ -205,6 +205,14 @@ async function handleGraphAction({ action, payload }) {
 }
 
 /**
+ * 单击节点：主题聚合节点 → 展开/收起它自己（地图式下钻，同一交互双向切换）。
+ * 普通知识点的详情走双击（@node-dblclick）。
+ */
+function handleGraphNodeClick(nodeId) {
+  store.toggleThemeNode(nodeId)
+}
+
+/**
  * 搜索选中节点 → 切换到图谱视图并聚焦该节点
  */
 async function handleGraphSearchSelect(nodeId) {
@@ -212,6 +220,8 @@ async function handleGraphSearchSelect(nodeId) {
     viewMode.value = 'graph'
     await new Promise(r => setTimeout(r, 450))
   }
+  store.revealNode(nodeId)                      // 目标可能藏在折叠的主题聚合节点里
+  await new Promise(r => setTimeout(r, 200))    // 等折叠状态生效、可见图重建
   forceGraphRef.value?.focusNode(nodeId)
 }
 
@@ -234,6 +244,8 @@ async function switchSubjectAndFocus(nodeId, subject) {
     // 等新学科的力导向图完成渲染
     await new Promise(r => setTimeout(r, 450))
   }
+  store.revealNode(nodeId)                      // 目标可能藏在折叠的主题聚合节点里
+  await new Promise(r => setTimeout(r, 200))    // 等折叠状态生效、可见图重建
   forceGraphRef.value?.focusNode(nodeId)
 }
 
@@ -390,12 +402,13 @@ const slideTransition = {
           </div>
           <ForceGraph
             ref="forceGraphRef"
-            :nodes="store.knowledgeNodes"
-            :edges="store.knowledgeEdges"
+            :nodes="store.displayNodes"
+            :edges="store.displayEdges"
             :loading="!store.graphLoaded"
             :error="store.graphError"
             :learning-path="store.learningPath"
             :next-node-id="store.nextToLearn?.node_id || ''"
+            @node-click="handleGraphNodeClick"
             @node-dblclick="handleNodeDblClick"
             @graph-action="handleGraphAction"
           />
