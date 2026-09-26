@@ -52,10 +52,13 @@ def get_system_prompt(mode: str, student_message: str, graph_summary: str = "",
     if not template_name:
         raise ValueError(f"未知引导模式：{mode}")
 
-    # 1. 渲染通用模板（含知识图谱摘要 + 用户画像）
+    # 1. 渲染通用模板（含知识图谱摘要 + 用户画像 + 学生当前位置）
+    # `current_position` 由调用方放进 extra_kwargs（三种模式共用同一段），
+    # 这里显式取值而**不是**把 extra_kwargs 整体展开 —— 避免模式模板的私有变量泄漏进通用模板。
     common = env.get_template(COMMON_TEMPLATE).render(
         knowledge_graph_summary=graph_summary,
         user_profile=user_profile,
+        current_position=extra_kwargs.get("current_position", ""),
     )
 
     # 2. 渲染模式模板（含学生消息 + 额外参数）

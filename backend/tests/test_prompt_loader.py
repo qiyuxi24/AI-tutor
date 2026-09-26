@@ -145,6 +145,32 @@ def test_user_profile_is_actually_injected():
     assert "{user_profile}" not in result
 
 
+def test_common_template_has_positive_scope_and_mastery_semantics():
+    """参照系契约 I1-3 / I2-3 的守卫（2026-09-26 G3+G4）。
+
+    I1-3：框架约束曾是纯负面表述（"严禁脱离此框架"），模型不知道"**能**讲什么"；
+    I2-3：掌握度只是清单里的一个数字，提示词里没有任何"据此调整"的要求。
+    两者都只靠模板文本实现，所以断言文本本身（同 test_kg_themes 的做法）。
+    """
+    result = get_system_prompt(
+        mode="free_talk",
+        student_message="hi",
+        graph_summary="### 现有节点（共 1 个）\n  [bt] 二叉树 (掌握度:0)",
+    )
+    assert "可讲范围" in result                      # I1-3 正面清单
+    assert "邻域" in result                          # I1-3 邻域说明
+    assert "域外概念不引入" in result
+    assert "掌握度决定怎么讲" in result              # I2-3 行为语义
+    assert "已掌握" in result and "精简" in result   # 高掌握度 → 精简/跳过
+    assert "薄弱" in result and "降低难度" in result  # 低掌握度 → 换角度/降难度
+
+    # 分档阈值必须与唯一真值源一致（graph_middleware.MASTERY_WEAK / _MASTERED）
+    from app.core.graph_middleware import MASTERY_WEAK, MASTERY_MASTERED
+    assert f"1–{MASTERY_WEAK - 1}" in result
+    assert f"{MASTERY_WEAK}–{MASTERY_MASTERED - 1}" in result
+    assert f"≥{MASTERY_MASTERED}" in result
+
+
 def test_common_template_has_no_single_brace_placeholders():
     """模板级回归守卫：common 模板不得再出现单花括号占位符。"""
     src = (prompt_loader.PROMPT_DIR / prompt_loader.COMMON_TEMPLATE).read_text(

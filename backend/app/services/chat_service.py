@@ -34,7 +34,7 @@ from app.core.knowledge_graph import KnowledgeGraph
 from app.core.profile import UserProfile
 from app.core.token_counter import count_tokens
 from app.core.error_codes import ErrorCode, log_error, publish_error_event
-from app.core.event_bus import publish, subscribe, get_user_queue, TEXT_DELTA
+from app.core.event_bus import publish, TEXT_DELTA
 from app.core.knowledge_writer import apply_suggestion, load_suggestions, save_suggestions
 
 logger = logging.getLogger("ai-tutor")
@@ -198,6 +198,16 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
     extra_kwargs = {}
     if mode == "recursive":
         extra_kwargs["current_node"] = current_node or "未知节点"
+
+    # 学生当前位置（参照系契约 I2-1 / AC-L2-2）：**三种模式共用**同一段，不得静默为空。
+    # 请求侧早已三模式都传 `current_node`（api/v1/chat.py），这里补的是服务端兜底：
+    # 传了就校验 ID 真实存在（I1-2 同源：不把图谱里没有的 ID 当位置注入），
+    # 没传或 ID 不存在则显式写「未指定」，由模型按对话推断 —— 不新增任何检索。
+    _focus = kg.get_node(current_node) if current_node else None
+    extra_kwargs["current_position"] = (
+        f"「{_focus['name']}」({_focus['id']})" if _focus
+        else "未指定（由本次对话内容推断，推断出后固定在同一知识点上）"
+    )
 
     # 注入检索上下文（RAG 是增强而非必需：检索失败或为空时不影响主提示词）
     # 去耦合：检索编排统一走 rag_pipeline，一次 run 按数据源分组生成图谱/知识库两个区块
@@ -509,7 +519,11 @@ async def process_message(user_id: int, messages: list, mode: str,
 
         # 3. Agent 主循环：LLM ↔ 工具 多轮串联，直到自然给出最终回复
         #    ★ 传 user_id：即使无 SSE 订阅，运行记录也写入 agent_runs（默认可观测）
-        result = await run_agent_loop(system_prompt, messages, kg=kg, user_id=user_id)
+        #    ★ 传私有队列：本路径不消费事件，但请求内事件**不得**走 event_bus 的
+        #      per-user 广播队列 —— 常驻长连接 /knowledge/events 会抢走并丢弃它们，
+        #      还会污染通知流（见 core/agent/events.py）。队列无人读取，随 run 回收。
+        result = await run_agent_loop(system_prompt, messages, kg=kg, user_id=user_id,
+                                      event_queue=asyncio.Queue())
         reply = result.text
 
         # 4. 图谱分析作为后台任务执行，不阻塞对话回复
@@ -546,10 +560,15 @@ async def process_message_stream(
     循环内的事件（thinking/tool_start/tool_result/text_delta）实时推到前端。
 
     架构：
-      1. 启动 agent_loop 作为 asyncio.Task（带 user_id → 事件投递到用户队列）
-      2. 同时 subscribe(user_id) 消费事件 → 转 SSE yield
-      3. agent_loop 完成后做图谱分析 + trace 落盘 + graph_updated 事件
+      1. 建**本请求私有队列**（event_queue），启动 agent_loop 作为 asyncio.Task
+         （事件直投该队列，不经 event_bus 的 per-user 队列）
+      2. 同时消费该队列 → 转 SSE yield
+      3. agent_loop 完成后做图谱分析 + trace 落盘 + graph_updated 事件（走全局广播）
       4. yield [DONE]
+
+    ⚠️ 队列必须私有：per-user 队列是**两个消费者共享**的（本函数 + 常驻长连接
+    /knowledge/events），共享时 text_delta 会被长连接抢走并丢弃 → 前端拿到空流。
+    详见 core/agent/events.py 的说明（2026-09-26 故障根因）。
 
     向后兼容：旧前端收到 {"token": "..."} 仍正常（text_delta 事件转 token 格式）。
     """
@@ -560,20 +579,19 @@ async def process_message_stream(
             current_node=current_node, kb=kb
         )
 
-        # 预创建用户事件队列，确保 agent 发出的第一个事件不丢失
-        # （旧实现先启动 agent 再 subscribe，agent 可能在队列创建前就发了事件 → 静默丢弃）
-        get_user_queue(user_id)
-
         # 发送前守卫：清理较早工具结果 + 历史超预算时分层压缩（统计由守卫内部记日志）
         messages, _ = trim_history_to_budget(tool_prompt, messages)
 
-        # 启动 agent loop 为后台任务（事件通过 event_bus 投递到用户队列）
+        # 本请求私有事件队列：先建队列再起 agent，agent 的第一个事件不会丢；
+        # 且不占用 per-user 广播队列（否则常驻长连接会抢走 text_delta）
+        event_queue: asyncio.Queue = asyncio.Queue()
         agent_task = asyncio.create_task(
-            run_agent_loop(tool_prompt, messages, kg=kg, user_id=user_id)
+            run_agent_loop(tool_prompt, messages, kg=kg, user_id=user_id,
+                           event_queue=event_queue)
         )
 
-        # 消费用户事件队列 → SSE
-        async for sse_data in _consume_agent_events(user_id, agent_task):
+        # 消费本请求私有队列 → SSE
+        async for sse_data in _consume_agent_events(event_queue, agent_task):
             yield sse_data
 
         # 获取 agent 结果（运行记录已由 run_agent_loop 内部写入 agent_runs，无需再 save_trace）
@@ -597,21 +615,26 @@ async def process_message_stream(
         kg.close()
 
 
-async def _consume_agent_events(user_id: int, agent_task: asyncio.Task) -> AsyncGenerator[str, None]:
+async def _consume_agent_events(queue: asyncio.Queue,
+                                agent_task: asyncio.Task) -> AsyncGenerator[str, None]:
     """
-    消费 agent 事件队列，转为 SSE 格式 yield。
+    消费**本请求私有**事件队列，转为 SSE 格式 yield。
 
-    旧实现的致命缺陷：用 `async for sse in subscribe(user_id)` 消费，
+    为什么队列是入参而不是 user_id：`event_bus` 的 per-user 队列被两个消费者共享
+    （本函数 + 常驻长连接 /knowledge/events），共享时事件被谁取到是随机的 ——
+    实测长连接抢走 text_delta 并丢弃，对话侧拿到空流（2026-09-26 故障）。
+
+    旧实现的另一个缺陷：用 `async for sse in subscribe(user_id)` 消费，
     而 subscribe 内部是 `while True: await q.get()`。当 agent_task 完成
     且队列排空后，下一次 q.get() 会永久阻塞——break 检查在循环体内，
     要 q.get() 返回后才能执行到，但队列已空永远不会返回。
 
-    新实现用 asyncio.wait 竞争 q.get() 与 agent_task 完成信号：
+    现实现用 asyncio.wait 竞争 q.get() 与 agent_task 完成信号：
       - 事件先到 → 处理事件，继续循环
       - agent 先完成 → 排空剩余事件后退出
       - 同时完成 → 处理当前事件，排空剩余后退出
     """
-    q = get_user_queue(user_id)
+    q = queue
 
     while True:
         get_task = asyncio.ensure_future(q.get())
@@ -633,7 +656,7 @@ async def _consume_agent_events(user_id: int, agent_task: asyncio.Task) -> Async
             except (asyncio.CancelledError, Exception):
                 pass
 
-        # agent 完成 → 让 call_soon_threadsafe 回调落地后排空剩余事件
+        # agent 完成 → 排空剩余事件（先让一轮循环，兼容生产者走 call_soon 的投递方式）
         if agent_task in done:
             await asyncio.sleep(0)
             while not q.empty():
@@ -644,13 +667,18 @@ async def _consume_agent_events(user_id: int, agent_task: asyncio.Task) -> Async
 
 
 def _format_agent_sse(event: dict) -> str | None:
-    """把事件 dict 格式化为 SSE data 行；未知类型返回 None（静默丢弃）。"""
+    """把事件 dict 格式化为 SSE data 行；未知类型返回 None（静默丢弃）。
+
+    本通道只承载 **agent run 内事件**（见 core/agent/events.py 的私有队列）。
+    graph_updated / quiz_ready / error 走 event_bus 全局或 per-user 广播，
+    由常驻长连接消费，不经过这里；节点相关事件在对话流里出现即属接错线。
+    """
     evt_type = event.get("type")
 
     if evt_type == TEXT_DELTA:
         return f"data: {json.dumps({'token': event.get('text', '')})}\n\n"
     if evt_type in ("thinking", "tool_start", "tool_result",
-                    "agent_start", "agent_done", "graph_updated", "quiz_ready", "error"):
+                    "agent_start", "agent_done"):
         return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
     logger.debug(f"未知事件类型已丢弃: {evt_type}")
     return None
