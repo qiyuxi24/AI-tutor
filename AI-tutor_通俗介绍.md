@@ -137,7 +137,7 @@ AI Tutor 把这三件事**打包成一个系统**，让"学习"变成一个看�
 .\install.ps1           # 装依赖（后端 Python + 前端 Node）
 copy .env.example .env  # 复制配置模板
 notepad .env            # 填 LLM API Key 和嵌入 Key
-.\start.ps1             # 启动前后端
+.\start.ps1             # 启动（有 Docker 用容器，否则本机开发模式）
 ```
 
 打开浏览器访问 **http://localhost:5173**，注册一个账号就能用。

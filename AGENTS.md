@@ -13,6 +13,7 @@
 | 事项 | 命令 / 路径 |
 |---|---|
 | 后端 Python | `backend/venv/Scripts/python.exe`（**必须用它**；系统 Python 的 fastapi 过旧会导入失败） |
+| 一键启动 | 根目录：`.\start.ps1`（自动探测：有 Docker 走容器，否则本机开发模式；`-Local` / `-Docker` 强制，`start.cmd` 双击同一入口） |
 | 启动后端 | cwd=`backend`：`venv\Scripts\python.exe -m uvicorn app.main:app --port 8000 --workers 1` |
 | 启动前端 | cwd=`frontend`：`npm run dev`（Vite 5173；`/api` 已代理到 8000，SSE 走 ws） |
 | 跑测试 | cwd=项目根：`backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"` |

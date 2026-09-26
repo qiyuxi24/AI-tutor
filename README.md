@@ -111,8 +111,10 @@ TutorAgent 把「对话式 AI 家教」与「知识图谱」「个人学情画�
 copy .env.example .env
 notepad .env        # 填 LLM_API_KEY(MiniMax) / DASHSCOPE_API_KEY / SECRET_KEY
 
-# 3. 启动前后端
+# 3. 启动（自动选择：Docker 可用则容器模式，否则本机开发模式）
 .\start.ps1
+#    .\start.ps1 -Local          强制本机开发模式（热重载 + 运维后台 8001/5174）
+#    .\start.ps1 -Docker -Force  强制容器模式并重建镜像（-Port 8081 可换端口）
 ```
 
 启动后访问 http://localhost:5173（首次启动自动创建管理员；**生产部署务必在根 `.env` 设置 `DEFAULT_ADMIN_PASSWORD`**，不要暴露默认口令 `admin/admin123`——见下方配置表）。

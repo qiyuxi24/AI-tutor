@@ -37,7 +37,8 @@
 .\install.ps1                 # 建 venv + 装后端依赖 + 装前端 node_modules
 copy .env.example .env        # 根 .env 是唯一真值文件
 notepad .env                  # 填 LLM_API_KEY / DASHSCOPE_API_KEY / SECRET_KEY
-.\start.ps1                   # 启动前后端 → http://localhost:5173
+.\start.ps1                   # 启动（有 Docker 走容器，否则本机）→ http://localhost:5173
+                              # 加 -Local 强制本机热重载 / -Docker 强制容器
 ```
 
 ### 手动方式
