@@ -16,13 +16,19 @@
 学科建模：复用 tags 标签，节点 tags 中第一个非难度标签即学科名
 （如 "数据结构"），实现"每个学科单独一张图"。
 
-设计：
+设计（**两阶段建图**，2026-09-26 重写）：
 - 数据来源：KbStore.get_document_text(node_id) 读取解析后的纯文本
 - **切分（2026-09-21 重写）**：build_section_tree 按真实标题层级建树 → collect_units
   **递归**把树切成"刚好一个生成单元"大小的切片（下限 1500 / 上限 5000 字符，
   相邻碎块自动合并）。旧实现按固定 3000 字符滑窗切，实测平均仅 570 字符/块
   → 模型上下文撑不起深度 → 节点正文中位 241 字、25% 不足 200 字（见 TODO_Graph_Quality §1.1）。
-- 深度守门：正文 < GRAPH_MIN_CONTENT_CHARS 的空壳节点拒收并计数（宁缺毋滥）
+- **阶段 1 · 架构**（`_call_skeleton_llm` → `_write_skeleton`）：逐单元只产「节点 + 边 +
+  一句话摘要」，落库为 `content_status='skeleton'` 的骨架节点（无正文）。先定结构再写内容，
+  避免"局部视野下重复造节点"与"正文挤占结构预算"两件事互相拖累。
+- **阶段 2 · 填充**（`_fill_nodes`）：按单元把该单元落下的骨架节点补上五段式正文，
+  写入后转 `filled`。已是 `filled` 的节点（含同名并轨命中的）不重复填充 —— 重跑幂等。
+- 深度守门：正文 < GRAPH_MIN_CONTENT_CHARS 的空壳节点拒收并计数（宁缺毋滥），
+  未达标的节点**留在 skeleton 态**等下轮补，不落"半成品正文"。
 - LLM：call_llm(纯 JSON 输出)，两个参数**都不能省**（2026-09-13 实测数据见 docs §10.5）：
     · max_tokens=GRAPH_MAX_TOKENS —— 默认 2000 会在几个节点后硬截断；
     · thinking=False —— 思考与正文共享输出预算，实测 3/8 分块出现"思考 26k 字符、
@@ -41,6 +47,8 @@ from typing import Optional
 from app.core.llm import call_llm, extract_json
 from app.core.kb.kb_manager import chunk_text, kb_manager
 from app.core.kb.embedder import HashEmbedder, get_embedder
+# 填充阶段要按 KnowledgeGraph 的唯一模板重渲染 MD（AGENTS.md §2：调用方不得自拼模板）
+from app.core.knowledge_graph import CONTENT_STATUS_SKELETON, render_node_markdown
 
 logger = logging.getLogger("ai-tutor")
 
@@ -63,8 +71,8 @@ GRAPH_MAX_DEPTH = 4            # 递归下钻最大层数（防病态深的目�
 GRAPH_MIN_CONTENT_CHARS = 400  # 节点正文下限：低于此值判为空壳，拒收并计数（宁缺毋滥）
 # 提示词里与之配套的两个数字（改提示词时记得一起看）：
 #   每个单元只产出 3-5 个知识点、单节点正文目标 600-1000 字五段式
-# 单次生成的输出 token 上限。每个节点要写完整 Markdown 讲解（数百 token），
-# call_llm 的默认 2000 会在几个节点后硬截断 → JSON 解析必然失败。
+# 单次生成的输出 token 上限（骨架与填充共用）。填充阶段每个节点要写完整 Markdown
+# 讲解（数百 token），call_llm 的默认 2000 会在几个节点后硬截断 → JSON 解析必然失败。
 # 2026-09-14 真机踩坑证据：completion=2000 顶满 + "返回无法解析的 JSON" → chunk 被静默跳过。
 # 关掉思考后实测单块正文峰值 ≈5.3k token；深正文后单单元正文峰值上升，8000 仍留有余量。
 GRAPH_MAX_TOKENS = 8000
@@ -72,15 +80,27 @@ GRAPH_MAX_TOKENS = 8000
 # 重发一次比丢掉整块（含其全部节点与边）划算。
 GRAPH_JSON_RETRIES = 1
 
-# 学科图谱生成专用系统提示词（从书籍内容批量提取知识点 + 建立关系）
-GRAPH_GENERATOR_SYSTEM_PROMPT = """你是一个「学科知识图谱构建专家」。你的任务是从给定的学科书籍内容中，提取该学科的核心知识点，并分析知识点之间的联系，构建一份结构化的知识图谱。
+# ── 主题层级上下文（KG-T1/T3 / D2）─────────────────────────────
+# 抽取 LLM 的 user_prompt 会带上该学科的「省→市」主题树，作为**每个生成单元的固定前缀**。
+# 主题树可能有上百条 → 只取一级前 N、每级下二级前 M 条，超限截断：主题只是导航层
+# （帮模型沿用既有命名/结构），不是主输入，别把 prompt 撑爆挤掉正文预算。
+THEME_CONTEXT_MAX_L1 = 12        # 一级主题（省）最多渲染条数
+THEME_CONTEXT_MAX_L2 = 8         # 每个一级主题下二级主题（市）最多渲染条数
+
+# ── 两阶段建图的两个系统提示词（2026-09-26）────────────────────────
+# 阶段 1 只规划结构（节点 + 边 + 摘要），**不写正文**：输出短，全部预算给结构规划。
+# 阶段 2 按阶段 1 定下的骨架逐节点补正文，**不改结构**：每个节点独享完整输出预算。
+# 拆开的原因：单次调用同时产 nodes+edges+长篇 content 时，"广度"必然挤占"深度"
+# （TODO_Graph_Quality §1.1 实测正文中位仅 241 字），且局部视野下容易重复造节点。
+GRAPH_SKELETON_SYSTEM_PROMPT = """你是一个「学科知识图谱架构师」。你的任务是从给定的学科书籍内容中，先**规划出知识结构**：有哪些核心知识点、它们之间怎么关联。
+
+**本阶段只输出结构与摘要，不要写正文讲解** —— 每个知识点的正文由后续「逐节点填充」阶段单独生成。
 
 ## 任务要求
 1. 从给定内容中提取**核心知识点**（通常是概念、原理、算法、数据结构、定理、方法等）。
 2. 为每个知识点生成唯一的英文 id（下划线命名，如 binary_tree）和中文 name。
-3. 分析知识点之间的**实质性知识联系**，输出边。只保留真正有语义关联的关系，宁缺毋滥。
-4. 每个知识点的 content 字段需撰写**完整、自足、可直接用于教学**的 Markdown 讲解 ——
-   学生只读这一段就应该学会该知识点，不需要回头翻书，也不应出现「如上文所述」「见本节开头」之类依赖上下文的表述。
+3. 为每个知识点写**一句话摘要** summary：说明它讲什么、为什么重要 —— 填充阶段据此写正文。
+4. 分析知识点之间的**实质性知识联系**，输出边。只保留真正有语义关联的关系，宁缺毋滥。
 
 ## 关系类型（与现有图谱一致）
 - prerequisite（前置依赖）：必须先掌握 A 才能理解 B，A 的知识在 B 的定义/推导中被直接使用。
@@ -95,10 +115,9 @@ GRAPH_GENERATOR_SYSTEM_PROMPT = """你是一个「学科知识图谱构建专家
     {
       "id": "english_id",
       "name": "中文知识点名称",
-      "summary": "一句话概括",
+      "summary": "一句话概括它讲什么",
       "difficulty": 1,
-      "estimated_minutes": 15,
-      "content": "该知识点的 Markdown 详细讲解（定义、要点、示例）"
+      "estimated_minutes": 15
     }
   ],
   "edges": [
@@ -116,10 +135,34 @@ GRAPH_GENERATOR_SYSTEM_PROMPT = """你是一个「学科知识图谱构建专家
 2. difficulty 取值 1-5（1=最简单，5=最难）；estimated_minutes 为预估学习分钟数。
 3. 边只建立知识点之间的实质联系。如果某些知识点没有明确联系，不要强行连线。
 4. edges 中的 from/to 必须是 nodes 或已存在节点（见下方「已有节点」）里的 id。
-5. **粒度（重要）**：每次只提取 3-5 个知识点 —— 宁可少而深，不要多而浅。
+5. **粒度（重要）**：每次只提取 3-5 个知识点 —— 宁可少而精，不要多而碎。
    一个知识点应当是「值得单独学一次课」的单元，预估学习时长 5-25 分钟。
    **禁止**把「本章小结」「复习回顾」「章节导读」「学习目标」这类目录性内容当作知识点输出。
-6. **正文深度（重要）**：每个 content 目标 600-1000 字（绝对下限 400 字，低于此值视为不合格），
+6. **不要输出 content 字段** —— 正文由后续阶段单独撰写；本阶段把结构与摘要规划准确即可。
+7. 答案必须是有效的 JSON，**字符串值内部禁止出现英文双引号**：需要引用术语时用中文引号「」或“”；
+   代码示例里的字符串请改用单引号；字符串内的换行必须写成 \\n 转义。
+   （未转义的引号会让整个响应作废——这是最常见的失败原因。）"""
+
+GRAPH_FILL_SYSTEM_PROMPT = """你是一个「学科知识讲解专家」。知识图谱的结构（有哪些知识点、它们之间怎么关联）**已经确定**，你现在的任务是：为给定的每个知识点撰写正文讲解。
+
+## 任务要求
+对输入中的**每一个**知识点，撰写**完整、自足、可直接用于教学**的 Markdown 讲解 ——
+学生只读这一段就应该学会该知识点，不需要回头翻书，也不应出现「如上文所述」「见本节开头」之类依赖上下文的表述。
+
+## 输出格式
+请仅输出一个严格的 JSON 对象，不要用 Markdown 代码块包裹，不要添加任何解释文字：
+{
+  "nodes": [
+    {
+      "id": "输入里给出的节点 id（原样照抄）",
+      "content": "该知识点的 Markdown 详细讲解"
+    }
+  ]
+}
+
+## 规则
+1. **必须为输入里的每个 id 都写 content**；id 原样照抄，不要新增知识点、不要改 id 或名称。
+2. **正文深度（重要）**：每个 content 目标 600-1000 字（绝对下限 400 字，低于此值视为不合格），
    必须按下面的五段式结构撰写，每段用小标题（##）标出：
    ① **定义**：这个知识点是什么，用一句话给出严谨定义，再解释关键术语；
    ② **核心要点**：3-5 条要点，逐条展开它为什么成立、成立的条件是什么；
@@ -127,8 +170,8 @@ GRAPH_GENERATOR_SYSTEM_PROMPT = """你是一个「学科知识图谱构建专家
       不要只写「例如……」一句带过；
    ④ **易错点**：学生常犯的错误或容易混淆的说法，说明错在哪里；
    ⑤ **与前后知识的关系**：它依赖哪些前置知识、为哪些后续内容打基础。
-   内容不足时宁可减少知识点个数，也不要压缩单个知识点的篇幅。
-7. 答案必须是有效的 JSON，**字符串值内部禁止出现英文双引号**：需要引用术语时用中文引号「」或“”；
+3. 不足 400 字的输出会被整条丢弃，所以宁可写得更展开，也不要用摘要充数。
+4. 答案必须是有效的 JSON，**字符串值内部禁止出现英文双引号**：需要引用术语时用中文引号「」或“”；
    代码示例里的字符串请改用单引号；字符串内的换行必须写成 \\n 转义。
    （未转义的引号会让整个响应作废——这是最常见的失败原因。）"""
 
@@ -185,12 +228,6 @@ def _is_heading_line(line: str, pattern: re.Pattern) -> bool:
     """标题行：命中该层级关键词 + 够短 + 不含句读标点"""
     return (bool(pattern.match(line)) and len(line) <= 40
             and not any(p in line for p in _TITLE_STOP))
-
-
-def _is_chapter_line(line: str) -> bool:
-    """`第X章` 或 `第X节` 标题行（供测试与调用方做统一判定）"""
-    return (_is_heading_line(line, _RE_CHAPTER_PREFIX)
-            or _is_heading_line(line, _RE_SECTION_PREFIX))
 
 
 def _rule_section_tree(text: str, depth: int = 0, parent_path: tuple = ()) -> list[dict]:
@@ -350,6 +387,26 @@ def collect_units(sections: list[dict]) -> list[dict]:
     return packed
 
 
+# ── 骨架来源定位（断点续填用）──────────────────────────────────────
+# 格式 `kb_node_id|章节标题`：骨架节点来自哪本书的哪一节。跨会话续填时按它重读 KB
+# 文本 → 重跑切分 → 按标题找回原文，**不必把原文存进库里**（避免 DB 膨胀）。
+SOURCE_REF_SEP = "|"
+
+
+def _make_source_ref(kb_node_id: int, section: str) -> str:
+    """骨架节点的来源定位串（`kb_node_id|章节标题`）"""
+    return f"{kb_node_id}{SOURCE_REF_SEP}{section or ''}"
+
+
+def _parse_source_ref(ref: str) -> tuple[int, str]:
+    """解析来源定位串 → (kb_node_id, 章节标题)；无来源/格式错误 → (0, "")"""
+    head, _, tail = (ref or "").partition(SOURCE_REF_SEP)
+    try:
+        return int(head), tail
+    except ValueError:
+        return 0, ""
+
+
 class GraphGenerator:
     """从学科书籍内容生成知识图谱"""
 
@@ -418,58 +475,70 @@ class GraphGenerator:
         return file_ids, board
 
     # ────────────────────────────────────────────
+    #  主题上下文（D2：让抽取 LLM 看到学科的省市主题树）
+    # ────────────────────────────────────────────
+
+    @staticmethod
+    def _format_theme_context(themes: list) -> str:
+        """
+        把扁平主题列表渲染成精简的「省→市」文本（供 user_prompt 拼入）。
+
+        参数:
+            themes: kg.list_themes(subject) 的扁平列表（含 level / parent_id / name）
+
+        返回:
+            多行文本，如 `- 线性结构\n  - 数组`；无一级主题时返回空串 `""`
+
+        上限: 一级 THEME_CONTEXT_MAX_L1 条、每个一级下二级 THEME_CONTEXT_MAX_L2 条，超出截断
+        """
+        items = [t for t in themes if isinstance(t, dict)]
+        top = [t for t in items if t.get("level") == 1][:THEME_CONTEXT_MAX_L1]
+        children: dict = {}
+        for t in items:
+            if t.get("level") == 2 and t.get("parent_id"):
+                children.setdefault(t["parent_id"], []).append(t)
+        lines: list[str] = []
+        for node in top:
+            lines.append(f"- {(node.get('name') or '').strip()}")
+            for child in children.get(node.get("id"), [])[:THEME_CONTEXT_MAX_L2]:
+                lines.append(f"  - {(child.get('name') or '').strip()}")
+        return "\n".join(lines)
+
+    def _load_theme_context(self, kg, subject: str) -> str:
+        """
+        读该学科已有主题树并渲染成 prompt 前缀文本；取不到一律降级为空串。
+
+        防御式：`kg` 可能是测试假对象 / `list_themes` 不存在 / DB 出错 —— 统统静默降级
+        （主题只是导航层，缺了不能毁建图）。不写 SQL、不新开 KnowledgeGraph 实例。
+        """
+        try:
+            themes = kg.list_themes(subject)
+        except Exception as e:                    # noqa: BLE001 —— 降级语义：不抛
+            logger.debug(f"读取学科主题树失败（忽略，主题只是导航层）：{e}")
+            return ""
+        return self._format_theme_context(themes) if isinstance(themes, list) else ""
+
+    # ────────────────────────────────────────────
     #  LLM 调用与解析
     # ────────────────────────────────────────────
 
-    async def _call_generator_llm(self, subject: str, book_content: str,
-                                  existing_nodes: list[dict],
-                                  section: str = "") -> Optional[dict]:
+    async def _call_json_llm(self, system_prompt: str, user_prompt: str, *,
+                             kind: str) -> Optional[dict]:
         """
-        调用 LLM 从一段书籍内容生成局部图谱（节点 + 边）。
+        一次 LLM 调用 + JSON 解析 + 「失败重发一次」（骨架 / 填充两阶段共用）。
 
-        参数:
-            subject:        学科名
-            book_content:   生成单元的原文（一段完整章节，不是字符滑窗碎片）
-            existing_nodes: 该学科已有的节点（用于增量时建边去重）
-            section:        本单元所属章节标题（让模型知道"这段属于哪一节"）
-
-        返回:
-            {"nodes": [...], "edges": [...]}，失败返回 None
+        一次循环同时兜住两种偶发失败：① 空回复/瞬时异常（M3 思考阶段耗尽输出预算）
+        ② 吐非法 JSON。两者"重发一次即成功"的概率都很高，比丢掉整块（含其全部
+        节点与边）划算。旋钮统一用 GRAPH_JSON_RETRIES，不再另设常数。
         """
-        # 构造已有节点上下文
-        if existing_nodes:
-            existing_str = "\n".join(
-                f"  [{n['id']}] {n['name']}" for n in existing_nodes
-            )
-        else:
-            existing_str = "  (暂无已有节点)"
-
-        section_line = f"当前章节：{section}\n" if section else ""
-        user_prompt = f"""请从以下学科书籍内容中提取知识点并构建图谱。
-
-学科：{subject}
-{section_line}
-已有节点（新增边时若一端已存在，请直接引用其 id）：
-{existing_str}
-
-本节内容：
----
-{book_content}
----
-
-请按格式输出 JSON。"""
-
-        # 一次循环同时兜住两种偶发失败：① 空回复/瞬时异常（M3 思考阶段耗尽输出预算）
-        # ② 吐非法 JSON。两者"重发一次即成功"的概率都很高，比丢掉整块（含其全部
-        # 节点与边）划算。旋钮统一用 GRAPH_JSON_RETRIES，不再另设常数。
         for attempt in range(GRAPH_JSON_RETRIES + 1):
             try:
                 raw = await call_llm(
-                    GRAPH_GENERATOR_SYSTEM_PROMPT,
+                    system_prompt,
                     [{"role": "user", "content": user_prompt}],
                     max_tokens=GRAPH_MAX_TOKENS,
                     thinking=False,
-                    kind="kb_graph_extract",
+                    kind=kind,
                 )
             except Exception as e:
                 # 异常（额度/网络）已由 chat_create 的重试+降级链处理过；
@@ -483,7 +552,7 @@ class GraphGenerator:
 
             data = extract_json(raw)
             if data is not None:
-                break
+                return data
             if attempt < GRAPH_JSON_RETRIES:
                 # 模型偶发吐非法 JSON（同一块重发即成），重发一次比丢掉整块划算
                 logger.warning(
@@ -496,14 +565,109 @@ class GraphGenerator:
                 f" 头200: {raw[:200]} 尾120: {raw[-120:]}"
             )
             return None
+        return None
 
+    @staticmethod
+    def _existing_nodes_text(existing_nodes: list[dict] | None) -> str:
+        """「已有节点」清单文本（建边时引用既有 id）"""
+        if not existing_nodes:
+            return "  (暂无已有节点)"
+        return "\n".join(f"  [{n['id']}] {n['name']}" for n in existing_nodes)
+
+    @staticmethod
+    def _theme_block(theme_context: str) -> str:
+        """主题树（省→市）参考段：空串时整段不出现（与无主题时行为逐字一致）"""
+        if not theme_context:
+            return ""
+        return (
+            "\n本学科现有主题结构（省→市，供归类与命名参考）：\n"
+            f"{theme_context}\n"
+            "新知识点若属于已有主题，请沿用其名称/结构与命名风格。\n"
+        )
+
+    async def _call_skeleton_llm(self, subject: str, book_content: str,
+                                 existing_nodes: list[dict],
+                                 section: str = "",
+                                 theme_context: str = "") -> Optional[dict]:
+        """
+        阶段 1：从一段书籍内容规划知识结构（节点 + 边 + 摘要，**不含正文**）。
+
+        参数:
+            subject:        学科名
+            book_content:   生成单元的原文（一段完整章节，不是字符滑窗碎片）
+            existing_nodes: 该学科已有的节点（用于增量时建边去重）
+            section:        本单元所属章节标题（让模型知道"这段属于哪一节"）
+            theme_context:  该学科「省→市」主题树渲染文本（导航参考，见 _load_theme_context）；
+                            由 _generate 整轮只读一次后逐单元显式传入。默认空串时该段不出现。
+
+        返回:
+            {"nodes": [...], "edges": [...]}，失败返回 None
+        """
+        section_line = f"当前章节：{section}\n" if section else ""
+        user_prompt = f"""请从以下学科书籍内容中提取知识点并构建图谱。
+
+学科：{subject}
+{section_line}
+已有节点（新增边时若一端已存在，请直接引用其 id）：
+{self._existing_nodes_text(existing_nodes)}
+{self._theme_block(theme_context)}
+本节内容：
+---
+{book_content}
+---
+
+请按格式输出 JSON（nodes 只含 id/name/summary/difficulty/estimated_minutes，不要写 content）。"""
+
+        data = await self._call_json_llm(GRAPH_SKELETON_SYSTEM_PROMPT, user_prompt,
+                                         kind="kb_graph_extract")
+        if not isinstance(data, dict):
+            return None
         nodes = data.get("nodes", [])
         edges = data.get("edges", [])
+        return {
+            "nodes": nodes if isinstance(nodes, list) else [],
+            "edges": edges if isinstance(edges, list) else [],
+        }
+
+    async def _call_fill_llm(self, subject: str, section: str, section_text: str,
+                             brief_nodes: list[dict],
+                             theme_context: str = "") -> Optional[dict]:
+        """
+        阶段 2：为一个单元刚落下的骨架节点补正文。
+
+        参数:
+            brief_nodes: [{"id","name","summary"}, ...] —— 本单元**仍是骨架态**的节点
+        返回:
+            {"nodes": [{"id": ..., "content": ...}, ...]}，失败返回 None
+        """
+        lines = "\n".join(
+            f"  [{n.get('id', '')}] {n.get('name', '')}"
+            + (f"：{n['summary']}" if n.get("summary") else "")
+            for n in brief_nodes
+        )
+        section_line = f"当前章节：{section}\n" if section else ""
+        user_prompt = f"""请为下列知识点撰写正文讲解。
+
+学科：{subject}
+{section_line}
+本节内容：
+---
+{section_text}
+---
+
+待填写正文的知识点（id 原样照抄，逐个写 content）：
+{lines}
+{self._theme_block(theme_context)}
+请按格式输出 JSON。"""
+
+        data = await self._call_json_llm(GRAPH_FILL_SYSTEM_PROMPT, user_prompt,
+                                         kind="kb_graph_fill")
+        if not isinstance(data, dict):
+            return None
+        nodes = data.get("nodes", [])
         if not isinstance(nodes, list):
-            nodes = []
-        if not isinstance(edges, list):
-            edges = []
-        return {"nodes": nodes, "edges": edges}
+            return {"nodes": []}
+        return {"nodes": [n for n in nodes if isinstance(n, dict)]}
 
     # ────────────────────────────────────────────
     #  语义去重（合并同义概念）
@@ -637,49 +801,72 @@ class GraphGenerator:
     # ────────────────────────────────────────────
 
     @staticmethod
-    def _drop_shallow_nodes(result: dict) -> tuple[dict, list[str]]:
+    def _deep_contents(fill_result: dict,
+                       name_by_id: dict[str, str]) -> tuple[dict[str, str], list[str]]:
         """
-        剔除正文不足 GRAPH_MIN_CONTENT_CHARS 的空壳节点，返回 (过滤后的结果, 被拒名字)。
+        阶段 2 的深度守门：从填充结果里挑出达标的正文，返回 ({node_id: content}, 被拒名字)。
 
         一本教材实测 25% 的节点正文不足 200 字（出不了题、也讲不了课，见
-        TODO_Graph_Quality §1.2），而用户要的正是"单个节点的深度" → 宁缺毋滥。
-        被拒节点引用的边在写库时因「端点不在 node_ids」被自动跳过，不留悬空边。
+        TODO_Graph_Quality §1.2），而用户要的正是"单个节点的深度" → 宁缺毋滥：
+        不达标的节点**不写正文**，留在 skeleton 态等下轮补（不落"半成品正文"）。
         """
-        kept, rejected = [], []
-        for node in result.get("nodes", []):
+        kept: dict[str, str] = {}
+        rejected: list[str] = []
+        for node in fill_result.get("nodes", []):
             if not isinstance(node, dict):
                 continue
-            name = str(node.get("name") or "").strip()
+            nid = str(node.get("id") or "").strip()
+            if not nid or nid not in name_by_id:
+                continue   # 模型编造的 id / 不在本批 → 直接丢（不落任何节点）
             content = str(node.get("content") or "").strip()
-            if name and len(content) < GRAPH_MIN_CONTENT_CHARS:
-                rejected.append(name)
+            if len(content) < GRAPH_MIN_CONTENT_CHARS:
+                rejected.append(name_by_id[nid])
                 continue
-            kept.append(node)
-        return {"nodes": kept, "edges": result.get("edges", [])}, rejected
+            kept[nid] = content
+        return kept, rejected
 
     # ────────────────────────────────────────────
     #  写入知识图谱
     # ────────────────────────────────────────────
 
-    async def _write_to_graph(self, kg, subject: str, result: dict,
+    @staticmethod
+    def _is_skeleton(kg, node_id: str) -> bool:
+        """节点是否仍是骨架态（需要补正文）。查不到节点返回 False（别瞎填）。"""
+        node = kg.get_node(node_id) if node_id else None
+        return bool(node) and (node.get("content_status") or CONTENT_STATUS_FILLED) \
+            == CONTENT_STATUS_SKELETON
+
+    async def _write_skeleton(self, kg, subject: str, result: dict,
                               existing_nodes: list[dict] | None = None,
-                              board: str = "") -> dict:
+                              board: str = "",
+                              source_ref: str = "") -> dict:
         """
-        将 LLM 生成的局部图谱写入知识图谱（含语义去重）。
+        阶段 1 落库：把 LLM 规划出的**结构**写进知识图谱（含语义去重）。
+
+        节点一律以骨架态落库（content_status='skeleton'，**不写正文**）—— 正文由阶段 2
+        的 `_fill_nodes` 补。已是 filled 的节点（同名/同义并轨命中）不会被降级。
 
         参数:
             existing_nodes: 该学科已有节点（用于语义去重）；None 时自动从 kg 读取
             board: 知识板块名；非空时新节点归属该板块（板块 = 学科下的一级分组）
+            source_ref: 来源定位串（见 _make_source_ref）—— 跨会话续填靠它找回原文
 
         返回:
-            {"created_nodes": [...], "created_edges": n, "skipped_nodes": [...]}
+            {"created_nodes": [...], "pending_node_ids": [...], "created_edges": n,
+             "skipped_nodes": [...], "merged_nodes": [...], "dedup_status": str}
+            pending_node_ids = 本次落下、**仍是骨架态**、需要阶段 2 补正文的节点
         """
         if existing_nodes is None:
             existing_nodes = kg.get_nodes_by_subject(subject)
         created_nodes = []
+        pending_ids: list[str] = []      # 骨架态待填充（含并轨命中的已有骨架节点）
         skipped_nodes = []
         merged_nodes = []   # 因合并而跳过的节点名
         node_ids = set(kg.get_node_ids())
+
+        def remember_pending(nid: str) -> None:
+            if nid not in pending_ids:
+                pending_ids.append(nid)
 
         # 第一遍：创建节点（先做语义去重，再跳过已存在的）
         node_id_by_name = {}
@@ -698,7 +885,6 @@ class GraphGenerator:
             name = str(n.get("name", "")).strip()
             if not nid or not name:
                 continue
-            content = str(n.get("content") or "").strip()
             # ★ 语义去重：若与已有节点同义，合并（不新建，边指向已有节点）
             if idx in confirmed_merge:
                 exist_idx = confirmed_merge[idx]
@@ -708,6 +894,8 @@ class GraphGenerator:
                     node_id_alias[nid] = exist_id
                     merged_nodes.append(name)
                     logger.info(f"同义合并：{name} → {exist_id}")
+                    if self._is_skeleton(kg, exist_id):
+                        remember_pending(exist_id)
                     continue
             # 全局唯一性：跳过已存在节点
             if nid in node_ids:
@@ -729,12 +917,16 @@ class GraphGenerator:
                 "difficulty": int(n.get("difficulty", 3)),
                 "estimated_minutes": int(n.get("estimated_minutes", 15)),
                 "added_by": "ai",
+                "source_ref": source_ref,
             }
             try:
-                # 建库 + 写 MD 一次完成（模板收口在 KnowledgeGraph，本处只给来源标注差异）。
+                # 建库 + 写**骨架** MD 一次完成（模板收口在 KnowledgeGraph）。
+                # 正文留空、状态标 skeleton —— 阶段 2 的 _fill_nodes 负责填充。
                 # 返回值是**实际落点**：写入层的同名并轨（L1 档）命中已有节点时不是 nid
                 # —— 批次内新节点同名也走这条路（首次写入已让 kg 缓存失效）。
-                real_id = kg.create_node_with_content(node_data, content, origin="book") or nid
+                real_id = kg.create_node_with_content(
+                    node_data, "", origin="book",
+                    content_status=CONTENT_STATUS_SKELETON) or nid
             except ValueError as e:
                 logger.info(f"跳过节点 {nid}（{name}）: {e}")
                 skipped_nodes.append(nid)
@@ -746,8 +938,11 @@ class GraphGenerator:
                 node_id_alias[nid] = real_id
                 merged_nodes.append(name)
                 logger.info(f"同名并轨：{name}（{nid}）→ {real_id}")
+                if self._is_skeleton(kg, real_id):
+                    remember_pending(real_id)
             else:
                 created_nodes.append(real_id)
+                remember_pending(real_id)
 
         # 第二遍：创建边（跳过无效 / 重复 / 自环）
         created_edges = 0
@@ -785,11 +980,135 @@ class GraphGenerator:
 
         return {
             "created_nodes": created_nodes,
+            "pending_node_ids": pending_ids,
             "created_edges": created_edges,
             "skipped_nodes": skipped_nodes,
             "merged_nodes": merged_nodes,
             "dedup_status": self._dedup_status,
         }
+
+    async def _fill_nodes(self, kg, subject: str, section: str, section_text: str,
+                          node_ids: list[str], theme_context: str = "") -> dict:
+        """
+        阶段 2：为一个单元落下的骨架节点补正文（本单元一次 LLM 调用写完整批）。
+
+        只处理**仍是骨架态**的节点：同 run 内前一批已填充的、以及并轨命中的 filled
+        节点都会被跳过 —— 这也是"重跑建图"的幂等来源（骨架不重复建、正文不重复填）。
+
+        参数:
+            node_ids: 本单元 `_write_skeleton` 返回的 pending_node_ids
+        返回:
+            {"filled": [名字...], "rejected_shallow": [名字...], "failed_fills": n}
+            rejected_shallow = 正文不足下限、**留在骨架态**等下轮补的节点（不落半成品）
+        """
+        briefs: list[dict] = []
+        for nid in node_ids:
+            node = kg.get_node(nid)
+            if not node or (node.get("content_status") or CONTENT_STATUS_FILLED) \
+                    != CONTENT_STATUS_SKELETON:
+                continue
+            briefs.append({"id": nid, "name": node.get("name", ""),
+                           "summary": node.get("summary", "")})
+        if not briefs:
+            return {"filled": [], "rejected_shallow": [], "failed_fills": 0}
+
+        result = await self._call_fill_llm(subject, section, section_text, briefs,
+                                           theme_context=theme_context)
+        if not result:
+            logger.warning(
+                f"填充失败（{subject} / {section or '无标题'}）：{len(briefs)} 个骨架节点"
+                "留在待填充态，重跑建图即可补上"
+            )
+            return {"filled": [], "rejected_shallow": [], "failed_fills": 1}
+
+        name_by_id = {b["id"]: b["name"] for b in briefs}
+        contents, rejected = self._deep_contents(result, name_by_id)
+        filled: list[str] = []
+        for nid, content in contents.items():
+            node = kg.get_node(nid) or {}
+            try:
+                # 按唯一模板重渲染（保留标题与来源标注）→ 替换骨架正文并转 filled
+                md = render_node_markdown(node.get("name", ""), node.get("summary", ""),
+                                          content, origin="book")
+                kg.update_node_content(nid, md, mode="replace", caller="ai")
+            except (ValueError, PermissionError) as e:
+                logger.info(f"填充节点 {nid} 失败: {e}")
+                continue
+            filled.append(name_by_id.get(nid, nid))
+        if rejected:
+            logger.warning(
+                f"填充（{subject}）：{len(rejected)} 个节点正文不足 "
+                f"{GRAPH_MIN_CONTENT_CHARS} 字被拒收、留在待填充态："
+                f"{'、'.join(rejected[:10])}"
+            )
+        return {"filled": filled, "rejected_shallow": rejected, "failed_fills": 0}
+
+    async def fill_pending_nodes(self, kg, subject: str) -> dict:
+        """
+        断点续填：把该学科下**仍是骨架态**的节点补上正文（跨会话 / 跨进程可用）。
+
+        场景：一次建图跑到一半被中断（LLM 失败、进程重启、用户关页面）→ 阶段 1 落下的
+        骨架节点停在 skeleton。本方法按 `nodes.source_ref`（见 _make_source_ref）重读来源
+        书籍、重跑切分、按章节标题找回原文，再走与建图阶段 2 **完全相同**的填充路径。
+
+        参数:
+            subject: 学科名（只处理该学科的骨架节点）
+        返回:
+            {"subject", "status", "filled": [...], "rejected_shallow": [...],
+             "failed_fills": n, "skipped_no_source": [...]}
+            status = "ok"（有可续填的）/ "nothing_pending"（该学科没有骨架节点）
+            skipped_no_source = 没有来源定位的（如问题拆解骨架）→ 不自动填，留给用户/对话
+        """
+        pending = [n for n in kg.get_nodes_by_subject(subject)
+                   if (n.get("content_status") or CONTENT_STATUS_FILLED)
+                   == CONTENT_STATUS_SKELETON]
+        if not pending:
+            return {"subject": subject, "status": "nothing_pending", "filled": [],
+                    "rejected_shallow": [], "failed_fills": 0, "skipped_no_source": []}
+
+        # 按来源书籍分组：kb_node_id → {章节标题 → [node_id]}
+        groups: dict[int, dict[str, list[str]]] = {}
+        skipped_no_source: list[str] = []
+        for node in pending:
+            kb_id, section = _parse_source_ref(node.get("source_ref"))
+            if not kb_id:
+                skipped_no_source.append(node["id"])
+                continue
+            groups.setdefault(kb_id, {}).setdefault(section, []).append(node["id"])
+
+        theme_context = self._load_theme_context(kg, subject)
+        filled: list[str] = []
+        rejected: list[str] = []
+        failed = 0
+        for kb_id, by_section in groups.items():
+            books = self._load_book_texts(self.user_id, [kb_id])
+            if not books:
+                logger.warning(
+                    f"续填（{subject}）：来源书籍 {kb_id} 读不到文本，"
+                    f"{sum(len(v) for v in by_section.values())} 个骨架节点跳过")
+                continue
+            units = {u["title"]: u["text"]
+                     for u in collect_units(build_section_tree(books[0]["text"]))}
+            for section, node_ids in by_section.items():
+                text = units.get(section)
+                if not text:
+                    # 章节标题在当前切分里找不到（书被替换 / 切分口径变了）→ 不猜，留给人工
+                    logger.warning(
+                        f"续填（{subject}）：章节 {section!r} 在来源书籍 {kb_id} 的当前切分"
+                        f"里找不到，{len(node_ids)} 个骨架节点跳过")
+                    continue
+                stats = await self._fill_nodes(kg, subject, section, text, node_ids,
+                                               theme_context=theme_context)
+                filled.extend(stats["filled"])
+                rejected.extend(stats["rejected_shallow"])
+                failed += stats["failed_fills"]
+
+        logger.info(
+            f"续填（{subject}）：骨架 {len(pending)} 个 → 填充 {len(filled)}、"
+            f"拒收 {len(rejected)}、失败批 {failed}、无来源跳过 {len(skipped_no_source)}")
+        return {"subject": subject, "status": "ok", "filled": filled,
+                "rejected_shallow": rejected, "failed_fills": failed,
+                "skipped_no_source": skipped_no_source}
 
     # ────────────────────────────────────────────
     #  对外接口
@@ -798,7 +1117,8 @@ class GraphGenerator:
     async def _generate(self, kg, subject: str, file_ids: list[int],
                         board: str = "") -> dict:
         """
-        执行路径（两种模式共用）：读取文本 → **递归切成生成单元** → 逐单元抽图谱 → 写库。
+        两阶段执行路径（两种模式共用）：
+          阶段 1 逐单元规划骨架（节点 + 边，落 skeleton）→ 阶段 2 逐单元填充正文（转 filled）。
 
         参数:
             file_ids: KB 中的**文件**节点 ID（文件夹已由 _resolve_files 展开）
@@ -810,6 +1130,10 @@ class GraphGenerator:
                     "error": "没有可处理的书籍文本，请先上传并解析书籍"}
 
         existing = kg.get_nodes_by_subject(subject)
+        # D2：抽取**开始前**先算一次主题树文本（它是每个单元 prompt 的固定前缀），
+        # 逐单元作为参数传入 —— 保持"每轮建图只读一次主题树"的性能语义；
+        # 取不到 → 空串（防御式，见 _load_theme_context）。
+        theme_context = self._load_theme_context(kg, subject)
         aggregate = {
             "subject": subject,
             "board": board,
@@ -818,7 +1142,9 @@ class GraphGenerator:
             "created_edges": 0,
             "skipped_nodes": [],
             "merged_nodes": [],
+            "filled_nodes": [],
             "rejected_shallow": [],
+            "failed_fills": 0,
             "units": 0,
             # 语义去重状态：ok / degraded（hash 兜底）/ unavailable（嵌入不可用）。
             # 单块值，退化状态一经出现就粘住，不被后续正常块盖回 ok。
@@ -826,6 +1152,8 @@ class GraphGenerator:
             "failed_chunks": 0,
         }
 
+        plan: list[dict] = []   # 阶段 2 的输入：[{section, text, node_ids}]
+        # ── 阶段 1：逐单元规划骨架（节点 + 边，不含正文）──
         for book in books:
             units = collect_units(build_section_tree(book["text"]))
             logger.info(
@@ -835,25 +1163,35 @@ class GraphGenerator:
             )
             aggregate["units"] += len(units)
             for unit in units:
-                result = await self._call_generator_llm(subject, unit["text"], existing,
-                                                        section=unit["title"])
+                result = await self._call_skeleton_llm(subject, unit["text"], existing,
+                                                       section=unit["title"],
+                                                       theme_context=theme_context)
                 if not result:
                     # 单块失败（LLM 报错/JSON 解析失败）不中断整本，但计数返回给前端
                     aggregate["failed_chunks"] += 1
                     continue
-                result, rejected = self._drop_shallow_nodes(result)
-                aggregate["rejected_shallow"].extend(rejected)
-                stats = await self._write_to_graph(kg, subject, result,
-                                                   existing_nodes=existing,
-                                                   board=board)
+                stats = await self._write_skeleton(
+                    kg, subject, result, existing_nodes=existing, board=board,
+                    source_ref=_make_source_ref(book["node_id"], unit["title"]))
                 aggregate["created_nodes"].extend(stats["created_nodes"])
                 aggregate["created_edges"] += stats["created_edges"]
                 aggregate["skipped_nodes"].extend(stats["skipped_nodes"])
                 aggregate["merged_nodes"].extend(stats["merged_nodes"])
                 if stats.get("dedup_status", "ok") != "ok":
                     aggregate["dedup_status"] = stats["dedup_status"]
+                if stats["pending_node_ids"]:
+                    plan.append({"section": unit["title"], "text": unit["text"],
+                                 "node_ids": stats["pending_node_ids"]})
                 # 更新已存在节点，供后续批次引用与去重
                 existing = kg.get_nodes_by_subject(subject)
+
+        # ── 阶段 2：逐单元给骨架节点补正文（写入后转 filled）──
+        for item in plan:
+            fill = await self._fill_nodes(kg, subject, item["section"], item["text"],
+                                          item["node_ids"], theme_context=theme_context)
+            aggregate["filled_nodes"].extend(fill["filled"])
+            aggregate["rejected_shallow"].extend(fill["rejected_shallow"])
+            aggregate["failed_fills"] += fill["failed_fills"]
 
         if aggregate["failed_chunks"]:
             logger.warning(
@@ -867,6 +1205,11 @@ class GraphGenerator:
                     f"全部 {aggregate['failed_chunks']} 个生成单元都生成失败（空回复或输出被截断）。"
                     "请检查日志中的 E-LLM-006 / 无法解析的 JSON，确认 LLM 配置后重试。"
                 )
+        if aggregate["failed_fills"]:
+            logger.warning(
+                f"学科图谱生成（{subject}）：{aggregate['failed_fills']} 个单元的正文填充"
+                "调用失败，涉及节点留在待填充态（重跑建图可补齐，不会重复建骨架）"
+            )
         if aggregate["rejected_shallow"]:
             logger.warning(
                 f"学科图谱生成（{subject}）：{len(aggregate['rejected_shallow'])} 个节点"
@@ -874,6 +1217,18 @@ class GraphGenerator:
                 f"{'、'.join(aggregate['rejected_shallow'][:10])}"
                 f"（模型未按要求写深正文时可调大 GRAPH_MAX_TOKENS）"
             )
+
+        # KG-T3 / D1：建图完成后自动归纳一次主题层级。放在 `_generate` 里而非调用方，
+        # 是为了让两条入口（学科级 / 章节级）都覆盖 —— 章节级增量补章后整棵树本就该变。
+        # 函数内延迟 import：避免本模块与 kg_themes 的循环依赖 / 无谓的启动期开销。
+        # 硬性失败语义：聚类失败**绝不抛**——只记 {"status": "failed"}，不能因为聚类毁掉建图。
+        try:
+            from app.core.kg_themes import generate_subject_themes
+            aggregate["themes"] = await generate_subject_themes(
+                kg, subject, user_id=self.user_id)
+        except Exception as e:                    # noqa: BLE001 —— 不能毁掉建图
+            logger.warning(f"建图后主题归纳失败（不影响图谱本身）：{e}")
+            aggregate["themes"] = {"status": "failed"}
         return aggregate
 
     async def generate_subject_graph(self, kg, subject: str,

@@ -39,8 +39,8 @@ def origins(monkeypatch):
     """记录五条路径实际传给原子方法的 origin（结构断言用）"""
     seen = []
     monkeypatch.setattr(KnowledgeGraph, "create_node_with_content",
-                        lambda self, node_data, content="", origin="manual":
-                        seen.append(origin))
+                        lambda self, node_data, content="", origin="manual",
+                        content_status=None: seen.append(origin))
     return seen
 
 
@@ -127,12 +127,12 @@ def test_book_path_merges_same_name_instead_of_duplicating(kg, monkeypatch):
     monkeypatch.setattr(gen, "_find_dedup_candidates", _async({}))
     monkeypatch.setattr(gen, "_confirm_synonyms", _async({}))
 
-    asyncio.run(gen._write_to_graph(
+    asyncio.run(gen._write_skeleton(
         kg, "数据结构",
         {"nodes": [{"id": "stack", "name": "栈"}, {"id": "queue", "name": "队列"}],
          "edges": []},
         existing_nodes=[]))
-    stats = asyncio.run(gen._write_to_graph(
+    stats = asyncio.run(gen._write_skeleton(
         kg, "数据结构",
         {"nodes": [{"id": "queue_v2", "name": "队列", "content": "补充：循环队列"}],
          "edges": [{"from": "stack", "to": "queue_v2", "relation": "related"}]},
@@ -144,21 +144,32 @@ def test_book_path_merges_same_name_instead_of_duplicating(kg, monkeypatch):
     assert {(e["from_node"], e["to_node"]) for e in kg.edges} == {("stack", "queue")}
 
 
-def test_book_path_merge_is_idempotent(kg, monkeypatch):
-    """同一本书重跑：同一段正文不叠两遍（节点 MD 不线性膨胀）"""
+def test_fill_is_idempotent_after_rerun(kg, monkeypatch):
+    """同一本书重跑：骨架不重复建、已填充的节点不再被填充（正文不叠两遍）"""
     gen = gg.GraphGenerator(user_id=1)
     monkeypatch.setattr(gen, "_find_dedup_candidates", _async({}))
     monkeypatch.setattr(gen, "_confirm_synonyms", _async({}))
-    payload = {"nodes": [{"id": "queue", "name": "队列", "content": "循环队列：队尾追上队头"}],
-               "edges": []}
 
     for nid in ("queue", "queue_v2", "queue_v3"):
-        asyncio.run(gen._write_to_graph(
-            kg, "数据结构",
-            {"nodes": [dict(payload["nodes"][0], id=nid)], "edges": []},
+        asyncio.run(gen._write_skeleton(
+            kg, "数据结构", {"nodes": [{"id": nid, "name": "队列"}], "edges": []},
             existing_nodes=[]))
+    assert [n["id"] for n in kg.nodes] == ["queue"], "同名重跑不建第二个节点"
 
-    assert _md(kg, "queue").count("循环队列：队尾追上队头") == 1
+    marker = "循环队列：队尾追上队头是唯一标记。"
+    body = marker + "字" * gg.GRAPH_MIN_CONTENT_CHARS
+
+    async def _fake_fill(subject, section, text, briefs, theme_context=""):
+        return {"nodes": [{"id": "queue", "content": body}]}
+
+    monkeypatch.setattr(gen, "_call_fill_llm", _fake_fill)
+    asyncio.run(gen._fill_nodes(kg, "数据结构", "第一章", "原文", ["queue"]))
+    assert kg.get_node("queue")["content_status"] == "filled"
+
+    # 再来一次（模拟重跑）：节点已 filled → briefs 为空 → 不再调 LLM、正文不叠
+    asyncio.run(gen._fill_nodes(kg, "数据结构", "第一章", "原文", ["queue"]))
+
+    assert _md(kg, "queue").count(marker) == 1
 
 
 def test_dedup_status_reported_when_embed_unavailable(kg, monkeypatch):
@@ -169,12 +180,12 @@ def test_dedup_status_reported_when_embed_unavailable(kg, monkeypatch):
     payload = {"nodes": [{"id": "queue", "name": "队列"}], "edges": []}
 
     monkeypatch.setattr(gg, "get_embedder", lambda **kw: _DeadEmbedder())
-    stats = asyncio.run(gen._write_to_graph(kg, "数据结构", payload, existing_nodes=existing))
+    stats = asyncio.run(gen._write_skeleton(kg, "数据结构", payload, existing_nodes=existing))
     assert stats["dedup_status"] == "unavailable"
 
     # hash 兜底（无 key / 无本地模型）算退化，不算不可用
     monkeypatch.setattr(gg, "get_embedder", lambda **kw: HashEmbedder())
-    stats = asyncio.run(gen._write_to_graph(kg, "数据结构", payload, existing_nodes=existing))
+    stats = asyncio.run(gen._write_skeleton(kg, "数据结构", payload, existing_nodes=existing))
     assert stats["dedup_status"] == "degraded"
 
 
@@ -190,7 +201,7 @@ def test_book_generation_origin(kg, origins, monkeypatch):
     monkeypatch.setattr(gen, "_find_dedup_candidates", _async({}))
     monkeypatch.setattr(gen, "_confirm_synonyms", _async({}))
 
-    asyncio.run(gen._write_to_graph(kg, "数据结构", {"nodes": [{"id": "n1", "name": "队列"}],
+    asyncio.run(gen._write_skeleton(kg, "数据结构", {"nodes": [{"id": "n1", "name": "队列"}],
                                                      "edges": []},
                                     existing_nodes=[]))
 
@@ -249,3 +260,79 @@ def _patch_api_user(kg, monkeypatch):
     monkeypatch.setattr(KnowledgeGraph, "close", lambda self: None)
     monkeypatch.setattr(kapi, "assign_taxonomy", _async(None))
     monkeypatch.setattr(kapi, "publish", lambda *a, **kw: None)
+
+
+# ── POST /knowledge/node 建节点写流程的对外可观测行为 ──
+# 断言只看回执形状 / 落点 id / name 口径，不看实现，这样内部怎么拆都不影响本组测试。
+
+def test_manual_api_receipt_has_landing_node(kg, monkeypatch):
+    """POST /knowledge/node：回执 {"status","node"}，node 带真实落点 id/file"""
+    _patch_api_user(kg, monkeypatch)
+
+    resp = asyncio.run(kapi.create_node(data={"id": "n1", "name": "队列"}, user_id=1))
+
+    assert resp["status"] == "ok"
+    assert resp["node"]["id"] == "n1"
+    assert resp["node"]["file"] == "nodes/n1.md"
+    assert kg.get_node("n1") is not None
+
+
+def test_manual_api_same_name_merge_returns_existing_id(kg, monkeypatch):
+    """同名并轨：回执必须用**返回值**（已有节点 id），不是请求里那个没落库的新 id"""
+    _patch_api_user(kg, monkeypatch)
+    asyncio.run(kapi.create_node(data={"id": "n1", "name": "队列"}, user_id=1))
+
+    resp = asyncio.run(kapi.create_node(data={"id": "n2", "name": "队列"}, user_id=1))
+
+    assert resp["node"]["id"] == "n1"
+    assert resp["node"]["file"] == "nodes/n1.md"
+    assert [n["id"] for n in kg.nodes] == ["n1"]
+
+
+def test_manual_api_missing_name_is_400(kg, monkeypatch):
+    """缺 name → KeyError → 400「缺少必填字段」"""
+    _patch_api_user(kg, monkeypatch)
+
+    with pytest.raises(kapi.HTTPException) as ei:
+        asyncio.run(kapi.create_node(data={"id": "n1"}, user_id=1))
+
+    assert ei.value.status_code == 400
+    assert "缺少必填字段" in ei.value.detail
+
+
+def test_missing_id_is_auto_generated(kg, monkeypatch):
+    """缺 id：自动补生成的 id 落库"""
+    _patch_api_user(kg, monkeypatch)
+
+    resp = asyncio.run(kapi.create_node(data={"name": "栈"}, user_id=1))
+
+    assert resp["node"]["id"] in kg.get_node_ids()
+
+
+# ── 断点续填端点（POST /knowledge/graph/fill）─────────────────────────
+
+def test_fill_endpoint_publishes_only_when_something_filled(kg, monkeypatch):
+    """端点口径：有节点被补齐才发图变更事件；nothing_pending 时不发"""
+    from app.core.kb import graph_generator as gg_mod
+
+    _patch_api_user(kg, monkeypatch)
+    events = []
+    monkeypatch.setattr(kapi, "publish", lambda *a, **kw: events.append(a))
+
+    async def _ok(self, kg_, subject):
+        return {"subject": subject, "status": "ok", "filled": ["队列"],
+                "rejected_shallow": [], "failed_fills": 0, "skipped_no_source": []}
+
+    monkeypatch.setattr(gg_mod.GraphGenerator, "fill_pending_nodes", _ok)
+    resp = asyncio.run(kapi.fill_pending_graph(subject="数据结构", user_id=1))
+    assert resp["filled"] == ["队列"]
+    assert events == [("graph_updated",)]
+
+    async def _empty(self, kg_, subject):
+        return {"subject": subject, "status": "nothing_pending", "filled": [],
+                "rejected_shallow": [], "failed_fills": 0, "skipped_no_source": []}
+
+    monkeypatch.setattr(gg_mod.GraphGenerator, "fill_pending_nodes", _empty)
+    resp = asyncio.run(kapi.fill_pending_graph(subject="数据结构", user_id=1))
+    assert resp["status"] == "nothing_pending"
+    assert len(events) == 1, "没有补齐任何节点就不该发事件"

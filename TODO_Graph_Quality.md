@@ -146,6 +146,7 @@ cd backend && venv/Scripts/python.exe scripts/inspect_graph_quality.py          
 - **空壳率**：`content` < 400 字占比（按用户/学科分组）
 - 结构健康：悬空边、自环、重复边、prerequisite 环、孤立节点、连通分量
 - 主题一致性：tags 分布异常值
+- **主题覆盖率**：该课**有主题归属**的节点数 / 节点总数（口径 = 设计文档 §9 AC-T2 真机基线；SSOT `docs/知识图谱/知识图谱_主题层级_设计与实现方案.md`）
 - 字段完整：summary / confidence / board 填充率
 - 拓扑：入度 0 / 出度 0 列表
 
@@ -163,7 +164,7 @@ cd backend && venv/Scripts/python.exe scripts/inspect_graph_quality.py          
 
 > **GQ-1（写入层精确同名合并）、GQ-2（嵌入失败不得静默）、GQ-3（质检脚本）已于 2026-09-20 落地**，
 > 归档在 `done.md` §4.3；判重口径、去重状态语义、脚本用法见该节与本文 §0.1。
-> 未决：**欠费**（§5.1）—— 不充值则 L3 语义去重只剩 hash 降级或完全不可用（现在至少不再静默）。
+> 已决：**欠费已解除**（2026-09-26 用户确认充值）—— L3 语义去重恢复可用，详见 §5.1。
 
 - [ ] **GQ-4 一次性合并已存在的重复节点**（工具已就绪，**待用户确认执行**）
   - 落点：`backend/scripts/inspect_graph_quality.py --fix-dupes`（默认 dry-run）→ 加 `--apply` 执行
@@ -211,15 +212,21 @@ cd backend && venv/Scripts/python.exe scripts/inspect_graph_quality.py          
 - [x] **KG-D4** `mastery_events` 表 + 掌握度唯一写入点 ✅ 2026-09-23（采纳"只加事件表"：`nodes.mastery` 保留为当前值；唯一写入点收敛到 `update_node_info`，5 条改 mastery 的路径全经它并**同事务**记账；`mastery_reason`/`mastery_evidence` 默认 `manual` → 老调用方零改动；读取 `get_mastery_events()`）—— 与 GQ-8 的 `confidence` 同属"状态类字段要可审计"；**未做**：并轨时按事件重放
 - [x] **KG-D5** 图谱检索关键词兜底（嵌入失败不再等于检索全失效）+ 修 `chunker.chunk_index` 段内重复 ✅ 2026-09-23（兜底查节点本体 name/summary，非 chunks）
 - [x] **KG-D6** `edges` 唯一索引 + `created_at`/`updated_at` ✅ 2026-09-23（另有 `nodes.updated_at`，回填 = `created_at`）；存量有重复边时**只告警不阻断启动**（真实库 679 边实测重复组 0 → 索引已建成）。**未做**：无向关系归一化（当前存量无反向重复，且会改数据 → 待拍板）；`weight` 刻意暂缓（无写入方，避免重蹈 `confidence` 覆辙）
-- [ ] **KG-D7~D11**（P1）`parent_id/path` 层级、`sources` 溯源、按 relation 分策略扩跳、跨源 RRF 融合、结构化选片
+- [ ] **KG-D7~D11**（P1）~~`parent_id/path` 层级~~（**2026-09-26 起改由 `themes` 表承担**，见下方 KG-T 条目）、`sources` 溯源、按 relation 分策略扩跳、跨源 RRF 融合、结构化选片
+- [x] **KG-T1~T3 主题层级**（2026-09-26 新增）✅ 2026-09-26 落地，详见 `docs/知识图谱/知识图谱_主题层级_设计与实现方案.md`：
+  - [x] KG-T1 `themes` + `node_themes` 两表（多归属 + 主归属 + `source='human'` 保护）✅ 2026-09-26 —— 落点 `core/knowledge_graph.py`
+  - [x] KG-T2 LLM 归纳聚类落库（一次调用产课内 2 层主题树）✅ 2026-09-26 —— 落点 `core/kg_themes.py`。**真机验证**（2026-09-26，`--user 5`/「强化学习」）：三次迭代（覆盖率 42% → 99.3% → 97%），最终 L1 7 / L2 21，覆盖 302 个本科节点中 **293**；残余 2 个 L2 >30（`函数式MDP与异步动态规划(37)`、`奖励设计与状态价值分析(35)`）与 9 个未归类（其中 6 个为噪声/碎片节点 —— 与 **GQ-7**（禁碎片节点）/ **GQ-12**（清历史噪声）同源）。详见 `docs/知识图谱/知识图谱_主题层级_设计与实现方案.md` §9.1
+  - [x] KG-T3 建图后触发 + 手动重建 API ✅ 2026-09-26 —— 落点 `kb/graph_generator.py` / `api/v1/knowledge.py`
+  - [x] KG-T4 前端地图式下钻 ✅ 2026-09-26 —— 省/市折叠（**锚点保留式**：点击大节点展开/收起同一交互，父节点位置稳定）+ 边"向上卷"（同点丢弃、同对合并、线宽随条数）+ 归属虚线边；落点 `frontend/src/utils/themeCollapse.js` / `ForceGraph.vue` / `stores/chatStore.js` / `views/HomeView.vue`，后端补 `KnowledgeGraph.get_primary_theme_map`。自检 `node frontend/scripts/check-theme-collapse.mjs`。**未做**：市层详情面板（暂用双击知识点详情）
+  - 与 GQ-9 的关系：层级分组由 `themes` 承担，`board` 去留待评估
 - [ ] **KG-D12~D15**（P2）FTS5、`confidence` 赋能或删列、向量改 BLOB、`quiz.questions.node_id` 改名
 
 ---
 
 ## 5. 待确认（需用户拍板）
 
-1. **是否充值阿里 embedding**？不充 → L3 语义去重、kb 混合检索、RAG 向量检索长期降级，只能靠 L1/L2（字符串层）兜底。
-   **2026-09-20 复测仍是欠费**：`Error code: 400 … 'type': 'Arrearage'`（`ApiEmbedder.embed()` → `EMBED_EMPTY`）。
+1. **是否充值阿里 embedding**？**已解决：2026-09-26 用户确认充值** → L3 语义去重、kb 混合检索、RAG 向量检索的欠费降级全部解除。
+   （历史记录：2026-09-20 复测仍为欠费，`Error code: 400 … 'type': 'Arrearage'`；`ApiEmbedder.embed()` → `EMBED_EMPTY`。）
    含义：GQ-1 落地后**字面同名**已被挡住，但「栈/堆栈」这类**同义不同名**仍会各建一个节点
    —— 区别是现在会带 `dedup_status: unavailable` 出来（不再静默）。
 2. **深度 vs 成本的取舍**：GQ-5/6 会改变单次建图耗时与 token 量，是否接受"一次建图更慢但质量更高"？

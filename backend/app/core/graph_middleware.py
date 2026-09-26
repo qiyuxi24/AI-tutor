@@ -11,11 +11,10 @@
     因此可独立测试、可复用（图谱页/学习路径/对话上下文均可调用）。
 
 支持粒度（按需返回，粒度逐级细化）：
-    scope="subjects"       → 全部学科列表（轻量，替代原 /knowledge/subjects）
-    scope="boards"         → 指定学科下的板块列表（含节点数/掌握度统计）
-    scope="graph"          → 指定板块的局部子图（nodes + edges）
-    scope="subject"        → 整学科的图（当未指定板块，或板块为空时的兜底）
-    subject=未分类          → 无学科归属的节点及其边（见 SUBJECT_UNCLASSIFIED）
+    学科列表        → 由 compute_stats 的 by_subject 提供（无独立端点）
+    list_boards     → 指定学科下的板块列表（含节点数/掌握度统计）
+    slice_graph     → 整学科图（只给 subject）/ 板块局部子图（subject + board）
+    SUBJECT_UNCLASSIFIED → 无学科归属的节点及其边（见该常量）
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from __future__ import annotations
 from typing import Optional
 
 # 合成学科名：无学科归属的节点（tags 中无学科标签）在统计与切片中的统一分组名。
-# 不是真实学科，因此不出现在 get_subjects() / list_subjects() 里。
+# 不是真实学科，因此不出现在 get_subjects() 里。
 SUBJECT_UNCLASSIFIED = "未分类"
 
 
@@ -86,11 +85,6 @@ def slice_graph(kg, subject: Optional[str] = None,
         "subject": subject, "board": board or None,
         "node_count": len(nodes), "edge_count": len(edges),
     }
-
-
-def list_subjects(kg) -> list[str]:
-    """返回当前用户所有学科（轻量接口，供学科选择器/板块导航使用）"""
-    return kg.get_subjects()
 
 
 def list_boards(kg, subject: str) -> list[dict]:

@@ -3,11 +3,15 @@
 判重口径三处一致：写入层并轨（`KnowledgeGraph.find_node_by_name`）、Agent 写路径、
 以及本脚本的存量体检 —— 所以这里锁的是"归一化 + 同学科 + 同用户"这三条边界。
 """
+import sqlite3
+
 from app.core.knowledge_graph import KnowledgeGraph
 from scripts.inspect_graph_quality import (
+    audit,
     dupe_groups,
     fuzzy_pairs,
     load_graph,
+    load_theme_coverage,
     merge_dupes,
     plan_merge,
 )
@@ -97,3 +101,142 @@ def test_merge_dupes_redirects_edges_and_deletes_redundant(tmp_path):
         assert "正文B" in after.get_node_content_preview("queue", max_chars=10_000)
     finally:
         after.close()
+
+
+# ════════════════════════════════════════════
+#  合并的级联陷阱（KG-T1 主题 / KG-D3 别名 / KG-D4 掌握度）
+# ════════════════════════════════════════════
+
+def _two_dupes(tmp_path):
+    """含 users + 两个同名节点（queue 有正文→保留者，queue_v2 无正文→被并）。
+
+    返回 (打开的 KnowledgeGraph, keep_id, drop_id)，调用方补完数据后自行 close()。
+    """
+    kg = KnowledgeGraph(user_id=1, data_dir=tmp_path)
+    with kg._conn:
+        kg._conn.execute(
+            "INSERT OR IGNORE INTO users (id, username, password_hash) VALUES (1, 'w', 'x')")
+    kg.create_node_with_content({"id": "queue", "name": "队列", "tags": ["数据结构"]},
+                                "正文A", origin="book")
+    kg.add_node({"id": "queue_v2", "name": "队列", "tags": ["数据结构"]})
+    return kg, "queue", "queue_v2"
+
+
+def test_merge_dupes_moves_theme_assignments(tmp_path):
+    """node_themes 随节点级联删除 —— 合并必须先搬到保留者，并归一化唯一主归属（AC-T3）"""
+    kg, keep_id, drop_id = _two_dupes(tmp_path)
+    tid = kg.create_theme("数据结构", "线性结构", 1)
+    kg.set_node_themes(drop_id, [{"theme_id": tid, "weight": 2.0, "is_primary": True}])
+    kg.close()
+
+    db_path = tmp_path / "knowledge.db"
+    nodes, _ = load_graph(db_path)
+    stats = merge_dupes(db_path, plan_merge(dupe_groups(nodes), tmp_path / "nodes"))
+
+    assert stats["themes_moved"] == 1
+    after = KnowledgeGraph(user_id=1, data_dir=tmp_path)
+    try:
+        assert [t["theme_id"] for t in after.get_node_themes(keep_id)] == [tid], "归属要转移到保留者"
+        assert after._conn.execute(
+            "SELECT COUNT(*) FROM node_themes WHERE node_id = ? AND is_primary = 1",
+            (keep_id,)).fetchone()[0] == 1, "每节点至多一个主归属（AC-T3）"
+        assert after._conn.execute(
+            "SELECT COUNT(*) FROM node_themes WHERE node_id = ?",
+            (drop_id,)).fetchone()[0] == 0, "被并节点的归属行随节点删除"
+    finally:
+        after.close()
+
+
+def test_merge_dupes_keeps_human_primary_single(tmp_path):
+    """保留者已有 human 主归属时，重定向后仍恰好 1 个主归属，且人工主归属优先"""
+    kg, keep_id, drop_id = _two_dupes(tmp_path)
+    human_t = kg.create_theme("数据结构", "人工主题", 1)
+    ai_t = kg.create_theme("数据结构", "AI主题", 1)
+    kg.set_node_themes(keep_id, [{"theme_id": human_t, "weight": 1.0, "is_primary": True}],
+                       source="human")
+    kg.set_node_themes(drop_id, [{"theme_id": ai_t, "weight": 9.0, "is_primary": True}])
+    kg.close()
+
+    db_path = tmp_path / "knowledge.db"
+    nodes, _ = load_graph(db_path)
+    merge_dupes(db_path, plan_merge(dupe_groups(nodes), tmp_path / "nodes"))
+
+    after = KnowledgeGraph(user_id=1, data_dir=tmp_path)
+    try:
+        rows = after._conn.execute(
+            "SELECT theme_id FROM node_themes WHERE node_id = ? AND is_primary = 1",
+            (keep_id,)).fetchall()
+        assert len(rows) == 1, "重定向后仍恰好 1 个主归属"
+        assert rows[0]["theme_id"] == human_t, "human 主归属优先保留"
+        assert {t["theme_id"] for t in after.get_node_themes(keep_id)} == {human_t, ai_t}
+    finally:
+        after.close()
+
+
+def test_merge_dupes_preserves_mastery_and_aliases(tmp_path):
+    """合并不得丢学习状态：掌握度取较大值（记事件），别名改指保留者、不留悬空"""
+    kg, keep_id, drop_id = _two_dupes(tmp_path)
+    kg.update_node_info(keep_id, {"mastery": 20}, caller="human")
+    kg.update_node_info(drop_id, {"mastery": 70}, caller="human")
+    kg.register_alias("排队别名", drop_id, source="ai")
+    kg.close()
+
+    db_path = tmp_path / "knowledge.db"
+    nodes, _ = load_graph(db_path)
+    stats = merge_dupes(db_path, plan_merge(dupe_groups(nodes), tmp_path / "nodes"))
+
+    assert stats["mastery_raised"] == 1
+    assert stats["aliases_moved"] == 1
+    assert stats["mastery_events_dropped"] == 1  # drop 的 1 条事件随节点删除（可观测计数）
+    after = KnowledgeGraph(user_id=1, data_dir=tmp_path)
+    try:
+        assert after.get_node(keep_id)["mastery"] == 70, "保留者掌握度抬到两者较大值"
+        aliases = {r["alias_key"] for r in after._conn.execute(
+            "SELECT alias_key FROM node_aliases WHERE node_id = ?", (keep_id,)).fetchall()}
+        assert "排队别名" in aliases, "被并节点的别名改指保留者"
+        assert after._conn.execute(
+            "SELECT COUNT(*) FROM node_aliases WHERE node_id = ?",
+            (drop_id,)).fetchone()[0] == 0
+    finally:
+        after.close()
+
+
+# ════════════════════════════════════════════
+#  主题覆盖率（AC-T2）与老库容错
+# ════════════════════════════════════════════
+
+def test_audit_reports_theme_coverage(tmp_path):
+    """体检要报主题覆盖率：有 node_themes 记录的节点数 / 带主归属者"""
+    kg, keep_id, _ = _two_dupes(tmp_path)
+    tid = kg.create_theme("数据结构", "线性结构", 1)
+    kg.set_node_themes(keep_id, [{"theme_id": tid, "weight": 1.0, "is_primary": True}])
+    kg.close()
+
+    db_path = tmp_path / "knowledge.db"
+    nodes, edges = load_graph(db_path)
+    m = audit(nodes, edges, tmp_path / "nodes", load_theme_coverage(db_path))
+
+    assert m["themes_available"] is True
+    assert m["themes_covered"] == 1
+    assert m["themes_primary"] == 1
+
+
+def test_audit_tolerates_old_db_without_theme_tables(tmp_path):
+    """老库没有 themes/node_themes 表：覆盖率标记不可用，且不抛异常（体检常查老库）"""
+    db = tmp_path / "knowledge.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE nodes (id TEXT PRIMARY KEY, name TEXT, tags TEXT DEFAULT '[]',"
+                 " user_id INTEGER, mastery INTEGER DEFAULT 0)")
+    conn.execute("CREATE TABLE edges (id INTEGER PRIMARY KEY, from_node TEXT,"
+                 " to_node TEXT, relation TEXT)")
+    conn.execute("INSERT INTO nodes (id, name, tags, user_id)"
+                 " VALUES ('a', '队列', '[\"数据结构\"]', 1)")
+    conn.commit()
+    conn.close()
+
+    nodes, edges = load_graph(db)
+    cov = load_theme_coverage(db)
+    assert cov["available"] is False
+
+    m = audit(nodes, edges, tmp_path / "nodes", cov)  # 不抛异常
+    assert m["themes_available"] is False
