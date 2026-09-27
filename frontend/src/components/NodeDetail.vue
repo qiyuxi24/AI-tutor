@@ -23,6 +23,7 @@ import { ref, computed, watch } from 'vue'
 import { renderMarkdown } from '../utils/markdown.js'
 // ★ 不再直接 import apiClient —— 保存操作由父组件通过 Store 处理
 import { formatError } from '../utils/errorCodes.js'
+import { useDetailPrefs } from '../utils/detailPrefs.js'
 
 const props = defineProps({
   nodeInfo: { type: Object, default: null },
@@ -37,6 +38,14 @@ const saving = ref(false)
 const saveError = ref('')
 const masterySlider = ref(0)
 const masterySaving = ref(false)
+
+/* 面板尺寸 / 正文字号来自设置页（模块级单例，改设置即时生效） */
+const { prefs: detailPrefs } = useDetailPrefs()
+const panelStyle = computed(() => ({
+  width: `min(${Math.round(680 * detailPrefs.value.scale)}px, 95vw)`,
+  maxHeight: `${Math.min(85 * detailPrefs.value.scale, 95)}vh`,
+  '--detail-font-size': `${detailPrefs.value.fontSize}px`,
+}))
 
 const htmlContent = computed(() => renderMarkdown(props.nodeInfo?.content))
 // 编辑模式右侧实时预览（与阅读模式共用同一渲染管线）
@@ -118,7 +127,7 @@ async function handleMasteryChange() {
 <template>
   <Transition name="modal">
     <div v-if="visible && nodeInfo" class="modal-overlay" @click.self="emit('close')">
-      <div class="modal-panel">
+      <div class="modal-panel" :style="panelStyle">
         <!-- 顶部栏 -->
         <div class="modal-header">
           <h2 class="modal-title">{{ nodeInfo.name }}</h2>
@@ -251,11 +260,12 @@ async function handleMasteryChange() {
 }
 
 .modal-panel {
-  width: min(680px, 90vw); max-height: 85vh;
+  width: min(680px, 95vw); max-height: 85vh;
   background: var(--color-bg-primary); border-radius: 14px;
   display: flex; flex-direction: column;
   box-shadow: var(--shadow-popup);
   overflow: hidden;
+  transition: width 0.15s ease, max-height 0.15s ease;
 }
 
 .modal-header {
@@ -264,8 +274,9 @@ async function handleMasteryChange() {
   flex-shrink: 0;
 }
 
-.modal-title { font-size: 18px; font-weight: 700; color: var(--color-text-primary); margin: 0; }
-.modal-actions { display: flex; gap: 8px; }
+/* min-width:0 + ellipsis：窄屏时标题先收缩，别把右侧按钮挤出面板 */
+.modal-title { font-size: 18px; font-weight: 700; color: var(--color-text-primary); margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-actions { display: flex; align-items: center; gap: 8px; }
 
 .action-btn {
   display: flex; align-items: center; gap: 5px;
@@ -324,7 +335,7 @@ async function handleMasteryChange() {
   width: 100%; height: 100%; min-height: 320px; padding: 14px;
   border: 1px solid var(--color-border); border-radius: 10px;
   font-family: 'Consolas', 'Courier New', monospace;
-  font-size: 14px; line-height: 1.6; resize: vertical;
+  font-size: var(--detail-font-size, 14px); line-height: 1.6; resize: vertical;
   color: var(--color-text-primary); background: var(--color-bg-secondary);
 }
 .edit-textarea:focus { outline: none; border-color: var(--color-accent); }
@@ -338,19 +349,19 @@ async function handleMasteryChange() {
 }
 .save-error { grid-column: 1 / -1; color: var(--color-red); font-size: 13px; margin: 0; }
 
-/* Markdown */
+/* Markdown —— 字号来自设置页（--detail-font-size），标题/代码用相对单位同步缩放 */
 .markdown-body {
   flex: 1; overflow-y: auto; padding: 20px 24px;
-  font-size: 14px; line-height: 1.7; color: var(--color-text-primary);
+  font-size: var(--detail-font-size, 14px); line-height: 1.7; color: var(--color-text-primary);
 }
 .markdown-body :deep(p) { margin: 0 0 10px; }
 .markdown-body :deep(strong) { font-weight: 600; }
-.markdown-body :deep(code) { background: var(--color-bg-surface); padding: 2px 6px; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 13px; }
-.markdown-body :deep(pre) { background: var(--color-bg-tertiary); color: var(--color-text-primary); padding: 14px 16px; border-radius: 10px; overflow-x: auto; margin: 12px 0; font-size: 13px; }
+.markdown-body :deep(code) { background: var(--color-bg-surface); padding: 2px 6px; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 0.93em; }
+.markdown-body :deep(pre) { background: var(--color-bg-tertiary); color: var(--color-text-primary); padding: 14px 16px; border-radius: 10px; overflow-x: auto; margin: 12px 0; font-size: 0.93em; }
 .markdown-body :deep(pre code) { background: transparent; padding: 0; color: inherit; }
 .markdown-body :deep(h1), .markdown-body :deep(h2), .markdown-body :deep(h3) { margin: 18px 0 8px; font-weight: 600; color: var(--color-text-primary); }
-.markdown-body :deep(h1) { font-size: 20px; }
-.markdown-body :deep(h2) { font-size: 17px; }
+.markdown-body :deep(h1) { font-size: 1.43em; }
+.markdown-body :deep(h2) { font-size: 1.21em; }
 .markdown-body :deep(blockquote) { border-left: 3px solid var(--color-accent); padding-left: 14px; margin: 12px 0; color: var(--color-text-secondary); }
 .markdown-body :deep(ul), .markdown-body :deep(ol) { padding-left: 20px; margin: 8px 0; }
 .empty-content { color: var(--color-text-muted); font-style: italic; text-align: center; padding: 40px 0; }

@@ -50,10 +50,9 @@ export const getKbContext = (nodeId, maxDepth = null) => {
 /** 知识库索引统计 */
 export const getKbStats = () => apiClient.get('/api/v1/kb/stats')
 
-/** 从学科书籍生成知识图谱（AI 直接写库） */
-export const generateKbGraph = (subject, nodeIds, mode = 'subject') =>
+/** 从学科书籍生成知识图谱（AI 直接写库）；勾选文件夹会把新节点归入该板块 */
+export const generateKbGraph = (subject, nodeIds) =>
   apiClient.post('/api/v1/kb/graph/generate', {
     subject,
-    mode,
     node_ids: nodeIds,
   }, { timeout: 300000 })  // 生成可能较慢

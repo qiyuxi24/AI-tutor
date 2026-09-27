@@ -1,8 +1,12 @@
 <script setup>
 /**
- * ForceGraph.vue — D3 力导向知识图谱组件
+ * ForceGraph.vue — 知识图谱视图外壳（UI 层）
  *
- * 职责：纯渲染 + 用户交互，不直接调用后端 API。
+ * 渲染内核已独立到 `utils/forceGraphEngine.js`（D3 力场 / 增量 join / 拖拽·缩放 / 连线拖线），
+ * 本组件只负责：
+ *   1. 把 store 的可见图与高亮态喂给内核；
+ *   2. 右键菜单 → 编辑弹窗 / 展开合并 / 建边删边 的交互编排；
+ *   3. 覆盖层：加载 / 错误 / 空态、缩放控件、图例 + 学习路径开关、更新提示。
  *
  * 设计风格：Obsidian 极简 —— 纯色节点、细线边、无光晕/渐变/装饰。
  *
@@ -10,12 +14,13 @@
  *   Store.knowledgeNodes/Edges → (props) → ForceGraph → (emit: graph-action) → HomeView
  */
 
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import * as d3 from 'd3'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import ContextMenu from './ContextMenu.vue'
 import EditDialog from './EditDialog.vue'
 import { notifyError } from '../utils/feedback'
-import { themeRadius } from '../utils/themeCollapse'
+import { useGraphForces } from '../utils/graphForces'
+import { useContextMenu } from '../utils/contextMenu'
+import { createForceGraphEngine } from '../utils/forceGraphEngine'
 
 /* ================================================================
    组件 Props
@@ -49,648 +54,108 @@ const emit = defineEmits([
    响应式状态
    ================================================================ */
 const containerRef = ref(null)
-
+const currentZoom = ref(1)
 const graphChanged = ref(false)
 const changeTimer = ref(null)
 const autoRefreshTimer = ref(null)
-const currentZoom = ref(1)
 
-const menuVisible = ref(false)
-const menuX = ref(0)
-const menuY = ref(0)
-const menuTargetType = ref('canvas')
-const menuTargetData = ref(null)
+// 右键菜单状态与开关：与侧栏共用同一套实现（utils/contextMenu.js），
+// 菜单条目在模板的 ContextMenu 插槽里按 targetType 给出。
+const {
+  visible: menuVisible,
+  x: menuX,
+  y: menuY,
+  targetType: menuTargetType,
+  targetData: menuTargetData,
+  open: showContextMenu,
+  close: closeMenu,
+} = useContextMenu()
 
 const dialogVisible = ref(false)
 const dialogMode = ref('create-node')
 const dialogData = ref({})
 
-const drawingEdgeMode = ref(false)
-const drawingSourceId = ref(null)
-let drawingWatchStop = null   // 跟踪 handleDrawingTarget 中创建的 watch，防止竞态泄漏
-
-// ── 科技树联动状态 ──
+// ── 科技树联动 ──
 // 本地"显示学习路径"开关；最终生效值 = 本地开关 OR 外部 props.showPath
 const pathVisible = ref(false)
 const pathVisibleFinal = computed(() => pathVisible.value || props.showPath)
-// 主题折叠模式：可见图里含主题聚合节点（由 store 的可见图计算产出，见 utils/themeCollapse.js）
-const themeModeActive = computed(() => (props.nodes || []).some(n => n.isTheme))
+// 力导向参数（设置页可调；模块级单例，改参数即时生效，见 utils/graphForces.js）
+const { forces } = useGraphForces()
 
 /* ================================================================
-   D3 核心对象引用（不响应式）
+   渲染内核接线
    ================================================================ */
-let simulation = null
-let svgSelection = null
-let zoomBehavior = null
-let zoomContainer = null
-let edgeHitLines = null
-let drawingTempLine = null
-let drawingMouseMoveHandler = null
-let nodeSelection = null   // 当前渲染的节点 group（路径高亮 / hover 恢复用）
-let linkSelection = null   // 当前渲染的边（路径高亮 / hover 恢复用）
-// 节点坐标缓存：折叠/展开会重建图，复用旧坐标可避免整张图重新洗牌（"节点乱飞"）
-const lastPositions = new Map()
+let engine = null
 
-/* ================================================================
-   工具函数
-   ================================================================ */
-
-/**
- * 节点颜色：掌握度四档（科技树语义）
- *   0      → 灰色  未开始（科技树暗色节点）
- *   1-29   → 红色  薄弱（刚开始学）
- *   30-69  → 黄色  学习中
- *   70-100 → 绿色  已掌握
- */
-const NODE_RADIUS = 16
-const NODE_COLOR_UNSTARTED = 'var(--color-graph-node)'
-const NODE_COLOR_WEAK = 'var(--color-red)'
-const NODE_COLOR_LEARNING = 'var(--color-yellow)'
-const NODE_COLOR_MASTERED = 'var(--color-green)'
-
-/** 掌握度分档：0 未开始 / 1 薄弱(1-29) / 2 学习中(30-69) / 3 已掌握(≥70)
- *  阈值契约 = 后端 graph_middleware.mastery_bucket（唯一真值源）；改这里必须同步改后端 */
-function masteryLevel(mastery) {
-  if (mastery == null || mastery === 0) return 0
-  if (mastery < 30) return 1
-  if (mastery < 70) return 2
-  return 3
-}
-
-/**
- * 关系类型 → 中文短标签
- */
-const RELATION_LABELS = {
-  prerequisite: '前置知识',
-  related: '相关概念',
-  confusion: '易混淆',
-  extension: '扩展延伸',
-}
-
-/**
- * 关系类型 → 标签颜色（淡色调，区分不同类型）
- */
-const RELATION_COLORS = {
-  prerequisite: 'var(--color-blue)',
-  related: 'var(--color-green)',
-  confusion: 'var(--color-orange)',
-  extension: 'var(--color-purple)',
-}
-
-function edgeDisplayLabel(relation) {
-  return RELATION_LABELS[relation] || relation || ''
-}
-
-function edgeDisplayColor(relation) {
-  return RELATION_COLORS[relation] || 'var(--color-text-muted)'
-}
-
-function nodeFill(mastery) {
-  const level = masteryLevel(mastery)
-  if (level === 0) return NODE_COLOR_UNSTARTED
-  if (level === 1) return NODE_COLOR_WEAK
-  if (level === 2) return NODE_COLOR_LEARNING
-  return NODE_COLOR_MASTERED
-}
-
-/* ── 学习路径（科技树）辅助函数 ──
-   props.learningPath 支持两种形态：字符串 id 数组 或 节点对象数组
-   isPathEdge 要求边的 source→target 与路径顺序一致（前置在前）才高亮 */
-function getPathOrder(id) {
-  const lp = props.learningPath || []
-  for (let i = 0; i < lp.length; i++) {
-    const item = lp[i]
-    if (item === id || (item && item.id === id)) return i
+/** 喂给内核的高亮态（学习路径开关 / 路径数据 / 推荐节点） */
+function highlightState() {
+  return {
+    pathVisible: pathVisibleFinal.value,
+    learningPath: props.learningPath,
+    nextNodeId: props.nextNodeId,
   }
-  return -1
 }
 
-function isPathNode(id) {
-  return getPathOrder(id) >= 0
-}
-
-function isPathEdge(edge) {
-  const s = edge.source?.id ?? edge.source
-  const t = edge.target?.id ?? edge.target
-  const si = getPathOrder(s)
-  const ti = getPathOrder(t)
-  // 与路径方向一致（前置 → 后置）的边才属于"该走的路"
-  return si >= 0 && ti >= 0 && si < ti
-}
-
-/** 边默认样式（供初始渲染与 hover 恢复共用）
- *  - 归属边（锚点 → 子节点）：细虚线，表达"归属"而非关系；
- *  - 聚合边（多条边卷到同一对主题）：线宽随合并条数增长（§5.2）。 */
-function isBelongLink(l) { return l.kind === 'belong' }
-function linkIsPath(l) { return pathVisibleFinal.value && isPathEdge(l) }
-function linkDefaultColor(l) {
-  if (isBelongLink(l)) return 'var(--color-border)'
-  return linkIsPath(l) ? 'var(--color-accent)' : 'var(--color-graph-edge)'
-}
-function linkDefaultWidth(l) {
-  if (isBelongLink(l)) return 1
-  if (l.kind === 'agg') return Math.min(4, 1.2 + Math.log2(l.count || 1) * 0.9)
-  return linkIsPath(l) ? 2.6 : 1.2
-}
-function linkDefaultOpacity(l) {
-  if (isBelongLink(l)) return 0.55
-  return linkIsPath(l) ? 0.9 : 0.4
-}
-function nodeBodyStroke(d) {
-  if (pathVisibleFinal.value && isPathNode(d.id)) return 'var(--color-accent)'
-  return nodeFill(d.mastery)
-}
-function nodeBodyStrokeWidth(d) {
-  return pathVisibleFinal.value && isPathNode(d.id) ? 2.6 : 1
-}
-function nodeBodyStrokeOpacity(d) {
-  return pathVisibleFinal.value && isPathNode(d.id) ? 0.95 : 0.3
-}
-
-/** 按当前路径状态统一刷新边与节点样式（初始渲染 / 开关切换 / hover 恢复均走这里） */
-function applyPathHighlight() {
-  if (!nodeSelection || !linkSelection) return
-  linkSelection
-    .attr('stroke', linkDefaultColor)
-    .attr('stroke-width', linkDefaultWidth)
-    .attr('stroke-opacity', linkDefaultOpacity)
-  nodeSelection.select('.node-body')
-    .attr('stroke', nodeBodyStroke)
-    .attr('stroke-width', nodeBodyStrokeWidth)
-    .attr('stroke-opacity', nodeBodyStrokeOpacity)
-}
-
-function nodeOpacity(mastery) {
-  if (mastery == null || mastery === 0) return 0.6
-  // mastery 0→100 映射 opacity 0.5→1.0
-  return 0.5 + Math.min(100, Math.max(1, mastery)) / 200
-}
-
-/**
- * 节点半径：主题聚合节点按成员数放大 —— "单个大节点"一眼可辨；
- * 普通知识点固定 NODE_RADIUS。点击主题节点即展开/收起它自己。
- */
-function nodeRadius(d) {
-  return d && d.isTheme ? themeRadius(d.childCount) : NODE_RADIUS
-}
-
-/* ================================================================
-   图谱渲染核心
-   ================================================================ */
-function initForceGraph(nodes, links) {
-  if (!containerRef.value) return
-
-  if (simulation) {
-    simulation.stop()
-    simulation = null
-  }
-
-  // 折叠/展开只改变可见节点集 → 复用旧坐标，让新节点从父节点附近生长
-  const hasCachedPos = nodes.some(n => lastPositions.has(n.id))
-  for (const n of nodes) {
-    const p = lastPositions.get(n.id)
-    if (p) { n.x = p.x; n.y = p.y }
-  }
-
-  const { width, height } = containerRef.value.getBoundingClientRect()
-
-  d3.select(containerRef.value).select('svg').remove()
-
-  // ── SVG ──
-  svgSelection = d3.select(containerRef.value)
-    .append('svg')
-    .attr('width', '100%')
-    .attr('height', '100%')
-    .style('display', 'block')
-
-  // ── 箭头标记（极简三角） ──
-  svgSelection.append('defs')
-    .append('marker')
-    .attr('id', 'arrowhead')
-    .attr('viewBox', '0 -4 8 8')
-    .attr('refX', 20).attr('refY', 0)
-    .attr('orient', 'auto')
-    .attr('markerWidth', 4).attr('markerHeight', 4)
-    .append('path')
-    .attr('d', 'M 0,-3.5 L 7,0 L 0,3.5')
-    .attr('fill', 'var(--color-graph-edge)')
-
-  // ── Zoom ──
-  zoomContainer = svgSelection.append('g')
-    .attr('class', 'zoom-container')
-
-  zoomBehavior = d3.zoom()
-    .scaleExtent([0.08, 5])
-    .filter((event) => {
-      if (event.type === 'wheel' && event.ctrlKey) return false
-      if (event.type === 'dblclick') return false
-      if (event.type === 'contextmenu') return false
-      return true
-    })
-    .on('zoom', (event) => {
-      zoomContainer.attr('transform', event.transform)
-      currentZoom.value = Math.round(event.transform.k * 100) / 100
-    })
-
-  svgSelection.call(zoomBehavior)
-
-  // ── 右键事件（原生 capture，绕过 D3 zoom） ──
-  const svgNode = svgSelection.node()
-  svgNode.addEventListener('contextmenu', (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-
-    if (drawingEdgeMode.value) {
-      clearDrawingMode()
-      return
-    }
-
-    const target = event.target
-    const tag = target.tagName?.toLowerCase()
-
-    if (tag === 'circle' && target.closest('.node')) {
-      const nodeGroup = target.closest('.node')
-      const nodeData = d3.select(nodeGroup).datum()
-      // 主题聚合节点不是真实知识点 → 落回画布菜单，不给"编辑/删除节点"
-      if (nodeData && !nodeData.isTheme) {
-        showContextMenu(event.clientX, event.clientY, 'node', nodeData)
-        return
-      }
-    }
-
-    if (target.closest('.edge-hit-lines line')) {
-      const lineEl = target.closest('.edge-hit-lines line')
-      const edgeData = d3.select(lineEl).datum()
-      if (edgeData) {
-        showContextMenu(event.clientX, event.clientY, 'edge', { edge: edgeData })
-        return
-      }
-    }
-
-    showContextMenu(event.clientX, event.clientY, 'canvas', null)
-  }, { capture: true })
-
-  // ── 力场仿真 ──
-  // 归属边（锚点 → 子节点）短且强 → 子节点围绕父节点聚拢，展开像"花开"
-  simulation = d3.forceSimulation(nodes)
-    .alpha(hasCachedPos ? 0.35 : 1)
-    .alphaDecay(0.02)
-    .velocityDecay(0.35)
-    .force('link', d3.forceLink(links)
-      .id(d => d.id)
-      .distance(l => (isBelongLink(l) ? 90 : 140))
-      .strength(l => (isBelongLink(l) ? 0.9 : 0.3))
-    )
-    .force('charge', d3.forceManyBody()
-      .strength(-250)
-      .distanceMax(500)
-    )
-    .force('center', d3.forceCenter(width / 2, height / 2).strength(0.06))
-    .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 12).strength(0.6))
-    .force('x', d3.forceX(width / 2).strength(0.02))
-    .force('y', d3.forceY(height / 2).strength(0.02))
-
-  // ── 连线（可视） ──
-  const link = zoomContainer.append('g')
-    .attr('class', 'links')
-    .selectAll('line')
-    .data(links)
-    .enter()
-    .append('line')
-    .attr('stroke', linkDefaultColor)
-    .attr('stroke-width', linkDefaultWidth)
-    .attr('stroke-opacity', linkDefaultOpacity)
-    // 归属边：虚线 + 无箭头（表达层级归属，不是知识点之间的关系）
-    .attr('stroke-dasharray', l => (isBelongLink(l) ? '4,4' : null))
-    .attr('marker-end', l => (isBelongLink(l) ? null : 'url(#arrowhead)'))
-    .style('pointer-events', 'none')
-
-  linkSelection = link
-
-  // ── 连线（透明击中区） ──
-  const hitGroup = zoomContainer.append('g')
-    .attr('class', 'edge-hit-lines')
-
-  const hitLines = hitGroup.selectAll('line')
-    .data(links)
-    .enter()
-    .append('line')
-    .attr('stroke', 'transparent')
-    .attr('stroke-width', 14)
-    .style('cursor', 'pointer')
-    .style('pointer-events', 'all')
-
-  edgeHitLines = hitLines
-
-  // ── 连线标签 ──
-  const linkLabel = zoomContainer.append('g')
-    .attr('class', 'link-labels')
-    .selectAll('text')
-    .data(links)
-    .enter()
-    .append('text')
-    .attr('font-size', 10)
-    .attr('font-weight', '500')
-    .attr('fill', d => edgeDisplayColor(d.relation))
-    .attr('text-anchor', 'middle')
-    .text(d => edgeDisplayLabel(d.relation))
-    .style('pointer-events', 'none')
-    .style('user-select', 'none')
-
-  // ── 节点组 ──
-  const node = zoomContainer.append('g')
-    .attr('class', 'nodes')
-    .selectAll('g')
-    .data(nodes)
-    .enter()
-    .append('g')
-    .attr('class', 'node')
-    .style('cursor', 'grab')
-
-  // 节点拖拽
-  node.call(d3.drag()
-    .on('start', dragstarted)
-    .on('drag', dragged)
-    .on('end', dragended)
-    .filter((event) => event.button === 0)
-  )
-
-  // ── 节点圆形（科技树四档配色 + 路径描边；主题聚合节点按成员数放大） ──
-  node.append('circle')
-    .attr('class', 'node-body')
-    .attr('r', nodeRadius)
-    .attr('fill', d => nodeFill(d.mastery))
-    .attr('opacity', d => nodeOpacity(d.mastery))
-    .attr('stroke', nodeBodyStroke)
-    .attr('stroke-width', nodeBodyStrokeWidth)
-    .attr('stroke-opacity', nodeBodyStrokeOpacity)
-    // 折叠的主题节点用虚线环提示"还能展开"；展开后成为实线锚点（点击可收起）
-    .attr('stroke-dasharray', d => (d.isTheme && !d.expanded ? '4,3' : null))
-
-  // ── 薄弱点脉冲环（下一步推荐节点，扩散动画提示"从这里学起"） ──
-  node.append('circle')
-    .attr('class', 'node-pulse')
-    .attr('r', nodeRadius)
-    .attr('fill', 'none')
-    .attr('stroke', 'var(--color-accent)')
-    .attr('stroke-width', 2)
-    .style('pointer-events', 'none')
-    .style('display', d => (d.id === props.nextNodeId ? null : 'none'))
-
-  nodeSelection = node
-
-  // ── 节点名称（标签在节点右侧，Obsidian 风格；聚合节点带成员数） ──
-  node.append('text')
-    .attr('class', 'node-label')
-    .attr('dx', d => nodeRadius(d) + 8)
-    .attr('dy', 4)
-    .attr('text-anchor', 'start')
-    .attr('fill', 'var(--color-text-primary)')
-    .attr('font-size', 12)
-    .attr('font-weight', '500')
-    .text(d => (d.isTheme ? `${d.name} (${d.childCount})` : d.name))
-    .style('pointer-events', 'none')
-    .style('user-select', 'none')
-
-  // ── 折叠徽标：主题节点上方 ＋（可展开）/ −（可收起）——点击节点即切换 ──
-  node.filter(d => d.isTheme).append('text')
-    .attr('class', 'node-fold')
-    .attr('dy', d => -nodeRadius(d) - 4)
-    .attr('text-anchor', 'middle')
-    .attr('font-size', 13)
-    .attr('font-weight', 700)
-    .attr('fill', 'var(--color-text-muted)')
-    .text(d => (d.expanded ? '−' : '＋'))
-    .style('pointer-events', 'none')
-    .style('user-select', 'none')
-
-  // ── 悬停高亮 ──
-  node.on('mouseover', function (event, d) {
-    event.stopPropagation()
-
-    // 悬停节点：放大 + 亮色描边
-    d3.select(this).select('.node-body')
-      .transition().duration(150)
-      .attr('r', nodeRadius(d) + 4)
-      .attr('stroke-width', 2)
-      .attr('stroke-opacity', 0.8)
-      .attr('stroke', 'var(--color-accent)')
-
-    d3.select(this).select('.node-label')
-      .transition().duration(150)
-      .attr('font-weight', '600')
-
-    // 关联边高亮
-    link
-      .transition().duration(150)
-      .attr('stroke', l =>
-        (l.source.id === d.id || l.target.id === d.id)
-          ? 'var(--color-accent)'
-          : 'var(--color-graph-edge)'
-      )
-      .attr('stroke-width', l =>
-        (l.source.id === d.id || l.target.id === d.id) ? 2 : 1.2
-      )
-      .attr('stroke-opacity', l =>
-        (l.source.id === d.id || l.target.id === d.id) ? 0.7 : 0.12
-      )
-
-    // 非关联节点淡化
-    node.select('.node-body').transition().duration(150)
-      .attr('opacity', n => {
-        if (n.id === d.id) return nodeOpacity(n.mastery)
-        const connected = links.some(l =>
-          (l.source.id === d.id && l.target.id === n.id) ||
-          (l.target.id === d.id && l.source.id === n.id)
-        )
-        return connected ? nodeOpacity(n.mastery) : 0.12
-      })
-    node.select('.node-label').transition().duration(150)
-      .attr('opacity', n => {
-        if (n.id === d.id) return 1
-        const connected = links.some(l =>
-          (l.source.id === d.id && l.target.id === n.id) ||
-          (l.target.id === d.id && l.source.id === n.id)
-        )
-        return connected ? 1 : 0.15
-      })
+onMounted(() => {
+  engine = createForceGraphEngine({
+    container: containerRef.value,
+    forces: forces.value,
+    highlight: highlightState(),
+    handlers: {
+      onNodeClick: (nodeId) => emit('node-click', nodeId),
+      onNodeDblClick: (nodeId) => emit('node-dblclick', nodeId),
+      onContextMenu: (event, type, data) => showContextMenu(event, type, data),
+      onZoomChange: (k) => { currentZoom.value = k },
+      // 点空白：收起右键菜单
+      onCanvasClick: () => { if (menuVisible.value) menuVisible.value = false },
+      onDrawTarget: handleDrawTarget,
+    },
   })
+  engine.update(props.nodes, props.edges)
+  window.addEventListener('resize', handleResize)
+  startAutoRefresh()
+})
 
-  node.on('mouseout', function (event, d) {
-    d3.select(this).select('.node-body')
-      .transition().duration(200)
-      .attr('r', nodeRadius(d))
-      .attr('stroke', nodeBodyStroke(d))
-      .attr('stroke-width', nodeBodyStrokeWidth(d))
-      .attr('stroke-opacity', nodeBodyStrokeOpacity(d))
-
-    d3.select(this).select('.node-label')
-      .transition().duration(200)
-      .attr('font-weight', '500')
-
-    node.select('.node-body').transition().duration(200)
-      .attr('opacity', n => nodeOpacity(n.mastery))
-    node.select('.node-label').transition().duration(200)
-      .attr('opacity', 1)
-
-    // hover 结束后恢复"学习路径"高亮（若已开启），避免被 hover 效果覆盖
-    link.transition().duration(200)
-      .attr('stroke', linkDefaultColor)
-      .attr('stroke-width', linkDefaultWidth)
-      .attr('stroke-opacity', linkDefaultOpacity)
-  })
-
-  // ── 点击 / 双击 ──
-  node.on('click', function (event, d) {
-    event.stopPropagation()
-    if (drawingEdgeMode.value) {
-      if (d.isTheme) return          // 聚合节点不是真实知识点，不能连线
-      handleDrawingTarget(d.id)
-      return
-    }
-    emit('node-click', d.id)
-  })
-  node.on('dblclick', function (event, d) {
-    event.stopPropagation()
-    if (d.isTheme) return            // 聚合节点没有节点详情
-    emit('node-dblclick', d.id)
-  })
-
-  svgSelection.on('click', () => {
-    if (menuVisible.value) menuVisible.value = false
-  })
-
-  // ── Tick ──
-  simulation.on('tick', () => {
-    link
-      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-      .attr('x2', d => d.target.x).attr('y2', d => d.target.y)
-
-    if (edgeHitLines) {
-      edgeHitLines
-        .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-        .attr('x2', d => d.target.x).attr('y2', d => d.target.y)
-    }
-
-    linkLabel
-      .attr('x', d => (d.source.x + d.target.x) / 2)
-      .attr('y', d => (d.source.y + d.target.y) / 2)
-
-    node.attr('transform', d => {
-      lastPositions.set(d.id, { x: d.x, y: d.y })   // 供折叠重建复用
-      return `translate(${d.x},${d.y})`
-    })
-
-    if (drawingTempLine && drawingSourceId.value) {
-      const src = simulation.nodes().find(n => n.id === drawingSourceId.value)
-      if (src) drawingTempLine.attr('x1', src.x).attr('y1', src.y)
-    }
-  })
-
-  // ── 拖拽 ──
-  function dragstarted(event, d) {
-    if (event.sourceEvent) event.sourceEvent.stopPropagation()
-    if (!event.active) simulation.alphaTarget(0.12).restart()
-    d.fx = d.x; d.fy = d.y
-    d3.select(this).style('cursor', 'grabbing')
-    d3.select(this).select('.node-body')
-      .transition().duration(100)
-      .attr('r', nodeRadius(d) + 3)
-      .attr('stroke-opacity', 0.6)
+onUnmounted(() => {
+  engine?.destroy()
+  engine = null
+  window.removeEventListener('resize', handleResize)
+  stopAutoRefresh()
+  if (changeTimer.value) {
+    clearTimeout(changeTimer.value)
+    changeTimer.value = null
   }
-  function dragged(event, d) {
-    if (event.sourceEvent) event.sourceEvent.stopPropagation()
-    d.fx = event.x; d.fy = event.y
-  }
-  function dragended(event, d) {
-    if (event.sourceEvent) event.sourceEvent.stopPropagation()
-    if (!event.active) simulation.alphaTarget(0)
-    d.fx = null; d.fy = null
-    d3.select(this).style('cursor', 'grab')
-    d3.select(this).select('.node-body')
-      .transition().duration(200)
-      .attr('r', nodeRadius(d))
-      .attr('stroke-opacity', 0.3)
-  }
-}
+})
 
-/* ================================================================
-   图谱渲染入口
-   ================================================================ */
-function renderGraph() {
-  try {
-    const nodes = (props.nodes || []).map(n => ({ ...n }))
-    const nodeIdSet = new Set(nodes.map(n => n.id))
-    // 过滤悬空边：d3.forceLink 要求边两端节点必须存在，否则初始化直接抛
-    // "node not found"。按学科/板块切片时后端会保留跨学科边（保证子图连通
-    // 性可见），其中一端节点不在当前节点集中，必须在此丢弃。
-    const links = (props.edges || [])
-      .map((e) => ({
-        source: e.source || e.from_node || e.from,
-        target: e.target || e.to_node || e.to,
-        label: e.label || '',
-        relation: e.relation || '',
-        edgeId: e.edgeId,
-        // 主题折叠元信息（utils/themeCollapse.js）：kind 区分关系/聚合/归属边
-        kind: e.kind || 'relation',
-        count: e.count || 1,
-      }))
-      .filter(l => nodeIdSet.has(l.source) && nodeIdSet.has(l.target))
-    if (nodes.length > 0 && containerRef.value) {
-      initForceGraph(nodes, links)
-    }
-  } catch (e) {
-    console.error('[ForceGraph] renderGraph 失败:', e)
-  }
-}
-
-let lastGraphFingerprint = ''
-
-function graphFingerprint(nodes, edges) {
-  // 纳入 mastery / relation / 折叠状态 / 边权：任一变化都必须触发重绘
-  const nodeIds = (nodes || [])
-    .map(n => `${n.id}:${n.mastery}:${n.isTheme ? (n.expanded ? 'E' : 'C') + n.childCount : ''}`)
-    .sort().join(',')
-  const edgeKeys = (edges || []).map(e =>
-    `${e.source || e.from_node || e.from}->${e.target || e.to_node || e.to}:${e.relation || ''}:${e.kind || ''}:${e.count || 1}`
-  ).sort().join(',')
-  return `${nodeIds}|${edgeKeys}`
-}
-
+// 数据变化 → 交给内核（内部按指纹去重，未变则不重绘）
 watch(() => [props.nodes, props.edges], () => {
-  const fp = graphFingerprint(props.nodes, props.edges)
-  if (fp !== lastGraphFingerprint) {
-    lastGraphFingerprint = fp
-    renderGraph()
-  }
+  engine?.update(props.nodes, props.edges)
 }, { deep: true })
 
 // ── 科技树联动：路径开关 / 路径数据 / 推荐节点变化时增量刷新样式（不重建布局） ──
-watch(pathVisible, () => applyPathHighlight())
-watch(() => props.showPath, () => applyPathHighlight())
-watch(() => props.learningPath, () => applyPathHighlight())
-watch(() => props.nextNodeId, () => {
-  svgSelection?.selectAll('.node-pulse')
-    .style('display', d => (d.id === props.nextNodeId ? null : 'none'))
-})
+watch(pathVisibleFinal, syncHighlight)
+watch(() => props.learningPath, syncHighlight)
+watch(() => props.nextNodeId, syncHighlight)
+function syncHighlight() {
+  engine?.setHighlight(highlightState())
+}
+
+// 设置页调参 → 立即作用于当前仿真（不重建、不重置视野）
+watch(forces, () => engine?.applyForces(forces.value), { deep: true })
+
+function handleResize() {
+  engine?.resize()
+}
 
 /* ================================================================
-   右键菜单控制
+   缩放控制
    ================================================================ */
-function showContextMenu(x, y, type, data) {
-  menuX.value = x
-  menuY.value = y
-  menuTargetType.value = type
-  menuTargetData.value = data
-  menuVisible.value = true
-}
-
-function closeMenu() {
-  menuVisible.value = false
-}
+function zoomIn() { engine?.zoomIn() }
+function zoomOut() { engine?.zoomOut() }
+function zoomReset() { engine?.zoomReset() }
 
 /* ================================================================
-   右键菜单事件 → 打开编辑弹窗
+   右键菜单事件 → 编辑弹窗 / 图操作
    ================================================================ */
 function handleCreateNode() {
   dialogMode.value = 'create-node'
@@ -705,70 +170,28 @@ function handleEditNode(nodeData) {
 }
 
 function handleAddEdgeFromNode(nodeId) {
-  startEdgeDrawing(nodeId)
+  engine?.startEdgeDrawing(nodeId)
+}
+
+function handleEditEdge(edgeData) {
+  dialogMode.value = 'edit-edge'
+  dialogData.value = { ...edgeData.edge }
+  dialogVisible.value = true
 }
 
 /* ================================================================
-   连线模式
+   连线模式落点 → 建边（成功后补开"编辑边"弹窗）
    ================================================================ */
-function startEdgeDrawing(sourceNodeId) {
-  drawingEdgeMode.value = true
-  drawingSourceId.value = sourceNodeId
-
-  const sourceNode = simulation?.nodes()?.find(n => n.id === sourceNodeId)
-  const sx = sourceNode?.x ?? 0
-  const sy = sourceNode?.y ?? 0
-
-  drawingTempLine = zoomContainer.append('line')
-    .attr('class', 'drawing-temp-line')
-    .attr('x1', sx).attr('y1', sy)
-    .attr('x2', sx).attr('y2', sy)
-    .attr('stroke', 'var(--color-accent)')
-    .attr('stroke-width', 1.5)
-    .attr('stroke-dasharray', '6,4')
-    .style('pointer-events', 'none')
-
-  svgSelection.style('cursor', 'crosshair')
-
-  drawingMouseMoveHandler = (event) => {
-    if (!drawingEdgeMode.value || !drawingTempLine) return
-    const [mx, my] = d3.pointer(event, svgSelection.node())
-    const transform = d3.zoomTransform(svgSelection.node())
-    const zx = (mx - transform.x) / transform.k
-    const zy = (my - transform.y) / transform.k
-    drawingTempLine.attr('x2', zx).attr('y2', zy)
-  }
-  svgSelection.on('mousemove.drawing', drawingMouseMoveHandler)
-}
-
-function clearDrawingMode() {
-  drawingEdgeMode.value = false
-  drawingSourceId.value = null
-
-  if (drawingTempLine) {
-    drawingTempLine.remove()
-    drawingTempLine = null
-  }
-
-  if (svgSelection) {
-    svgSelection.style('cursor', '')
-    svgSelection.on('mousemove.drawing', null)
-  }
-}
-
-async function handleDrawingTarget(targetNodeId) {
-  const sourceId = drawingSourceId.value
-  if (targetNodeId === sourceId) {
+async function handleDrawTarget(fromId, toId) {
+  if (!fromId) return
+  if (toId === fromId) {
     notifyError('不能连接到自身')
-    clearDrawingMode()
     return
   }
 
-  clearDrawingMode()
-
   emit('graph-action', {
     action: 'create-edge',
-    payload: { from: sourceId, to: targetNodeId, relation: 'related', label: '' },
+    payload: { from: fromId, to: toId, relation: 'related', label: '' },
   })
 
   await new Promise((resolve) => {
@@ -780,7 +203,7 @@ async function handleDrawingTarget(targetNodeId) {
       const found = (newEdges || []).find(e => {
         const eSource = e.source || e.from_node || e.from
         const eTarget = e.target || e.to_node || e.to
-        return eSource === sourceId && eTarget === targetNodeId && e.relation === 'related'
+        return eSource === fromId && eTarget === toId && e.relation === 'related'
       })
       if (found) {
         resolved = true
@@ -792,12 +215,6 @@ async function handleDrawingTarget(targetNodeId) {
       }
     }, { deep: true, immediate: true })
   })
-}
-
-function handleEditEdge(edgeData) {
-  dialogMode.value = 'edit-edge'
-  dialogData.value = { ...edgeData.edge }
-  dialogVisible.value = true
 }
 
 /* ================================================================
@@ -846,21 +263,7 @@ function handleDialogSubmit(formData) {
 }
 
 /* ================================================================
-   窗口 resize
-   ================================================================ */
-function handleResize() {
-  if (simulation && containerRef.value) {
-    const { width, height } = containerRef.value.getBoundingClientRect()
-    simulation
-      .force('center', d3.forceCenter(width / 2, height / 2).strength(0.06))
-      .force('x', d3.forceX(width / 2).strength(0.02))
-      .force('y', d3.forceY(height / 2).strength(0.02))
-    simulation.alpha(0.2).restart()
-  }
-}
-
-/* ================================================================
-   自动刷新
+   自动刷新（仅"数量变化"提示，真刷新走 store 的 SSE / refreshGraph）
    ================================================================ */
 let lastNodeCount = 0
 let lastEdgeCount = 0
@@ -899,81 +302,14 @@ watch(() => props.autoRefresh, (val) => {
 })
 
 /* ================================================================
-   缩放控制
-   ================================================================ */
-function zoomIn() {
-  if (!svgSelection) return
-  svgSelection.transition().duration(300).call(zoomBehavior.scaleBy, 1.3)
-}
-function zoomOut() {
-  if (!svgSelection) return
-  svgSelection.transition().duration(300).call(zoomBehavior.scaleBy, 0.7)
-}
-function zoomReset() {
-  if (!svgSelection) return
-  svgSelection.transition().duration(500).call(zoomBehavior.transform, d3.zoomIdentity)
-}
-
-/* ================================================================
-   生命周期
-   ================================================================ */
-onMounted(() => {
-  renderGraph()
-  window.addEventListener('resize', handleResize)
-  startAutoRefresh()
-})
-
-onUnmounted(() => {
-  if (simulation) {
-    simulation.stop()
-    simulation = null
-  }
-  if (containerRef.value) {
-    d3.select(containerRef.value).select('svg').remove()
-  }
-  window.removeEventListener('resize', handleResize)
-  stopAutoRefresh()
-  if (changeTimer.value) {
-    clearTimeout(changeTimer.value)
-    changeTimer.value = null
-  }
-  clearDrawingMode()
-  lastPositions.clear()
-})
-
-/* ================================================================
    暴露方法
    ================================================================ */
-
 /**
  * 聚焦指定节点：平滑移动到该节点并高亮
  * @param {string} nodeId - 节点 ID
  */
 function focusNode(nodeId) {
-  if (!simulation || !svgSelection) return
-  const node = simulation.nodes().find(n => n.id === nodeId)
-  if (!node) return
-
-  const { width, height } = containerRef.value.getBoundingClientRect()
-  const scale = 1.5
-  const tx = width / 2 - node.x * scale
-  const ty = height / 2 - node.y * scale
-
-  svgSelection.transition().duration(600)
-    .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale))
-
-  // 高亮节点（脉冲效果）
-  const nodeGroup = svgSelection.selectAll('.node').filter(d => d.id === nodeId)
-  nodeGroup.select('.node-body')
-    .transition().duration(200)
-    .attr('r', nodeRadius(node) + 6)
-    .attr('stroke', 'var(--color-accent)')
-    .attr('stroke-width', 2.5)
-    .attr('stroke-opacity', 1)
-    .transition().duration(400)
-    .attr('r', nodeRadius(node))
-    .attr('stroke-width', 1)
-    .attr('stroke-opacity', 0.3)
+  engine?.focusNode(nodeId)
 }
 
 defineExpose({ focusNode })
@@ -1014,7 +350,6 @@ defineExpose({ focusNode })
       <span class="legend-item"><span class="legend-dot dot-weak"></span>薄弱</span>
       <span class="legend-item"><span class="legend-dot dot-learning"></span>学习中</span>
       <span class="legend-item"><span class="legend-dot dot-mastered"></span>已掌握</span>
-      <span v-if="themeModeActive" class="legend-hint">点大节点展开／收起</span>
       <span class="legend-divider"></span>
       <button
         class="path-toggle"
@@ -1033,21 +368,83 @@ defineExpose({ focusNode })
       </div>
     </transition>
 
-    <!-- 右键菜单 -->
-    <ContextMenu
-      :visible="menuVisible"
-      :x="menuX"
-      :y="menuY"
-      :targetType="menuTargetType"
-      :targetData="menuTargetData"
-      @close="closeMenu"
-      @create-node="handleCreateNode"
-      @edit-node="handleEditNode"
-      @delete-node="handleDeleteNode"
-      @add-edge-from-node="handleAddEdgeFromNode"
-      @edit-edge="handleEditEdge"
-      @delete-edge="handleDeleteEdge"
-    />
+    <!-- 右键菜单：容器（定位/遮罩）由 ContextMenu 提供，条目在这里按目标类型给出 -->
+    <ContextMenu :visible="menuVisible" :x="menuX" :y="menuY" @close="closeMenu">
+      <template #default="{ close }">
+        <!-- ── 空白区域 ── -->
+        <template v-if="menuTargetType === 'canvas'">
+          <div class="menu-item" @click="handleCreateNode(); close()">
+            <span class="menu-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </span>
+            创建新节点
+          </div>
+        </template>
+
+        <!-- ── 节点 ── -->
+        <template v-else-if="menuTargetType === 'node'">
+          <!-- 普通知识点 -->
+          <div class="menu-item" @click="handleEditNode(menuTargetData); close()">
+              <span class="menu-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                </svg>
+              </span>
+              编辑节点
+            </div>
+            <div class="menu-item" @click="handleAddEdgeFromNode(menuTargetData?.id); close()">
+              <span class="menu-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                </svg>
+              </span>
+              添加关联边
+            </div>
+            <div class="menu-divider"></div>
+            <div class="menu-item menu-item-danger" @click="handleDeleteNode(menuTargetData?.id); close()">
+              <span class="menu-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 6h18" />
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                  <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  <line x1="10" y1="11" x2="10" y2="17" />
+                  <line x1="14" y1="11" x2="14" y2="17" />
+                </svg>
+              </span>
+              删除节点
+            </div>
+        </template>
+
+        <!-- ── 边 ── -->
+        <template v-else-if="menuTargetType === 'edge'">
+          <div class="menu-item" @click="handleEditEdge(menuTargetData); close()">
+            <span class="menu-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+              </svg>
+            </span>
+            编辑边标签
+          </div>
+          <div class="menu-divider"></div>
+          <div class="menu-item menu-item-danger" @click="handleDeleteEdge(menuTargetData); close()">
+            <span class="menu-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 6h18" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                <line x1="10" y1="11" x2="10" y2="17" />
+                <line x1="14" y1="11" x2="14" y2="17" />
+              </svg>
+            </span>
+            删除边
+          </div>
+        </template>
+      </template>
+    </ContextMenu>
 
     <!-- 编辑弹窗 -->
     <EditDialog
@@ -1075,15 +472,12 @@ defineExpose({ focusNode })
 
 .force-graph-container :deep(svg) { display: block; }
 
-/* ── D3 元素（极简过渡） ── */
+/* ── D3 元素（极简过渡；节点/边由 forceGraphEngine.js 生成） ── */
 .force-graph-container :deep(.node-body) {
   transition: r 0.15s ease, opacity 0.15s ease, stroke-width 0.15s ease;
 }
 .force-graph-container :deep(.node-label) {
   transition: opacity 0.15s ease, font-weight 0.15s ease;
-}
-.force-graph-container :deep(.node-fold) {
-  transition: opacity 0.15s ease;
 }
 .force-graph-container :deep(text) {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -1181,7 +575,7 @@ defineExpose({ focusNode })
 .dot-weak { background: var(--color-red); }
 .dot-learning { background: var(--color-yellow); }
 .dot-mastered { background: var(--color-green); }
-.legend-hint { color: var(--color-text-muted); white-space: nowrap; }
+
 .legend-divider { width: 1px; height: 14px; background: var(--color-border-subtle); }
 .path-toggle {
   display: flex; align-items: center; gap: 6px;

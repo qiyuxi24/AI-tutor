@@ -26,7 +26,6 @@ const selectedContext = ref(null)
 const treeRef = ref(null)
 const tree = ref([])
 const subjectInput = ref('')           // 学科名
-const genMode = ref('subject')         // subject=整学科 / section=按章节
 const generating = ref(false)
 const genResult = ref(null)            // 生成结果
 const genError = ref('')
@@ -90,7 +89,7 @@ async function handleGenerate() {
   genError.value = ''
   genResult.value = null
   try {
-    const res = await generateKbGraph(subject, nodeIds, genMode.value)
+    const res = await generateKbGraph(subject, nodeIds)
     const d = res.data || {}
     genResult.value = {
       subject,
@@ -191,10 +190,6 @@ onMounted(() => {
               maxlength="100"
               class="gen-subject-input"
             />
-            <el-select v-model="genMode" class="gen-mode-select">
-              <el-option label="整学科一键生成" value="subject" />
-              <el-option label="按章节增量生成" value="section" />
-            </el-select>
             <el-button
               type="primary"
               :loading="generating"
@@ -206,7 +201,7 @@ onMounted(() => {
           </div>
 
           <div class="gen-tree-wrap" v-if="tree.length">
-            <div class="gen-tree-label">选择书籍来源（可勾选文件夹，将包含其下所有文件）</div>
+            <div class="gen-tree-label">选择书籍来源（勾选文件夹会把新知识点归入同名板块，并包含其下所有文件）</div>
             <el-tree
               ref="treeRef"
               :data="tree"
@@ -427,10 +422,6 @@ onMounted(() => {
 
 .gen-subject-input {
   width: 180px;
-}
-
-.gen-mode-select {
-  width: 170px;
 }
 
 .gen-tree-wrap {

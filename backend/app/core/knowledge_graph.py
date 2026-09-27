@@ -46,6 +46,13 @@ ORIGIN_DEFAULT = "manual"
 CONTENT_STATUS_SKELETON = "skeleton"
 CONTENT_STATUS_FILLED = "filled"
 
+# 增补标记状态（GQ-19 第③步，`doc_node_marks.status`）：
+# `pending` = 该资料覆盖了这个已有节点、待增补；`filled` = 已增补并写入节点 sources。
+# 状态机单向：pending → filled（见 set_mark_status，不允许降级）。
+MARK_PENDING = "pending"
+MARK_FILLED = "filled"
+MARK_STATUSES = (MARK_PENDING, MARK_FILLED)
+
 # 同名并轨（去重 L1 档）的判定键 = 归一化后的 name。
 # 归一化只做字符串层处理，不做语义判断（语义去重在 kb/graph_generator.py 的
 # 嵌入粗筛 + LLM 复核）。实测漏合并的写法有两类：字面完全相同（同名重复）与
@@ -97,6 +104,76 @@ def subject_from_tags(tags) -> str:
         if tag not in _DIFFICULTY_TAGS:
             return tag
     return ""
+
+
+# ── L0 溯源（GQ-18）：节点的 `sources` JSON 数组 ──────────────────────
+# 元素固定五键，唯一真值见 docs/知识图谱/知识图谱_多资料综合维护调研.md §4 L0。
+# 去重键 = (doc_id, chunk_id, section)：同一资料的同一段落反复抽取只留一条
+# （幂等键的落地形态，供 GQ-19 的「按资料增量」复用）。
+SOURCE_ID_KEY = ("doc_id", "chunk_id", "section")
+
+
+def normalize_source_entry(raw) -> Optional[dict]:
+    """把一条来源规范成 L0 五键字典；非法条目返回 None（调用方静默跳过）。
+
+    - `doc_id` 必须可转 int（幂等键主体）→ 不可转则该条无效；
+    - 缺 `chunk_id` / `section` → None / ""；`chunk_id` 空串归一为 None；
+    - 缺 `extracted_at` → 用当前时间（首次见到该段落的时间）。
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        doc_id = int(raw["doc_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    chunk_id = raw.get("chunk_id")
+    if chunk_id == "":
+        chunk_id = None
+    return {
+        "doc_id": doc_id,
+        "doc_name": str(raw.get("doc_name") or ""),
+        "section": str(raw.get("section") or ""),
+        "chunk_id": chunk_id,
+        "extracted_at": str(raw.get("extracted_at") or datetime.now().isoformat()),
+    }
+
+
+def _parse_sources(raw) -> list[dict]:
+    """把 `nodes.sources` 的 JSON 文本反序列化为字典列表（空/损坏 → []）。"""
+    try:
+        data = json.loads(raw) if raw else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [e for e in data if isinstance(e, dict)]
+
+
+def _source_key(entry: dict) -> tuple:
+    """来源去重键（L0 幂等键）。"""
+    return (entry.get("doc_id"), entry.get("chunk_id"), entry.get("section"))
+
+
+def _dedupe_preserving_order(items) -> list:
+    """保序去重（None / 空列表 → []）。"""
+    seen: set = set()
+    out: list = []
+    for it in items or []:
+        if it in seen:
+            continue
+        seen.add(it)
+        out.append(it)
+    return out
+
+
+def _parse_evidence(raw):
+    """把 `doc_node_marks.evidence` 反序列化（空/损坏 → None）。"""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 
 def render_node_markdown(name: str, summary: str, content: str,
@@ -189,6 +266,7 @@ class KnowledgeGraph:
                     confidence      REAL,
                     content_status  TEXT DEFAULT 'filled',
                     source_ref      TEXT DEFAULT '',
+                    sources         TEXT DEFAULT '[]',
                     user_id         INTEGER REFERENCES users(id)
                 )
             """)
@@ -243,43 +321,30 @@ class KnowledgeGraph:
                 )
             """)
 
-            # 6. 主题树（KG-T1，主题层级）：按**知识相关度**聚出的课内 2 层分组。
-            # 层级**不进 nodes**（否则"章"这类结构节点会混入出题/统计/检索），主题是独立实体。
-            # 硬约束 level ∈ {1,2}（应用层校验，不加 SQL CHECK —— 改 CHECK 要重建表）。
+            # 8. 资料↔节点账本 + 增补队列（GQ-19 第③步）。
+            # **本表有意承担两个职责**（2026-09-26 lead 定案）：
+            #   ① **doc 级幂等账本** —— 「这份资料产出/影响了哪些节点」（含 evidence.kind
+            #      = new|hit，由编排层写进 evidence，本表不校验）→ 只有这样"纯新增资料"
+            #      也判得出"已建过"；若只记 hits，纯新增资料永远判不出已建；
+            #   ② **增补队列** —— status pending→filled，仅对"命中已有节点"才有意义。
+            # 两职责共用一表是有意的：同一资料、同一批节点、同一条生命周期，拆表反要
+            # 处理一致性。与 nodes.sources 的分工：sources 是「节点 ← 多份资料」的**长期事实**；
+            # 本表是「资料 → 节点」的**过程状态**（增补完成转 filled，并把 doc_id 写进 sources）。
+            # 删节点经 FK 级联删标记（连接已开 foreign_keys=ON），不留悬空工作项。
             self._conn.execute("""
-                CREATE TABLE IF NOT EXISTS themes (
-                    id          TEXT PRIMARY KEY,
-                    user_id     INTEGER NOT NULL,
-                    subject     TEXT NOT NULL DEFAULT '',
-                    name        TEXT NOT NULL,
-                    parent_id   TEXT,
-                    level       INTEGER NOT NULL,
-                    order_index INTEGER DEFAULT 0,
-                    source      TEXT DEFAULT 'ai',
-                    created_at  TEXT,
-                    updated_at  TEXT,
-                    FOREIGN KEY (parent_id) REFERENCES themes(id) ON DELETE CASCADE
-                )
-            """)
-
-            # 7. 节点 ↔ 主题归属（KG-T1，多对多）：通用性的落点 ——
-            # 「递归」可同时属「函数」与「算法思想」；is_primary 供 UI 单归属渲染。
-            self._conn.execute("""
-                CREATE TABLE IF NOT EXISTS node_themes (
-                    node_id    TEXT NOT NULL,
-                    theme_id   TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS doc_node_marks (
                     user_id    INTEGER NOT NULL,
-                    weight     REAL DEFAULT 1.0,
-                    is_primary INTEGER DEFAULT 0,
-                    source     TEXT DEFAULT 'ai',
+                    doc_id     INTEGER NOT NULL,
+                    node_id    TEXT NOT NULL,
+                    status     TEXT NOT NULL DEFAULT 'pending',
+                    evidence   TEXT DEFAULT '',
                     created_at TEXT,
-                    PRIMARY KEY (node_id, theme_id),
-                    FOREIGN KEY (node_id)  REFERENCES nodes(id)  ON DELETE CASCADE,
-                    FOREIGN KEY (theme_id) REFERENCES themes(id) ON DELETE CASCADE
+                    PRIMARY KEY (user_id, doc_id, node_id),
+                    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
                 )
             """)
 
-        # 8. 自动迁移：给旧表补缺失列（subject/board/user_id/created_at/updated_at）
+        # 9. 自动迁移：给旧表补缺失列（subject/board/user_id/created_at/updated_at/sources）
         self._auto_migrate()
 
     def _auto_migrate(self) -> None:
@@ -333,6 +398,15 @@ class KnowledgeGraph:
                 self._conn.execute(
                     "ALTER TABLE nodes ADD COLUMN source_ref TEXT DEFAULT ''"
                 )
+        if "sources" not in node_cols:
+            # L0 溯源（GQ-18）：节点 ← 多份资料的来源数组（JSON）。
+            # 关键：`CREATE TABLE IF NOT EXISTS` 不会给**已存在**的 nodes 加列，只有这条
+            # ALTER 能给老库补上（AGENTS.md §1 明写的坑）。老节点 DEFAULT '[]' = 来源未知，
+            # 不阻塞（与调研 §4 L0 的兼容口径一致），无需回填。
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE nodes ADD COLUMN sources TEXT DEFAULT '[]'"
+                )
 
         # 选片/统计走它；放迁移末尾（列此时必已存在），IF NOT EXISTS 保证幂等
         with self._conn:
@@ -374,16 +448,17 @@ class KnowledgeGraph:
                 "ON mastery_events(user_id, node_id)"
             )
 
-        # KG-T1：主题按 (user_id, subject) 取树；归属双向反查
+        # 主题层级已下线（2026-09-27）：图谱只保留最小节点与关系边。
+        # 老库残留的两张表连同存量数据一并清掉（先子表后父表，避免 FK 阻塞）。
+        with self._conn:
+            self._conn.execute("DROP TABLE IF EXISTS node_themes")
+            self._conn.execute("DROP TABLE IF EXISTS themes")
+
+        # GQ-19：增补队列的主查询 = 「这份资料（doc_id）覆盖了哪些节点」
         with self._conn:
             self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_themes_user_subject ON themes(user_id, subject)"
-            )
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_node_themes_theme ON node_themes(theme_id)"
-            )
-            self._conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_node_themes_node ON node_themes(node_id)"
+                "CREATE INDEX IF NOT EXISTS idx_doc_node_marks_doc "
+                "ON doc_node_marks(user_id, doc_id)"
             )
 
     def _invalidate_cache(self) -> None:
@@ -426,13 +501,15 @@ class KnowledgeGraph:
     # ════════════════════════════════════════════
 
     def _row_to_node_dict(self, row: sqlite3.Row) -> dict:
-        """将 SQLite 行转为节点字典（tags 从 JSON 字符串反序列化）"""
+        """将 SQLite 行转为节点字典（tags / sources 从 JSON 字符串反序列化）"""
         d = dict(row)
         # tags 存为 JSON 数组字符串，反序列化
         try:
             d["tags"] = json.loads(d["tags"])
         except (json.JSONDecodeError, TypeError):
             d["tags"] = []
+        # sources（GQ-18）同 tags：存 JSON 数组文本，这里反序列化（空/损坏 → []）
+        d["sources"] = _parse_sources(d.get("sources"))
         return d
 
     def _row_to_edge_dict(self, row: sqlite3.Row) -> dict:
@@ -1202,6 +1279,191 @@ class KnowledgeGraph:
         self.invalidate_content_cache(node_id)
         return edge_count
 
+    def remove_subject(self, subject: str) -> dict:
+        """删除某学科的**整张图**：节点 + 关联边/别名/掌握度事件 + 节点 MD。
+
+        与 `remove_node` 的差别：一次删一批，且**不做 human 内容护栏** —— 这是用户在前端
+        显式确认过的破坏性操作（等价于"删掉这门课的图谱重来"），逐节点拦 human 节点会让
+        按钮点下去"什么都没删"。
+
+        **学科口径与读取侧同源**：复用 `get_nodes_by_subject`（内部 `node_subject`
+        = subject 列 + tags 回退），所以"前端看得见的"就是"这里会删掉的"。若直接
+        `DELETE FROM nodes WHERE subject = ?`，subject 列为空、只靠 tags 认课的老节点会漏删。
+
+        **不需要逐表删**：本连接已开 `foreign_keys=ON`（见 __init__），edges /
+        node_aliases / mastery_events / doc_node_marks 随 nodes 行级联删除
+        —— 与 `backend-admin/app/core/db.py::delete_user_rows` 不同（那个连接刻意没开 FK，
+        只能逐表显式删）。
+
+        只删图谱本身：调用方负责清理 RAG 索引（见 `DELETE /knowledge/graph`）。
+
+        参数:
+            subject: 学科名（必填，空/纯空白抛 ValueError）
+
+        返回:
+            {"subject", "deleted_nodes", "deleted_edges"}
+
+        异常:
+            ValueError: subject 为空
+        """
+        subj = (subject or "").strip()
+        if not subj:
+            raise ValueError("学科名不能为空")
+
+        node_ids = [n["id"] for n in self.get_nodes_by_subject(subj)]
+
+        # 边数在删除前统计：含跨学科边（一端在本学科即会随节点级联删除）。
+        deleted_edges = 0
+        if node_ids:
+            marks = ",".join("?" * len(node_ids))
+            deleted_edges = self._conn.execute(
+                f"SELECT COUNT(*) FROM edges WHERE user_id = ?"
+                f" AND (from_node IN ({marks}) OR to_node IN ({marks}))",
+                (self.user_id, *node_ids, *node_ids),
+            ).fetchone()[0]
+
+        with self._conn:
+            if node_ids:
+                marks = ",".join("?" * len(node_ids))
+                self._conn.execute(
+                    f"DELETE FROM nodes WHERE user_id = ? AND id IN ({marks})",
+                    (self.user_id, *node_ids),
+                )
+
+        for node_id in node_ids:
+            md_path = self.nodes_dir / f"{node_id}.md"
+            if md_path.exists():
+                md_path.unlink()
+
+        self._invalidate_cache()
+        self.invalidate_content_cache()
+        return {
+            "subject": subj,
+            "deleted_nodes": len(node_ids),
+            "deleted_edges": deleted_edges,
+        }
+
+    def rename_subject(self, old_subject: str, new_subject: str) -> dict:
+        """学科改名：该学科全部节点的 `subject` 列、tags 里的旧学科名一起换掉。
+        **只改课名**：板块归属、掌握度、边、正文都不动。
+
+        **口径与读取侧同源**：节点集合取 `get_nodes_by_subject(old)`（= `node_subject`，
+        subject 列 + tags 回退），所以"前端看得见的"都会跟着改名。tags 里的旧学科名必须
+        一起替换 —— 否则 `subject_from_tags` 仍推导出旧名，`_auto_migrate` 的回填会把
+        老节点写回旧课，同一门课裂成两个。
+
+        **拒绝改到已存在的学科**：那等于静默合并两门课（两门课的边、掌握度会混在
+        一起），与"改名"的预期不符；真要合并得当独立需求做。**「未分类」的拦截不在本层**
+        —— 那是 graph_middleware 的合成分组名，由 API 层拒绝（本层不知道这个约定）。
+
+        参数:
+            old_subject: 现学科名
+            new_subject: 新学科名（strip 后非空、与旧名不同、且未被其他学科占用）
+
+        返回:
+            {"old_subject", "new_subject", "renamed_nodes"}
+
+        异常:
+            ValueError: 名称为空 / 新旧同名 / 新名已被占用
+        """
+        old = (old_subject or "").strip()
+        new = (new_subject or "").strip()
+        if not old or not new:
+            raise ValueError("学科名不能为空")
+        if old == new:
+            raise ValueError("新旧学科名相同，无需重命名")
+        if new in self.get_subjects():
+            raise ValueError(f"学科「{new}」已存在，请换一个名字")
+
+        now = datetime.now().isoformat()
+        nodes = self.get_nodes_by_subject(old)
+        with self._conn:
+            # 必须逐节点改：tags 是节点级 JSON，批量 UPDATE 换不掉里面的旧学科名。
+            # 单学科几百~几千节点、同一事务内，代价可接受。
+            for n in nodes:
+                tags = [new if t == old else t for t in (n.get("tags") or [])]
+                self._conn.execute(
+                    "UPDATE nodes SET subject = ?, tags = ?, updated_at = ?"
+                    " WHERE id = ? AND user_id = ?",
+                    (new, json.dumps(tags, ensure_ascii=False), now, n["id"], self.user_id),
+                )
+
+        self._invalidate_cache()
+        return {
+            "old_subject": old,
+            "new_subject": new,
+            "renamed_nodes": len(nodes),
+        }
+
+    def rename_board(self, subject: str, old_board: str, new_board: str) -> dict:
+        """板块改名：本学科下 `board = old` 的节点改为 new（板块就是 `nodes.board` 上的
+        分组标签，没有独立的板块表，所以改名 = 批量改列）。
+
+        节点集合取 `get_nodes_by_board`（内部 `get_nodes_by_subject`，与读取侧同源），
+        故 subject 列为空、只靠 tags 认课的老节点也在改名范围内。
+
+        用 `get_boards_by_subject` 先判"有没有这个板块 / 新名是否已被占用"：改名到已存在
+        的板块等于静默合并两个板块，与"改名"的预期不符，直接拒绝。
+
+        异常:
+            ValueError: 名称空 / 新旧同名 / 学科下无此板块 / 新板块名已存在
+        """
+        subj = (subject or "").strip()
+        old = (old_board or "").strip()
+        new = (new_board or "").strip()
+        if not subj or not old or not new:
+            raise ValueError("学科名与板块名都不能为空")
+        if old == new:
+            raise ValueError("新旧板块名相同，无需重命名")
+
+        boards = {b["board"] for b in self.get_boards_by_subject(subj)}
+        if old not in boards:
+            raise ValueError(f"学科「{subj}」下没有板块「{old}」")
+        if new in boards:
+            raise ValueError(f"板块「{new}」已存在，请换一个名字")
+
+        node_ids = [n["id"] for n in self.get_nodes_by_board(subj, old)]
+        marks = ",".join("?" * len(node_ids))
+        with self._conn:
+            renamed = self._conn.execute(
+                f"UPDATE nodes SET board = ?, updated_at = ?"
+                f" WHERE user_id = ? AND id IN ({marks})",
+                (new, datetime.now().isoformat(), self.user_id, *node_ids),
+            ).rowcount
+
+        self._invalidate_cache()
+        return {"subject": subj, "old_board": old, "new_board": new,
+                "renamed_nodes": renamed}
+
+    def remove_board(self, subject: str, board: str) -> dict:
+        """解散板块：本学科下 `board = board` 的节点置回「未分组」（board = ''）。
+
+        **不删节点、不删正文、不动掌握度** —— 板块只是分组标签，删掉标签不该带走学习数据。
+        要连知识点一起删，用 `remove_subject`（整科）或逐节点 `remove_node`。
+
+        异常:
+            ValueError: 名称空 / 学科下无此板块
+        """
+        subj = (subject or "").strip()
+        name = (board or "").strip()
+        if not subj or not name:
+            raise ValueError("学科名与板块名都不能为空")
+
+        node_ids = [n["id"] for n in self.get_nodes_by_board(subj, name)]
+        if not node_ids:
+            raise ValueError(f"学科「{subj}」下没有板块「{name}」")
+
+        marks = ",".join("?" * len(node_ids))
+        with self._conn:
+            moved = self._conn.execute(
+                f"UPDATE nodes SET board = '', updated_at = ?"
+                f" WHERE user_id = ? AND id IN ({marks})",
+                (datetime.now().isoformat(), self.user_id, *node_ids),
+            ).rowcount
+
+        self._invalidate_cache()
+        return {"subject": subj, "board": name, "moved_nodes": moved}
+
     def update_node_info(self, node_id: str, data: dict, caller: str = "human", *,
                          mastery_reason: str = "manual",
                          mastery_evidence: str = "") -> None:
@@ -1211,11 +1473,6 @@ class KnowledgeGraph:
         **掌握度变更的唯一入口**（KG-D4）：`mastery` 真的变了就在同一事务里补一条
         `mastery_events` 事件。所有改 mastery 的路径（判分回写 / `update_mastery` 工具 /
         三个 API 端点）都经这里，所以新增写路径**不需要**自己记账。
-
-        **换课清理（P0）**：`subject` 真的变了（新值非空且与旧值不同，旧值按 `node_subject`
-        语义含 tags 回退）时，同一事务内删除该节点 `source != 'human'` 的 `node_themes`
-        归属 —— 旧课的 AI 归属会在新树里永远落空；`source='human'` 的人工调整保留（§6.2）。
-        **不**在此热路径调 LLM 重算：下次建图或手动 `/knowledge/themes/rebuild` 会重新归类。
 
         **改名登记旧名别名（KG-D3 补洞）**：`name` 真的变了就把**旧名**登记为该节点的别名
         （`source='rename'`）—— 否则旧名在 `find_node_by_name`（只查 `nodes.name` + `node_aliases`）
@@ -1266,13 +1523,6 @@ class KnowledgeGraph:
                 if after != before:
                     event = (before, after)
 
-        # 换课后清理 AI 主题归属（P0）：subject 真的变了才清 ——
-        # 新值非空 且 与旧值不同；旧值走 node_subject 语义（subject 列为空时回退 tags 推导），
-        # 故传空串/相同值都视为"未变化"，不误清。human 归属在下面的 DELETE 里被排除（§6.2）。
-        subject_changed = False
-        if "subject" in updates:
-            new_subject = str(updates["subject"] or "").strip()
-            subject_changed = bool(new_subject) and new_subject != self.node_subject(node)
 
         # 改名检测（KG-D3 补洞）：新名非空且与旧名不同 → 旧名要登记为别名（见 docstring）。
         name_changed = False
@@ -1302,15 +1552,6 @@ class KnowledgeGraph:
                                            mastery_reason, mastery_evidence)
             # 换课清理 AI 归属：与 subject 更新同事务，避免"学科已换、旧归属残留"的中间态。
             # 只删非 human 行；human 人工调整按 §6.2 保留。
-            if subject_changed:
-                cur = self._conn.execute(
-                    "DELETE FROM node_themes"
-                    " WHERE node_id = ? AND user_id = ? AND source != 'human'",
-                    (node_id, self.user_id),
-                )
-                logger.info(
-                    f"改学科 → 清理 AI 主题归属 {cur.rowcount} 条（节点 {node_id}）"
-                )
         # 改名后补登记旧名别名（放在事务之后：别名的增删是附加语义，不参与本次字段更新）
         if name_changed:
             registered = self.register_alias(old_name, node_id, source="rename")
@@ -1361,335 +1602,206 @@ class KnowledgeGraph:
         return int(row[0])
 
     # ══════════════════════════════════════════════════════════════
-    #  主题层级（KG-T1）：按知识相关度聚出的课内 2 层分组
-    #  设计见 docs/知识图谱/知识图谱_主题层级_设计与实现方案.md
+    #  溯源（GQ-18）与增补标记（GQ-19 第③步）
+    #  L0 溯源层 + 增补工作队列；设计见
+    #  docs/知识图谱/知识图谱_多资料综合维护调研.md §4 L0/L3 与 TODO_Graph_Quality.md §5.2。
+    #  分工：`nodes.sources` = 「节点 ← 多份资料」的长期事实（并入、不覆盖）；
+    #       `doc_node_marks` = 「资料 → 待补节点」的过程状态（增补完成转 filled）。
     # ══════════════════════════════════════════════════════════════
 
-    THEME_MAX_LEVEL = 2   # 一门课内部最多两层：省(L1) → 市(L2)
-
-    def create_theme(self, subject: str, name: str, level: int,
-                     parent_id: Optional[str] = None, order_index: int = 0,
-                     source: str = "ai") -> str:
-        """创建一个主题，返回其 ID。
-
-        硬约束（一门课内部两层）：level ∈ {1,2}；省级不得有 parent；
-        市级必须有 parent，且 parent 是同用户的省级主题、属于同一门课。
-
-        异常:
-            ValueError: 名称空 / 层级非法 / 省级带 parent / 市级缺 parent 或跨课
-        """
-        name = (name or "").strip()
-        if not name:
-            raise ValueError("主题名不能为空")
-        if level not in (1, 2):
-            raise ValueError(f"主题层级只能是 1(省) 或 2(市)，收到 {level}")
-
-        subject = (subject or "").strip()
-        if level == 1:
-            if parent_id:
-                raise ValueError("省级主题不能指定 parent_id")
-        else:
-            parent = self._conn.execute(
-                "SELECT id, level, subject FROM themes WHERE id = ? AND user_id = ?",
-                (parent_id, self.user_id),
-            ).fetchone()
-            if parent is None:
-                raise ValueError("市级主题的 parent_id 不存在或不属于当前用户")
-            if parent["level"] != 1:
-                raise ValueError("市级主题只能挂在省级主题下")
-            if subject and parent["subject"] != subject:
-                raise ValueError("子主题与父主题必须属于同一门课")
-
-        tid = f"th_{uuid.uuid4().hex[:12]}"
-        now = datetime.now().isoformat()
-        with self._conn:
-            self._conn.execute(
-                "INSERT INTO themes (id, user_id, subject, name, parent_id, level,"
-                " order_index, source, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (tid, self.user_id, subject, name, parent_id,
-                 int(level), int(order_index), source, now, now),
-            )
-        return tid
-
-    def list_themes(self, subject: str = "") -> list[dict]:
-        """列出当前用户的主题（可按课过滤），按 level → order_index → created_at 排序。
-
-        返回**扁平列表**（含 parent_id）—— 组树由调用方负责（前端或 build_theme_tree）。
-        """
-        sql = "SELECT * FROM themes WHERE user_id = ?"
-        params: list = [self.user_id]
-        if subject:
-            sql += " AND subject = ?"
-            params.append(subject)
-        sql += " ORDER BY level, order_index, created_at"
-        return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
-
-    def update_theme(self, theme_id: str, data: dict) -> None:
-        """改名 / 调整展示顺序；改过的主题置 `source='human'`（重算不覆盖）。
-
-        异常:
-            ValueError: 无可更新字段 / 名称空 / 主题不存在或不属于当前用户
-        """
-        fields = {k: v for k, v in data.items() if k in ("name", "order_index")}
-        if not fields:
-            raise ValueError("没有可更新的字段（仅支持 name / order_index）")
-        if "name" in fields and not str(fields["name"]).strip():
-            raise ValueError("主题名不能为空")
-        fields["source"] = "human"
-        fields["updated_at"] = datetime.now().isoformat()
-
-        sets = ", ".join(f"{k} = ?" for k in fields)
-        with self._conn:
-            cur = self._conn.execute(
-                f"UPDATE themes SET {sets} WHERE id = ? AND user_id = ?",
-                (*fields.values(), theme_id, self.user_id),
-            )
-            if cur.rowcount == 0:
-                raise ValueError("主题不存在或不属于当前用户")
-
-    def delete_theme(self, theme_id: str) -> None:
-        """删除主题（经 FK 级联删子主题与本主题下的归属）。
-
-        语义（D4）：只删主题与其"归属路径"，**不删 nodes 行、不删 MD 正文**。
-
-        异常:
-            ValueError: 主题不存在或不属于当前用户
-        """
-        with self._conn:
-            cur = self._conn.execute(
-                "DELETE FROM themes WHERE id = ? AND user_id = ?",
-                (theme_id, self.user_id),
-            )
-            if cur.rowcount == 0:
-                raise ValueError("主题不存在或不属于当前用户")
-
-    def set_node_themes(self, node_id: str, assignments: list[dict],
-                        source: str = "ai") -> None:
-        """覆盖式设置某节点的主题归属。
+    def get_sources(self, node_id: str) -> list[dict]:
+        """某节点的来源列表（L0 溯源层，GQ-18）。
 
         参数:
-            assignments: [{"theme_id": str, "weight": float, "is_primary": bool}, ...]
-            source:      'ai'（聚类写入）/ 'human'（人工调整）
+            node_id: 节点 ID（仅当前用户）
+        返回:
+            `[{doc_id, doc_name, section, chunk_id, extracted_at}, ...]`；
+            **节点不存在或不属于当前用户 → `[]`**（他人节点视同不存在）。
+        """
+        row = self._conn.execute(
+            "SELECT sources FROM nodes WHERE id = ? AND user_id = ?",
+            (node_id, self.user_id),
+        ).fetchone()
+        return _parse_sources(row["sources"]) if row is not None else []
+
+    def add_sources(self, node_id: str, entries: list[dict]) -> bool:
+        """把若干来源**并入**节点的 `sources`（GQ-18；幂等，绝不覆盖已有来源）。
+
+        多源维护的前置能力：一份新资料讲到同一节点时，只**追加**它的来源，
+        不冲掉先前资料的来源。去重键 = `(doc_id, chunk_id, section)` —— 同一资料的
+        同一段落反复抽取只留一条（这正是「按资料增量」不膨胀的幂等键）。
+        `extracted_at` 以**首次**写入为准，重复调用不刷新（保留"首次见到"的可审计语义）。
+
+        参数:
+            node_id: 节点 ID（仅当前用户；不存在/不属于当前用户 → 不写、返回 False）
+            entries: `[{doc_id, doc_name, section, chunk_id?, extracted_at?}, ...]`
+                     —— 逐条经 `normalize_source_entry` 规范化，非法条目静默跳过
+        返回:
+            是否发生写入（无新增来源 → False，即幂等信号）
+        副作用:
+            有新增时刷新 `nodes.updated_at` 并作废实例缓存
+        """
+        if not entries:
+            return False
+        row = self._conn.execute(
+            "SELECT sources FROM nodes WHERE id = ? AND user_id = ?",
+            (node_id, self.user_id),
+        ).fetchone()
+        if row is None:
+            return False
+
+        merged = _parse_sources(row["sources"])
+        seen = {_source_key(s) for s in merged}
+        added = False
+        for raw in entries:
+            entry = normalize_source_entry(raw)
+            if entry is None:
+                continue
+            key = _source_key(entry)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(entry)
+            added = True
+        if not added:
+            return False
+
+        with self._conn:
+            self._conn.execute(
+                "UPDATE nodes SET sources = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                (json.dumps(merged, ensure_ascii=False), datetime.now().isoformat(),
+                 node_id, self.user_id),
+            )
+        self._invalidate_cache()
+        return True
+
+    def mark_doc_nodes(self, doc_id: int, node_ids: list[str],
+                       evidence: dict | None = None) -> int:
+        """把「这份资料产出/影响了哪些节点」写入 `doc_node_marks`（GQ-19 第③步）。
+
+        本表**兼两职责**（见建表注释）：① doc 级幂等账本（编排层对「新增」「命中」各调一次，
+        用 `evidence.kind = "new" | "hit"` 区分 —— 本表不校验 kind，只是透存）；② 增补队列
+        （status='pending' 待增补 → `set_mark_status(..., 'filled')` 后把 doc_id 写进节点
+        `sources`）。只记命中会让纯新增资料永远判不出"已建过"，故按职责①记账必须记全量。
 
         语义:
-            - 覆盖：删除该节点**非 human** 的旧归属，再写新的；
-            - 保护：`source='human'` 的旧归属不删（重算不毁人工调整）；
-            - 唯一主归属：优先保留已有 human 主归属，否则取 weight 最大者；
-            - 容错：不属于当前用户 / 不存在的 theme_id 静默丢弃（聚类输出可能含脏数据）。
-
-        异常:
-            ValueError: 节点不存在或不属于当前用户
-        """
-        if self.get_node(node_id) is None:
-            raise ValueError("节点不存在或不属于当前用户")
-
-        cleaned: dict[str, dict] = {}
-        for a in assignments or []:
-            tid = a.get("theme_id")
-            if not tid:
-                continue
-            exists = self._conn.execute(
-                "SELECT 1 FROM themes WHERE id = ? AND user_id = ?",
-                (tid, self.user_id)).fetchone()
-            if exists is None:
-                continue
-            weight = float(a.get("weight") or 1.0)
-            prev = cleaned.get(tid)
-            if prev is None or weight > prev["weight"]:
-                cleaned[tid] = {"weight": weight,
-                                "is_primary": 1 if a.get("is_primary") else 0}
-        if not cleaned:
-            return
-
-        now = datetime.now().isoformat()
-        with self._conn:
-            self._conn.execute(
-                "DELETE FROM node_themes"
-                " WHERE node_id = ? AND user_id = ? AND source != 'human'",
-                (node_id, self.user_id),
-            )
-            for tid, spec in cleaned.items():
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO node_themes"
-                    " (node_id, theme_id, user_id, weight, is_primary, source, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (node_id, tid, self.user_id, spec["weight"],
-                     spec["is_primary"], source, now),
-                )
-            # 唯一主归属（AC-T3）：统一归一化（含"human 主归属 + 本次 ai 主归属"会留两个
-            # 主归属的情形）。规则与实现见 `renormalize_primary` —— 只此一处定义。
-            self.renormalize_primary(node_id)
-
-    def renormalize_primary(self, node_id: str) -> None:
-        """把某节点的主题归属归一化到**至多一个**主归属（AC-T3）。
-
-        规则（`set_node_themes` 与合并维护共用，唯一实现）：
-        1) 已有 `source='human'` 的主归属 → 尊重人工，保留它，其余一律降为非主；
-        2) 否则 → 取 `weight` 最大者；并列按 `theme_id` 升序稳定选择。
+            - **幂等 upsert**：同 `(doc_id, node_id)` 重复标记不产生新行；
+            - **不降级**：已是 `filled` 的行原样保留（绝不退回 pending，避免重复增补）；
+            - pending 行的 evidence 被新值刷新（若与旧值不同）；
+            - 只处理属当前用户的节点，不存在 / 他人的 node_id 静默跳过。
 
         参数:
-            node_id: 节点 ID（须属当前用户；节点不存在或无归属时为空操作，**不抛异常**）
-        副作用:
-            仅重置 `node_themes.is_primary`（不增删归属行）。
-        用户隔离:
-            读写均带 `user_id` 过滤，不会动到他人数据。
-        """
-        with self._conn:
-            human_primary = self._conn.execute(
-                "SELECT theme_id FROM node_themes"
-                " WHERE node_id = ? AND user_id = ? AND is_primary = 1 AND source = 'human'"
-                " ORDER BY weight DESC, theme_id LIMIT 1",
-                (node_id, self.user_id)).fetchone()
-            self._conn.execute(
-                "UPDATE node_themes SET is_primary = 0"
-                " WHERE node_id = ? AND user_id = ?",
-                (node_id, self.user_id),
-            )
-            chosen = human_primary["theme_id"] if human_primary else None
-            if chosen is None:
-                row = self._conn.execute(
-                    "SELECT theme_id FROM node_themes"
-                    " WHERE node_id = ? AND user_id = ?"
-                    " ORDER BY weight DESC, theme_id LIMIT 1",
-                    (node_id, self.user_id)).fetchone()
-                chosen = row["theme_id"] if row else None
-            if chosen is not None:
-                self._conn.execute(
-                    "UPDATE node_themes SET is_primary = 1"
-                    " WHERE node_id = ? AND user_id = ? AND theme_id = ?",
-                    (node_id, self.user_id, chosen),
-                )
-
-    def reassign_node_themes(self, from_id: str, to_id: str) -> dict:
-        """把 `from_id` 的**全部主题归属**搬到 `to_id`，并归一化目标主归属（合并去重用）。
-
-        与 `set_node_themes`（覆盖式）不同，本方法是**增量并轨**：不改 `from_id` 的行
-        （其行随删节点级联消失），只把归属并入目标。同主题已在目标上时不覆盖，
-        **`weight` 取两者较大值**（与 `set_node_themes` 的 weight 口径自洽），并计入去重数。
-
-        参数:
-            from_id: 被并（即将删除）的节点 ID
-            to_id:   保留者节点 ID
+            doc_id:   资料（文档）标识，来自 KB 侧（一个文件一个 doc）
+            node_ids: 被该资料覆盖的节点 ID 列表（自动保序去重）
+            evidence: 判定证据（可 JSON 序列化；None = 无证据，不改已有 pending 证据）
         返回:
-            `{"moved": int, "deduped": int}` —— moved = 新并入目标的归属数；
-            deduped = 目标已有同主题而被合并（未新增）的归属数。
-        异常:
-            ValueError: 两者相同，或任一节点不存在 / 不属于当前用户
-                （合并脚本在**删节点之前**调用，此时两节点都应存在）
-        用户隔离:
-            `from_id`/`to_id` 与归属的读写都带 `user_id` 过滤 —— 他人节点视同不存在。
+            实际新写入 / 更新的行数（完全无变化 → 0）
         """
-        if from_id == to_id:
-            raise ValueError("把归属搬到自身没有意义")
-        if self.get_node(from_id) is None:
-            raise ValueError(f"源节点不存在或不属于当前用户：{from_id}")
-        if self.get_node(to_id) is None:
-            raise ValueError(f"目标节点不存在或不属于当前用户：{to_id}")
+        candidates = _dedupe_preserving_order(node_ids)
+        doc_id = int(doc_id)
+        owned = self._owned_node_ids(candidates)
+        if not owned:
+            return 0
 
-        rows = self._conn.execute(
-            "SELECT theme_id, weight, is_primary, source, created_at FROM node_themes"
-            " WHERE node_id = ? AND user_id = ?",
-            (from_id, self.user_id),
-        ).fetchall()
-        moved = dup = 0
+        placeholders = ",".join("?" * len(owned))
+        existing = {
+            r["node_id"]: dict(r)
+            for r in self._conn.execute(
+                "SELECT node_id, status, evidence FROM doc_node_marks"
+                f" WHERE user_id = ? AND doc_id = ? AND node_id IN ({placeholders})",
+                (self.user_id, doc_id, *owned),
+            ).fetchall()
+        }
+        new_evidence = json.dumps(evidence, ensure_ascii=False) if evidence is not None else ""
+        now = datetime.now().isoformat()
+        written = 0
         with self._conn:
-            for r in rows:
-                before = self._conn.total_changes
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO node_themes"
-                    " (node_id, theme_id, user_id, weight, is_primary, source, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (to_id, r["theme_id"], self.user_id, r["weight"],
-                     r["is_primary"], r["source"], r["created_at"]),
-                )
-                if self._conn.total_changes > before:
-                    moved += 1
-                else:
-                    dup += 1
-                # 同主题已在目标上：INSERT OR IGNORE 不会更新已存在行 → weight 取两者较大值
-                self._conn.execute(
-                    "UPDATE node_themes SET weight = MAX(weight, ?)"
-                    " WHERE node_id = ? AND theme_id = ? AND user_id = ?",
-                    (r["weight"], to_id, r["theme_id"], self.user_id),
-                )
-            self.renormalize_primary(to_id)
-        return {"moved": moved, "deduped": dup}
+            for node_id in owned:
+                prev = existing.get(node_id)
+                if prev is None:
+                    self._conn.execute(
+                        "INSERT INTO doc_node_marks"
+                        " (user_id, doc_id, node_id, status, evidence, created_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?)",
+                        (self.user_id, doc_id, node_id, MARK_PENDING, new_evidence, now),
+                    )
+                    written += 1
+                elif (prev["status"] != MARK_FILLED and evidence is not None
+                      and prev["evidence"] != new_evidence):
+                    # 只在仍 pending 时刷新证据；filled 行整行冻结（不降级）
+                    self._conn.execute(
+                        "UPDATE doc_node_marks SET evidence = ?"
+                        " WHERE user_id = ? AND doc_id = ? AND node_id = ?",
+                        (new_evidence, self.user_id, doc_id, node_id),
+                    )
+                    written += 1
+        return written
 
-    def get_node_themes(self, node_id: str) -> list[dict]:
-        """某节点的全部主题归属（主归属在前），含主题名与层级 —— UI 与 AI 都用它。"""
-        rows = self._conn.execute("""
-            SELECT nt.theme_id, nt.weight, nt.is_primary, nt.source AS assign_source,
-                   t.name AS theme_name, t.level, t.parent_id, t.subject
-            FROM node_themes nt JOIN themes t ON t.id = nt.theme_id
-            WHERE nt.node_id = ? AND nt.user_id = ?
-            ORDER BY nt.is_primary DESC, nt.weight DESC
-        """, (node_id, self.user_id)).fetchall()
-        return [dict(r) for r in rows]
+    def list_doc_marks(self, doc_id: int, status: str | None = None) -> list[dict]:
+        """列出某资料在增补队列里的标记（GQ-19 第③步的「工作集」查询）。
 
-    def get_theme_nodes(self, theme_id: str,
-                        include_descendants: bool = True) -> list[str]:
-        """主题下的知识点 ID（默认含子主题）—— 供 UI 下钻与将来的按主题选片。"""
-        theme = self._conn.execute(
-            "SELECT id FROM themes WHERE id = ? AND user_id = ?",
-            (theme_id, self.user_id)).fetchone()
-        if theme is None:
-            return []
-        ids = [theme_id]
-        if include_descendants:
-            ids += [r["id"] for r in self._conn.execute(
-                "SELECT id FROM themes WHERE parent_id = ? AND user_id = ?",
-                (theme_id, self.user_id)).fetchall()]
-        placeholders = ",".join("?" * len(ids))
-        rows = self._conn.execute(
-            f"SELECT DISTINCT node_id FROM node_themes"
-            f" WHERE user_id = ? AND theme_id IN ({placeholders})",
-            (self.user_id, *ids)).fetchall()
-        return [r["node_id"] for r in rows]
-
-    def get_primary_theme_map(self, subject: str = "") -> dict[str, str]:
-        """批量取「节点 → 主归属主题 id」（可按课过滤）—— UI 地图式下钻的数据源。
-
-        只取 `is_primary=1`（多归属仍留在库里，UI 按主归属做单归属渲染）。
-        `node_themes` 无 subject 列，故按 `themes.subject` 关联限定学科。
+        参数:
+            doc_id: 资料标识（仅当前用户）
+            status: 只列某状态（'pending' / 'filled'）；None = 全部
+        返回:
+            `[{user_id, doc_id, node_id, status, evidence, created_at}, ...]`，
+            按 `created_at, node_id` 稳定排序；`evidence` 反序列化为对象（无证据 → None）。
         """
-        sql = """
-            SELECT nt.node_id, nt.theme_id
-            FROM node_themes nt JOIN themes t ON t.id = nt.theme_id
-            WHERE nt.user_id = ? AND nt.is_primary = 1
-        """
-        params: list = [self.user_id]
-        if subject:
-            sql += " AND t.subject = ?"
-            params.append(subject)
-        rows = self._conn.execute(sql, params).fetchall()
-        return {r["node_id"]: r["theme_id"] for r in rows}
+        sql = "SELECT * FROM doc_node_marks WHERE user_id = ? AND doc_id = ?"
+        params: list = [self.user_id, int(doc_id)]
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY created_at, node_id"
+        out = []
+        for r in self._conn.execute(sql, params).fetchall():
+            d = dict(r)
+            d["evidence"] = _parse_evidence(d.get("evidence"))
+            out.append(d)
+        return out
 
-    def clear_ai_themes(self, subject: str) -> dict:
-        """清空某课**由 AI 生成**的主题与归属（human 数据保留），供重算前调用。
+    def set_mark_status(self, doc_id: int, node_id: str, status: str) -> bool:
+        """推进增补标记状态（GQ-19 第⑤步：增补完成后转 filled）。
 
-        语义（D4）：`node_themes` 是"路径"—— 只删归属，**不删 nodes 行、不删 MD 正文**。
-        跨学科保护（D4 修正）：`node_themes` 无 subject 列，故用
-        `theme_id IN (SELECT id FROM themes WHERE user_id=? AND subject=?)` 限定，
-        **绝不跨学科删**其他课的 AI 归属。
+        **只允许 `pending → filled`**（单向状态机，与"绝不重复增补"的意图一致）；
+        回退 / 重复置位都不被支持（返回 False，不改库）。
+
+        参数:
+            doc_id:  资料标识（仅当前用户）
+            node_id: 节点 ID（仅当前用户）
+            status:  目标状态；仅 `filled` 产生迁移，`pending` 是起点状态（无操作）
+        返回:
+            是否真的发生了状态迁移（无此标记 / 已是 filled → False）
+        异常:
+            ValueError: `status` 不在 `{'pending', 'filled'}`
         """
-        subj = (subject or "").strip()
+        if status not in MARK_STATUSES:
+            raise ValueError(f"非法标记状态：{status}，合法值：{MARK_STATUSES}")
+        if status != MARK_FILLED:
+            return False  # pending 是起点；已 filled 不得降级
         with self._conn:
             cur = self._conn.execute(
-                "DELETE FROM themes"
-                " WHERE user_id = ? AND subject = ? AND source != 'human'",
-                (self.user_id, subj),
+                "UPDATE doc_node_marks SET status = ?"
+                " WHERE user_id = ? AND doc_id = ? AND node_id = ? AND status = ?",
+                (MARK_FILLED, self.user_id, int(doc_id), node_id, MARK_PENDING),
             )
-            deleted_themes = cur.rowcount
-            # 主题被删时其归属已级联删除；这里再清一遍「本课 human 主题下的 ai 归属」。
-            # 必须按学科限定（D4 修正）：否则会连带删掉其他课的 AI 归属。
-            self._conn.execute(
-                "DELETE FROM node_themes WHERE user_id = ? AND source != 'human'"
-                " AND theme_id IN ("
-                "   SELECT id FROM themes WHERE user_id = ? AND subject = ?)",
-                (self.user_id, self.user_id, subj),
-            )
-        return {"deleted_themes": deleted_themes}
+            return cur.rowcount > 0
+
+    def _owned_node_ids(self, node_ids: list[str]) -> list[str]:
+        """从 node_ids 中筛出「存在且属当前用户」的（保持输入顺序）。
+
+        mark_doc_nodes 的用户隔离：他人节点与不存在的 id 一律剔除，
+        与 `register_alias` 的"他人节点视同不存在"一致。
+        """
+        if not node_ids:
+            return []
+        placeholders = ",".join("?" * len(node_ids))
+        rows = self._conn.execute(
+            f"SELECT id FROM nodes WHERE user_id = ? AND id IN ({placeholders})",
+            (self.user_id, *node_ids),
+        ).fetchall()
+        owned = {r["id"] for r in rows}
+        return [n for n in node_ids if n in owned]
 
     def update_node_content(self, node_id: str, content: str, mode: str = "append",
                             caller: str = "human",

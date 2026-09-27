@@ -98,7 +98,7 @@ def test_template_has_positive_scope_and_mastery_semantics():
 
     I1-3：框架约束曾是纯负面表述（"严禁脱离此框架"），模型不知道"**能**讲什么"；
     I2-3：掌握度只是清单里的一个数字，提示词里没有任何"据此调整"的要求。
-    两者都只靠模板文本实现，所以断言文本本身（同 test_kg_themes 的做法）。
+    两者都只靠模板文本实现，所以断言文本本身。
     """
     result = get_system_prompt(
         student_message="hi",

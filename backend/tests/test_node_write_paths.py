@@ -159,7 +159,7 @@ def test_fill_is_idempotent_after_rerun(kg, monkeypatch):
     marker = "循环队列：队尾追上队头是唯一标记。"
     body = marker + "字" * gg.GRAPH_MIN_CONTENT_CHARS
 
-    async def _fake_fill(subject, section, text, briefs, theme_context=""):
+    async def _fake_fill(subject, section, text, briefs):
         return {"nodes": [{"id": "queue", "content": body}]}
 
     monkeypatch.setattr(gen, "_call_fill_llm", _fake_fill)

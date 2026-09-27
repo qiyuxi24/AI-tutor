@@ -25,7 +25,7 @@
 
 - **uvicorn 必须 `--workers 1`**：EventBus 用户队列与进程内定时 GC 依赖单进程，多 worker 各自持有总线 → 事件必丢。
 - **`.env` 只有根目录一份**，不要在 `backend/` 下另建。
-- **`nodes.id` 是全局 TEXT 主键**（非 per-user）；脚本/测试建节点前先 `INSERT OR IGNORE INTO users`。**给 `knowledge.db` 加表**（`node_aliases`/`mastery_events`/`themes`/`node_themes`/`doc_node_marks` 同族）= `knowledge_graph.py::_create_tables` 建表 + `_auto_migrate` 补索引，**并同步三处**：`backend-admin/app/core/db.py::delete_user_rows` 的删号清单（该连接**不开** FK 级联，漏一行就是永久脏数据）、`scripts/inspect_graph_quality.py` 的体检口径、`AGENTS.md §5` 路由。**给 `knowledge.db` 加列**（如 `nodes.sources`、`nodes.subject`）= 写进 `_auto_migrate` 的 `ALTER TABLE` 清单：`CREATE TABLE IF NOT EXISTS` 不给老表加字段（与 `records.py` 那条同理）。
+- **`nodes.id` 是全局 TEXT 主键**（非 per-user）；脚本/测试建节点前先 `INSERT OR IGNORE INTO users`。**给 `knowledge.db` 加表**（`node_aliases`/`mastery_events`/`doc_node_marks` 同族）= `knowledge_graph.py::_create_tables` 建表 + `_auto_migrate` 补索引，**并同步三处**：`backend-admin/app/core/db.py::delete_user_rows` 的删号清单（该连接**不开** FK 级联，漏一行就是永久脏数据）、`scripts/inspect_graph_quality.py` 的体检口径、`AGENTS.md §5` 路由。**给 `knowledge.db` 加列**（如 `nodes.sources`、`nodes.subject`）= 写进 `_auto_migrate` 的 `ALTER TABLE` 清单：`CREATE TABLE IF NOT EXISTS` 不给老表加字段（与 `records.py` 那条同理）。
 - **用户隔离**：图谱/画像/RAG/记录全按 `user_id` 分区；`KnowledgeGraph(user_id)` 每次新建、用毕 `close()`，别跨协程共享实例。
 - **记录型库（`agent_runs` / `llm_usage` / `agent_debug_logs`）统一走 `core/records.py`**：连接 / 建表 / 补列 / 过期清理的唯一实现，三张表分属两个库（`agent_runs.db`、`debug_log.db`）。**加表 = 写自己的 schema + 调 `records.connect` + 在 `main.py::_prune_once` 的 `_JOBS` 加一行**，别另抄一套连接代码。**加列 = 写进该模块的补列清单**（如 `store._COLUMN_MIGRATIONS`，由 `records.ensure_columns` 就地补）：`CREATE TABLE IF NOT EXISTS` 既不会给老表加字段、也不会自动接线（`token_estimate` 就是这么加的；回归 `test_legacy_db_gets_token_estimate_column`）。
 - **🔴 Jinja2 占位符必须双花括号**（单花括号是字面文本，**不报错**）：`data/prompts/system_prompt_common.j2` 曾把 `{knowledge_graph_summary}` / `{user_profile}` 写错 → AI **完全看不到图谱与画像**，曾被误判为"模型幻觉"，排查成本极高。改模板/加载器后**断言"值被注入"**，而不是"占位符名字出现"；诊断脚本 `backend/scripts/probe_graph_prompt.py`；回归 `backend/tests/test_prompt_loader.py`。
@@ -37,7 +37,7 @@
 
 ## 2. 项目特有约定（非标准实践，照做）
 
-- **单一事实源 / 唯一出口**：LLM 原语在 `core/llm/`（**检索侧**嵌入 `embed.py::embed_texts` —— 语义去重侧另走 `kb/embedder.py::ApiEmbedder`，共用其常量与失败语义；JSON 提取 `json_extract.py::extract_json`；`chat_create` 是唯一带 fallback 的出口；真打 LLM 仅 `agent/loop._chat_once` 与 `call_llm`）；运行记录 `core/agent/store.py`（**唯一写入方 = loop**）；工具注册表 `core/agent_tools/registry.py`；token 计量 `core/token_counter.py`；**节点来源溯源 = `KnowledgeGraph.add_sources`**（并入去重、绝不覆盖），配套 `doc_node_marks` = 「资料 → 该资料产出/影响的节点」**账本**（`evidence.kind` 区分 `new`/`hit`）+ **增补队列**（`status` 区分 `pending`/`filled`）—— 两职责**有意共用一表**（同资料、同批节点、同生命周期）；唯一写入口 `mark_doc_nodes`/`set_mark_status`，状态**单向** `pending`→`filled`。**图谱 `nodes`/`edges` 的存储布局与检索通路说明** = `docs/知识图谱/知识图谱_数据结构与检索通路_评审与改良方案.md`（表定义仍以 `knowledge_graph.py::_create_tables` 为唯一真值）；**主题聚类唯一出口** = `core/kg_themes.py::generate_subject_themes`（LLM 归纳 → 落库；建图后自动一次 + 手动 `POST /knowledge/themes/rebuild`；**不要在别处自己写 `themes`**）；**主题归属唯一写入口** = `KnowledgeGraph.set_node_themes`（多对多 + 唯一主归属；`source='human'` 的数据不被重算覆盖）。
+- **单一事实源 / 唯一出口**：LLM 原语在 `core/llm/`（**检索侧**嵌入 `embed.py::embed_texts` —— 语义去重侧另走 `kb/embedder.py::ApiEmbedder`，共用其常量与失败语义；JSON 提取 `json_extract.py::extract_json`；`chat_create` 是唯一带 fallback 的出口；真打 LLM 仅 `agent/loop._chat_once` 与 `call_llm`）；运行记录 `core/agent/store.py`（**唯一写入方 = loop**）；工具注册表 `core/agent_tools/registry.py`；token 计量 `core/token_counter.py`；**节点来源溯源 = `KnowledgeGraph.add_sources`**（并入去重、绝不覆盖），配套 `doc_node_marks` = 「资料 → 该资料产出/影响的节点」**账本**（`evidence.kind` 区分 `new`/`hit`）+ **增补队列**（`status` 区分 `pending`/`filled`）—— 两职责**有意共用一表**（同资料、同批节点、同生命周期）；唯一写入口 `mark_doc_nodes`/`set_mark_status`，状态**单向** `pending`→`filled`。**图谱 `nodes`/`edges` 的存储布局与检索通路说明** = `docs/知识图谱/知识图谱_数据结构与检索通路_评审与改良方案.md`（表定义仍以 `knowledge_graph.py::_create_tables` 为唯一真值）；**图谱只保留最小节点与关系边** —— 主题层（`themes`/`node_themes`、聚合下钻）已于 2026-09-27 整体下线**并删表**，勿再引入任何第二级结构或聚合大节点。
 - **新建节点只有一个出口** `KnowledgeGraph.create_node_with_content(node_data, content, origin)`：4 条写路径（Agent 工具写层 `knowledge_writer` / 书籍建图 `graph_generator` / 手动 API / 问题拆解）全部走它，MD 模板唯一来源 = `knowledge_graph.ORIGIN_NOTES`。**禁止**在调用方自己 `open(kg.nodes_dir/...)` 写节点 MD；新增写路径时守住 `tests/test_node_write_paths.py`（逐条断言 origin，加了新路径而没复用模板就会红）。**同名并轨也在这一层**（2026-09-20）：命中同名（`normalize_node_name` + 同用户同学科，判重唯一实现 = `KnowledgeGraph.find_node_by_name`）则不新建、只并入正文，**返回实际落点 ID** —— 调用方必须用返回值建边/回执，别再自己写一份同名比较。建图语义去重状态 `dedup_status`（`ok`/`degraded` hash 兜底/`unavailable` 欠费）随 aggregate 带出。
 - **LLM 调用边界**：所有对话走 `run_agent_loop`（带 KG_TOOLS）；一次性文本/JSON（出题/判分/图谱生成）走 `call_llm`（不带工具）。
 - **M3 三段坑**：思考与正文**共享** `max_tokens` 预算 → 批量结构化抽取必须 `thinking=False`，长 JSON 显式调大 max_tokens（否则"空正文 / 硬截断"交替出现）。
@@ -91,7 +91,6 @@
 | 知识图谱（**唯一参照 = 参照系契约**） | `docs/知识图谱/知识图谱_参照系契约.md` + `docs/知识图谱/知识图谱_模块结构与封装调研` / `docs/知识图谱/知识图谱_P0实现方案与核心思路` / `docs/知识图谱/知识图谱_P1扩跳与AB对照实验` / `docs/知识图谱/知识图谱_多资料综合维护调研` |
 | 图谱质量体检 / 存量同名合并 | `backend/scripts/inspect_graph_quality.py`（`--user N` 单用户、`--fix-dupes [--apply]` 合并，默认只读）；指标口径与验收基线见 `TODO_Graph_Quality.md` §0.1 |
 | **图谱数据结构（schema / 索引 / 检索通路）** | `docs/知识图谱/知识图谱_数据结构与检索通路_评审与改良方案.md`（15 项问题分级 + KG-D1~D15 改造清单）；**设计说明 / 选型理由 / 业界对比 / 准确率口径** → `docs/知识图谱/知识图谱_数据结构设计说明与业界对比.md`；表定义仍以 `knowledge_graph.py::_create_tables` 为准 |
-| **图谱主题层级（`themes`/`node_themes` 的 SSOT）** | `docs/知识图谱/知识图谱_主题层级_设计与实现方案.md`（设计/决策）；实现计划 + 决策补充（D1~D8）→ `docs/知识图谱/知识图谱_主题层级_实现计划.md` |
 | RAG / 文档解析 / 检索 / 出题 | `docs/RAG/RAG_*.md`、`docs/教学模块/QUIZ_出题逻辑调研.md` |
 | **试卷归档（拆题 / 入库 / 知识点关联）** | `docs/教学模块/试卷归档_调研与实施方案.md`（解析引擎选型不重复，引用 `docs/RAG/RAG_视觉解析策略_调研与实施方案.md`） |
 | MCP 网页搜索 | `docs/RAG/MCP_网页搜索工具_调研与实施方案.md` |
@@ -105,6 +104,6 @@
 
 ## 6. 提交与测试纪律
 
-- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **835 passed, 7 deselected**（2026-09-22 实测；另一会话改动多时先重跑确认）。
+- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **1098 passed, 7 deselected**（2026-09-27 实测；另一会话改动多时先重跑确认）。
 - 提交按**文件族**拆；单文件跨主题按**依赖方向**排序（先被调用方）；测试与其修复同一提交；不混无关改动。
 - 与其他 AI 会话共存：提交前 `git status` 看清别人 WIP，**路径限定 add**。

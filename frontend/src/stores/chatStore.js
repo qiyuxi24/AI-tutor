@@ -29,7 +29,6 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { sendMessageStream, apiClient } from '../api/index.js'
 import { clientError, fmt, ErrorDefs } from '../utils/errorCodes.js'
-import { buildVisibleGraph, isThemeNodeId, THEME_PREFIX } from '../utils/themeCollapse.js'
 
 // 按 user_id 隔离 localStorage，防止切换账号后对话历史泄露
 const _uid = (() => {
@@ -40,7 +39,6 @@ const _uid = (() => {
 })()
 const STORAGE_KEY_CONVERSATIONS = `ai_tutor_conversations_${_uid}`
 const STORAGE_KEY_CURRENT = `ai_tutor_current_${_uid}`
-const STORAGE_KEY_MODE = `ai_tutor_mode_${_uid}`
 
 // 后端 graph_middleware.SUBJECT_UNCLASSIFIED 的对应值。
 // 「未分类」= 无学科归属节点的合成分组名，不是真实学科（不出现在学科列表里，
@@ -67,8 +65,7 @@ export const useChatStore = defineStore('chat', () => {
   // ─── 对话状态 ───
   const conversations = ref([])
   const currentId = ref(null)
-  const mode = ref('adaptive')
-  const currentNode = ref('')  // 递归模式：当前教学知识点 ID
+  const currentNode = ref('')  // 当前教学位置的知识点 ID（可选）
   const loading = ref(false)
   // 知识库上下文范围（用户选择放进对话上下文的文件/文件夹）
   const kbContext = ref(null)
@@ -86,11 +83,6 @@ export const useChatStore = defineStore('chat', () => {
   // 知识板块维度：学科之下的一级分组，currentBoard=null 表示查看整学科
   const boards = ref([])           // 当前学科的板块列表 [{board, node_count, ...}]
   const currentBoard = ref(null)   // 当前查看的板块名；null = 整学科
-  // 主题层级维度（KG-T4 地图式下钻）：主题树 + 节点主归属 + 展开状态。
-  // 只存事实，画布可见图由 buildVisibleGraph 派生（utils/themeCollapse.js）。
-  const themes = ref([])           // 当前学科主题扁平列表 [{id,name,level,parent_id,order_index}]
-  const themePrimary = ref({})     // {node_id: 主归属主题 id}
-  const expandedThemes = ref([])   // 已展开主题 id —— 默认全折叠：先看"省"，再逐层下钻
 
   // 学习进度维度：科技树联动数据（拓扑排序路径 + 下一步推荐）
   const learningPath = ref([])     // 按学习顺序排列的节点 [{id, name, mastery, difficulty, ...}]
@@ -204,9 +196,6 @@ export const useChatStore = defineStore('chat', () => {
       knowledgeNodes.value = []
       knowledgeEdges.value = []
       boards.value = []
-      themes.value = []
-      themePrimary.value = {}
-      expandedThemes.value = []
       graphError.value = ''
       graphLoaded.value = true
       return
@@ -236,7 +225,6 @@ export const useChatStore = defineStore('chat', () => {
       fetchLearningPath()
       fetchNextToLearn()
       fetchStats(currentSubject.value)
-      await fetchThemes(currentSubject.value)   // 等主题就绪，便于紧随其后的"展开到目标节点"
     } catch (e) {
       graphError.value = clientError('GRAPH_LOAD')
     }
@@ -360,7 +348,6 @@ export const useChatStore = defineStore('chat', () => {
     if (currentSubject.value === subject) return
     currentSubject.value = subject || null
     currentBoard.value = null            // 切换学科后回到整学科视图
-    expandedThemes.value = []            // 折叠状态归零：主题 id 是学科内的，不跨课继承
     graphLoaded.value = false
     await fetchBoards(subject || null)   // 按需加载板块列表（学科导航用）
     await fetchGraph(true)
@@ -377,81 +364,21 @@ export const useChatStore = defineStore('chat', () => {
     await fetchGraph(true)
   }
 
-  /**
-   * 拉取当前学科的主题树 + 节点主归属（地图式下钻的数据源）。
-   * 主题由聚类落库、不随 CRUD 变化，因此与图谱请求同行、失败静默降级为"不折叠"。
-   * @param {string} subject
-   */
-  async function fetchThemes(subject) {
-    if (!subject) {
-      themes.value = []
-      themePrimary.value = {}
-      return
-    }
-    try {
-      const { data } = await apiClient.get('/api/v1/knowledge/themes', { params: { subject } })
-      if (currentSubject.value !== subject) return   // 已切走学科，丢弃过期响应
-      themes.value = data.themes || []
-      themePrimary.value = data.primary || {}
-    } catch {
-      if (currentSubject.value === subject) {
-        themes.value = []            // 拿不到主题 → 退回原始节点图，不影响图谱可用
-        themePrimary.value = {}
-      }
-    }
-  }
-
-  /**
-   * 画布点击主题聚合节点 → 展开/收起它自己（同一节点同一交互双向切换）。
-   * @param {string} nodeId - ForceGraph 节点 id（聚合节点形如 `theme:<themeId>`）
-   * @returns {boolean} 是否消费了本次点击（false = 普通知识点，交给双击详情）
-   */
-  function toggleThemeNode(nodeId) {
-    if (!isThemeNodeId(nodeId)) return false
-    const tid = nodeId.slice(THEME_PREFIX.length)
-    const i = expandedThemes.value.indexOf(tid)
-    if (i >= 0) expandedThemes.value.splice(i, 1)
-    else expandedThemes.value.push(tid)
-    return true
-  }
-
-  /**
-   * 展开某知识点的主题祖先链 —— 保证它当前在画布上可见。
-   * 搜索选中、仪表盘跳转、节点详情互跳都要用：折叠态下目标可能藏在聚合节点里。
-   * @param {string} nodeId
-   */
-  function revealNode(nodeId) {
-    const t = themes.value.find(x => x.id === themePrimary.value[nodeId])
-    if (!t) return
-    const need = t.parent_id ? [t.parent_id, t.id] : [t.id]
-    expandedThemes.value = [...new Set([...expandedThemes.value, ...need])]
-  }
-
-  // ─── 地图式下钻：画布可见图（折叠 + 边向上卷后的节点/边）───
-  // 主题数据缺失时 buildVisibleGraph 原样返回，行为与折叠功能上线前一致。
-  const visibleGraph = computed(() => buildVisibleGraph({
-    nodes: knowledgeNodes.value,
-    edges: knowledgeEdges.value,
-    themes: themes.value,
-    primary: themePrimary.value,
-    expanded: expandedThemes.value,
-  }))
-  const displayNodes = computed(() => visibleGraph.value.nodes)
-  const displayEdges = computed(() => visibleGraph.value.edges)
-  const hasThemes = computed(() => themes.value.length > 0)
+  // 图谱只渲染最小节点（原子知识点）与关系边：主题层与聚合下钻已下线（2026-09-27）。
+  const displayNodes = computed(() => knowledgeNodes.value)
+  const displayEdges = computed(() => knowledgeEdges.value)
 
   /**
    * 从学科书籍生成知识图谱（AI 直接写库），生成后刷新图谱。
+   * 勾选文件夹时，新节点会归入该文件夹同名的知识板块。
    *
    * @param {string} subject - 学科名（如 '数据结构'）
    * @param {number[]} nodeIds - KB 中的文件/文件夹节点 ID 列表
-   * @param {'subject'|'section'} mode - 生成模式
    * @returns {Promise<Object>} 生成结果（created_nodes 等）
    */
-  async function generateSubjectGraph(subject, nodeIds, mode = 'subject') {
+  async function generateSubjectGraph(subject, nodeIds) {
     const { data } = await apiClient.post('/api/v1/kb/graph/generate', {
       subject,
-      mode,
       node_ids: nodeIds,
     }, { timeout: 300000 })  // 生成可能较慢
     await fetchSubjects()
@@ -461,6 +388,78 @@ export const useChatStore = defineStore('chat', () => {
     graphLoaded.value = false
     await fetchBoards(subject)   // 刷新板块列表（生成后节点可能带板块）
     await fetchGraph(true)
+    return data
+  }
+
+  /**
+   * 删除整个学科图谱（节点 / 关系 / 主题 / 节点正文），**知识库中的教材原文不受影响**。
+   *
+   * 删除后走 refreshGraph：重拉学科列表 + ensureSubjectSelected —— 当前学科已消失时
+   * 自动回退到剩余的第一个学科（该分支已存在，见 ensureSubjectSelected 注释）。
+   *
+   * @param {string} subject - 学科名（「未分类」是后端合成分组，会被后端 400 拒绝）
+   * @returns {Promise<Object>} API 响应（deleted_nodes / deleted_edges / deleted_themes）
+   */
+  async function deleteSubjectGraph(subject) {
+    const { data } = await apiClient.delete('/api/v1/knowledge/graph', { params: { subject } })
+    await refreshGraph(true)
+    return data
+  }
+
+  /**
+   * 学科改名：只改课名（节点 subject + tags 里的旧名 + 主题树归属），知识点内容不动。
+   *
+   * 正看着的就是被改名的学科时，**先**把本地 currentSubject 换成新名再刷新 —— 否则
+   * refreshGraph 里的 ensureSubjectSelected 发现旧名已不存在，会把视图切到别的学科。
+   *
+   * @param {string} oldName
+   * @param {string} newName
+   * @returns {Promise<Object>} API 响应（renamed_nodes / renamed_themes）
+   */
+  async function renameSubject(oldName, newName) {
+    const { data } = await apiClient.patch('/api/v1/knowledge/subject', {
+      old_name: oldName,
+      new_name: newName,
+    })
+    if (currentSubject.value === oldName) currentSubject.value = newName
+    await refreshGraph(true)
+    return data
+  }
+
+  /**
+   * 板块改名：只改分组名（板块内知识点、边、掌握度都不动）。
+   * @param {string} subject
+   * @param {string} oldName
+   * @param {string} newName
+   */
+  async function renameBoard(subject, oldName, newName) {
+    const { data } = await apiClient.patch('/api/v1/knowledge/board', {
+      subject,
+      old_name: oldName,
+      new_name: newName,
+    })
+    // 正在看的就是这个板块 → 视图跟着换名，别退回整学科
+    if (currentSubject.value === subject && currentBoard.value === oldName) {
+      currentBoard.value = newName
+    }
+    await refreshGraph(true)
+    return data
+  }
+
+  /**
+   * 解散板块：板块内的知识点回到「未分组」，一个都不删。
+   * @param {string} subject
+   * @param {string} board
+   */
+  async function deleteBoard(subject, board) {
+    const { data } = await apiClient.delete('/api/v1/knowledge/board', {
+      params: { subject, board },
+    })
+    // 正在看的就是这个板块 → 它没了，回整学科视图
+    if (currentSubject.value === subject && currentBoard.value === board) {
+      currentBoard.value = null
+    }
+    await refreshGraph(true)
     return data
   }
 
@@ -774,7 +773,6 @@ export const useChatStore = defineStore('chat', () => {
     } else {
       localStorage.setItem(STORAGE_KEY_CURRENT, '')
     }
-    localStorage.setItem(STORAGE_KEY_MODE, mode.value)
 
     // 双写：同步到后端（防抖，避免频繁请求）
     syncToBackend()
@@ -851,9 +849,20 @@ export const useChatStore = defineStore('chat', () => {
     deleteFromBackend(id)
   }
 
-  // ─── 设置模式 ───
-  function setMode(newMode) {
-    mode.value = newMode
+  // ─── 重命名对话 ───
+  /**
+   * 只改标题。标题本就在「localStorage 为主 + 后端全量同步」的契约里：persist() 会把新
+   * 标题带进 syncToBackend()，后端 upsert 以客户端 title 为准（conversation_store 的
+   * ON CONFLICT title = excluded.title）—— 所以**不需要再加一个改名端点**。
+   * messages 没变 → 后端不推进 updated_at，列表排序不受影响。
+   *
+   * @param {string} id
+   * @param {string} title - 已 trim 的非空标题
+   */
+  function renameConversation(id, title) {
+    const conv = conversations.value.find((c) => c.id === id)
+    if (!conv || conv.title === title) return
+    conv.title = title
     persist()
   }
 
@@ -923,7 +932,6 @@ export const useChatStore = defineStore('chat', () => {
     // 使用流式 API
     streamController = sendMessageStream(
       conv.messages.slice(0, -1), // 不含占位消息的对话历史
-      mode.value,
       {
         // 每收到一个 token，追加到占位消息
         onToken: (token) =>
@@ -982,7 +990,6 @@ export const useChatStore = defineStore('chat', () => {
     // 对话
     conversations,
     currentId,
-    mode,
     currentNode,
     loading,
     kbContext,
@@ -996,7 +1003,7 @@ export const useChatStore = defineStore('chat', () => {
     newConversation,
     switchConversation,
     deleteConversation,
-    setMode,
+    renameConversation,
     setKbContext,
     send,
     // 图谱数据
@@ -1010,16 +1017,8 @@ export const useChatStore = defineStore('chat', () => {
     boards,
     currentBoard,
     setBoard,
-    // 主题层级（地图式下钻：省/市折叠）
-    themes,
-    themePrimary,
-    expandedThemes,
     displayNodes,
     displayEdges,
-    hasThemes,
-    fetchThemes,
-    toggleThemeNode,
-    revealNode,
     ensureSubjectSelected,
     fetchBoards,
     fetchGraph,
@@ -1028,6 +1027,10 @@ export const useChatStore = defineStore('chat', () => {
     fetchSubjects,
     setSubject,
     generateSubjectGraph,
+    deleteSubjectGraph,
+    renameSubject,
+    renameBoard,
+    deleteBoard,
     // 学习进度（科技树联动）
     learningPath,
     nextToLearn,

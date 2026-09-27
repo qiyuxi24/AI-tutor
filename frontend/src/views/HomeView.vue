@@ -28,6 +28,7 @@ import NodeDetail from '../components/NodeDetail.vue'
 import UserProfile from '../components/UserProfile.vue'
 import GraphSearch from '../components/GraphSearch.vue'
 import OnboardingGuide from '../components/OnboardingGuide.vue'
+import LoginDialog from '../components/LoginDialog.vue'
 import KnowledgeView from './KnowledgeView.vue'
 import QuizView from './QuizView.vue'
 import CollectorView from './CollectorView.vue'
@@ -66,6 +67,7 @@ function startGraphResize(e) {
   document.addEventListener('mouseup', onUp)
 }
 const showUserProfile = ref(false)
+const showLoginDialog = ref(false)
 const graphSearchRef = ref(null)
 const forceGraphRef = ref(null)
 const onboardingRef = ref(null)
@@ -77,14 +79,25 @@ const nodeDetailModal = ref(null)
 const nodeDetailVisible = ref(false)
 const nodeDetailLoading = ref(false)
 
-onMounted(() => {
+onMounted(async () => {
+  // 先确保有会话（无 token 时静默登录体验账户）：init() 会立刻打一批需要 token
+  // 的接口，没先登录整屏就是 401。
+  // ponytail: 失败一律弹登录框，不区分"口令不对"和"后端没起"——弹框里带着真实
+  // 错误信息，用户至少知道该干什么。要精确区分就让 ensureSession 返回原因而非 boolean。
+  const ok = await authStore.ensureSession()
+  if (!ok) showLoginDialog.value = true
   // init() 内部依次：fetchSubjects() → ensureSubjectSelected() → fetchGraph() → connectSSE()
   store.init()
 })
 
-function handleLogout() {
-  authStore.logout()
-  window.location.hash = '#/login'
+/** 切换账号：打开登录弹窗（#/login 路由页已取消，也不再提供"退出登录"）*/
+function openAccountSwitch() {
+  showLoginDialog.value = true
+}
+
+/** 登录/注册成功：必须重载，否则 store 里还是上一个账号的图谱与对话记录 */
+function handleLoginSuccess() {
+  window.location.reload()
 }
 
 function handleActivitySelect(id) {
@@ -205,14 +218,6 @@ async function handleGraphAction({ action, payload }) {
 }
 
 /**
- * 单击节点：主题聚合节点 → 展开/收起它自己（地图式下钻，同一交互双向切换）。
- * 普通知识点的详情走双击（@node-dblclick）。
- */
-function handleGraphNodeClick(nodeId) {
-  store.toggleThemeNode(nodeId)
-}
-
-/**
  * 搜索选中节点 → 切换到图谱视图并聚焦该节点
  */
 async function handleGraphSearchSelect(nodeId) {
@@ -220,8 +225,6 @@ async function handleGraphSearchSelect(nodeId) {
     viewMode.value = 'graph'
     await new Promise(r => setTimeout(r, 450))
   }
-  store.revealNode(nodeId)                      // 目标可能藏在折叠的主题聚合节点里
-  await new Promise(r => setTimeout(r, 200))    // 等折叠状态生效、可见图重建
   forceGraphRef.value?.focusNode(nodeId)
 }
 
@@ -244,8 +247,6 @@ async function switchSubjectAndFocus(nodeId, subject) {
     // 等新学科的力导向图完成渲染
     await new Promise(r => setTimeout(r, 450))
   }
-  store.revealNode(nodeId)                      // 目标可能藏在折叠的主题聚合节点里
-  await new Promise(r => setTimeout(r, 200))    // 等折叠状态生效、可见图重建
   forceGraphRef.value?.focusNode(nodeId)
 }
 
@@ -332,7 +333,7 @@ const slideTransition = {
       :active-view="viewMode"
       @select="handleActivitySelect"
       @open-profile="showUserProfile = true"
-      @logout="handleLogout"
+      @switch-account="openAccountSwitch"
     />
 
     <div class="content-region">
@@ -408,7 +409,6 @@ const slideTransition = {
             :error="store.graphError"
             :learning-path="store.learningPath"
             :next-node-id="store.nextToLearn?.node_id || ''"
-            @node-click="handleGraphNodeClick"
             @node-dblclick="handleNodeDblClick"
             @graph-action="handleGraphAction"
           />
@@ -435,7 +435,7 @@ const slideTransition = {
       <SettingsView
         v-if="viewMode === 'settings'"
         @replay-onboarding="replayOnboarding"
-        @logout="handleLogout"
+        @switch-account="openAccountSwitch"
       />
     </div>
 
@@ -456,6 +456,9 @@ const slideTransition = {
       @close="showUserProfile = false"
       @profile-updated="store.refreshGraph()"
     />
+
+    <!-- 登录 / 注册弹窗（切换账号） -->
+    <LoginDialog v-model:visible="showLoginDialog" @success="handleLoginSuccess" />
 
     <!-- 新手引导 -->
     <OnboardingGuide ref="onboardingRef" />
