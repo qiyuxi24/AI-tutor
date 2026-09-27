@@ -10,6 +10,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 体验账户口令（构建期烘进前端）；留空则用前端源码默认值。
+        # 设了 DEFAULT_ADMIN_PASSWORD 就必须同时设它，否则首屏静默登录失败
+        - VITE_DEMO_PASSWORD=${VITE_DEMO_PASSWORD:-}
     image: ai-tutor:latest
     container_name: ai-tutor
     restart: unless-stopped

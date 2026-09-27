@@ -30,6 +30,10 @@ class FakeKG:
                 return tag
         return ""
 
+    def get_node_themes(self, node_id):
+        """导出只读主归属主题名；替身不带主题 → 全部落「未归类」（导出降级路径）。"""
+        return []
+
     def close(self):
         self.closed = True
 

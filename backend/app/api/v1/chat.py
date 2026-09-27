@@ -46,14 +46,13 @@ async def handle_chat(request: ChatRequest, raw_request: Request,
 
     kb = {"node_ids": request.kb_node_ids or [], "name": request.kb_node_name} \
         if request.kb_node_ids else None
-    reply, mode, graph_analysis = await process_message(
+    reply, graph_analysis = await process_message(
         user_id=user_id,
         messages=request.messages,
-        mode=request.mode,
         current_node=request.current_node,
         kb=kb,
     )
-    return ChatResponse(reply=reply, mode=mode, graph_analysis=graph_analysis)
+    return ChatResponse(reply=reply, graph_analysis=graph_analysis)
 
 
 @router.post("/chat/stream")
@@ -72,7 +71,6 @@ async def handle_chat_stream(request: ChatRequest, raw_request: Request,
 
         async for sse_chunk in process_message_stream(
             messages=request.messages,
-            mode=request.mode,
             user_id=user_id,
             current_node=request.current_node,
             kb=kb,

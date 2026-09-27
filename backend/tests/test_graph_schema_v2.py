@@ -130,7 +130,7 @@ def test_graph_generator_tags_exclude_difficulty(kg, monkeypatch):
     monkeypatch.setattr(gen, "_find_dedup_candidates", _async({}))
     monkeypatch.setattr(gen, "_confirm_synonyms", _async({}))
 
-    asyncio.run(gen._write_to_graph(
+    asyncio.run(gen._write_skeleton(
         kg, "数据结构",
         {"nodes": [
             {"id": "stack", "name": "栈", "difficulty": 2},
@@ -214,3 +214,95 @@ def test_delete_node_cascades_aliases(kg):
     assert kg.find_node_by_name("堆栈") is None
     assert kg._conn.execute(
         "SELECT COUNT(*) FROM node_aliases WHERE node_id = 'stack'").fetchone()[0] == 0
+
+
+def test_rename_registers_old_name_as_alias(kg):
+    """改名后旧名必须成为别名 —— 否则旧名失联，后续会再造一个语义重复节点。
+
+    回归来源（2026-09-26 耦合审计）：`update_node_info` 改 `name` 时未登记别名，而
+    `find_node_by_name` 只查 `nodes.name` + `node_aliases` → 旧名彻底查不到。写入层的
+    同名并轨（GQ-1）只挡"写入时同名"，**挡不住改名后的旧名**；而建图的语义去重（L3 嵌入）
+    当前正是降级/欠费状态，于是"改完名 → 下次建图用旧名再抽一遍"会直接造出重复节点。
+    """
+    kg.add_node({"id": "a", "name": "堆栈", "tags": ["数据结构"]})
+
+    kg.update_node_info("a", {"name": "栈"})
+
+    assert kg.get_node("a")["name"] == "栈"
+    assert kg.find_node_by_name("堆栈")["id"] == "a", "旧名应登记为别名并指向同一节点"
+    assert kg.find_node_by_name("栈")["id"] == "a", "新名照常可查"
+    row = kg._conn.execute(
+        "SELECT source FROM node_aliases WHERE user_id = 1 AND node_id = 'a' AND alias_key = ?",
+        (normalize_node_name("堆栈"),)).fetchone()
+    assert row is not None and row["source"] == "rename", "来源应标 rename（区分自名 ai / 并轨 merge）"
+
+
+def test_rename_to_same_name_does_not_touch_aliases(kg):
+    """传相同名字（或只改别的字段）不得登记别名 —— 否则别名表会被无意义撑大。"""
+    kg.add_node({"id": "a", "name": "堆栈", "tags": ["数据结构"]})
+
+    kg.update_node_info("a", {"name": "堆栈", "difficulty": 4})
+
+    assert kg._conn.execute(
+        "SELECT COUNT(*) FROM node_aliases WHERE node_id = 'a'").fetchone()[0] == 0, \
+        "名字没变就不该登记别名（自名只在 create_node_with_content 里登记）"
+
+
+# ── 两阶段建图：content_status（骨架 / 已填充）────────────────────────
+
+def test_content_status_column_added_to_legacy_db(tmp_path):
+    """老库（无 content_status 列）→ 实例化即补列；存量行一律 filled（老数据没有"待填充"概念）"""
+    data_dir = _make_legacy_db(tmp_path / "kg",
+                               [{"id": "n1", "name": "栈", "tags": ["数据结构"]}])
+    kg = KnowledgeGraph(user_id=1, data_dir=data_dir)
+    try:
+        cols = [r[1] for r in kg._conn.execute("PRAGMA table_info(nodes)").fetchall()]
+        assert "content_status" in cols, "老库应被补上 content_status 列"
+        assert kg.get_node("n1")["content_status"] == "filled"
+    finally:
+        kg.close()
+
+
+def test_create_node_infers_content_status(kg):
+    """无正文 → 骨架态；有正文 → 已填充；显式传参覆盖推断"""
+    kg.create_node_with_content({"id": "s", "name": "骨架"}, origin="book")
+    kg.create_node_with_content({"id": "f", "name": "完整"}, "正文内容", origin="book")
+
+    assert kg.get_node("s")["content_status"] == "skeleton"
+    assert kg.get_node("f")["content_status"] == "filled"
+
+    kg.create_node_with_content({"id": "x", "name": "显式"}, origin="book",
+                                content_status="skeleton")
+    assert kg.get_node("x")["content_status"] == "skeleton"
+
+
+def test_update_node_content_marks_filled(kg):
+    """写入正文 → 转 filled；写空内容不改状态（否则骨架会被误标成已填充）"""
+    kg.create_node_with_content({"id": "s", "name": "骨架"}, origin="book")
+    kg.update_node_content("s", "补上的正文")
+    assert kg.get_node("s")["content_status"] == "filled"
+
+    kg.create_node_with_content({"id": "s2", "name": "骨架2"}, origin="book")
+    kg.update_node_content("s2", "")
+    assert kg.get_node("s2")["content_status"] == "skeleton"
+
+
+def test_source_ref_column_added_to_legacy_db(tmp_path):
+    """老库补 source_ref 列，存量行留空串（老数据没有来源定位，不参与续填）"""
+    data_dir = _make_legacy_db(tmp_path / "kg",
+                               [{"id": "n1", "name": "栈", "tags": ["数据结构"]}])
+    kg = KnowledgeGraph(user_id=1, data_dir=data_dir)
+    try:
+        cols = [r[1] for r in kg._conn.execute("PRAGMA table_info(nodes)").fetchall()]
+        assert "source_ref" in cols, "老库应被补上 source_ref 列"
+        assert kg.get_node("n1")["source_ref"] == ""
+    finally:
+        kg.close()
+
+
+def test_source_ref_persisted_on_create(kg):
+    """建节点时传入的来源定位要落库（跨会话续填靠它重读原文）"""
+    kg.create_node_with_content({"id": "s", "name": "骨架", "source_ref": "7|第1章"},
+                                origin="book")
+
+    assert kg.get_node("s")["source_ref"] == "7|第1章"

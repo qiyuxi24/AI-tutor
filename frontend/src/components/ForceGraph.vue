@@ -15,6 +15,7 @@ import * as d3 from 'd3'
 import ContextMenu from './ContextMenu.vue'
 import EditDialog from './EditDialog.vue'
 import { notifyError } from '../utils/feedback'
+import { themeRadius } from '../utils/themeCollapse'
 
 /* ================================================================
    组件 Props
@@ -72,6 +73,8 @@ let drawingWatchStop = null   // 跟踪 handleDrawingTarget 中创建的 watch�
 // 本地"显示学习路径"开关；最终生效值 = 本地开关 OR 外部 props.showPath
 const pathVisible = ref(false)
 const pathVisibleFinal = computed(() => pathVisible.value || props.showPath)
+// 主题折叠模式：可见图里含主题聚合节点（由 store 的可见图计算产出，见 utils/themeCollapse.js）
+const themeModeActive = computed(() => (props.nodes || []).some(n => n.isTheme))
 
 /* ================================================================
    D3 核心对象引用（不响应式）
@@ -85,6 +88,8 @@ let drawingTempLine = null
 let drawingMouseMoveHandler = null
 let nodeSelection = null   // 当前渲染的节点 group（路径高亮 / hover 恢复用）
 let linkSelection = null   // 当前渲染的边（路径高亮 / hover 恢复用）
+// 节点坐标缓存：折叠/展开会重建图，复用旧坐标可避免整张图重新洗牌（"节点乱飞"）
+const lastPositions = new Map()
 
 /* ================================================================
    工具函数
@@ -173,15 +178,23 @@ function isPathEdge(edge) {
   return si >= 0 && ti >= 0 && si < ti
 }
 
-/** 路径边/节点默认样式（供初始渲染与 hover 恢复共用） */
+/** 边默认样式（供初始渲染与 hover 恢复共用）
+ *  - 归属边（锚点 → 子节点）：细虚线，表达"归属"而非关系；
+ *  - 聚合边（多条边卷到同一对主题）：线宽随合并条数增长（§5.2）。 */
+function isBelongLink(l) { return l.kind === 'belong' }
+function linkIsPath(l) { return pathVisibleFinal.value && isPathEdge(l) }
 function linkDefaultColor(l) {
-  return pathVisibleFinal.value && isPathEdge(l) ? 'var(--color-accent)' : 'var(--color-graph-edge)'
+  if (isBelongLink(l)) return 'var(--color-border)'
+  return linkIsPath(l) ? 'var(--color-accent)' : 'var(--color-graph-edge)'
 }
 function linkDefaultWidth(l) {
-  return pathVisibleFinal.value && isPathEdge(l) ? 2.6 : 1.2
+  if (isBelongLink(l)) return 1
+  if (l.kind === 'agg') return Math.min(4, 1.2 + Math.log2(l.count || 1) * 0.9)
+  return linkIsPath(l) ? 2.6 : 1.2
 }
 function linkDefaultOpacity(l) {
-  return pathVisibleFinal.value && isPathEdge(l) ? 0.9 : 0.4
+  if (isBelongLink(l)) return 0.55
+  return linkIsPath(l) ? 0.9 : 0.4
 }
 function nodeBodyStroke(d) {
   if (pathVisibleFinal.value && isPathNode(d.id)) return 'var(--color-accent)'
@@ -213,6 +226,14 @@ function nodeOpacity(mastery) {
   return 0.5 + Math.min(100, Math.max(1, mastery)) / 200
 }
 
+/**
+ * 节点半径：主题聚合节点按成员数放大 —— "单个大节点"一眼可辨；
+ * 普通知识点固定 NODE_RADIUS。点击主题节点即展开/收起它自己。
+ */
+function nodeRadius(d) {
+  return d && d.isTheme ? themeRadius(d.childCount) : NODE_RADIUS
+}
+
 /* ================================================================
    图谱渲染核心
    ================================================================ */
@@ -222,6 +243,13 @@ function initForceGraph(nodes, links) {
   if (simulation) {
     simulation.stop()
     simulation = null
+  }
+
+  // 折叠/展开只改变可见节点集 → 复用旧坐标，让新节点从父节点附近生长
+  const hasCachedPos = nodes.some(n => lastPositions.has(n.id))
+  for (const n of nodes) {
+    const p = lastPositions.get(n.id)
+    if (p) { n.x = p.x; n.y = p.y }
   }
 
   const { width, height } = containerRef.value.getBoundingClientRect()
@@ -283,7 +311,8 @@ function initForceGraph(nodes, links) {
     if (tag === 'circle' && target.closest('.node')) {
       const nodeGroup = target.closest('.node')
       const nodeData = d3.select(nodeGroup).datum()
-      if (nodeData) {
+      // 主题聚合节点不是真实知识点 → 落回画布菜单，不给"编辑/删除节点"
+      if (nodeData && !nodeData.isTheme) {
         showContextMenu(event.clientX, event.clientY, 'node', nodeData)
         return
       }
@@ -302,20 +331,22 @@ function initForceGraph(nodes, links) {
   }, { capture: true })
 
   // ── 力场仿真 ──
+  // 归属边（锚点 → 子节点）短且强 → 子节点围绕父节点聚拢，展开像"花开"
   simulation = d3.forceSimulation(nodes)
+    .alpha(hasCachedPos ? 0.35 : 1)
     .alphaDecay(0.02)
     .velocityDecay(0.35)
     .force('link', d3.forceLink(links)
       .id(d => d.id)
-      .distance(140)
-      .strength(0.3)
+      .distance(l => (isBelongLink(l) ? 90 : 140))
+      .strength(l => (isBelongLink(l) ? 0.9 : 0.3))
     )
     .force('charge', d3.forceManyBody()
       .strength(-250)
       .distanceMax(500)
     )
     .force('center', d3.forceCenter(width / 2, height / 2).strength(0.06))
-    .force('collision', d3.forceCollide().radius(NODE_RADIUS + 12).strength(0.6))
+    .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + 12).strength(0.6))
     .force('x', d3.forceX(width / 2).strength(0.02))
     .force('y', d3.forceY(height / 2).strength(0.02))
 
@@ -329,7 +360,9 @@ function initForceGraph(nodes, links) {
     .attr('stroke', linkDefaultColor)
     .attr('stroke-width', linkDefaultWidth)
     .attr('stroke-opacity', linkDefaultOpacity)
-    .attr('marker-end', 'url(#arrowhead)')
+    // 归属边：虚线 + 无箭头（表达层级归属，不是知识点之间的关系）
+    .attr('stroke-dasharray', l => (isBelongLink(l) ? '4,4' : null))
+    .attr('marker-end', l => (isBelongLink(l) ? null : 'url(#arrowhead)'))
     .style('pointer-events', 'none')
 
   linkSelection = link
@@ -382,20 +415,22 @@ function initForceGraph(nodes, links) {
     .filter((event) => event.button === 0)
   )
 
-  // ── 节点圆形（科技树四档配色 + 路径描边） ──
+  // ── 节点圆形（科技树四档配色 + 路径描边；主题聚合节点按成员数放大） ──
   node.append('circle')
     .attr('class', 'node-body')
-    .attr('r', NODE_RADIUS)
+    .attr('r', nodeRadius)
     .attr('fill', d => nodeFill(d.mastery))
     .attr('opacity', d => nodeOpacity(d.mastery))
     .attr('stroke', nodeBodyStroke)
     .attr('stroke-width', nodeBodyStrokeWidth)
     .attr('stroke-opacity', nodeBodyStrokeOpacity)
+    // 折叠的主题节点用虚线环提示"还能展开"；展开后成为实线锚点（点击可收起）
+    .attr('stroke-dasharray', d => (d.isTheme && !d.expanded ? '4,3' : null))
 
   // ── 薄弱点脉冲环（下一步推荐节点，扩散动画提示"从这里学起"） ──
   node.append('circle')
     .attr('class', 'node-pulse')
-    .attr('r', NODE_RADIUS)
+    .attr('r', nodeRadius)
     .attr('fill', 'none')
     .attr('stroke', 'var(--color-accent)')
     .attr('stroke-width', 2)
@@ -404,16 +439,28 @@ function initForceGraph(nodes, links) {
 
   nodeSelection = node
 
-  // ── 节点名称（标签在节点右侧，Obsidian 风格） ──
+  // ── 节点名称（标签在节点右侧，Obsidian 风格；聚合节点带成员数） ──
   node.append('text')
     .attr('class', 'node-label')
-    .attr('dx', NODE_RADIUS + 8)
+    .attr('dx', d => nodeRadius(d) + 8)
     .attr('dy', 4)
     .attr('text-anchor', 'start')
     .attr('fill', 'var(--color-text-primary)')
     .attr('font-size', 12)
     .attr('font-weight', '500')
-    .text(d => d.name)
+    .text(d => (d.isTheme ? `${d.name} (${d.childCount})` : d.name))
+    .style('pointer-events', 'none')
+    .style('user-select', 'none')
+
+  // ── 折叠徽标：主题节点上方 ＋（可展开）/ −（可收起）——点击节点即切换 ──
+  node.filter(d => d.isTheme).append('text')
+    .attr('class', 'node-fold')
+    .attr('dy', d => -nodeRadius(d) - 4)
+    .attr('text-anchor', 'middle')
+    .attr('font-size', 13)
+    .attr('font-weight', 700)
+    .attr('fill', 'var(--color-text-muted)')
+    .text(d => (d.expanded ? '−' : '＋'))
     .style('pointer-events', 'none')
     .style('user-select', 'none')
 
@@ -424,7 +471,7 @@ function initForceGraph(nodes, links) {
     // 悬停节点：放大 + 亮色描边
     d3.select(this).select('.node-body')
       .transition().duration(150)
-      .attr('r', NODE_RADIUS + 4)
+      .attr('r', nodeRadius(d) + 4)
       .attr('stroke-width', 2)
       .attr('stroke-opacity', 0.8)
       .attr('stroke', 'var(--color-accent)')
@@ -472,7 +519,7 @@ function initForceGraph(nodes, links) {
   node.on('mouseout', function (event, d) {
     d3.select(this).select('.node-body')
       .transition().duration(200)
-      .attr('r', NODE_RADIUS)
+      .attr('r', nodeRadius(d))
       .attr('stroke', nodeBodyStroke(d))
       .attr('stroke-width', nodeBodyStrokeWidth(d))
       .attr('stroke-opacity', nodeBodyStrokeOpacity(d))
@@ -497,6 +544,7 @@ function initForceGraph(nodes, links) {
   node.on('click', function (event, d) {
     event.stopPropagation()
     if (drawingEdgeMode.value) {
+      if (d.isTheme) return          // 聚合节点不是真实知识点，不能连线
       handleDrawingTarget(d.id)
       return
     }
@@ -504,6 +552,7 @@ function initForceGraph(nodes, links) {
   })
   node.on('dblclick', function (event, d) {
     event.stopPropagation()
+    if (d.isTheme) return            // 聚合节点没有节点详情
     emit('node-dblclick', d.id)
   })
 
@@ -527,7 +576,10 @@ function initForceGraph(nodes, links) {
       .attr('x', d => (d.source.x + d.target.x) / 2)
       .attr('y', d => (d.source.y + d.target.y) / 2)
 
-    node.attr('transform', d => `translate(${d.x},${d.y})`)
+    node.attr('transform', d => {
+      lastPositions.set(d.id, { x: d.x, y: d.y })   // 供折叠重建复用
+      return `translate(${d.x},${d.y})`
+    })
 
     if (drawingTempLine && drawingSourceId.value) {
       const src = simulation.nodes().find(n => n.id === drawingSourceId.value)
@@ -543,7 +595,7 @@ function initForceGraph(nodes, links) {
     d3.select(this).style('cursor', 'grabbing')
     d3.select(this).select('.node-body')
       .transition().duration(100)
-      .attr('r', NODE_RADIUS + 3)
+      .attr('r', nodeRadius(d) + 3)
       .attr('stroke-opacity', 0.6)
   }
   function dragged(event, d) {
@@ -557,7 +609,7 @@ function initForceGraph(nodes, links) {
     d3.select(this).style('cursor', 'grab')
     d3.select(this).select('.node-body')
       .transition().duration(200)
-      .attr('r', NODE_RADIUS)
+      .attr('r', nodeRadius(d))
       .attr('stroke-opacity', 0.3)
   }
 }
@@ -579,6 +631,9 @@ function renderGraph() {
         label: e.label || '',
         relation: e.relation || '',
         edgeId: e.edgeId,
+        // 主题折叠元信息（utils/themeCollapse.js）：kind 区分关系/聚合/归属边
+        kind: e.kind || 'relation',
+        count: e.count || 1,
       }))
       .filter(l => nodeIdSet.has(l.source) && nodeIdSet.has(l.target))
     if (nodes.length > 0 && containerRef.value) {
@@ -592,10 +647,12 @@ function renderGraph() {
 let lastGraphFingerprint = ''
 
 function graphFingerprint(nodes, edges) {
-  // 纳入 mastery / relation：掌握度或边类型变化也必须触发重绘（科技树四色依赖）
-  const nodeIds = (nodes || []).map(n => `${n.id}:${n.mastery}`).sort().join(',')
+  // 纳入 mastery / relation / 折叠状态 / 边权：任一变化都必须触发重绘
+  const nodeIds = (nodes || [])
+    .map(n => `${n.id}:${n.mastery}:${n.isTheme ? (n.expanded ? 'E' : 'C') + n.childCount : ''}`)
+    .sort().join(',')
   const edgeKeys = (edges || []).map(e =>
-    `${e.source || e.from_node || e.from}->${e.target || e.to_node || e.to}:${e.relation || ''}`
+    `${e.source || e.from_node || e.from}->${e.target || e.to_node || e.to}:${e.relation || ''}:${e.kind || ''}:${e.count || 1}`
   ).sort().join(',')
   return `${nodeIds}|${edgeKeys}`
 }
@@ -881,6 +938,7 @@ onUnmounted(() => {
     changeTimer.value = null
   }
   clearDrawingMode()
+  lastPositions.clear()
 })
 
 /* ================================================================
@@ -908,12 +966,12 @@ function focusNode(nodeId) {
   const nodeGroup = svgSelection.selectAll('.node').filter(d => d.id === nodeId)
   nodeGroup.select('.node-body')
     .transition().duration(200)
-    .attr('r', NODE_RADIUS + 6)
+    .attr('r', nodeRadius(node) + 6)
     .attr('stroke', 'var(--color-accent)')
     .attr('stroke-width', 2.5)
     .attr('stroke-opacity', 1)
     .transition().duration(400)
-    .attr('r', NODE_RADIUS)
+    .attr('r', nodeRadius(node))
     .attr('stroke-width', 1)
     .attr('stroke-opacity', 0.3)
 }
@@ -956,6 +1014,7 @@ defineExpose({ focusNode })
       <span class="legend-item"><span class="legend-dot dot-weak"></span>薄弱</span>
       <span class="legend-item"><span class="legend-dot dot-learning"></span>学习中</span>
       <span class="legend-item"><span class="legend-dot dot-mastered"></span>已掌握</span>
+      <span v-if="themeModeActive" class="legend-hint">点大节点展开／收起</span>
       <span class="legend-divider"></span>
       <button
         class="path-toggle"
@@ -1022,6 +1081,9 @@ defineExpose({ focusNode })
 }
 .force-graph-container :deep(.node-label) {
   transition: opacity 0.15s ease, font-weight 0.15s ease;
+}
+.force-graph-container :deep(.node-fold) {
+  transition: opacity 0.15s ease;
 }
 .force-graph-container :deep(text) {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -1119,6 +1181,7 @@ defineExpose({ focusNode })
 .dot-weak { background: var(--color-red); }
 .dot-learning { background: var(--color-yellow); }
 .dot-mastered { background: var(--color-green); }
+.legend-hint { color: var(--color-text-muted); white-space: nowrap; }
 .legend-divider { width: 1px; height: 14px; background: var(--color-border-subtle); }
 .path-toggle {
   display: flex; align-items: center; gap: 6px;

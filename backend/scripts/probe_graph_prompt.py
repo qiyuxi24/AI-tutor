@@ -38,7 +38,7 @@ async def main(user_id: int) -> None:
     print("  ...（截断）" if len(summary) > 1200 else "")
 
     messages = [{"role": "user", "content": "根据我的知识图谱，我现在该学什么？"}]
-    prompt, _ = await _build_system_prompt(messages, "adaptive", kg, inject_tools=True)
+    prompt, _ = await _build_system_prompt(messages, kg, inject_tools=True)
     print(f"\n=== 最终 system_prompt 长度={len(prompt)} 字符 ===")
     print(f"含「## 当前知识图谱」: {'## 当前知识图谱' in prompt}")
     print(f"含「EMPTY_GRAPH」空图谱提示: {'当前学生图谱为空' in prompt}")

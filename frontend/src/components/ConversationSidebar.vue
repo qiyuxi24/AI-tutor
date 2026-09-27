@@ -6,9 +6,22 @@
  * 由父组件（HomeView）控制折叠，本组件不持业务状态。
  */
 
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useChatStore } from '../stores/chatStore'
+import { useContextMenu } from '../utils/contextMenu'
+import ContextMenu from './ContextMenu.vue'
 
 const store = useChatStore()
+
+// 右键菜单：与图谱侧栏同一套开关（utils/contextMenu.js），targetData = 被右键的对话
+const {
+  visible: menuVisible,
+  x: menuX,
+  y: menuY,
+  targetData: menuConv,
+  open: openMenu,
+  close: closeMenu,
+} = useContextMenu()
 
 function handleNew() {
   if (store.isCurrentEmpty) return
@@ -19,9 +32,46 @@ function handleSwitch(id) {
   store.switchConversation(id)
 }
 
-function handleDelete(e, id) {
-  e.stopPropagation()
-  store.deleteConversation(id)
+/**
+ * 重命名对话。标题本就在「localStorage 为主 + 后端全量同步」的契约里，改完 persist()
+ * 会自动把新标题同步过去，不需要额外请求。
+ */
+async function handleRename() {
+  const conv = menuConv.value
+  if (!conv) return
+  let value
+  try {
+    ({ value } = await ElMessageBox.prompt('请输入新的对话标题', '重命名对话', {
+      inputValue: conv.title,
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+    }))
+  } catch {
+    return   // 取消
+  }
+  const title = (value || '').trim()
+  if (!title) {
+    ElMessage.warning('标题不能为空')
+    return
+  }
+  store.renameConversation(conv.id, title)
+}
+
+/** 删除对话（二次确认）。删的是当前对话时，store 会自动补一个新对话，不会停在空视图。 */
+async function handleDelete() {
+  const conv = menuConv.value
+  if (!conv) return
+  try {
+    await ElMessageBox.confirm(`确定删除对话「${conv.title}」吗？`, '删除对话', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return   // 取消
+  }
+  store.deleteConversation(conv.id)
+  ElMessage.success('已删除')
 }
 </script>
 
@@ -55,22 +105,47 @@ function handleDelete(e, id) {
           :key="conv.id"
           class="history-item"
           :class="{ active: conv.id === store.currentId }"
+          :title="`${conv.title}（右键可重命名 / 删除）`"
           @click="handleSwitch(conv.id)"
+          @contextmenu.prevent="openMenu($event, 'conversation', conv)"
         >
           <svg class="chat-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
           </svg>
           <span class="item-title">{{ conv.title }}</span>
-          <button class="delete-btn" @click="handleDelete($event, conv.id)" title="删除对话">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
         </div>
       </template>
       <div v-if="!store.hasConversations" class="empty-hint">暂无历史对话</div>
     </nav>
+
+    <!-- 右键菜单：容器与图谱侧栏共用 -->
+    <ContextMenu :visible="menuVisible" :x="menuX" :y="menuY" @close="closeMenu">
+      <template #default="{ close }">
+        <div class="menu-item" @click="close(); handleRename()">
+          <span class="menu-icon">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+            </svg>
+          </span>
+          重命名对话
+        </div>
+        <div class="menu-divider"></div>
+        <div class="menu-item menu-item-danger" @click="close(); handleDelete()">
+          <span class="menu-icon">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+              <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              <line x1="10" y1="11" x2="10" y2="17" />
+              <line x1="14" y1="11" x2="14" y2="17" />
+            </svg>
+          </span>
+          删除对话
+        </div>
+      </template>
+    </ContextMenu>
   </aside>
 </template>
 
@@ -170,26 +245,6 @@ function handleDelete(e, id) {
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 1.3;
-}
-
-.delete-btn {
-  flex-shrink: 0;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s;
-}
-.history-item:hover .delete-btn { display: flex; }
-.delete-btn:hover {
-  color: var(--color-red);
-  background: var(--color-red-light);
 }
 
 .empty-hint {

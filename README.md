@@ -62,7 +62,7 @@ TutorAgent 把「对话式 AI 家教」与「知识图谱」「个人学情画�
 
 | 模块 | 说明 | 状态 |
 |------|------|------|
-| **对话 = Agent Loop** | 自适应引导/自由对话/递归式教学/路径推荐四模式；后台多轮工具循环（max 5 轮、单工具超时、trace 落盘） | ✅ |
+| **对话 = Agent Loop** | 单一教学提示词 + 知识图谱驱动导学；后台多轮工具循环（max 5 轮、单工具超时、trace 落盘） | ✅ |
 | **流式 + 事件双通道** | SSE 逐 token 推文 + 后台图谱操作事件自动刷新 UI | ✅ |
 | **知识图谱** | D3 力导向可视化 + CRUD + 拓扑排序学习路径（Kahn）+ 搜索聚焦 | ✅ |
 | **科技树化图谱** | 节点按掌握度四色着色 + 图例 + 学习路径高亮 + 薄弱点脉冲 | ✅ |
@@ -171,6 +171,7 @@ npm run dev
 | `SECRET_KEY` | ✅ | JWT 签名密钥，缺失拒绝启动 |
 | `CORS_ALLOW_ORIGINS` | ❌ | 逗号分隔白名单，默认仅本地 5173 |
 | `DEFAULT_ADMIN_PASSWORD` | ❌ | 设置后首次启动自动建 admin |
+| `VITE_DEMO_PASSWORD` | ❌ | 前端体验账户口令（Docker 构建期注入）。**须与 `DEFAULT_ADMIN_PASSWORD` 一致**，不一致则首屏弹登录框；留空用前端源码默认值 |
 
 ---
 
@@ -179,7 +180,7 @@ npm run dev
 ```
 ├── frontend/                 # Vue 3 前端
 │   └── src/
-│       ├── views/            # Home(对话)/Knowledge(图谱)/Dashboard/Quiz/Collector/Settings/Login
+│       ├── views/            # Home(对话)/Knowledge(图谱)/Dashboard/Quiz/Collector/Settings
 │       ├── components/       # ForceGraph(科技树)/ChatArea/NodeDetail/ActivityBar...
 │       ├── stores/           # Pinia：authStore / chatStore
 │       ├── api/              # axios + SSE 封装

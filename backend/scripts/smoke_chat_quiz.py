@@ -71,7 +71,7 @@ async def _simulate_turn(args) -> int:
     get_user_queue(args.user)
 
     messages = [{"role": "user", "content": args.simulate}]
-    prompt, _ = await _build_system_prompt(messages, "adaptive", kg, inject_tools=True)
+    prompt, _ = await _build_system_prompt(messages, kg, inject_tools=True)
 
     print(f"\n── 模拟学生发言 ──\n  {args.simulate}")
     print(f"系统提示词 {len(prompt)} 字符 | 工具数 "

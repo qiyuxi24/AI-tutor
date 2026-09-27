@@ -1,5 +1,5 @@
-"""诊断探针：走**生产路径**（GraphGenerator._call_generator_llm）扫描真实书籍分块，
-量化「学科图谱生成」的失败率与产出。
+"""诊断探针：走**生产路径**（GraphGenerator._call_skeleton_llm，两阶段建图的骨架阶段）
+扫描真实书籍分块，量化「学科图谱生成」的失败率与产出（本探针只看结构与边，不看正文）。
 
 只读 KB + 只调 LLM，不写图谱。用法（cwd 任意）：
     backend/venv/Scripts/python.exe reports/probe_graph_json.py [扫描块数] [起始块]
@@ -38,8 +38,8 @@ async def main(limit: int, offset: int = 0) -> None:
     ok = fail = 0
     nodes = edges = 0
     for i, unit in enumerate(window, start=offset):
-        result = await gen._call_generator_llm(SUBJECT, unit["text"], [],
-                                               section=unit["title"])
+        result = await gen._call_skeleton_llm(SUBJECT, unit["text"], [],
+                                              section=unit["title"])
         if result is None:
             fail += 1
             print(f"[{i:3d}] 入={len(unit['text']):5d} -> 失败（已跳过该单元）")

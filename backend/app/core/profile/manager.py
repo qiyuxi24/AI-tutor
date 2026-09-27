@@ -17,6 +17,7 @@ from .schema import (
     get_path,
     is_empty_profile,
     is_filled,
+    merge_goals,
     merge_patch,
     new_note_id,
     now,
@@ -114,7 +115,24 @@ class UserProfile:
         self._save(data)
         return data
 
+    def append_goals(self, value) -> list:
+        """追加学习目标（去重保序）。
+
+        goals 的 update_field 是**整体替换**（API 表单编辑语义）；增量记目标
+        （AI 工具、旧版 Markdown append）必须走这里，否则只传新目标会清空已有目标。
+        """
+        goals = merge_goals(self.get().get("goals"), value)
+        self.update_field("goals", goals)
+        return goals
+
     # ---------- AI 观察笔记 ----------
+
+    def has_note(self, content: str) -> bool:
+        """是否已有内容相同的观察笔记（AI 逐字去重的判据；同义改写不在此列）"""
+        content = (content or "").strip()
+        return bool(content) and any(
+            (n.get("content") or "").strip() == content
+            for n in self.get().get("ai_notes") or [])
 
     def add_note(self, content: str, source: str = "ai") -> str:
         """追加一条观察笔记，返回笔记 id"""
@@ -158,11 +176,7 @@ class UserProfile:
                 if is_filled(v) and not is_filled(current.get(section, {}).get(k)):
                     current.setdefault(section, {})[k] = v
         # 目标去重合并
-        goals = list(current.get("goals", []))
-        for g in incoming.get("goals", []):
-            if g and g not in goals:
-                goals.append(g)
-        current["goals"] = goals
+        current["goals"] = merge_goals(current.get("goals"), incoming.get("goals", []))
         # 知识背景：仅补空缺
         if is_filled(incoming.get("knowledge_background", "")) and \
                 not is_filled(current.get("knowledge_background", "")):

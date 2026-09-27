@@ -1,6 +1,7 @@
-"""
-Prompt loader 提示词加载器测试。
-覆盖：三种模式渲染、未知模式报错、模板拼接、参数传递。
+"""Prompt loader 提示词加载器测试。
+
+2026-09-26：三种引导模式（adaptive / free_talk / recursive）合并为唯一一套最简提示词，
+本文件随之从"逐模式渲染"改为"唯一模板渲染 + 注入守卫"。
 
 ⚠️ 2026-09-14 修复：`system_prompt_common.j2` 里图谱/画像占位符曾写成**单花括号**
 `{knowledge_graph_summary}`（Jinja2 只认 `{{ }}`）→ 渲染时被当字面文本原样输出，
@@ -8,114 +9,55 @@ Prompt loader 提示词加载器测试。
 本文件曾有测试把这个错误行为当成"预期"锁死（断言 `"knowledge_graph_summary" in result`）——
 现改为断言**值真的被替换进来**，防止回退。
 """
-import pytest
-
 from app.core import prompt_loader
-from app.core.prompt_loader import get_system_prompt, MODE_TEMPLATE_MAP
+from app.core.prompt_loader import get_system_prompt
 
 
 # ─── 模板目录验证 ────────────────────────────────────────────────
 
 def test_prompt_dir_exists():
-    """确保 data/prompts 目录和模板文件存在"""
+    """确保 data/prompts 目录与唯一模板文件存在"""
     assert prompt_loader.PROMPT_DIR.exists()
+    assert (prompt_loader.PROMPT_DIR / prompt_loader.TEMPLATE).exists()
 
-    for mode, filename in MODE_TEMPLATE_MAP.items():
-        path = prompt_loader.PROMPT_DIR / filename
-        assert path.exists(), f"模板文件 {filename} 不存在"
 
-    common = prompt_loader.PROMPT_DIR / prompt_loader.COMMON_TEMPLATE
-    assert common.exists()
+def test_no_mode_dispatch():
+    """模式概念已删除：模板目录只留一套提示词，loader 不再按 mode 分派。"""
+    assert not hasattr(prompt_loader, "MODE_TEMPLATE_MAP")
+    names = {p.name for p in prompt_loader.PROMPT_DIR.glob("*.j2")}
+    assert names == {prompt_loader.TEMPLATE}
 
 
 # ─── get_system_prompt 基本渲染 ───────────────────────────────────
 
-def test_get_system_prompt_adaptive():
-    """adaptive 模式：拼接 common + adaptive 模板，student_message 被注入"""
-    result = get_system_prompt(
-        mode="adaptive",
-        student_message="我想学栈",
-        graph_summary="图谱：数据结构",
-        user_profile="偏好：可视化",
-    )
+def test_get_system_prompt_renders_message():
+    result = get_system_prompt(student_message="我想学栈")
     assert "我想学栈" in result
     assert len(result) > 50
 
 
-def test_get_system_prompt_free_talk():
-    result = get_system_prompt(
-        mode="free_talk",
-        student_message="随便聊聊",
-    )
-    assert "随便聊聊" in result
-
-
-def test_get_system_prompt_recursive():
-    result = get_system_prompt(
-        mode="recursive",
-        student_message="学到二叉树",
-        graph_summary="### 现有节点（共 1 个）\n  [binary_tree] 二叉树 (掌握度:0)",
-        current_node="binary_tree",
-    )
-    assert "学到二叉树" in result
-    assert "binary_tree" in result
-    assert "掌握度:0" in result          # 图谱经通用模板注入，递归模板不自拼副本
-
-
-def test_get_system_prompt_unknown_mode():
-    with pytest.raises(ValueError, match="未知引导模式"):
-        get_system_prompt(mode="invalid", student_message="x")
-
-
 def test_get_system_prompt_empty_message():
-    result = get_system_prompt(mode="adaptive", student_message="")
+    result = get_system_prompt(student_message="")
     assert isinstance(result, str)
     assert len(result) > 0
 
 
-def test_get_system_prompt_no_optional_args():
-    result = get_system_prompt(mode="adaptive", student_message="测试")
-    assert "测试" in result
-
-
-def test_get_system_prompt_all_three_modes():
-    """三种模式都能正常渲染"""
-    for mode in ("adaptive", "free_talk", "recursive"):
-        kwargs = {"student_message": f"test_{mode}"}
-        if mode == "recursive":
-            kwargs["current_node"] = "node_1"
-        result = get_system_prompt(mode=mode, **kwargs)
-        assert f"test_{mode}" in result
-        assert len(result) > 50
-
-
-# ─── common 模板行为 ─────────────────────────────────────────────
-
 def test_common_template_always_present():
-    """common 模板内容（全局底线等）始终出现在输出中"""
-    result = get_system_prompt(mode="free_talk", student_message="hi")
+    """共同底线等内容（全局底线、框架约束）始终出现在输出中"""
+    result = get_system_prompt(student_message="hi")
     assert "资深教师" in result or "苏格拉底" in result
     assert "全局底线" in result
 
 
-def test_user_profile_section_appears_when_provided():
-    """传入非空 user_profile 时，「学生画像」区块出现（{% if user_profile %} 生效）"""
-    result_with = get_system_prompt(
-        mode="free_talk",
-        student_message="hi",
-        user_profile="偏好：图形化理解",
-    )
-    assert "学生画像" in result_with
+def test_teaching_method_section_present():
+    """唯一的「教学方式」段存在（合并前是模式模板的内容）"""
+    result = get_system_prompt(student_message="hi")
+    assert "教学方式" in result
+    assert "拆解引导" in result
+    assert "类比举例" in result
 
 
-def test_user_profile_section_absent_when_empty():
-    """不传 user_profile 时，「学生画像」区块不出现"""
-    result_without = get_system_prompt(
-        mode="free_talk",
-        student_message="hi",
-    )
-    assert "学生画像" not in result_without
-
+# ─── 注入守卫（单花括号 bug 的回归线）────────────────────────────
 
 def test_graph_summary_is_actually_injected():
     """图谱摘要必须**真的被替换进** prompt（曾因模板用单花括号而静默丢失）。
@@ -124,89 +66,64 @@ def test_graph_summary_is_actually_injected():
     但图谱内容一个节点都没有。所以断言**值**与**字面占位符残留**两件事。
     """
     summary = "### 现有节点（共 2 个）\n  [binary_tree] 二叉树 (掌握度:0)"
-    result = get_system_prompt(
-        mode="free_talk",
-        student_message="hi",
-        graph_summary=summary,
-    )
+    result = get_system_prompt(student_message="hi", graph_summary=summary)
     assert "binary_tree" in result, "图谱内容没有被注入"
     assert "掌握度:0" in result
     assert "{knowledge_graph_summary}" not in result, "占位符未被 Jinja2 替换（单花括号 bug 回退）"
 
 
-def test_user_profile_is_actually_injected():
-    """学生画像内容必须真的被替换进 prompt（同上的单花括号 bug）。"""
-    result = get_system_prompt(
-        mode="free_talk",
-        student_message="hi",
-        user_profile="偏好：图形化理解",
-    )
+def test_user_profile_section_appears_when_provided():
+    """传入非空 user_profile 时，「学生画像」区块出现（{% if user_profile %} 生效）"""
+    result = get_system_prompt(student_message="hi", user_profile="偏好：图形化理解")
+    assert "学生画像" in result
     assert "偏好：图形化理解" in result
     assert "{user_profile}" not in result
 
 
-def test_common_template_has_no_single_brace_placeholders():
-    """模板级回归守卫：common 模板不得再出现单花括号占位符。"""
-    src = (prompt_loader.PROMPT_DIR / prompt_loader.COMMON_TEMPLATE).read_text(
-        encoding="utf-8")
+def test_user_profile_section_absent_when_empty():
+    """不传 user_profile 时，「学生画像」区块不出现"""
+    result = get_system_prompt(student_message="hi")
+    assert "学生画像" not in result
+
+
+def test_current_position_injected():
+    """位置段由调用方传入的显式文案渲染（未指定时也要有值，不得整段消失）"""
+    result = get_system_prompt(student_message="hi", current_position="「递归」(rec)")
+    assert "学生当前所处位置" in result
+    assert "「递归」(rec)" in result
+
+
+def test_template_has_positive_scope_and_mastery_semantics():
+    """参照系契约 I1-3 / I2-3 的守卫（2026-09-26 G3+G4）。
+
+    I1-3：框架约束曾是纯负面表述（"严禁脱离此框架"），模型不知道"**能**讲什么"；
+    I2-3：掌握度只是清单里的一个数字，提示词里没有任何"据此调整"的要求。
+    两者都只靠模板文本实现，所以断言文本本身（同 test_kg_themes 的做法）。
+    """
+    result = get_system_prompt(
+        student_message="hi",
+        graph_summary="### 现有节点（共 1 个）\n  [bt] 二叉树 (掌握度:0)",
+    )
+    assert "可讲范围" in result                      # I1-3 正面清单
+    assert "邻域" in result                          # I1-3 邻域说明
+    assert "域外概念不引入" in result
+    assert "掌握度决定怎么讲" in result              # I2-3 行为语义
+    assert "已掌握" in result and "精简" in result   # 高掌握度 → 精简/跳过
+    assert "薄弱" in result and "降低难度" in result  # 低掌握度 → 换角度/降难度
+
+    # 分档阈值必须与唯一真值源一致（graph_middleware.MASTERY_WEAK / _MASTERED）
+    from app.core.graph_middleware import MASTERY_WEAK, MASTERY_MASTERED
+    assert f"1–{MASTERY_WEAK - 1}" in result
+    assert f"{MASTERY_WEAK}–{MASTERY_MASTERED - 1}" in result
+    assert f"≥{MASTERY_MASTERED}" in result
+
+
+def test_template_has_no_single_brace_placeholders():
+    """模板级回归守卫：唯一模板不得再出现单花括号占位符。"""
+    src = (prompt_loader.PROMPT_DIR / prompt_loader.TEMPLATE).read_text(encoding="utf-8")
     assert "{knowledge_graph_summary}" not in src
     assert "{user_profile}" not in src
+    assert "{student_message}" not in src
     assert "{{ knowledge_graph_summary }}" in src
     assert "{{ user_profile }}" in src
-
-
-# ─── 递归模式参数 ────────────────────────────────────────────────
-
-def test_recursive_extra_kwargs_passed():
-    """递归模式的 extra_kwargs（current_node）被正确传给模板"""
-    result = get_system_prompt(
-        mode="recursive",
-        student_message="msg",
-        current_node="my_node",
-    )
-    assert "my_node" in result
-
-
-def test_recursive_graph_injected_once():
-    """回归守卫：图谱在递归模式下**只被注入一次**。
-
-    2026-09-15 前，递归模板另拼一份 `knowledge_graph_framework`（节点 + 仅 prerequisite 边），
-    与通用模板的 `{{ knowledge_graph_summary }}` 信息重叠，且不走注入体量控制
-    → 递归模式注入量约为其他模式的两倍且无上限。
-    """
-    summary = "GRAPH_MARK"
-    result = get_system_prompt(
-        mode="recursive",
-        student_message="msg",
-        graph_summary=summary,
-        current_node="my_node",
-    )
-    assert result.count(summary) == 1
-
-    src = (prompt_loader.PROMPT_DIR / "system_prompt_recursive.j2").read_text(encoding="utf-8")
-    assert "knowledge_graph_framework" not in src
-
-
-def test_recursive_mode_section():
-    """递归模式包含递归特有的区块"""
-    result = get_system_prompt(
-        mode="recursive",
-        student_message="学习",
-        current_node="node_a",
-    )
-    assert "递归" in result or "recursive" in result.lower()
-
-
-# ─── 拼接验证 ────────────────────────────────────────────────────
-
-def test_concatenation_common_and_mode():
-    """输出包含 common 模板和 mode 模板的内容"""
-    result = get_system_prompt(
-        mode="adaptive",
-        student_message="拼接测试",
-    )
-    # common 模板内容
-    assert "全局底线" in result
-    # mode 模板内容（adaptive 特有）
-    assert "拼接测试" in result
-    assert "自适应" in result or "引导" in result
+    assert "{{ student_message }}" in src

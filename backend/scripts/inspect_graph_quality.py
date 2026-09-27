@@ -63,6 +63,32 @@ def load_graph(db_path: Path) -> tuple[list[dict], list[dict]]:
     return nodes, edges
 
 
+def load_theme_coverage(db_path: Path) -> dict:
+    """主题归属覆盖信息（只读、裸 sqlite）：{"available", "with_themes", "primary"}。
+
+    三个集合存**全局 node_id**（node_id 全局唯一），audit 再与本批节点求交，天然按用户过滤。
+    老库（无 themes/node_themes 表）或 WAL 打不开时 `available=False` —— 本脚本是只读体检，
+    经常用来查老库，**绝不能因缺表而崩**。
+    """
+    rows = None
+    for uri in (True, False):  # 先 mode=ro；WAL 拿不到 -shm 时退普通连接（仍只读）
+        try:
+            conn = (sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                    if uri else sqlite3.connect(str(db_path)))
+            try:
+                rows = conn.execute("SELECT node_id, is_primary FROM node_themes").fetchall()
+            finally:
+                conn.close()
+            break
+        except sqlite3.Error:
+            continue
+    if rows is None:
+        return {"available": False, "with_themes": set(), "primary": set()}
+    return {"available": True,
+            "with_themes": {r[0] for r in rows},
+            "primary": {r[0] for r in rows if r[1]}}
+
+
 def body_of(nodes_dir: Path, user_id, node_id: str) -> str:
     """节点 MD 正文（剥掉开头的 `# 标题` / `> 来源` / 空行），文件不存在返回空串"""
     path = Path(nodes_dir) / str(user_id) / f"{node_id}.md"
@@ -204,8 +230,14 @@ def connected_components(nodes: list[dict], edges: list[dict]) -> int:
     return len({find(i) for i in parent})
 
 
-def audit(nodes: list[dict], edges: list[dict], nodes_dir: Path) -> dict:
-    """体检指标（nodes/edges 已按需过滤）"""
+def audit(nodes: list[dict], edges: list[dict], nodes_dir: Path,
+          theme_cov: dict | None = None) -> dict:
+    """体检指标（nodes/edges 已按需过滤）。
+
+    theme_cov: `load_theme_coverage()` 的结果；None（或调用方没传）视为「未建主题表」，
+    此时 themes_available=False、覆盖计数为 0 —— 老库照常出报告，不崩。
+    """
+    cov = theme_cov or {"available": False, "with_themes": set(), "primary": set()}
     ids = {n["id"] for n in nodes}
     bodies = {n["id"]: body_of(nodes_dir, n.get("user_id"), n["id"]) for n in nodes}
     lens = sorted(len(b) for b in bodies.values())
@@ -237,10 +269,17 @@ def audit(nodes: list[dict], edges: list[dict], nodes_dir: Path) -> dict:
         "roots": [n["id"] for n in nodes if not in_deg[n["id"]]],
         "leaves": [n["id"] for n in nodes if not out_deg[n["id"]]],
         "subjects": subjects,
+        "themes_available": bool(cov["available"]),
+        "themes_covered": len(ids & cov["with_themes"]),
+        "themes_primary": len(ids & cov["primary"]),
         "summary_filled": sum(1 for n in nodes if (n.get("summary") or "").strip()),
         "confidence_filled": sum(1 for n in nodes if n.get("confidence") is not None),
         "board_filled": sum(1 for n in nodes if (n.get("board") or "").strip()),
         "mastery_zero": sum(1 for n in nodes if not n.get("mastery")),
+        # 两阶段建图（2026-09-26）：skeleton = 阶段 1 已落结构、正文还没补上的节点。
+        # 老库没有该列（dict 取不到键）→ 一律按 filled 算，不会误报。
+        "skeleton": sum(1 for n in nodes
+                        if (n.get("content_status") or "filled") == "skeleton"),
     }
 
 
@@ -290,6 +329,11 @@ def print_report(title: str, m: dict) -> None:
         print("  孤立：" + "、".join(m["orphans"][:15]))
 
     print("\n── 主题一致性（学科 tags 分布，计数 ≤2 的疑似污染）──")
+    if m["themes_available"]:
+        print(f"  主题覆盖：{m['themes_covered']}/{n}（{_pct_str(m['themes_covered'], n)}）"
+              f"  含主归属 {m['themes_primary']}")
+    else:
+        print("  主题覆盖：未建主题表（老库，跳过）")
     for subj, cnt in m["subjects"].most_common():
         mark = " ?" if cnt <= 2 else "  "
         print(f"  {mark} {subj}：{cnt}")
@@ -298,6 +342,9 @@ def print_report(title: str, m: dict) -> None:
     print(f"  summary {m['summary_filled']}（{_pct_str(m['summary_filled'], n)}）"
           f"  confidence {m['confidence_filled']}（{_pct_str(m['confidence_filled'], n)}）"
           f"  board {m['board_filled']}（{_pct_str(m['board_filled'], n)}）")
+    if m["skeleton"]:
+        print(f"  待填充骨架 {m['skeleton']}（{_pct_str(m['skeleton'], n)}）"
+              f" —— 两阶段建图阶段 1 已落结构、正文待补（重跑建图或手动补齐）")
 
 
 # ════════════════════════════════════════════
@@ -319,14 +366,20 @@ def plan_merge(groups: list[dict], nodes_dir: Path) -> list[dict]:
 
 
 def merge_dupes(db_path: Path, plan: list[dict]) -> dict:
-    """执行合并：边重定向 → 删冗余节点（级联删边 + 删 MD）。返回统计。
+    """执行合并：边/主题归属/别名重定向 + 掌握度合入 → 删冗余节点（级联删边 + 删 MD）。
 
     边先重定向到保留者再删旧边；重定向后重复/自环/成环的边**直接丢弃**
     （保留者上已有等价边，add_edge 的 ValueError 即为该情形）。
+
+    级联删除会连**主题归属（node_themes）/别名（node_aliases）/掌握度事件（mastery_events）**
+    一起带走，所以删节点前必须先把前两者搬到保留者（掌握度取较大值合入），
+    否则被并知识点的主题归属与别名会静默丢失。
     """
     from app.core.knowledge_graph import KnowledgeGraph
 
-    stats = {"merged": 0, "edges_moved": 0, "edges_dropped": 0, "content_appended": 0}
+    stats = {"merged": 0, "edges_moved": 0, "edges_dropped": 0, "content_appended": 0,
+             "themes_moved": 0, "themes_dropped_dup": 0, "aliases_moved": 0,
+             "mastery_raised": 0, "mastery_events_dropped": 0}
     for item in plan:
         kg = KnowledgeGraph(user_id=item["user_id"], data_dir=db_path.parent)
         try:
@@ -356,9 +409,28 @@ def merge_dupes(db_path: Path, plan: list[dict]) -> dict:
                 if drop_body and drop_body not in keep_body and keep_body:
                     kg.update_node_content(keep_id, drop_body, mode="append")
                     stats["content_appended"] += 1
+                # KG-T1 主题归属 / KG-D3 别名：随节点级联删，删节点前经公开方法搬到保留者
+                # （归一路径收敛进 KnowledgeGraph，脚本不再直接读写这两张表）
+                themes = kg.reassign_node_themes(drop_id, keep_id)
+                aliases_moved = kg.reassign_node_aliases(drop_id, keep_id)
+                stats["themes_moved"] += themes["moved"]
+                stats["themes_dropped_dup"] += themes["deduped"]
+                stats["aliases_moved"] += aliases_moved
+                # 合并不得丢学习状态：保留者掌握度取两者较大值（小值合并语义，走唯一入口记账）；
+                # mastery_events 历史随节点级联删除是既有行为，仅计数以保持**可观测**
+                if int(node.get("mastery") or 0) > int((kg.get_node(keep_id) or {}).get("mastery") or 0):
+                    kg.update_node_info(keep_id, {"mastery": int(node.get("mastery") or 0)},
+                                        caller="human")
+                    stats["mastery_raised"] += 1
+                events_dropped = kg.count_mastery_events(drop_id)
+                stats["mastery_events_dropped"] += events_dropped
                 kg.remove_node(drop_id, caller="human")  # 维护操作，故以 human 名义放行
                 stats["merged"] += 1
-                logger.info(f"同名合并：{drop_id} → {keep_id}（uid{item['user_id']}）")
+                logger.info(
+                    f"同名合并：{drop_id} → {keep_id}（uid{item['user_id']}）："
+                    f"主题归属搬移 {themes['moved']}（去重 {themes['deduped']}）、"
+                    f"别名搬移 {aliases_moved}、丢弃掌握度事件 {events_dropped} 条"
+                )
         finally:
             kg.close()
     return stats
@@ -387,7 +459,8 @@ def main() -> None:
         ids = {n["id"] for n in nodes}
         edges = [e for e in edges if e["from_node"] in ids and e["to_node"] in ids]
 
-    metrics = audit(nodes, edges, nodes_dir)
+    theme_cov = load_theme_coverage(db_path)
+    metrics = audit(nodes, edges, nodes_dir, theme_cov)
     title = "全库" if args.user is None else f"user {args.user}"
     print_report(title, metrics)
 
@@ -398,9 +471,10 @@ def main() -> None:
             sub_ids = {n["id"] for n in sub}
             sub_edges = [e for e in edges
                          if e["from_node"] in sub_ids and e["to_node"] in sub_ids]
-            m = audit(sub, sub_edges, nodes_dir)
+            m = audit(sub, sub_edges, nodes_dir, theme_cov)
             print(f"  uid{uid}: {m['node_count']} 节点 / {m['edge_count']} 边，"
                   f"正文中位 {m['body_median']}，空壳 {m['shell']}，"
+                  f"骨架待填 {m['skeleton']}，"
                   f"同名组 {len(m['dupes'])}，孤立 {len(m['orphans'])}")
 
     if args.fix_dupes:
@@ -423,7 +497,11 @@ def main() -> None:
             stats = merge_dupes(db_path, plan)
             print(f"\n✅ 已合并 {stats['merged']} 个节点：边重定向 {stats['edges_moved']} 条 / "
                   f"丢弃 {stats['edges_dropped']} 条 / 并入正文 {stats['content_appended']} 段")
-            print("   重跑本脚本确认同名组归零。")
+            print(f"   主题归属搬移 {stats['themes_moved']}（去重 {stats['themes_dropped_dup']}）"
+                  f" / 别名搬移 {stats['aliases_moved']}"
+                  f" / 掌握度抬升 {stats['mastery_raised']}"
+                  f"（丢弃掌握度事件 {stats['mastery_events_dropped']} 条）")
+            print("   重跑本脚本确认同名组归零；主题聚类请手动 POST /knowledge/themes/rebuild。")
         else:
             print("\n（dry-run）确认无误后加 --apply 执行。")
 

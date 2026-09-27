@@ -198,7 +198,7 @@
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| **真实 embedding 欠费** | 难度自评 / 学习分析的语义去重需 embedding → 欠费时降级 | 复用 `hybrid_search` 降级链：API → 本地 → hash（参 `core/kb/embedder.py::get_embedder`） |
+| **真实 embedding 可用性** | 难度自评 / 学习分析的语义去重需 embedding → 不可用时降级（2026-09-26 已充值，当前无阻塞） | 复用 `hybrid_search` 降级链：API → 本地 → hash（参 `core/kb/embedder.py::get_embedder`） |
 | **评测数据集缺失** | 评估难度评估质量需历史作答数据 → 暂无 | 先用 mock 数据验证管线；真实评估 = 比赛后用 1 个月用户数据 |
 | **比赛时间线（10-15 双截止）** | 评价体系属 P2 加分项，若时间紧 | **只做 P0 难度评估**作为亮点，P1/P2 推到赛后 |
 | **并发写入** | 仓库常有多个 AI 会话并发 | 提交按文件族拆、`git add` 路径限定、不主动 commit |

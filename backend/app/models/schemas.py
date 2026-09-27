@@ -5,9 +5,6 @@ from typing import List, Literal, Optional
 # 对话相关
 # ================================================================
 
-# 引导模式：adaptive = 自适应引导，free_talk = 自由对话，recursive = 递归式教学
-GuideMode = Literal['adaptive', 'free_talk', 'recursive']
-
 class ChatMessage(BaseModel):
     role: str    # "user" 或 "assistant"
     content: str
@@ -15,15 +12,13 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     """前端发给后端的请求体（user_id 由 JWT token 提供，无需在请求体中传递）"""
     messages: List[ChatMessage] # 全部对话历史
-    mode: GuideMode             # 引导模式
-    current_node: Optional[str] = None  # 递归模式：当前正在教学的知识点 ID
+    current_node: Optional[str] = None  # 当前教学位置的知识点 ID（可选）
     kb_node_ids: Optional[List[int]] = None  # 知识库上下文范围：选中的文件/文件夹节点 ID
     kb_node_name: Optional[str] = None       # 当前选中的知识库范围名称（用于提示词）
 
 class ChatResponse(BaseModel):
     """后端返回给前端的响应体"""
     reply: str                      # AI 的回复
-    mode: str                       # 当前使用的模式
     graph_analysis: Optional[dict] = None  # 图谱更新分析结果（可选）
 
 

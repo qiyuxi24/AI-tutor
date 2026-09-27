@@ -70,6 +70,38 @@ def test_policy_prompt_present():
         assert keyword in TOOL_CAPABILITY_PROMPT
 
 
+def test_authorization_tiers_present():
+    """「工具授权分级」必须在最终提示词里，且两份清单各就各位。
+
+    2026-09-26 新增策略：联网搜索 / 读网页 / 检索 / 画像 = 免确认直接调用；
+    改知识图谱结构 / 下载留存 / 出题 = 先把学生问过、同意后才调用。
+    这里按**段内**查找（而非全文），防止工具名出现在别处就算通过。
+    """
+    assert "工具授权分级" in TOOL_CAPABILITY_PROMPT
+    section = TOOL_CAPABILITY_PROMPT.split("工具授权分级")[1].split("### 掌握度由谁更新")[0]
+    for name in ("add_knowledge_node", "update_node_content", "add_edge", "delete_node",
+                 "download_resource", "quiz_generate"):
+        assert f"`{name}`" in section, f"{name} 应列在「须先问」清单里"
+    for name in ("mcp__websearch__web_search", "fetch_webpage", "rag_search",
+                 "update_user_profile"):
+        assert f"`{name}`" in section, f"{name} 应列在「免确认」清单里"
+
+
+def test_write_tools_self_declare_confirmation():
+    """写类工具自己的 guidance/description 必须自述「须先问」。
+
+    为什么必须各自声明：跨工具策略段虽然写了，但单工具说明里若仍有
+    "不必等用户开口就动手" 这类**更具体**的指令，模型会照更具体的那条执行
+    （本项目已踩过：触发类提示词被更强的既有教学原则盖过）。
+    """
+    must_ask = {"add_knowledge_node", "update_node_content", "add_edge",
+                "delete_node", "download_resource", "quiz_generate"}
+    for s in all_specs():
+        if s["name"] in must_ask:
+            text = (s.get("guidance") or "") + (s.get("description") or "")
+            assert "须先问" in text, f"{s['name']} 未声明「须先问」"
+
+
 def test_duplicate_registration_rejected():
     """同名工具重复注册直接报错（否则后注册的会静默覆盖前一个）。"""
     with pytest.raises(ValueError, match="工具名重复注册"):

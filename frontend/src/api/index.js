@@ -11,14 +11,30 @@ export const apiClient = axios.create({
 // ═══ 公共工具 ═══
 
 /**
- * 401 时的统一处理：清除凭据 + 跳转登录页
+ * 401 时的统一处理：清除凭据 + 静默重新登录
  * axios 拦截器和 fetch 流式请求共用此逻辑
+ *
+ * 站点已取消 #/login 路由页（无登录墙），所以这里**不能**再跳登录页，
+ * 否则用户被丢到一个不存在的路由 → 白屏。改为直接静默重登体验账户。
+ *
+ * ⚠️ localStorage 与 Pinia **必须一起清**：authStore 的 token 只在初始化时读过一次
+ * localStorage，只清 localStorage 的话 isLoggedIn 仍为 true → ensureSession 拿旧值
+ * 判"已登录"而不重新登录，用户侧表现为"发了消息没反应"。
  */
-function handleUnauthorized() {
+async function handleUnauthorized() {
+  // ponytail: 不比对"请求发出时用的 token"，并发旧请求的 401 会把刚换来的新 token
+  // 也清掉一次（代价 = 多一次静默登录，不会坏）。要消除就把请求时的 token 记进
+  // config，401 时比对不一致直接忽略。
   localStorage.removeItem('ai_tutor_token')
   localStorage.removeItem('ai_tutor_user')
-  if (window.location.hash !== '#/login') {
-    window.location.hash = '#/login'
+  try {
+    // 动态 import 打断 api ↔ store 的静态循环依赖（调用时两边都已加载完毕）
+    const { useAuthStore } = await import('../stores/authStore.js')
+    const auth = useAuthStore()
+    auth.logout()
+    await auth.ensureSession()
+  } catch {
+    // 无活跃 pinia 的场合忽略：localStorage 已清，下次 HomeView 挂载时会再登一次
   }
 }
 
@@ -31,11 +47,17 @@ apiClient.interceptors.request.use((config) => {
   return config
 })
 
-// ═══ 响应拦截器：401 时清除 token 并跳转登录页 ═══
+// 登录/注册接口的 401 是"账号密码错"，不是"会话过期"。
+// 必须豁免：否则弹窗里输错密码会触发 handleUnauthorized → ensureSession → 再登录
+// → 再 401 → 无限递归。（/auth/me 不豁免，它 401 就是 token 真的失效了）
+const AUTH_ENDPOINTS = ['/auth/login', '/auth/register']
+
+// ═══ 响应拦截器：401 时清除 token 并静默重登 ═══
 apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    const url = error.config?.url || ''
+    if (error.response?.status === 401 && !AUTH_ENDPOINTS.some((p) => url.includes(p))) {
       handleUnauthorized()
     }
     return Promise.reject(error)
@@ -77,7 +99,6 @@ export const deleteProfileNote = (noteId) =>
  * 阶段2：后台自动执行工具调用 + 图谱分析
  *
  * @param {Array} messages - 完整对话历史 [{role, content}, ...]
- * @param {string} mode - 引导模式
  * @param {Object} callbacks - 回调函数集合
  * @param {Function} callbacks.onToken - 收到新 token 时调用 (token: string)
  * @param {Function} callbacks.onThinking - AI 思考过程 (text: string)
@@ -87,11 +108,11 @@ export const deleteProfileNote = (noteId) =>
  * @param {Function} callbacks.onAgentDone - Agent 循环结束 (data: {rounds, total_llm_calls})
  * @param {Function} callbacks.onDone - 流式完成时调用 (fullReply: string)
  * @param {Function} callbacks.onError - 出错时调用 (error: string)
- * @param {string} currentNode - 递归模式当前节点 ID
+ * @param {string} currentNode - 当前教学位置的知识点 ID（可选）
  * @param {Object|null} kb - 知识库上下文范围 {nodeIds: [], name: string}
  * @returns {AbortController} 用于取消请求
  */
-export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = '', kb = null) => {
+export const sendMessageStream = (messages, callbacks = {}, currentNode = '', kb = null) => {
   const controller = new AbortController()
   const { onToken, onThinking, onToolStart, onToolResult, onAgentStart, onAgentDone, onDone, onError } = callbacks
 
@@ -99,7 +120,6 @@ export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = 
 
   const body = JSON.stringify({
     messages,
-    mode,
     current_node: currentNode,
     kb_node_ids: kb?.nodeIds || null,
     kb_node_name: kb?.name || null,
@@ -119,12 +139,16 @@ export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = 
     .then(async (response) => {
       if (!response.ok) {
         if (response.status === 401) {
+          // 必须先给 UI 一个交代：只 return 的话 onError/onDone 都不触发，
+          // chatStore.loading 永远为 true（发送按钮永久禁用、气泡停在"AI 思考中…"），
+          // 用户侧就是"对话没反应"（2026-09-26 修）。
+          onError?.(fmt(ErrorDefs.COMM.UNKNOWN_RESPONSE,
+                        { status: response.status, detail: '登录已过期，已自动重新登录，请重发消息' }))
           handleUnauthorized()
           return
         }
         // 流式错误使用统一的错误码映射
         const text = await response.text().catch(() => '')
-        const mockErr = { response: { status: response.status, data: { detail: text || undefined } } }
         onError?.(fmt(ErrorDefs.COMM.UNKNOWN_RESPONSE, { status: response.status, detail: text || undefined }))
         return
       }
@@ -184,11 +208,10 @@ export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = 
             else if (parsed.type === 'agent_done') {
               onAgentDone?.(parsed)
             }
-            else if (parsed.type === 'graph_updated') {
-              // 图谱更新：前端知识树刷新由 knowledgeStore 独立 SSE 处理，此处忽略
-            }
             else if (parsed.type === 'final') {
-              // 冗余最终文本：先存下，等 onDone 时仅在"没收到任何 token"时兜底
+              // 冗余最终文本（后端在 [DONE] 前补发）：先存下，仅在"一帧 token 都没收到"
+              // 时兜底渲染，见下方 [DONE] 处理。
+              // （原 `graph_updated` 忽略分支已在重构中移除，未匹配的事件类型本来就自然落空。）
               finalReply = parsed.text || ''
             }
             else if (parsed.error) {
