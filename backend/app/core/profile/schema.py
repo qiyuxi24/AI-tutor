@@ -33,6 +33,10 @@ FIELD_WEIGHTS = {
 }
 TOTAL_WEIGHT = sum(FIELD_WEIGHTS.values())
 
+# AI（agent 工具 `update_user_profile`）可写的字段：权重表去掉版权开关。
+# usage_mode 是用户策略（personal / commercial），只能用户自己改，不由 AI 代填。
+AI_WRITABLE_FIELDS = tuple(p for p in FIELD_WEIGHTS if p != "preferences.usage_mode")
+
 # update_data 允许写入的顶层键（version/user_id/created_at 等元字段一律忽略，防止被前端改写）
 EDITABLE_SECTIONS = ("basic", "learning", "preferences", "goals",
                      "knowledge_background", "ai_notes")
@@ -93,6 +97,21 @@ def merge_patch(target: dict, patch: dict) -> dict:
         else:
             target[key] = deepcopy(value)
     return target
+
+
+def merge_goals(existing, incoming) -> list:
+    """合并学习目标：去重保序，接受 str（按行拆）或 list；返回新列表，不改入参。
+
+    goals 的 update_field 是**整体替换**（API 表单编辑语义），增量记目标必须走合并，
+    否则"只传新目标"会把已有目标清空。
+    """
+    merged = [str(g).strip() for g in (existing or []) if str(g).strip()]
+    values = incoming if isinstance(incoming, list) else str(incoming or "").splitlines()
+    for g in values:
+        g = str(g).strip()
+        if g and g not in merged:
+            merged.append(g)
+    return merged
 
 
 def default_profile_data(user_id: int) -> dict:
