@@ -12,6 +12,7 @@ import asyncio
 import json
 
 from app.core import event_bus
+from app.core.agent import events as agent_events
 from app.core.agent.events import AgentEventEmitter
 from app.core.event_bus import (
     publish, subscribe, get_user_queue,
@@ -353,16 +354,31 @@ def test_chat_stream_not_starved_by_long_lived_subscriber():
 # ── 新增：请求内事件的路由不变量守卫（2026-09-26 故障）──
 
 
-def test_request_scoped_event_bypasses_user_broadcast_queue():
+def test_request_scoped_event_bypasses_user_broadcast_queue(monkeypatch):
     """AgentEventEmitter(queue=...) 的事件走私有队列，绝不进 per-user 广播队列。
 
     锁死的不变量：传了私有 queue → 事件直投该队列，既不入 event_bus 的 per-user
     队列，常驻长连接（subscribe(user_id=...)）也收不到。若 events.py 的
     `if self.queue is not None:` 分支被移除，emit 会回落到 publish(..., user_id=1)，
     本测试三条断言全变红。
+
+    断言#2 为何 spy `publish` 而非查"队列为空"：per-user 队列是**事后**观测 ——
+    破坏态下事件虽进了该队列，却会被常驻长连接（正挂起在 q.get() 上）抢先消费，
+    队列随即变空 → "为空"断言在破坏态**误绿**。改为 spy `events.publish`，直接
+    断言"请求内事件**从未**发起过 publish"（动作语义，与事件事后是否被消费无关）。
     """
     _reset_state()
     ks_events = []
+    publish_calls: list = []
+
+    # spy 包住真正的 publish：既记录调用，又保留破坏态"事件真进了 per-user 队列"的行为
+    real_publish = event_bus.publish
+
+    def spy_publish(*args, **kwargs):
+        publish_calls.append((args, kwargs))
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(agent_events, "publish", spy_publish)
 
     async def _run():
         # 常驻长连接（等价前端进对话页即建立的 /knowledge/events），先挂起在 q.get() 上
@@ -391,8 +407,8 @@ def test_request_scoped_event_bypasses_user_broadcast_queue():
     # 1) 事件进了私有队列
     assert q.qsize() == 1, f"私有队列没拿到事件: {q.qsize()}"
     assert q.get_nowait() == {"type": TEXT_DELTA, "run_id": "r1", "text": "正文"}
-    # 2) 没有进 per-user 广播队列
-    assert get_user_queue(1).empty(), "请求内事件串进了 per-user 广播队列"
+    # 2) 请求内事件从未走 event_bus.publish（动作语义，非"队列事后为空"）
+    assert publish_calls == [], f"请求内事件串进了 event_bus.publish: {publish_calls}"
     # 3) 常驻长连接收不到
     assert ks_events == [], f"常驻长连接抢到了请求内事件: {ks_events}"
     _reset_state()

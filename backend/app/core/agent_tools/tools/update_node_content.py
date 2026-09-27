@@ -31,9 +31,15 @@ GUIDANCE = """
 
 
 def handler(args, kg) -> str:
+    node_id = args["node_id"]
+    # 小节化节点这里写的是主 MD，而读侧只认小节 → 写了等于没写。
+    # 与其静默哑火（模型会据此对学生说"已更新"，是明确的错话），不如直接指回正确的工具。
+    if kg.has_sections(node_id):
+        return (f"操作失败：{node_id} 的正文已按「小节」组织，本工具写的主 MD 不会被读到。"
+                "请改用 update_node_sections 重写该知识点的讲解。")
     op = args.get("op", "replace")
-    kg.update_node_content(args["node_id"], args["content"], mode=op, caller="ai")
-    return f"已更新节点 {args['node_id']} 的内容（{op}）"
+    kg.update_node_content(node_id, args["content"], mode=op, caller="ai")
+    return f"已更新节点 {node_id} 的内容（{op}）"
 
 
 SPEC = _spec("update_node_content", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE)

@@ -3,7 +3,8 @@
  * ActivityBar.vue — 最左侧活动栏（VSCode / ima 风格，沉浸式无顶部栏）
  *
  * 职责：
- *   1. 页面入口图标导航（对话 / 图谱 / 知识库）
+ *   1. 页面入口图标导航（对话 / 学习进度 / 图谱 / 出题 / 资源采集）
+ *      知识库不是独立页面，它是图谱页右侧可收起的侧栏（见 KbPanel + HomeView 的 .graph-kb）
  *   2. 品牌 logo
  *   3. 底部：主题切换 / 设置 / 用户菜单（含用户画像、切换账号）
  *
@@ -29,7 +30,6 @@ const items = [
   { id: 'chat', title: '对话', icon: 'chat' },
   { id: 'dashboard', title: '学习进度', icon: 'dashboard' },
   { id: 'graph', title: '知识图谱', icon: 'graph' },
-  { id: 'knowledge', title: '知识库', icon: 'folder' },
   { id: 'quiz', title: '出题', icon: 'quiz' },
   { id: 'resources', title: '资源采集', icon: 'resources' },
 ]
@@ -81,10 +81,6 @@ function handleUserMenu(action) {
           <line x1="7.5" y1="6.5" x2="15.8" y2="8.4" />
           <line x1="16.5" y1="8.8" x2="13.1" y2="17" />
           <line x1="7.3" y1="7.3" x2="10.7" y2="16.8" />
-        </svg>
-        <!-- 知识库图标 -->
-        <svg v-else-if="item.icon === 'folder'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
         </svg>
         <!-- 出题图标（测验/试题） -->
         <svg v-else-if="item.icon === 'quiz'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

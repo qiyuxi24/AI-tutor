@@ -53,8 +53,6 @@ def main():
             tags            TEXT DEFAULT '[]',
             summary         TEXT DEFAULT '',
             mastery         INTEGER DEFAULT 0,
-            difficulty      INTEGER DEFAULT 3,
-            estimated_minutes INTEGER DEFAULT 15,
             added_by        TEXT DEFAULT 'human',
             created_at      TEXT,
             confidence      REAL
@@ -84,8 +82,8 @@ def main():
 
             conn.execute("""
                 INSERT INTO nodes (id, name, file_path, tags, summary, mastery,
-                                   difficulty, estimated_minutes, added_by, created_at, confidence)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   added_by, created_at, confidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 node["id"],
                 node.get("name", ""),
@@ -93,8 +91,6 @@ def main():
                 tags_json,
                 node.get("summary", ""),
                 node.get("mastery", 0),
-                node.get("difficulty", 3),
-                node.get("estimated_minutes", 15),
                 node.get("added_by", "human"),
                 node.get("created_at", ""),
                 node.get("confidence"),

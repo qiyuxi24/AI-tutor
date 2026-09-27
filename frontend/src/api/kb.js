@@ -17,7 +17,10 @@ export const uploadKbFile = (file, parentId = null) => {
   return apiClient.post('/api/v1/kb/upload', form, {
     params,
     headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 120000, // 上传+解析+向量化可能较慢
+    // 上传 = 解析 + 分块 + 嵌入，扫描版 PDF 会走逐页 OCR，分钟级很正常。
+    // 120s 会把请求掐断（后端 CancelledError → 索引半途而废，目录里留下无索引的孤儿文件），
+    // 所以给足 10 分钟；真正的进度反馈应由上传接口自己给，不能靠超时。
+    timeout: 600000,
   })
 }
 
@@ -58,14 +61,6 @@ export const getKbStats = () => apiClient.get('/api/v1/kb/stats')
  */
 export const fetchNodeSection = (nodeId, sectionId) =>
   apiClient.get(`/api/v1/knowledge/node/${nodeId}/section/${sectionId}`)
-
-/**
- * 为节点生成小节（两阶段 LLM 管线，耗时较长）
- * @param {boolean} [force] 强制重生成（true 覆盖已有小节）
- * resp: { status, created, failed, message }
- */
-export const generateNodeSections = (nodeId, force = false) =>
-  apiClient.post(`/api/v1/knowledge/node/${nodeId}/sections/generate`, { force })
 
 /** 删除单个小节 resp: { deleted: bool } */
 export const deleteNodeSection = (nodeId, sectionId) =>

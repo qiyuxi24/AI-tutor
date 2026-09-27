@@ -16,10 +16,9 @@
  * 删除**有意不做 hover 按钮**：侧栏条目窄，悬浮按钮既挤压文字又易误触，且会与画布
  * 「右键出菜单」的行为分叉。
  *
- * 视觉：条目样式与 ConversationSidebar / GraphBoardSidebar 统一 —— 浅色强调底 + 左侧
- * 色条表示选中，无边框条目，4px 细滚动条。
+ * 视觉：条目样式与 ConversationSidebar 统一 —— 浅色强调底 + 左侧色条表示选中，
+ * 无边框条目，4px 细滚动条。
  *
- * 与板块侧栏（GraphBoardSidebar）构成两级导航：学科 → 知识板块。
  * 「未分类」是后端合成的分组（无学科归属的节点），排在列表末尾、样式弱化。
  */
 
@@ -85,7 +84,7 @@ async function handleRename() {
 
 /**
  * 删除整个学科图谱（不可撤销）。
- * 只删图谱（节点/关系/主题/节点正文），知识库里的教材原文与向量索引不动 —— 可重新建图。
+ * 只删图谱（节点/关系/节点正文），知识库里的教材原文与向量索引不动 —— 可重新建图。
  */
 async function handleDelete() {
   const s = menuSubject.value
@@ -93,7 +92,7 @@ async function handleDelete() {
   try {
     await ElMessageBox.confirm(
       `确定删除学科「${s.subject}」的整个知识图谱吗？该学科 ${s.node_count} 个知识点及其关系、`
-        + '主题分层与掌握度记录将被永久删除。知识库中的教材原文不受影响。',
+        + '掌握度记录将被永久删除。知识库中的教材原文不受影响。',
       '删除学科图谱',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )
@@ -147,7 +146,7 @@ async function handleDelete() {
 
       <p v-if="!subjectSummaries.length" class="subject-empty">
         暂无学科<br />
-        <span class="subject-empty-hint">去「知识库」页从教材生成，或直接和 AI 对话建知识点</span>
+        <span class="subject-empty-hint">在右侧知识库勾选教材后一键生成，或直接和 AI 对话建知识点</span>
       </p>
     </div>
 

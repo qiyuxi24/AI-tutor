@@ -13,7 +13,7 @@
 - 与已有笔记重复的不要再记（软约束 + 门面逐字去重兜底）。
 """
 
-from ..registry import _spec
+from ..registry import TIER_FREE, _spec
 from app.core.profile import AI_WRITABLE_FIELDS, UserProfile
 
 DESCRIPTION = (
@@ -88,4 +88,5 @@ def handler(args, kg) -> str:
     return "；".join(done)
 
 
-SPEC = _spec("update_user_profile", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE)
+SPEC = _spec("update_user_profile", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE,
+             tier=TIER_FREE)

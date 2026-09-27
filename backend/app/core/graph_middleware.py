@@ -503,16 +503,10 @@ def _subject_stats(kg, nodes: list[dict], subject: str | None) -> dict:
     weak_count = 0
     unstarted_count = 0
     mastery_sum = 0
-    minutes_total = 0
-    minutes_learned = 0
 
     for n in nodes:
         m = int(n.get("mastery", 0) or 0)
         mastery_sum += m
-        est = int(n.get("estimated_minutes", 0) or 0)
-        minutes_total += est
-        # 已学时长按掌握度比例折算（0% → 0 分钟，100% → 完整预估时长）
-        minutes_learned += round(est * m / 100)
         bucket = mastery_bucket(m)
         if bucket == "mastered":
             mastered_count += 1
@@ -534,9 +528,6 @@ def _subject_stats(kg, nodes: list[dict], subject: str | None) -> dict:
         "unstarted_count": unstarted_count,
         "mastery_avg": mastery_avg,
         "completion_rate": completion_rate,
-        "estimated_minutes_total": minutes_total,
-        "estimated_minutes_learned": minutes_learned,
-        "estimated_minutes_remaining": max(0, minutes_total - minutes_learned),
     }
 
 
@@ -554,7 +545,7 @@ def compute_stats(kg, subject: str | None = None) -> dict:
             "subject": str | None,          # 指定学科时返回学科名
             "overall": {...},               # 全局（或指定学科）聚合
             "by_subject": [ {...}, ... ],   # 按学科分组（仅 subject=None 时返回）
-            "weak_points": [ {id, name, subject, mastery, difficulty}, ... ],  # 薄弱点 Top3
+            "weak_points": [ {id, name, subject, mastery}, ... ],  # 薄弱点 Top3
             "next_to_learn": {...} | None,  # 复用 get_next_to_learn
         }
     """
@@ -573,18 +564,15 @@ def compute_stats(kg, subject: str | None = None) -> dict:
         if orphan:
             by_subject.append(_subject_stats(kg, orphan, SUBJECT_UNCLASSIFIED))
 
-    # 薄弱点 Top3：未开始(0) + 薄弱(1~29)，按掌握度升序 + 难度降序，取前 3
-    def _weak_key(n):
-        return (int(n.get("mastery", 0) or 0), -int(n.get("difficulty", 3) or 3))
+    # 薄弱点 Top3：未开始(0) + 薄弱(1~29)，按掌握度升序，取前 3
     weak_candidates = [n for n in nodes if int(n.get("mastery", 0) or 0) < MASTERY_WEAK]
-    weak_candidates.sort(key=_weak_key)
+    weak_candidates.sort(key=lambda n: int(n.get("mastery", 0) or 0))
     weak_points = [
         {
             "id": n["id"],
             "name": n.get("name", ""),
             "subject": kg.node_subject(n) or SUBJECT_UNCLASSIFIED,
             "mastery": int(n.get("mastery", 0) or 0),
-            "difficulty": int(n.get("difficulty", 3) or 3),
         }
         for n in weak_candidates[:3]
     ]

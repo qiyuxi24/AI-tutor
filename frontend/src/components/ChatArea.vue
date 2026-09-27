@@ -4,10 +4,6 @@ import { useChatStore } from '../stores/chatStore'
 import MessageBubble from './MessageBubble.vue'
 import InputArea from './InputArea.vue'
 
-const props = defineProps({
-  sidebarCollapsed: Boolean,
-})
-
 const emit = defineEmits(['navigate-to-node'])
 
 const store = useChatStore()

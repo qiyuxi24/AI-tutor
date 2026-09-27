@@ -125,7 +125,7 @@ def test_update_node_info_accepts_subject(kg):
 # ── KG-D2：tags 不再写难度档 ──────────────────────────
 
 def test_graph_generator_tags_exclude_difficulty(kg, monkeypatch):
-    """建图写入路径：新节点 tags 不含 一级/二级/三级，难度落在 difficulty 列，学科落 subject。"""
+    """建图写入路径：新节点 tags 不含 一级/二级/三级，学科落 subject。"""
     gen = gg.GraphGenerator(user_id=1)
     monkeypatch.setattr(gen, "_find_dedup_candidates", _async({}))
     monkeypatch.setattr(gen, "_confirm_synonyms", _async({}))
@@ -133,17 +133,17 @@ def test_graph_generator_tags_exclude_difficulty(kg, monkeypatch):
     asyncio.run(gen._write_skeleton(
         kg, "数据结构",
         {"nodes": [
-            {"id": "stack", "name": "栈", "difficulty": 2},
-            {"id": "tree", "name": "树", "difficulty": 5},
+            {"id": "stack", "name": "栈"},
+            {"id": "tree", "name": "树"},
         ], "edges": []},
         existing_nodes=[]))
 
     stack = kg.get_node("stack")
     assert stack["tags"] == ["数据结构"], "tags 只放学科名"
     assert not (set(stack["tags"]) & {"一级", "二级", "三级"})
-    assert stack["difficulty"] == 2, "难度由 difficulty 列承载"
     assert stack["subject"] == "数据结构"
-    assert kg.get_node("tree")["difficulty"] == 5
+    assert "difficulty" not in stack, "难度字段已从节点模型下线"
+    assert not kg.get_node("tree").get("estimated_minutes"), "时长字段已从节点模型下线"
 
 
 # ── KG-D3：别名并轨 ───────────────────────────────────

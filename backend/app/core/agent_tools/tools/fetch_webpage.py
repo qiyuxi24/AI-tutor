@@ -28,7 +28,7 @@ import httpx
 from app.core.error_codes import ErrorCode, log_error
 
 from ..net_guard import is_blocked_url
-from ..registry import _spec
+from ..registry import TIER_FREE, _spec
 
 logger = logging.getLogger("ai-tutor")
 
@@ -161,4 +161,5 @@ def handler(args, kg) -> str:
     return fetch_webpage(args["url"], max_chars=int(args.get("max_chars", 3000)), kg=kg)
 
 
-SPEC = _spec("fetch_webpage", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE)
+SPEC = _spec("fetch_webpage", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE,
+             tier=TIER_FREE)

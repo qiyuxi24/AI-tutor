@@ -151,10 +151,10 @@ async function handleDelete() {
 
 <style scoped>
 .conv-sidebar {
-  width: 260px;
-  min-width: 260px;
+  /* 宽度与外观由外层 SidePanel 决定（统一卡片），这里只管内部纵向布局 */
+  width: 100%;
   height: 100%;
-  background: var(--color-bg-primary);
+  background: transparent;
   color: var(--color-text-primary);
   display: flex;
   flex-direction: column;
@@ -200,9 +200,10 @@ async function handleDelete() {
 }
 
 .history-list {
-  flex: 1;
+  flex: 1 1 auto;
   overflow-y: auto;
   padding: 0 8px;
+  min-height: 0;
 }
 .history-list::-webkit-scrollbar { width: 4px; }
 .history-list::-webkit-scrollbar-thumb {

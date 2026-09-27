@@ -36,7 +36,7 @@
 ```python
 """<工具名> —— <做什么> / <最要命的边界要点>（给人看的是这段）"""
 
-from ..registry import _spec            # 需要领域模块就一并 import
+from ..registry import _spec            # 需要领域模块 / TIER_FREE 就一并 import
 
 DESCRIPTION = "..."                     # ① 模型侧：随 tools= 每轮发给模型，写短写准
 PARAMETERS = {                          # ② JSON Schema（与 MCP inputSchema 同构）
@@ -53,7 +53,8 @@ def handler(args, kg) -> str:           # ④ 执行体：(args, kg) -> 给模�
     ...
 
 
-SPEC = _spec("<工具名>", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE)   # ⑤
+SPEC = _spec("<工具名>", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE,   # ⑤
+             tier=TIER_FREE)   # 授权分级：只读/判分类才写；不写 = TIER_ASK（须先问）
 ```
 
 然后在 `tools/__init__.py` 加两行：`from . import <工具名>` + `NATIVE_SPECS` 里加 `<工具名>.SPEC`。

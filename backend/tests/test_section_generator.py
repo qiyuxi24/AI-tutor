@@ -60,6 +60,13 @@ class FakeKG:
     def read_section(self, node_id, section_id):
         return self.writes.get((node_id, section_id), "")
 
+    def clear_sections(self, node_id):
+        secs = list(self.list_sections(node_id))
+        self.manifests.setdefault(node_id, {"sections": []})["sections"] = []
+        for s in secs:
+            self.writes.pop((node_id, s["id"]), None)
+        return len(secs)
+
     def _set_status(self, node_id, section_id, status):
         for s in self.list_sections(node_id):
             if s["id"] == section_id:
@@ -177,6 +184,68 @@ def test_force_regenerates_when_manifest_exists(monkeypatch):
     assert result["status"] == "ok"
     assert [c["title"] for c in result["created"]] == ["新定义"]
     assert len([c for c in calls if c["kind"] == "kb_section_plan"]) == 1
+
+
+# ── replace（重新修改）与 instruction（学生反馈） ─────────────────────
+
+def test_replace_clears_old_sections_before_rewriting(monkeypatch):
+    """replace=True：旧小节被清掉，只剩新规划的一套（不是新旧并存）"""
+    plan = ('{"sections":[{"title":"重写后的唯一小节","kind":"custom","brief":"b"}],'
+            '"summary":""}')
+    _make_fake_llm(monkeypatch, plan, lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+    kg.manifests["double_integral"] = {"sections": [
+        {"id": "s01", "title": "旧节一", "kind": "custom", "status": "filled"},
+        {"id": "s02", "title": "旧节二", "kind": "custom", "status": "filled"}]}
+    kg.writes[("double_integral", "s01")] = "旧正文" * 100
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", replace=True))
+
+    assert result["status"] == "ok"
+    assert [s["title"] for s in kg.list_sections("double_integral")] == ["重写后的唯一小节"]
+    # 新小节会复用 s01 这个 id，所以按**内容**断言旧正文已被清掉
+    assert all("旧正文" not in v for v in kg.writes.values()), "旧小节正文必须一起清掉"
+
+
+def test_replace_keeps_old_sections_when_planning_fails(monkeypatch):
+    """规划失败 → 旧小节原样保留（"清空 + 生成失败"会把节点搞成空壳）"""
+    _make_fake_llm(monkeypatch, "不是 JSON", lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+    kg.manifests["double_integral"] = {"sections": [
+        {"id": "s01", "title": "旧节一", "kind": "custom", "status": "filled"}]}
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", replace=True))
+
+    assert result["status"] == "error"
+    assert [s["id"] for s in kg.list_sections("double_integral")] == ["s01"]
+
+
+def test_instruction_reaches_both_stages(monkeypatch):
+    """学生反馈注入阶段①规划与阶段②成文（"重新修改"与"重新生成"的区别）"""
+    plan = '{"sections":[{"title":"定义","kind":"definition","brief":"b"}],"summary":""}'
+    calls = _make_fake_llm(monkeypatch, plan, lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+
+    asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", instruction="太浅了，多给例题"))
+
+    assert len(calls) == 2                      # 1 次规划 + 1 次成文
+    for c in calls:
+        assert "太浅了，多给例题" in c["messages"][0]["content"]
+
+
+def test_no_instruction_leaves_prompt_block_out(monkeypatch):
+    """不传反馈时不注入空块（提示词逐字符不变）"""
+    plan = '{"sections":[{"title":"定义","kind":"definition","brief":"b"}],"summary":""}'
+    calls = _make_fake_llm(monkeypatch, plan, lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+
+    asyncio.run(sg.SectionGenerator(user_id=1).generate(kg, "double_integral"))
+
+    for c in calls:
+        assert "额外要求" not in c["messages"][0]["content"]
 
 
 # ── 单节截断：failed 但不拖垮整批 ────────────────────────────────────

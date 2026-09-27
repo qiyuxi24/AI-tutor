@@ -271,6 +271,31 @@ def test_add_quiz_ref_records_route(kg):
     assert quizzes[1]["id"] == "q-2" and quizzes[1]["section_id"] == ""
 
 
+# ── clear_sections（重写前清场） ───────────────────────────────
+
+def test_clear_sections_removes_all_and_drops_section_quiz_refs(kg):
+    """清空小节：MD 与清单条目一起删；指向这些节的试卷引用一并摘掉，节点级引用保留。"""
+    _seed_node(kg)
+    kg.create_section("n1", "定义", content="A")
+    kg.create_section("n1", "例题", content="B")
+    kg.add_quiz_ref("n1", "q-s01", section_id="s01")
+    kg.add_quiz_ref("n1", "q-node")                 # 节点级，不属任何小节
+
+    removed = kg.clear_sections("n1")
+
+    assert removed == 2
+    assert kg.list_sections("n1") == []
+    assert list((kg.nodes_dir / "n1").glob("*.md")) == []
+    assert [q["id"] for q in kg.read_manifest("n1")["quizzes"]] == ["q-node"]
+
+
+def test_clear_sections_without_sections_is_noop(kg):
+    """无小节（老节点）→ 0，且不凭空造出 manifest"""
+    _seed_node(kg)
+    assert kg.clear_sections("n1") == 0
+    assert kg.read_manifest("n1") is None
+
+
 # ── 级联删除：remove_node / remove_subject ─────────────────────
 
 def test_remove_node_deletes_section_folder(kg):

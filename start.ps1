@@ -426,7 +426,11 @@ New-Item -ItemType Directory -Force -Path (Split-Path $backendLog -Parent) | Out
 # 代价是后端日志不再打在本窗口，改写入 logs\uvicorn-dev.log（logs/ 已在 .gitignore 中）。
 # --reload-dir app：本机缺 watchfiles，uvicorn 降级为 StatReload 并监视整个 backend/ 目录，
 # 跑测试或在 backend/ 下写临时文件都会触发重载；限定只监视 app/ 即可。
-$backendProcess = Start-Process -FilePath $venvPython -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--reload", "--reload-dir", "app", "--no-use-colors" -PassThru -WindowStyle Hidden -WorkingDirectory $backendDir -RedirectStandardError $backendLog
+# 另加 --reload-dir data/prompts：提示词模板不在 app/ 下，漏了它改 .j2 不会重载
+# （进程内模板缓存不失效 → 改了看不到效果，容易被误判成"模型没按提示词走"）。
+# 绝对路径：uvicorn 的监视目录相对 CWD 解析，写成相对路径会随启动方式漂移。
+$promptsDir = Join-Path $projectRoot "data\prompts"
+$backendProcess = Start-Process -FilePath $venvPython -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--reload", "--reload-dir", "app", "--reload-dir", $promptsDir, "--no-use-colors" -PassThru -WindowStyle Hidden -WorkingDirectory $backendDir -RedirectStandardError $backendLog
 
 Write-Host "[后端] PID: $($backendProcess.Id)" -ForegroundColor Green
 

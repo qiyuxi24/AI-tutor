@@ -18,7 +18,8 @@ RAG 管道（去耦合中间件）—— 将检索层与消费层解耦。
 """
 
 from app.core.rag_pipeline.types import RagContext, RagHit
-from app.core.rag_pipeline.sources import RagSource, GraphRagSource, KbRagSource
+from app.core.rag_pipeline.sources import (
+    RagSource, GraphRagSource, KbRagSource, GraphStructureSource)
 from app.core.rag_pipeline.router import should_retrieve
 from app.core.rag_pipeline.pipeline import RagPipeline, pipeline
 
@@ -30,5 +31,6 @@ __all__ = [
     "RagContext",
     "GraphRagSource",
     "KbRagSource",
+    "GraphStructureSource",
     "should_retrieve",
 ]

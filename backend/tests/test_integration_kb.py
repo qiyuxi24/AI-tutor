@@ -236,3 +236,46 @@ def test_user_isolation(manager):
 
     # 越权访问：直接查 OTHER 下不存在的节点路径为空
     assert manager._get_store(OTHER).get_node_path(OTHER, 1) == ""
+
+
+# ────────────────────────────────────────────
+#  上传原子性 / 索引修复
+# ────────────────────────────────────────────
+
+def test_index_failure_rolls_back_file(manager, monkeypatch):
+    """索引阶段失败 → 目录节点与正文一并回滚，不留"有正文、无索引"的孤儿。
+
+    回归样本：admin(5) 的《【人教版】高中必修 第一册物理电子课本.pdf》
+    （documents 92196 字符、doc_chunks 0 条）——用户看得见文件，AI 永远检索不到。
+    """
+    async def boom(self, user_id, node_id, text, vectorize=True):
+        raise RuntimeError("index failed")
+
+    monkeypatch.setattr(KbManager, "_index_document", boom)
+    with pytest.raises(RuntimeError):
+        _run(manager.upload_and_index(USER, "栈.md", STACK_DOC.encode(), None))
+
+    assert manager.build_tree(USER) == []
+    assert manager.stats(USER)["files"] == 0
+
+
+def test_reindex_file_repairs_orphan(manager):
+    """reindex_file 为历史孤儿文件（正文在、分块没了）补建索引并恢复可检索。"""
+    node_id = _run(manager.upload_and_index(USER, "栈.md", STACK_DOC.encode(), None))
+    # 模拟历史遗留：索引被清掉，正文仍在 documents
+    manager._get_vec_store(USER).delete_node_chunks(USER, node_id)
+    manager._get_sparse(USER).delete_node_chunks(node_id)
+    assert manager.stats(USER)["chunks"] == 0
+
+    rebuilt = _run(manager.reindex_file(USER, node_id))
+    assert rebuilt > 0
+    assert manager.stats(USER)["chunks"] == rebuilt
+
+    hits = _run(manager.search(USER, "栈 后进先出 压栈", top_k=3))
+    assert hits and hits[0]["node_id"] == node_id
+
+
+def test_reindex_file_without_text_is_noop(manager):
+    """没有解析正文的节点（如文件夹）不参与重建，返回 0。"""
+    folder = manager.create_folder(USER, "空目录", None)
+    assert _run(manager.reindex_file(USER, folder)) == 0

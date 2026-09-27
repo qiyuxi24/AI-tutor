@@ -191,8 +191,6 @@ def ensure_graph(kg, data: dict, rebuild: bool) -> tuple[int, int]:
             "tags": n.get("tags", []),
             "summary": n.get("summary", ""),
             "mastery": n.get("mastery", 0),
-            "difficulty": n.get("difficulty", 3),
-            "estimated_minutes": n.get("estimated_minutes", 15),
             "added_by": "human",
         })
         if n.get("content"):
@@ -244,7 +242,9 @@ async def build_prompt(kg, question: str, inject_graph: bool) -> str:
 
     # 检索注入两组都调：关闭组的图谱内容已由 pipeline.unregister("graph") 挡住，
     # 因此这里不是变量来源，保持两组一致以免引入额外差异。
-    retrieval = await _build_retrieval_context(question, kg.user_id)
+    # sources={"graph"} 是**显式**隔离变量：本评测只关心图谱注入，必须排除知识库片段
+    # （不写的话知识库源会自证参与，两组都被 KB 结果稀释）。
+    retrieval = await _build_retrieval_context(question, kg.user_id, sources={"graph"})
     if retrieval:
         prompt += retrieval
 

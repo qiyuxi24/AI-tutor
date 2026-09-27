@@ -22,7 +22,7 @@
 import { ref, computed, watch } from 'vue'
 import { renderMarkdown } from '../utils/markdown.js'
 // ★ 保存操作由父组件通过 Store 处理；此处只读小节正文/试题列表与触发生成（走 kb.js 封装，不裸调 apiClient）
-import { fetchNodeSection, fetchNodeQuizzes, generateNodeSections } from '../api/kb.js'
+import { fetchNodeSection, fetchNodeQuizzes } from '../api/kb.js'
 import { formatError } from '../utils/errorCodes.js'
 import { useDetailPrefs } from '../utils/detailPrefs.js'
 
@@ -50,12 +50,11 @@ const sections = computed(() => props.nodeInfo?.sections || [])
 const LEGACY_DOC = { id: '__content__', title: '正文', kind: 'custom', status: 'filled' }
 const docList = computed(() => (hasSections.value ? sections.value : [LEGACY_DOC]))
 const activeSectionId = ref('')
+const sidebarCollapsed = ref(false)     // 侧栏可伸缩：收起后只剩一条 36px 窄边 + 展开按钮
 const sectionContent = ref('')          // 当前选中节正文（懒加载）
 const sectionHtml = computed(() => renderMarkdown(sectionContent.value))
 const sectionLoading = ref(false)
 const sectionError = ref('')
-const generating = ref(false)           // 「生成小节」按钮 loading
-const generateError = ref('')
 
 /* 试题分组：与小节同侧边栏，懒加载（打开节点详情时请求一次；任意节点都展示） */
 const quizzes = ref([])
@@ -162,25 +161,6 @@ async function selectSection(id) {
   }
 }
 
-/**
- * 生成小节：调用后端两阶段管线，成功后 emit('refresh') 让父组件重取详情
- * （新 sections 经 watch 自动载入首节）。失败在本组件内提示。
- */
-async function handleGenerateSections() {
-  generating.value = true
-  generateError.value = ''
-  try {
-    const { data } = await generateNodeSections(props.nodeInfo.id)
-    emit('refresh')
-    // 部分小节生成失败时后端回传 message，就地提示（不算整批失败）
-    if ((data?.failed || 0) > 0 && data?.message) generateError.value = data.message
-  } catch (e) {
-    generateError.value = formatError(e, { action: '生成小节' })
-  } finally {
-    generating.value = false
-  }
-}
-
 /* 面板尺寸 / 正文字号来自设置页（模块级单例，改设置即时生效）。
    阅读模式带左侧栏，面板放宽；编辑模式仍是双栏编辑器，维持原宽。 */
 const { prefs: detailPrefs } = useDetailPrefs()
@@ -205,8 +185,6 @@ watch(() => props.nodeInfo, (val) => {
     activeSectionId.value = val.has_sections ? '' : LEGACY_DOC.id
     sectionContent.value = ''
     sectionError.value = ''
-    generating.value = false
-    generateError.value = ''
     // 试题分组：换节点即重置并按需重新拉取（任意节点都渲染该分组）
     quizzes.value = []
     quizzesError.value = ''
@@ -347,13 +325,6 @@ async function handleMasteryChange() {
           />
         </div>
 
-        <!-- 标签 -->
-        <div v-if="nodeInfo.tags?.length" class="tags-row">
-          <span v-for="tag in nodeInfo.tags" :key="tag" class="tag">{{ tag }}</span>
-          <span v-if="nodeInfo.difficulty" class="tag diff-tag">难度 {{ nodeInfo.difficulty }}/5</span>
-          <span v-if="nodeInfo.estimated_minutes" class="tag time-tag">约 {{ nodeInfo.estimated_minutes }} 分钟</span>
-        </div>
-
         <!-- 编辑模式：Markdown 源码 + 实时预览（分屏） -->
         <div v-if="mode === 'edit'" class="edit-area">
           <textarea
@@ -368,23 +339,20 @@ async function handleMasteryChange() {
 
         <!-- 阅读模式：左侧栏（有 manifest → 小节列表；老节点 → 单项「正文」）+ 右侧正文 -->
         <div v-else-if="mode === 'view'" class="sections-layout">
-          <aside class="section-sidebar">
-            <div v-if="!hasSections || generateError" class="section-sidebar-head">
-              <button
-                v-if="!hasSections"
-                class="action-btn gen-sections-btn"
-                :disabled="generating"
-                @click="handleGenerateSections"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                     stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>
-                  <path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/>
-                </svg>
-                {{ generating ? '生成中…' : '生成小节' }}
-              </button>
-              <p v-if="generateError" class="save-error section-gen-error">{{ generateError }}</p>
-            </div>
+          <aside class="section-sidebar" :class="{ collapsed: sidebarCollapsed }">
+            <!-- 可伸缩：收起后只剩这一条窄边与按钮 -->
+            <button
+              type="button"
+              class="sidebar-toggle"
+              :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'"
+              @click="sidebarCollapsed = !sidebarCollapsed"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline v-if="sidebarCollapsed" points="9 18 15 12 9 6"/>
+                <polyline v-else points="15 18 9 12 15 6"/>
+              </svg>
+            </button>
             <div class="section-sidebar-body">
               <ul class="section-list">
                 <li v-for="s in docList" :key="s.id">
@@ -549,10 +517,17 @@ async function handleMasteryChange() {
 }
 .mastery-slider:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.tags-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 24px; flex-shrink: 0; }
-.tag { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; background: var(--color-accent-light); color: var(--color-accent); }
-.diff-tag { background: rgba(245, 158, 11, 0.12); color: var(--color-orange); }
-.time-tag { background: var(--color-green-light); color: var(--color-green); }
+/* 可伸缩侧栏：收起后只剩顶部一个箭头按钮 */
+.sidebar-toggle {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 28px; flex-shrink: 0;
+  border: none; border-bottom: 1px solid var(--color-border);
+  background: transparent; color: var(--color-text-muted);
+  cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.sidebar-toggle:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
+.section-sidebar.collapsed { width: 36px; min-width: 36px; }
+.section-sidebar.collapsed .section-sidebar-body { display: none; }
 
 /* 编辑区：左源码 / 右实时预览 */
 .edit-area {
@@ -602,8 +577,6 @@ async function handleMasteryChange() {
   display: flex; flex-direction: column;
   border-right: 1px solid var(--color-border); background: var(--color-bg-surface);
 }
-.section-sidebar-head { padding: 12px; border-bottom: 1px solid var(--color-border); flex-shrink: 0; }
-.gen-sections-btn { width: 100%; justify-content: center; }
 .section-gen-error { margin: 8px 0 0; font-size: 12px; }
 .section-sidebar-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 .section-list {

@@ -23,6 +23,8 @@ from concurrent.futures import ThreadPoolExecutor
 from app.core.config import settings
 from app.core.error_codes import ErrorCode, log_error
 
+from .registry import TIER_FREE
+
 logger = logging.getLogger("ai-tutor")
 
 # 同步→异步桥：与 impl/rag._run_async / kg_taxonomy 同一约定（各持单例池互不干扰）
@@ -142,6 +144,9 @@ def mcp_tool_specs() -> list[dict]:
                 "description": t.description or "",
                 "parameters": t.input_schema,  # MCP 字段名 inputSchema 的 pydantic 侧属性
                 "handler": _make_handler(name, t.name, ref),
+                # 授权分级：现有唯一 MCP server 是只读的网页搜索 → 免确认。
+                # ⚠️ 以后挂**写类** MCP server（能改图谱/留存资料）必须改成 TIER_ASK。
+                "tier": TIER_FREE,
             })
     _specs_cache = specs
     return _specs_cache

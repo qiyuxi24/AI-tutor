@@ -2,7 +2,8 @@
 /**
  * HomeView.vue — 主视图（编排层）
  *
- * 布局：左侧活动栏 + 内容区（对话 / 图谱 / 知识库 / 设置），无顶部栏（沉浸式）
+ * 布局：左侧活动栏 + 内容区（对话 / 学习进度 / 图谱 / 出题 / 资源采集 / 设置），无顶部栏（沉浸式）。
+ * 知识库不是独立视图：它是图谱页右侧可收起的侧栏（KbPanel，宽度由 --kb-w 驱动）。
  *
  * 职责：
  *   1. 页面切换，由左侧活动栏驱动
@@ -13,24 +14,24 @@
  * 主题切换 / 用户菜单已下沉到 ActivityBar 组件内部。
  */
 
-import { ref, onMounted, computed, watch } from 'vue'
-import { useChatStore } from '../stores/chatStore'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { useChatStore, BACKEND_RELOADED_EVENT } from '../stores/chatStore'
 import { useAuthStore } from '../stores/authStore'
 import { formatError, clientError } from '../utils/errorCodes.js'
-import { notifyError } from '../utils/feedback'
+import { notifyError, notifyInfo } from '../utils/feedback'
 import ActivityBar from '../components/ActivityBar.vue'
 import ConversationSidebar from '../components/ConversationSidebar.vue'
 import ChatArea from '../components/ChatArea.vue'
 import ForceGraph from '../components/ForceGraph.vue'
 import GraphSubjectBar from '../components/GraphSubjectBar.vue'
-import GraphBoardSidebar from '../components/GraphBoardSidebar.vue'
 import PathBoard from '../components/PathBoard.vue'
 import NodeDetail from '../components/NodeDetail.vue'
 import UserProfile from '../components/UserProfile.vue'
 import GraphSearch from '../components/GraphSearch.vue'
+import SidePanel from '../components/SidePanel.vue'
 import OnboardingGuide from '../components/OnboardingGuide.vue'
 import LoginDialog from '../components/LoginDialog.vue'
-import KnowledgeView from './KnowledgeView.vue'
+import KbPanel from '../components/KbPanel.vue'
 import QuizView from './QuizView.vue'
 import CollectorView from './CollectorView.vue'
 import SettingsView from './SettingsView.vue'
@@ -39,34 +40,35 @@ import DashboardView from './DashboardView.vue'
 const store = useChatStore()
 const authStore = useAuthStore()
 const viewMode = ref('chat')
+
+// ─── 三处侧栏（统一走 SidePanel）：折叠态 + 宽度 ───
+// 宽度与折叠态留在父级，是因为它们要参与布局：对话栏折叠后 ChatArea 自动占满，
+// 知识库栏宽度还要驱动搜索栏/缩放控件让位（--kb-w）。持久化由 SidePanel 按 storageKey 负责。
 const sidebarCollapsed = ref(false)
+const convPanelWidth = ref(260)
 const graphNavCollapsed = ref(false)
+const graphNavWidth = ref(240)
+const kbCollapsed = ref(false)
+const kbWidth = ref(320)
 
-// ─── 图谱导航：宽度拖拽（手动存 localStorage，宽度不持久化的话拖了也白拖）───
-const GRAPH_PANEL_MIN = 140
-const GRAPH_PANEL_MAX = 340
-const graphPanelWidth = ref(Number(localStorage.getItem('graphPanelWidth')) || 176)
-const graphPanelResizing = ref(false)
+// 学习任务栏宽度：必须与下方 .graph-path-board 的 width 一致（画布缩放控件按它让位）
+const PATH_BOARD_WIDTH = 360
 
-function startGraphResize(e) {
-  const startX = e.clientX
-  const startW = graphPanelWidth.value
-  graphPanelResizing.value = true
-  const onMove = (ev) => {
-    graphPanelWidth.value = Math.min(
-      GRAPH_PANEL_MAX,
-      Math.max(GRAPH_PANEL_MIN, startW + ev.clientX - startX)
-    )
-  }
-  const onUp = () => {
-    graphPanelResizing.value = false
-    localStorage.setItem('graphPanelWidth', String(graphPanelWidth.value))
-    document.removeEventListener('mousemove', onMove)
-    document.removeEventListener('mouseup', onUp)
-  }
-  document.addEventListener('mousemove', onMove)
-  document.addEventListener('mouseup', onUp)
+// ─── 开发态：后端代码改动 → 自动局部刷新 ───
+// 后端 uvicorn --reload 重启会掐断 SSE（见 chatStore.connectSSE），重连成功即"已重载"；
+// 此时把 epoch +1 让子视图重挂 → 各自的 onMounted 重新拉数据（这就是"局部刷新"）。
+// 前端改动不用管：Vite HMR 已覆盖。
+// 仅开发环境生效：生产环境一次网络抖动不该把用户正在填的作答/勾选冲掉。
+const viewEpoch = ref(0)
+
+function handleBackendReloaded() {
+  viewEpoch.value += 1
+  // 图谱 / 学科列表 / 统计在 store 里，不走子视图重挂，得单独重拉
+  store.refreshGraph()
+  notifyInfo('后端已重载，页面数据已同步')
+  console.info('[dev] 检测到后端重载，已局部刷新当前视图')
 }
+
 const showUserProfile = ref(false)
 const showLoginDialog = ref(false)
 const graphSearchRef = ref(null)
@@ -77,9 +79,28 @@ const onboardingRef = ref(null)
 // 路径不画在图上（图上一淡出就丢上下文），改成右侧弹出的分层看板。
 const showPathBoard = ref(false)
 
+/**
+ * 任务栏与知识库栏争同一条右边缘 → 开任务栏时收起知识库（反之展开知识库时
+ * 关任务栏，见下方 watch）。两边都能搌开、又都不遮对方，比堆叠更好预测。
+ */
 function togglePathBoard() {
   showPathBoard.value = !showPathBoard.value
+  if (showPathBoard.value) kbCollapsed.value = true
 }
+
+// 用户手动展开知识库 → 让位（否则两张卡片在同一位置重叠）
+watch(kbCollapsed, (collapsed) => {
+  if (!collapsed) showPathBoard.value = false
+})
+
+/**
+ * 画布要向右让出多少：知识库栏（或任务栏）占用的那一条。
+ * 两边互斥，所以取当前实际占位的那一个；都收起则为 0。
+ */
+const rightReserve = computed(() => {
+  if (!kbCollapsed.value) return kbWidth.value
+  return showPathBoard.value ? PATH_BOARD_WIDTH : 0
+})
 
 /**
  * 任务栏数据只在面板打开时拉、且打开着的时候切学科/板块要跟着重算
@@ -100,8 +121,6 @@ function handlePathBoardFocus(nodeId) {
 async function handlePathBoardEdit(nodeId) {
   await handleNodeDblClick(nodeId)
 }
-
-const SIDEBAR_WIDTH = 260
 
 // ─── 节点详情弹窗 ───
 const nodeDetailModal = ref(null)
@@ -125,6 +144,16 @@ onMounted(async () => {
   if (!ok) showLoginDialog.value = true
   // init() 内部依次：fetchSubjects() → ensureSubjectSelected() → fetchGraph() → connectSSE()
   store.init()
+  // 后端重载 → 局部刷新（开发态，见 handleBackendReloaded）
+  if (import.meta.env.DEV) {
+    window.addEventListener(BACKEND_RELOADED_EVENT, handleBackendReloaded)
+  }
+})
+
+onUnmounted(() => {
+  if (import.meta.env.DEV) {
+    window.removeEventListener(BACKEND_RELOADED_EVENT, handleBackendReloaded)
+  }
 })
 
 /** 切换账号：打开登录弹窗（#/login 路由页已取消，也不再提供"退出登录"）*/
@@ -345,10 +374,6 @@ async function handleNodeDetailNavigate(nodeId) {
   }
 }
 
-function toggleSidebar() {
-  sidebarCollapsed.value = !sidebarCollapsed.value
-}
-
 // ─── 视图切换动画 ───
 const slideTransition = {
   onEnter(el, done) {
@@ -392,67 +417,54 @@ const slideTransition = {
       <!-- 对话页 -->
       <Transition name="view-fade" v-bind="slideTransition">
         <div v-if="viewMode === 'chat'" class="chat-layout" data-view="chat">
-          <!-- 对话历史二级侧栏（可折叠） -->
-          <div class="conv-panel" :class="{ collapsed: sidebarCollapsed }" :style="{ width: SIDEBAR_WIDTH + 'px' }">
-            <ConversationSidebar />
-          </div>
-
-          <!-- 统一的折叠切换按钮（展开/收起同一按钮，图标随状态变化） -->
-          <button
-            class="conv-toggle-btn"
-            :class="{ collapsed: sidebarCollapsed }"
-            @click="toggleSidebar"
-            :title="sidebarCollapsed ? '展开对话列表' : '收起对话列表'"
+          <!-- 对话历史二级侧栏（统一 SidePanel：可拖宽 / 可折叠） -->
+          <SidePanel
+            class="conv-panel"
+            side="left"
+            label="对话列表"
+            :min="200"
+            :max="420"
+            storage-key="conv"
+            v-model:width="convPanelWidth"
+            v-model:collapsed="sidebarCollapsed"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <polyline v-if="!sidebarCollapsed" points="15 18 9 12 15 6" />
-              <polyline v-else points="9 18 15 12 9 6" />
-            </svg>
-          </button>
+            <ConversationSidebar />
+          </SidePanel>
 
-          <ChatArea
-            :sidebarCollapsed="sidebarCollapsed"
-            @navigate-to-node="handleGraphSearchSelect"
-          />
+          <ChatArea @navigate-to-node="handleGraphSearchSelect" />
         </div>
       </Transition>
 
       <!-- 知识图谱页 -->
       <Transition name="view-fade" v-bind="slideTransition">
-        <div v-if="viewMode === 'graph'" class="graph-layout" data-view="graph">
-          <div class="graph-topbar">
-            <div class="graph-search-bar">
+        <div
+          v-if="viewMode === 'graph'"
+          class="graph-layout"
+          data-view="graph"
+          :style="{ '--kb-w': rightReserve + 'px' }"
+        >
+          <!-- 左侧导航：搜索 + 学科列表，一次只渲染一个学科（避免图谱无限生长）。
+               整张卡片的外观/折叠/拖宽/拖高都由 SidePanel 统一提供，收起时搜索栏一起收起。 -->
+          <SidePanel
+            class="graph-nav"
+            side="left"
+            label="学科导航"
+            :min="180"
+            :max="360"
+            storage-key="graphNav"
+            v-model:width="graphNavWidth"
+            v-model:collapsed="graphNavCollapsed"
+            resizable-height
+          >
+            <div class="graph-nav-search">
               <GraphSearch
                 ref="graphSearchRef"
                 :nodes="store.knowledgeNodes"
                 @select-node="handleGraphSearchSelect"
               />
             </div>
-          </div>
-          <!-- 左侧两级导航：学科收藏栏（一级）→ 知识板块（二级）
-               一次只渲染一个学科，避免图谱无限生长。
-               两级栏合并为一张卡片，右缘把手既可点击折叠、也可拖拽调宽。 -->
-          <div
-            class="graph-nav"
-            :class="{ collapsed: graphNavCollapsed, resizing: graphPanelResizing }"
-            :style="{ '--panel-w': graphPanelWidth + 'px' }"
-          >
-            <div class="graph-panel-stack">
-              <GraphSubjectBar class="graph-panel" />
-              <GraphBoardSidebar class="graph-panel" />
-              <span class="graph-resizer" @mousedown.prevent="startGraphResize"></span>
-            </div>
-            <button
-              class="graph-collapse-btn"
-              @click="graphNavCollapsed = !graphNavCollapsed"
-              :title="graphNavCollapsed ? '展开学科导航' : '收起学科导航'"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline v-if="!graphNavCollapsed" points="15 18 9 12 15 6" />
-                <polyline v-else points="9 18 15 12 9 6" />
-              </svg>
-            </button>
-          </div>
+            <GraphSubjectBar class="graph-panel" />
+          </SidePanel>
           <ForceGraph
             ref="forceGraphRef"
             :nodes="store.displayNodes"
@@ -466,7 +478,23 @@ const slideTransition = {
             @graph-action="handleGraphAction"
           />
 
-          <!-- 右侧：学习任务栏（分层看板；点底部「学习路径」开关） -->
+          <!-- 右侧知识库栏（统一 SidePanel）：宽度经 --kb-w 驱动画布缩放控件让位 -->
+          <SidePanel
+            class="graph-kb"
+            side="right"
+            label="知识库"
+            :min="240"
+            :max="560"
+            storage-key="kb"
+            v-model:width="kbWidth"
+            v-model:collapsed="kbCollapsed"
+            resizable-height
+          >
+            <KbPanel :key="viewEpoch" />
+          </SidePanel>
+
+          <!-- 右侧：学习任务栏（分层看板；点图例里的「学习路径」开关）
+               与知识库栏互斥（见 togglePathBoard） -->
           <Transition name="view-fade">
             <PathBoard
               v-if="showPathBoard"
@@ -485,23 +513,21 @@ const slideTransition = {
         </div>
       </Transition>
 
-      <!-- 知识库页 -->
-      <KnowledgeView v-if="viewMode === 'knowledge'" />
-
       <!-- 出题页（可从节点详情侧边栏「试题」跳入并聚焦某题；无跳转时行为与原来一致） -->
       <QuizView
         v-if="viewMode === 'quiz'"
-        :key="quizViewKey"
+        :key="quizViewKey + ':' + viewEpoch"
         :initial-subject="quizTarget?.nodeName || ''"
         :focus-question-id="quizTarget?.questionId || null"
       />
 
       <!-- 资源采集页 -->
-      <CollectorView v-if="viewMode === 'resources'" />
+      <CollectorView v-if="viewMode === 'resources'" :key="viewEpoch" />
 
       <!-- 学习进度仪表盘 -->
       <DashboardView
         v-if="viewMode === 'dashboard'"
+        :key="viewEpoch"
         @go-graph="handleDashboardGoGraph"
         @go-node="handleDashboardGoNode"
       />
@@ -509,6 +535,7 @@ const slideTransition = {
       <!-- 设置页 -->
       <SettingsView
         v-if="viewMode === 'settings'"
+        :key="viewEpoch"
         @replay-onboarding="replayOnboarding"
         @switch-account="openAccountSwitch"
       />
@@ -567,46 +594,9 @@ const slideTransition = {
   left: 0;
 }
 
+/* 对话历史侧栏：统一 SidePanel，外边距即悬浮卡片的留白 */
 .conv-panel {
-  flex-shrink: 0;
-  transition: margin-left 0.3s cubic-bezier(0.4, 0.0, 0.2, 1);
-  overflow: hidden;
-  border-right: 1px solid var(--color-border);
-}
-.conv-panel.collapsed {
-  margin-left: -260px;
-}
-
-/* 折叠后的展开条 */
-/* 统一的折叠切换按钮（展开态在侧栏右缘，收起态在内容区左缘） */
-.conv-toggle-btn {
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 22px;
-  height: 52px;
-  border: 1px solid var(--color-border);
-  border-radius: 7px;
-  background: var(--color-bg-primary);
-  color: var(--color-text-tertiary);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 20;
-  transition: left 0.3s cubic-bezier(0.4, 0.0, 0.2, 1), background 0.2s, color 0.2s;
-}
-/* 展开态：按钮贴着侧栏右边缘 */
-.conv-toggle-btn {
-  left: 260px;
-}
-/* 收起态：按钮移到内容区左边缘，形状保持不变，仅内部箭头翻转 */
-.conv-toggle-btn.collapsed {
-  left: 0;
-}
-.conv-toggle-btn:hover {
-  background: var(--color-bg-surface);
-  color: var(--color-text-primary);
+  margin: 12px 0 12px 12px;
 }
 
 /* 图谱布局 */
@@ -618,69 +608,52 @@ const slideTransition = {
   left: 0;
 }
 
-/* ── 图谱顶部栏（搜索） ── */
-.graph-topbar {
-  position: absolute;
-  top: 12px;
-  left: 16px;
-  right: 12px;
-  z-index: 25;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  pointer-events: none;
-}
-.graph-topbar > * {
-  pointer-events: auto;
+/* ── 左侧栏顶部的知识节点搜索（挂在卡片内，随侧栏一起收起） ── */
+.graph-nav-search {
+  flex-shrink: 0;
+  padding: 10px 10px 8px;
+  border-bottom: 1px solid var(--color-border);
 }
 
-/* ── 图谱左侧两级导航（学科收藏栏 + 知识板块） ──
-   布局：一张圆角卡片（两级栏用细分隔线分区）+ 右缘把手（点击折叠 / 拖拽调宽）。
-   宽度由 --panel-w 驱动（拖拽时内联更新），收起时卡片宽度归零并淡出。 */
+/* ── 图谱左侧两级导航（学科 + 知识板块）／右侧知识库 ──
+   两者都是浮在画布上的卡片：外观与交互（抽屉把手、拖宽热区、折叠动画）统一由
+   SidePanel 提供，这里只给各自的定位；卡片内的分区与滚动交给子面板自己。
+
+   高度：**随内容自适应，最多到画布四边各留 12px**（不是无条件撑满）——
+   内容少时卡片就是实际需要的高度，不高高地空出一条；内容多到封顶后由内部列表滚动。 */
 .graph-nav {
   position: absolute;
-  top: 64px;
+  top: 12px;
   left: 12px;
-  bottom: 12px;
+  max-height: calc(100% - 24px);
   z-index: 20;
-  display: flex;
-  align-items: stretch;
 }
 
 /* ── 图谱右侧「学习任务栏」（分层看板）──
-   与左侧导航同一套卡片语言；同样从 64px 起，给顶部搜索栏让位。 */
+   与 .graph-kb 同一条右边缘、同一套定位口径（top/right 12px + 最多留 12px 边界），
+   但两者**互斥**（见 togglePathBoard）：同时开会在同一位置重叠。 */
 .graph-path-board {
   position: absolute;
-  top: 64px;
+  top: 12px;
   right: 12px;
-  bottom: 12px;
+  max-height: calc(100% - 24px);
   width: 360px;
-  z-index: 22;
+  z-index: 21;
 }
 
-.graph-panel-stack {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  width: var(--panel-w, 176px);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  overflow: hidden;
-  transition: width 0.28s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+/* 左栏卡片里有搜索下拉（绝对定位，会超出卡片边界），卡片与内容都要放开裁切；
+   收起时的隐藏靠 SidePanel 的透明度，不依赖裁切。 */
+.graph-nav :deep(.sp-body),
+.graph-nav :deep(.sp-content) {
+  overflow: visible;
 }
 
-.graph-nav.collapsed .graph-panel-stack {
-  width: 0;
-  opacity: 0;
-  border-width: 0;
-  pointer-events: none;
-}
-
-/* 拖拽中禁用过渡，否则面板跟不上鼠标 */
-.graph-nav.resizing .graph-panel-stack {
-  transition: none;
+.graph-kb {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  max-height: calc(100% - 24px);
+  z-index: 20;
 }
 
 /* 两级面板只负责内部布局，外观统一交给外层卡片。
@@ -688,7 +661,6 @@ const slideTransition = {
 .graph-nav .graph-panel {
   width: 100%;
   min-height: 0;
-  flex-shrink: 1; /* 子组件自带 flex-shrink:0，改纵向排布后需允许收缩才能内部滚动 */
   background: transparent;
   border: none;
   border-radius: 0;
@@ -697,66 +669,16 @@ const slideTransition = {
   border-top: 1px solid var(--color-border);
 }
 
-/* 右缘拖拽热区：平时隐形，悬停才浮出一条强调色竖线 */
-.graph-resizer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 7px;
-  z-index: 1;
-  cursor: col-resize;
-}
-.graph-resizer::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 2px;
-  background: transparent;
-  transition: background 0.18s;
-}
-.graph-resizer:hover::after {
-  background: var(--color-accent, #5b8ff9);
+/* 学科区：卡片没封顶时按内容高度，封顶后吃掉剩余高度并自己滚动（上面是固定不缩的搜索栏） */
+.graph-nav .graph-subject-bar {
+  flex: 1 1 auto;
 }
 
-/* 折叠把手：像抽屉拉手一样贴在卡片右缘，默认半隐、悬停浮现 */
-.graph-collapse-btn {
-  align-self: center;
-  flex-shrink: 0;
-  width: 16px;
-  height: 46px;
-  margin-left: -1px;
-  padding: 0;
-  border: 1px solid var(--color-border);
-  border-left: none;
-  border-radius: 0 8px 8px 0;
-  background: var(--color-bg-secondary);
-  color: var(--color-text-tertiary);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0.5;
-  transition: opacity 0.18s, background 0.18s, color 0.18s;
-}
-.graph-collapse-btn:hover {
-  opacity: 1;
-  background: var(--color-bg-surface);
-  color: var(--color-text-primary);
-}
-
-/* 收起后卡片消失，把手脱开浮在原位，补全四边与圆角提示可展开 */
-.graph-nav.collapsed .graph-collapse-btn {
-  opacity: 0.85;
-  border-left: 1px solid var(--color-border);
-  border-radius: 8px;
-}
-
-/* ── 图谱搜索栏 ── */
-.graph-search-bar {
-  z-index: 25;
+/* 画布右下角的缩放控件同样要给右栏让位（它原来贴 right:16px）；
+   rightReserve 把知识库栏与学习任务栏一起算进去（两边互斥）。 */
+.graph-layout :deep(.zoom-controls) {
+  right: calc(32px + var(--kb-w, 0px));
+  transition: right 0.28s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }

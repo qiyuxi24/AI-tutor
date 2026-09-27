@@ -3,7 +3,7 @@ index.json 数据规范化脚本
 
 功能：
 1. 读取 data/knowledge/index.json
-2. 为所有节点补全缺失字段（summary, mastery, difficulty, estimated_minutes, confidence）
+2. 为所有节点补全缺失字段（summary, mastery, confidence）
 3. 为所有边补全缺失字段（added_by, confidence）
 4. 备份原文件为 index.json.bak
 5. 将规范化后的数据写回 index.json
@@ -19,8 +19,6 @@ from pathlib import Path
 NODE_DEFAULTS = {
     "summary": "",
     "mastery": 0,
-    "difficulty": 3,
-    "estimated_minutes": 15,
     "confidence": None,
 }
 
@@ -129,8 +127,7 @@ def main():
 def verify(data: dict):
     """验证规范化后所有节点和边的字段完整性"""
     required_node_fields = {"id", "name", "file", "tags", "summary",
-                            "mastery", "difficulty", "estimated_minutes",
-                            "added_by", "created_at", "confidence"}
+                            "mastery", "added_by", "created_at", "confidence"}
     required_edge_fields = {"from", "to", "relation", "label",
                             "added_by", "confidence"}
 

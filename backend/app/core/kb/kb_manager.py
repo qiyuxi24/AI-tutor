@@ -22,6 +22,7 @@
 import asyncio
 import logging
 import re
+import sqlite3
 from pathlib import Path
 from typing import Optional
 
@@ -298,7 +299,20 @@ class KbManager:
         )
 
         # 分块 + 向量化 + 入库
-        await self._index_document(user_id, node_id, text, vectorize=vectorize)
+        # 原子性：add_file 已提交，此处失败必须回滚，否则目录树里留下"有正文、无任何
+        # 索引"的孤儿文件 —— 用户看到文件在，但检索永远命中不到（实测 admin 的
+        # 【人教版】必修第一册.pdf 就是这样：documents 有 92196 字符，doc_chunks 为 0，
+        # 成因是前端上传超时（120s）掐断请求，CancelledError 绕过 except Exception）。
+        # 用 BaseException 才能连 CancelledError（客户端断连）一起兜住；回滚是同步 sqlite
+        # 写、无 await，取消场景下也能执行完，随后原样重抛。
+        try:
+            await self._index_document(user_id, node_id, text, vectorize=vectorize)
+        except BaseException:
+            try:
+                self.delete_node(user_id, node_id)
+            except Exception as rollback_err:  # 回滚失败只记日志，不能盖住原始异常
+                logger.error(f"上传回滚失败（node_id={node_id}）: {rollback_err}")
+            raise
         return node_id
 
     async def _index_document(self, user_id: int, node_id: int, text: str,
@@ -353,6 +367,27 @@ class KbManager:
         if sparse_docs:
             sparse.upsert_bulk(sparse_docs)
         return len(chunks)
+
+    async def reindex_file(self, user_id: int, node_id: int,
+                           vectorize: bool = True) -> int:
+        """
+        为**已入库**的文件节点重建检索索引（不重新解析、不改正文）。
+
+        用途：修复历史遗留的"有正文、无分块"孤儿文件（索引阶段被中断/失败后留下的），
+        正文已在 `documents.extract_text` 里，重建即可恢复可检索；也供批量体检脚本调用。
+
+        参数:
+            user_id:   用户 ID
+            node_id:   文件节点 ID（须属于该用户且已有解析正文）
+            vectorize: 是否调用嵌入（False = 只建 BM25 索引）
+
+        返回:
+            重建的分块数；无正文或节点不存在返回 0。
+        """
+        text = self.get_document_text(user_id, node_id)
+        if not text or not text.strip():
+            return 0
+        return await self._index_document(user_id, node_id, text, vectorize=vectorize)
 
     # ────────────────────────────────────────────
     #  删除
@@ -648,6 +683,32 @@ class KbManager:
             else:
                 files.update(store.collect_descendant_files(user_id, node["id"]))
         return sorted(files)
+
+    def has_indexed_content(self, user_id: int) -> bool:
+        """
+        该用户是否有**可检索的已索引分块**（只读探测，不建目录、不建表、不写任何东西）。
+
+        用途：检索源自证可用性（`KbRagSource.should_query`）。"知识库源要不要参与检索"
+        应由"有没有数据"决定，而不是由调用方传了哪些参数决定 —— 后者曾让 chat 侧与
+        rag_search 侧各写一份开关逻辑、两处都错，上传的资料静默不可达。
+
+        零副作用是硬要求：`_get_vec_store()` 会创建 per-user 库文件，若在这里用它会
+        给每个从未用过知识库的用户凭空建库。
+        """
+        rag_db = self.data_dir / str(user_id) / "rag.db"
+        if not rag_db.exists():
+            return False
+        try:
+            # 只读 URI：库不存在/表不存在/被占用都退化为"没有内容"，绝不抛错影响主对话
+            conn = sqlite3.connect(f"file:{rag_db}?mode=ro", uri=True)
+            try:
+                return conn.execute(
+                    "SELECT 1 FROM doc_chunks LIMIT 1"
+                ).fetchone() is not None
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return False
 
     def get_node(self, user_id: int, node_id: int) -> Optional[dict]:
         return self._get_store(user_id).get_node(node_id)

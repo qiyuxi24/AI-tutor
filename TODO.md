@@ -83,7 +83,6 @@
 - [ ]  **试卷拆分器 `quiz_splitter.py` 已实现但零引用（未接入上传链路）**（2026-09-12 发现，详见 `TODO_Collector.md` 遗留技术债 #2）：需先定入口形态（`/kb/upload` 自动拆 / 独立 `POST /quiz/import` / 并入 B3.1）。
 - [ ]  **`collector/pipeline_ingest.py` + `chapterizer.py` 零引用（2026-09-15 core 审计）**：整书切章入库链路（`ingest_book_chapters`）已实现且 6 例测试通过，但采集链路 `manager.run_task` 直接调 `kb_manager.upload_and_index`，**未接此管线**（`chapterizer` 只被它引用，同属链内）。需定入口：采集任务整书入库 / 手动导入 / 判定不用后删除。
 - [ ]  **conversations 内嵌 tools/thinking 去留 + run 与会话无关联键**（9/8 起挂着，**待决策**）：需定"是否为 agent_runs 加 conversation 外键/会话 id 字段（动 schema）"，或接受现状。
-- [ ]  **守卫测试有一条断言不可靠**（2026-09-26）：`tests/test_event_bus.py::test_request_scoped_event_bypasses_user_broadcast_queue` 里「per-user 队列为空」那条断言，在破坏态下会因事件被长连接消费掉而**误绿**；改成 monkeypatch `publish` 断言其**未被调用**才精确（约 5 行）。
 
 ## 进度速览（2026-09-13）
 

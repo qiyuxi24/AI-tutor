@@ -21,6 +21,25 @@ from app.services.chat_service import process_message, process_message_stream
 router = APIRouter()
 
 
+def _build_kb_context(request: ChatRequest) -> dict | None:
+    """
+    构造本次对话的知识库**检索范围**（RagContext.kb）——只表达范围，不表达开关。
+
+    - 前端选定了范围 → 只在该批文件里检索（node_ids 由 KbRagSource 展开目录）
+    - 未选定 → 返回 None = 不限范围，检索该用户全部上传资料
+
+    本函数返回什么**都不会**影响"知识库源是否参与"：那是源自证的事
+    （`KbRagSource.should_query` 查"有没有已索引资料"）。曾经这里返回 None 就等于
+    静默关掉整个知识库源 —— 一个漏传的业务参数不该有这种权力。
+    """
+    if not request.kb_node_ids:
+        return None
+    return {
+        "node_ids": request.kb_node_ids,
+        "name": request.kb_node_name or "我的知识库",
+    }
+
+
 def _check_chat_rate_limit(request: Request) -> bool:
     """检查聊天接口频率限制，超限返回 429。"""
     client_ip = request.client.host if request.client else "unknown"
@@ -44,8 +63,7 @@ async def handle_chat(request: ChatRequest, raw_request: Request,
     if rate_limit_resp:
         return rate_limit_resp
 
-    kb = {"node_ids": request.kb_node_ids or [], "name": request.kb_node_name} \
-        if request.kb_node_ids else None
+    kb = _build_kb_context(request)
     reply, graph_analysis = await process_message(
         user_id=user_id,
         messages=request.messages,
@@ -66,8 +84,7 @@ async def handle_chat_stream(request: ChatRequest, raw_request: Request,
         return rate_limit_resp
 
     async def event_stream():
-        kb = {"node_ids": request.kb_node_ids or [], "name": request.kb_node_name} \
-            if request.kb_node_ids else None
+        kb = _build_kb_context(request)
 
         async for sse_chunk in process_message_stream(
             messages=request.messages,

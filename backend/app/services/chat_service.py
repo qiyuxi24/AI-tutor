@@ -27,9 +27,10 @@ from datetime import datetime
 from app.core.prompt_loader import get_system_prompt
 from app.core.agent.loop import run_agent_loop
 from app.core.agent_tools import TOOLS_PROMPT  # 注册表生成的「工具调用指南」段落
+from app.core.agent_tools.registry import build_authorization_block
 from app.core.config import settings
 from app.core.agent.guard import trim_history_to_budget
-from app.core.graph_analyzer import GraphAnalyzer, build_graph_context
+from app.core.graph_analyzer import GraphAnalyzer
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.profile import UserProfile
 from app.core.token_counter import count_tokens
@@ -46,7 +47,7 @@ logger = logging.getLogger("ai-tutor")
 #  逐工具指南 = 注册表生成（TOOLS_PROMPT）；跨工具策略 = 本文件 TOOL_POLICY_PROMPT
 # ══════════════════════════════════════════════════════════════════
 
-TOOL_POLICY_PROMPT = """
+_TOOL_POLICY_TEMPLATE = """
 ## 工具使用策略（跨工具）
 
 逐工具说明见上一节「工具调用指南」——它由工具注册表生成，新增工具会自动出现在其中。
@@ -58,13 +59,12 @@ TOOL_POLICY_PROMPT = """
 
 **① 免确认 —— 直接调用，不要问**
 只读检索，或只记录学生本人的信息，不改变他的知识图谱结构：
-`mcp__websearch__web_search`、`fetch_webpage`、`rag_search`、`update_user_profile`
+{free_tools}
 （学生说"帮我查一下""搜搜看"，直接搜，别先问"要不要我搜"。）
 
 **② 须先问 —— 先在对话里问过学生、他答应了，下一轮再调用**
 会改变知识图谱结构，或把资料下载留存进他的库：
-`add_knowledge_node`、`update_node_content`、`add_edge`、`delete_node`、
-`download_resource`、`quiz_generate`
+{ask_tools}
 
 铁律（违反会被学生视为"擅自操作"）：
 1. **这一类操作，本轮只输出询问文本，不要同时调用工具。**
@@ -109,6 +109,14 @@ TOOL_POLICY_PROMPT = """
 - **你创建的节点和边**（added_by="ai"）可以自由修改和删除。
 - 如果用户明确要求你修改某个特定节点（如"帮我改一下XX的内容"），你可以调用工具，系统会放行。
 """
+
+# 授权分级两份名单 = **注册表派生**（唯一声明处是各工具的 `_spec(tier=...)`）。
+# 原先这里是手写名单、测试再硬编码一份，实测已漏项：`update_mastery` / `grade_answer`
+# 谁都没列 → 模型对它们没有任何分级指引，且加新工具必须记得改三处。
+_AUTH_FREE, _AUTH_ASK = build_authorization_block()
+TOOL_POLICY_PROMPT = (_TOOL_POLICY_TEMPLATE
+                      .replace("{free_tools}", _AUTH_FREE)
+                      .replace("{ask_tools}", _AUTH_ASK))
 
 # 完整工具能力说明 = 注册表生成的逐工具指南（含 MCP 工具，随开关自动增减）+ 跨工具策略
 TOOL_CAPABILITY_PROMPT = TOOLS_PROMPT + TOOL_POLICY_PROMPT
@@ -185,20 +193,29 @@ def _last_user_text(messages: list) -> str:
     return ""
 
 
-def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True,
-                         focus_node_id: str = "", max_chars: int | None = None) -> str:
+async def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True,
+                               focus_node_id: str = "",
+                               max_chars: int | None = None) -> str:
     """
     构建知识图谱摘要文本，注入到通用模板的 {knowledge_graph_summary} 占位符。
 
+    **经 RAG 中间件取回**：图谱结构是 pipeline 的 required 源 `graph_structure`，
+    与图谱片段 / 知识库片段同级暴露，消费层只依赖 RagHit（依赖倒置）。
+
     参数:
         kg:            KnowledgeGraph 实例（已绑定 user_id）
-        detailed:      True=全量数据（后台阶段用），False=精简摘要（流式阶段用）
-        focus_node_id: 当前教学节点；注入体量超上限时优先保留其邻域（见 graph_analyzer）
-        max_chars:     本次注入的字符上限；None=settings.graph_inject_max_chars。
-                       固定段越线强制降级时会传一个更小的值重建（见 _build_system_prompt）
+        detailed:      True=附节点 MD 摘要；False=仅名称+标签
+        focus_node_id: 当前教学节点；注入体量超上限时优先保留其邻域
+        max_chars:     本次注入字符上限；None=settings.graph_inject_max_chars
     """
-    return build_graph_context(kg, detailed=detailed, focus_node_id=focus_node_id,
-                               max_chars=max_chars)
+    from app.core.rag_pipeline import pipeline, RagContext
+
+    hits = await pipeline.run(RagContext(
+        user_id=kg.user_id, query="", sources={"graph_structure"},
+        metadata={"kg": kg, "graph_detailed": detailed,
+                  "focus_node_id": focus_node_id, "graph_max_chars": max_chars},
+    ))
+    return "".join(h.content for h in hits if h.source == "graph_structure")
 
 
 async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
@@ -222,7 +239,7 @@ async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
          if (m.role if hasattr(m, 'role') else m['role']) == 'user'),
         ''
     )
-    graph_summary = _build_graph_summary(kg, detailed=inject_tools, focus_node_id=current_node)
+    graph_summary = await _build_graph_summary(kg, detailed=inject_tools, focus_node_id=current_node)
 
     # 加载用户画像（空画像返回 ""，不会把空模板注入提示词）
     profile = UserProfile(user_id=kg.user_id)
@@ -270,7 +287,7 @@ async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
     # 所以这一步必须在组装侧做。上限减半重建一次，仍越线记 error 照发（已无手段）。
     degrade_line = int(budget * FIXED_SEGMENT_DEGRADE_RATIO)
     if fixed_tokens > degrade_line and graph_summary:
-        graph_summary = _build_graph_summary(
+        graph_summary = await _build_graph_summary(
             kg, detailed=inject_tools, focus_node_id=current_node,
             max_chars=max(1, len(graph_summary) // 2),
         )
@@ -308,17 +325,22 @@ async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
 async def _build_retrieval_context(student_message: str, user_id: int,
                                    kb: dict | None = None,
                                    usage_mode: str = "personal",
-                                   graph_hops: int = 0) -> str:
+                                   graph_hops: int = 0,
+                                   sources: set[str] | None = None) -> str:
     """
     通过 RAG 管道检索相关片段，构造注入系统提示词的检索上下文。
 
     参数:
         student_message: 学生当前消息
         user_id:         用户 ID
-        kb:              知识库上下文范围 {node_ids, name} | None
+        kb:              知识库**检索范围** {node_ids, name} | None（None = 不限范围）。
+                         只用于收窄范围，不决定知识库源是否参与（源自证，见 KbRagSource）
         usage_mode:      版权/用途模式（调用方从画像读好后传入，缺省 personal）
         graph_hops:      图谱扩跳深度（0=纯语义检索，默认）。>0 时沿前置关系
                          额外补出语义不相似的前置知识片段，供 A/B 实验对比。
+        sources:         **显式**源选择（None = 全部已注册源）；如 {"graph"} 表示只注入
+                         图谱片段（评测脚本要隔离变量时用）。注意这是"点明要哪些"，
+                         与"漏传参数导致源消失"是两件事。
 
     返回:
         格式化的检索上下文 Markdown 文本（图谱区块 + 知识库区块）；
@@ -335,7 +357,7 @@ async def _build_retrieval_context(student_message: str, user_id: int,
     from app.core.rag_pipeline import pipeline, RagContext
 
     hits = await pipeline.run(RagContext(
-        user_id=user_id, query=student_message, top_k=5, kb=kb,
+        user_id=user_id, query=student_message, top_k=5, kb=kb, sources=sources,
         mode=usage_mode, metadata={"graph_hops": graph_hops},
     ))
 

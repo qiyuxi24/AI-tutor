@@ -42,6 +42,16 @@ const _uid = (() => {
 const STORAGE_KEY_CONVERSATIONS = `ai_tutor_conversations_${_uid}`
 const STORAGE_KEY_CURRENT = `ai_tutor_current_${_uid}`
 
+/**
+ * 开发态信号：后端进程已重载（uvicorn --reload 重启）。
+ *
+ * 前端代码改动由 Vite HMR 负责；后端代码改动没有任何 HMR 通道，
+ * 但**进程重启必然掐断所有 TCP 连接** → 常驻 SSE 断线后重连成功，
+ * 就是"后端已重载完成"的免费信号（不需要后端加任何钩子/接口）。
+ * HomeView 监听本事件 → 局部重挂当前视图 + 重拉图谱。
+ */
+export const BACKEND_RELOADED_EVENT = 'backend-reloaded'
+
 // 后端 graph_middleware.SUBJECT_UNCLASSIFIED 的对应值。
 // 「未分类」= 无学科归属节点的合成分组名，不是真实学科（不出现在学科列表里，
 // 但作为一个可选分组出现在 subjectSummaries 中）。
@@ -88,9 +98,6 @@ export const useChatStore = defineStore('chat', () => {
   const subjects = ref([])           // 真实学科名列表（不含「未分类」）
   const subjectSummaries = ref([])   // 学科 + 分量统计 [{subject, node_count, mastered_count, mastery_avg}]
   const currentSubject = ref(null)   // 当前选中学科；null = 未选（画布空态，不拉全量）
-  // 知识板块维度：学科之下的一级分组，currentBoard=null 表示查看整学科
-  const boards = ref([])           // 当前学科的板块列表 [{board, node_count, ...}]
-  const currentBoard = ref(null)   // 当前查看的板块名；null = 整学科
 
   // 学习进度维度：科技树联动数据（下一步推荐 + 分层看板）
   // 学习任务栏（右侧分层看板）：切片内全部知识点 + 前置 / 解锁 / 向前追溯。
@@ -206,16 +213,14 @@ export const useChatStore = defineStore('chat', () => {
     if (!currentSubject.value) {
       knowledgeNodes.value = []
       knowledgeEdges.value = []
-      boards.value = []
       graphError.value = ''
       graphLoaded.value = true
       return
     }
     try {
-      const params = { subject: currentSubject.value }
-      // 板块按需切片：仅当指定了板块才传 board
-      if (currentBoard.value) params.board = currentBoard.value
-      const { data } = await apiClient.get('/api/v1/knowledge/graph', { params })
+      const { data } = await apiClient.get('/api/v1/knowledge/graph', {
+        params: { subject: currentSubject.value },
+      })
       knowledgeNodes.value = (data.nodes || []).map(n => ({
         ...n,
         level: (n.tags || []).find(t => ['一级','二级','三级'].includes(t)) || '一级'
@@ -347,42 +352,12 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 按需获取指定学科下的知识板块列表（含各板块节点数/掌握度统计）。
-   * @param {string} subject - 学科名
-   */
-  async function fetchBoards(subject) {
-    if (!subject) {
-      boards.value = []
-      return
-    }
-    try {
-      const { data } = await apiClient.get('/api/v1/knowledge/boards', { params: { subject } })
-      boards.value = data.boards || []
-    } catch {
-      boards.value = []
-    }
-  }
-
-  /**
-   * 切换当前查看的学科（每个学科单独一张图），并重置板块到"整学科"。
+   * 切换当前查看的学科（每个学科单独一张图）。
    * @param {string|null} subject - 学科名（含「未分类」）；null = 未选中（画布空态）
    */
   async function setSubject(subject) {
     if (currentSubject.value === subject) return
     currentSubject.value = subject || null
-    currentBoard.value = null            // 切换学科后回到整学科视图
-    graphLoaded.value = false
-    await fetchBoards(subject || null)   // 按需加载板块列表（学科导航用）
-    await fetchGraph(true)
-  }
-
-  /**
-   * 切换当前查看的知识板块（按需请求该板块局部子图，middleware 切片）。
-   * @param {string|null} board - 板块名；null 表示整学科
-   */
-  async function setBoard(board) {
-    if (currentBoard.value === board) return
-    currentBoard.value = board || null
     graphLoaded.value = false
     await fetchGraph(true)
   }
@@ -407,9 +382,7 @@ export const useChatStore = defineStore('chat', () => {
     await fetchSubjects()
     // 生成后自动切换到该学科视图
     currentSubject.value = subject
-    currentBoard.value = null
     graphLoaded.value = false
-    await fetchBoards(subject)   // 刷新板块列表（生成后节点可能带板块）
     await fetchGraph(true)
     return data
   }
@@ -450,43 +423,6 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 板块改名：只改分组名（板块内知识点、边、掌握度都不动）。
-   * @param {string} subject
-   * @param {string} oldName
-   * @param {string} newName
-   */
-  async function renameBoard(subject, oldName, newName) {
-    const { data } = await apiClient.patch('/api/v1/knowledge/board', {
-      subject,
-      old_name: oldName,
-      new_name: newName,
-    })
-    // 正在看的就是这个板块 → 视图跟着换名，别退回整学科
-    if (currentSubject.value === subject && currentBoard.value === oldName) {
-      currentBoard.value = newName
-    }
-    await refreshGraph(true)
-    return data
-  }
-
-  /**
-   * 解散板块：板块内的知识点回到「未分组」，一个都不删。
-   * @param {string} subject
-   * @param {string} board
-   */
-  async function deleteBoard(subject, board) {
-    const { data } = await apiClient.delete('/api/v1/knowledge/board', {
-      params: { subject, board },
-    })
-    // 正在看的就是这个板块 → 它没了，回整学科视图
-    if (currentSubject.value === subject && currentBoard.value === board) {
-      currentBoard.value = null
-    }
-    await refreshGraph(true)
-    return data
-  }
-
-  /**
    * 刷新图谱数据。
    * 强制重新 fetch，如果是用户操作触发的刷新则抑制 SSE 3 秒避免双重刷新。
    *
@@ -498,8 +434,6 @@ export const useChatStore = defineStore('chat', () => {
     // 图从空变非空（如对话中新建首个节点）时自动选中学科，否则会停在空态
     await ensureSubjectSelected()
     graphLoaded.value = false
-    // 板块计数可能因 CRUD 变化，一并刷新（仅当已选学科时）
-    if (currentSubject.value) await fetchBoards(currentSubject.value)
     await fetchGraph(true)
     if (fromUserAction) {
       suppressSSE()
@@ -693,6 +627,7 @@ export const useChatStore = defineStore('chat', () => {
   // ─── SSE：监听后端数据变更，自动刷新图谱 ───
   let sseSource = null
   let sseReconnectTimer = null
+  let sseWasDown = false   // 断线标记：只认"断过线又连上"= 后端重载，首次连接不算
 
   function connectSSE() {
     // 清理旧连接和重连定时器
@@ -703,6 +638,12 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const url = `/api/v1/knowledge/events?token=${encodeURIComponent(token)}`
       sseSource = new EventSource(url)
+      sseSource.onopen = () => {
+        // 首连成功什么都不做；断线后重连成功 = 后端已重载 → 通知页面刷新
+        if (!sseWasDown) return
+        sseWasDown = false
+        window.dispatchEvent(new CustomEvent(BACKEND_RELOADED_EVENT))
+      }
       sseSource.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
@@ -719,6 +660,9 @@ export const useChatStore = defineStore('chat', () => {
         } catch { /* ignore parse errors */ }
       }
       sseSource.onerror = () => {
+        // 断线原因可能是后端重载、网络抖动、后端挂了 —— 一律记为"断过线"，
+        // 重连成功时统一刷新（刷新幂等且廉价，无法区分也不必区分）。
+        sseWasDown = true
         sseSource.close()
         sseSource = null
         // 5 秒后重连（保存引用以便取消）
@@ -1056,13 +1000,9 @@ export const useChatStore = defineStore('chat', () => {
     subjects,
     subjectSummaries,
     currentSubject,
-    boards,
-    currentBoard,
-    setBoard,
     displayNodes,
     displayEdges,
     ensureSubjectSelected,
-    fetchBoards,
     fetchGraph,
     refreshGraph,
     fetchNodeDetail,
@@ -1071,8 +1011,6 @@ export const useChatStore = defineStore('chat', () => {
     generateSubjectGraph,
     deleteSubjectGraph,
     renameSubject,
-    renameBoard,
-    deleteBoard,
     // 学习进度（科技树联动）
     pathBoard,
     pathBoardLoading,

@@ -366,8 +366,6 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
             "prerequisites": prerequisites,
             "related_nodes": related_ids,
             "mastery": node.get("mastery", 0),
-            "difficulty": node.get("difficulty", 3),
-            "estimated_minutes": node.get("estimated_minutes", 15),
             "summary": node.get("summary", ""),
             "file_path": node.get("file_path", ""),
         }
@@ -524,8 +522,6 @@ async def _create_node_via_pipeline(kg: KnowledgeGraph, data: dict) -> tuple[str
         "board": data.get("board", ""),
         "summary": data.get("summary", ""),
         "mastery": data.get("mastery", 0),
-        "difficulty": data.get("difficulty", 3),
-        "estimated_minutes": data.get("estimated_minutes", 15),
         "added_by": data.get("added_by", "human"),
         "confidence": data.get("confidence"),
     }
@@ -561,7 +557,7 @@ async def create_node(data: dict = Body(...), user_id: int = Depends(get_current
     （见 core/kg_taxonomy.py）；判定失败落「未分类」，不影响建节点。
 
     注意：使用 dict + Body(...) 而非 Pydantic 模型，因为需要兼容 AI function calling
-    传来的额外字段（id, from_nodes, difficulty 等），这些字段不固定。
+    传来的额外字段（id, from_nodes 等），这些字段不固定。
     """
     kg = KnowledgeGraph(user_id=user_id)
     try:
@@ -582,7 +578,7 @@ async def update_node(node_id: str, data: dict = Body(...), user_id: int = Depen
     """
     更新节点信息或 MD 文件内容
 
-    可同时更新节点元数据（name, mastery, difficulty, etc.）和 MD 内容。
+    可同时更新节点元数据（name, mastery, etc.）和 MD 内容。
     兼容 AI function calling 的 update_node_content 调用。
     """
     kg = KnowledgeGraph(user_id=user_id)
@@ -593,7 +589,7 @@ async def update_node(node_id: str, data: dict = Body(...), user_id: int = Depen
 
         # 更新元数据字段
         update_data = {}
-        updatable = ["name", "mastery", "difficulty", "estimated_minutes", "summary", "tags"]
+        updatable = ["name", "mastery", "summary", "tags"]
         for key in updatable:
             if key in data:
                 update_data[key] = data[key]
