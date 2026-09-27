@@ -80,8 +80,6 @@ JSON 格式如下：
         "tags": ["标签1", "标签2"],
         "file": "nodes/英文ID.md",
         "summary": "一句话概括这个知识点",
-        "difficulty": 3,
-        "estimated_minutes": 15,
         "content": "这个知识点的Markdown详细内容，至少包含定义、要点、示例"
       },
       "recommended_edges": [
@@ -117,8 +115,7 @@ JSON 格式如下：
 5. 不要建议删除节点或边
 6. 答案必须是有效的 JSON，不要包含换行符以外的控制字符
 7. **重要**：新增节点的 content 字段必须根据对话内容填写完整的 Markdown 知识讲解，包含定义、要点、示例等，不要留空
-8. difficulty 取值 1-5（1=最简单，5=最难），estimated_minutes 为预估学习分钟数
-9. **关键**：对于 recommended_edges 中的每条边，reason 字段必须解释为什么这两个节点之间确实存在该关系，不能只写"因为对话中提到了"
+8. **关键**：对于 recommended_edges 中的每条边，reason 字段必须解释为什么这两个节点之间确实存在该关系，不能只写"因为对话中提到了"
 """
 
 
@@ -145,10 +142,7 @@ def _render_graph_block(kg, nodes: list, edges: list, mode: str) -> str:
             # 概览模式：仅 ID + 名称 + 标签（用于分析 LLM）
             node_lines.append(f"  [{n['id']}] {n['name']} (标签: {', '.join(n.get('tags', []))})")
             continue
-        line = (
-            f"  [{n['id']}] {n['name']} (掌握度:{n.get('mastery', 0)}, "
-            f"难度:{n.get('difficulty', 3)}, 预计:{n.get('estimated_minutes', 15)}分)"
-        )
+        line = f"  [{n['id']}] {n['name']} (掌握度:{n.get('mastery', 0)})"
         if mode == "preview":
             # 详细模式：附 MD 摘要（走 KnowledgeGraph 的内容缓存，减少文件 I/O）
             content = kg.get_node_content_preview(n["id"])

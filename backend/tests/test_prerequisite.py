@@ -67,9 +67,9 @@ def test_single_char_name_needs_two_hits():
 
 
 def test_weak_criteria_alone_is_not_enough():
-    """只有弱准则（次序 + 难度差）不足以认定先修关系"""
+    """只有弱准则（次序；难度差已随节点难度字段下线）不足以认定先修关系"""
     cands = infer_prerequisites(NODES, [], content=CONTENT)
-    # a→c 只有 C3(次序) + C6(难度) 两条弱票 = 2.0/11.5 ≈ 0.17 < 0.30
+    # a→c 只有 C3(次序) 一条弱票 = 1.0/10.5 ≈ 0.10 < 0.30
     assert ("a", "c") not in _pairs(cands)
 
 
@@ -84,7 +84,9 @@ def test_score_bounds_and_threshold_monotonicity():
 def test_explicit_order_overrides_created_at():
     """传入权威教材顺序时，C3 以 order 为准（覆盖 created_at 近似）"""
     order = {"a": 2, "b": 1, "c": 0}          # 教材顺序：C → 栈 → 数组
-    cands = infer_prerequisites(NODES, [], content=CONTENT, order=order)
+    # 阈值显式放低：C6（难度差）已随节点难度字段下线，b→c 在默认阈值下不再入候选，
+    # 但本用例只验证 C3 读 order，故显式给定阈值把它留在候选集里。
+    cands = infer_prerequisites(NODES, [], content=CONTENT, order=order, threshold=0.20)
     # 与正文引用方向冲突时，次序票被拉反
     assert _vote(cands, "b", "c", "C3次序") == -1
 
@@ -211,7 +213,7 @@ def test_no_candidate_for_tiny_graph():
 
 def test_weights_are_normalized_by_total():
     """分数归一化基值 = 全部准则权重之和（改权重要同步改测试预期）"""
-    assert TOTAL_WEIGHT == pytest.approx(11.5)
+    assert TOTAL_WEIGHT == pytest.approx(10.5)
 
 
 # ══════════════════════════════════════════════════════════════════

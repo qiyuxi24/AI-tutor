@@ -58,16 +58,6 @@ CHAT_QUIZ_TIMEOUT_SECS = 120
 #  出题（后台）
 # ══════════════════════════════════════════════════════════════════
 
-def _difficulty_of(node: dict) -> str:
-    """图谱节点难度（1~5）→ 出题难度档"""
-    d = int(node.get("difficulty", 3) or 3)
-    if d <= 2:
-        return "easy"
-    if d >= 4:
-        return "hard"
-    return "medium"
-
-
 def _node_materials(kg: KnowledgeGraph, node: dict, node_id: str) -> list[str]:
     """
     把图谱节点正文转成出题依据片段。
@@ -126,7 +116,8 @@ async def generate_and_publish(user_id: int, *, node_id: str,
             return
 
         subject = node.get("name") or node_id
-        difficulty = _difficulty_of(node)
+        # 节点难度字段已下线（2026-09-27），自动出题统一走中等档
+        difficulty = "medium"
         seed = _node_materials(kg, node, node_id)
 
         store = quiz_manager._get_store(user_id)

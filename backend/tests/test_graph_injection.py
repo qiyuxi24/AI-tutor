@@ -13,7 +13,7 @@ class FakeKg:
     def __init__(self, n_nodes: int, n_edges: int = 0, preview_chars: int = 200):
         self.nodes = [
             {"id": f"n{i}", "name": f"知识点{i}", "mastery": i % 100,
-             "difficulty": 3, "estimated_minutes": 15, "tags": ["数学", "基础"]}
+             "tags": ["数学", "基础"]}
             for i in range(n_nodes)
         ]
         self.edges = [
@@ -36,7 +36,7 @@ def test_under_cap_format_unchanged():
     assert out == (
         "## 当前知识图谱\n\n"
         "### 现有节点（共 1 个）\n"
-        "  [n0] 知识点0 (掌握度:0, 难度:3, 预计:15分)\n"
+        "  [n0] 知识点0 (掌握度:0)\n"
         "    摘要: " + kg._preview[:200] + "\n\n"
         "### 现有关系（共 0 条）\n"
         "  (暂无关系)"
@@ -63,7 +63,7 @@ def test_drops_preview_before_nodes():
 
     assert "摘要:" not in out                     # 摘要先被省
     assert out.count("[n") == 20                  # 节点一个不少（框架完整）
-    assert "掌握度:" in out and "难度:" in out     # L2 定位所需字段仍在
+    assert "掌握度:" in out                       # L2 定位所需字段仍在
     assert "省略内容摘要" in out
     assert "rag_search" in out                    # 指出内容从哪来
 

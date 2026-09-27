@@ -20,14 +20,12 @@ PARAMETERS = {
         "id": {"type": "string", "description": "节点英文ID，如 'hanoi_tower'"},
         "name": {"type": "string", "description": "节点中文名称"},
         "tags": {"type": "array", "items": {"type": "string"},
-                 "description": "自由标签（如 ['递归', '分治']）。⚠️ 不要写难度级别（难度用 difficulty 字段）、不要重复填学科（学科用 subject 字段，别混进 tags）"},
+                 "description": "自由标签（如 ['递归', '分治']）。⚠️ 不要写难度级别、不要重复填学科（学科用 subject 字段，别混进 tags）"},
         "subject": {"type": "string",
                     "description": "该知识点所属学科（如 '数据结构'）。⚠️ 对话上下文能明确判断时填写，且必须复用已有学科名；不确定就省略，系统会自动判定。"},
         "board": {"type": "string",
                   "description": "该学科下的知识板块（如 '线性表'）。⚠️ 必须与 subject 匹配、优先复用该学科已有板块名；不确定就省略，系统会自动判定。"},
         "summary": {"type": "string", "description": "一句话摘要"},
-        "difficulty": {"type": "integer", "description": "难度 1-5", "minimum": 1, "maximum": 5},
-        "estimated_minutes": {"type": "integer", "description": "预估学习分钟数"},
         "content": {"type": "string", "description": "完整的 Markdown 内容"},
         "from_nodes": {"type": "array", "items": {"type": "string"},
                        "description": "前置节点 ID 列表（会自动创建 prerequisite 边）。⚠️ 只能包含真正必须先学的前置知识节点。如果新节点不需要任何已有节点作为前置，传空数组或不传。"},
@@ -43,7 +41,7 @@ GUIDANCE = """
   学生主动要求（"帮我加一个汉诺塔节点"）＝ 已授权，直接调用。
 - `from_nodes` 只填**真正的前置知识节点**（必须先学会它才能理解新节点）；没有前置就不传。
 - 能判断学科/板块就一并带上 `subject` / `board`，且**必须复用已有名称**；不确定就省略，系统会自动判定。
-- `tags` 只填自由标签：**不要**写"一级/二级/三级"这类难度（难度有 `difficulty` 字段承载），也不要重复填学科。
+- `tags` 只填自由标签：**不要**写"一级/二级/三级"这类难度档，也不要重复填学科。
 - 例：学生说"帮我加一个汉诺塔节点"，建完后自然回复"已添加！汉诺塔现在关联在递归定义下"。
 """
 
@@ -55,8 +53,6 @@ def handler(args, kg) -> str:
         node_name=args["name"],
         tags=args.get("tags"),
         summary=args.get("summary", ""),
-        difficulty=int(args.get("difficulty", 3)),
-        estimated_minutes=int(args.get("estimated_minutes", 15)),
         content=args.get("content", ""),
         from_nodes=args.get("from_nodes"),
         subject=args.get("subject", ""),

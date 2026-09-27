@@ -223,7 +223,7 @@ def test_generate_and_publish_pushes_questions_without_answers(
             self.closed = False
 
         def get_node(self, node_id):
-            return {"id": node_id, "name": "二叉树的性质", "difficulty": 2,
+            return {"id": node_id, "name": "二叉树的性质",
                     "mastery": 0, "summary": "完全二叉树编号性质"}
 
         def get_node_content_preview(self, node_id, **kw):
@@ -248,7 +248,7 @@ def test_generate_and_publish_pushes_questions_without_answers(
     async def fake_generate_quiz(**kwargs):
         assert kwargs["question_types"] == chat_quiz.CHAT_QUIZ_TYPES
         assert kwargs["subject"] == "二叉树的性质"
-        assert kwargs["difficulty"] == "easy"      # difficulty=2 → easy
+        assert kwargs["difficulty"] == "medium"    # 节点难度字段已下线，统一中等档
         assert kwargs["seed_materials"]            # 节点正文已作为第一依据注入
         assert kwargs["avoid_questions"] == [prior]  # 跨调用去重已生效
         return {

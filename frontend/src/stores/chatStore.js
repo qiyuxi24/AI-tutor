@@ -92,7 +92,7 @@ export const useChatStore = defineStore('chat', () => {
   const currentSubject = ref(null)   // 当前选中学科；null = 未选（画布空态，不拉全量）
 
   // 学习进度维度：科技树联动数据（拓扑排序路径 + 下一步推荐）
-  const learningPath = ref([])     // 按学习顺序排列的节点 [{id, name, mastery, difficulty, ...}]
+  const learningPath = ref([])     // 按学习顺序排列的节点 [{id, name, mastery, summary, tags, ...}]
   const nextToLearn = ref(null)    // 下一步推荐节点 {node_id, name, mastery, reason}
 
   // 学习进度统计（仪表盘）：聚合自图谱 mastery，单一数据源

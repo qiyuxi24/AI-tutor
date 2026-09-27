@@ -66,7 +66,6 @@ def _find_same_name(kg: KnowledgeGraph, node_name: str, subject: str) -> str:
 
 def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
                         tags: list | None = None, summary: str = "",
-                        difficulty: int = 3, estimated_minutes: int = 15,
                         content: str = "", from_nodes: list | None = None,
                         confidence: float | None = None,
                         subject: str = "", board: str = "") -> str:
@@ -87,8 +86,6 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
         node_name:        节点中文名
         tags:             标签列表
         summary:          一句话摘要
-        difficulty:       难度 1-5
-        estimated_minutes: 预估学习分钟数
         content:          Markdown 正文（空则生成默认模板）
         from_nodes:       前置节点 ID 列表，自动创建 prerequisite 边
         confidence:       AI 置信度
@@ -137,10 +134,6 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
         if merged.get("board") and merged["board"] != existing.get("board"):
             update_data["board"] = merged["board"]
 
-        if existing.get("difficulty", 3) != difficulty:
-            update_data["difficulty"] = difficulty
-        if existing.get("estimated_minutes", 15) != estimated_minutes:
-            update_data["estimated_minutes"] = estimated_minutes
         if confidence is not None and existing.get("confidence") is None:
             update_data["confidence"] = confidence
 
@@ -187,8 +180,6 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
         "board": board,
         "summary": summary,
         "mastery": 0,
-        "difficulty": difficulty,
-        "estimated_minutes": estimated_minutes,
         "added_by": "ai",
         "confidence": confidence,
     }
@@ -266,8 +257,6 @@ def create_node_from_webpage(kg: KnowledgeGraph, url: str, title: str = "",
         "board": "",
         "summary": f"来源：{url}",
         "mastery": 0,
-        "difficulty": 3,
-        "estimated_minutes": 15,
         "added_by": "ai",
     }
     # 建库 + 写 MD 一次完成（模板与来源标注的唯一来源在 KnowledgeGraph）
@@ -309,8 +298,6 @@ def apply_suggestion(kg: KnowledgeGraph, suggestion: dict) -> str:
             node_name=node.get("name", ""),
             tags=node.get("tags"),
             summary=node.get("summary", ""),
-            difficulty=int(node.get("difficulty", 3)),
-            estimated_minutes=int(node.get("estimated_minutes", 15)),
             content=node.get("content", ""),
             from_nodes=from_nodes,
             confidence=suggestion.get("confidence"),

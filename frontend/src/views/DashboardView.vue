@@ -23,15 +23,6 @@ const bySubject = computed(() => stats.value?.by_subject || [])
 const weakPoints = computed(() => stats.value?.weak_points || [])
 const nextToLearn = computed(() => stats.value?.next_to_learn || null)
 
-/** 时长格式化：分钟 → "X 小时 Y 分" / "X 分钟" */
-function formatMinutes(min) {
-  if (!min || min <= 0) return '0 分钟'
-  if (min < 60) return `${min} 分钟`
-  const h = Math.floor(min / 60)
-  const m = min % 60
-  return m ? `${h} 小时 ${m} 分` : `${h} 小时`
-}
-
 /** 占比百分比（取整，用于进度条宽度） */
 function pct(num, denom) {
   if (!denom) return 0
@@ -149,7 +140,6 @@ watch(
             <div class="dash-meta-row">
               <span>平均掌握度 <b>{{ overall.mastery_avg }}</b> / 100</span>
               <span>完成率 <b>{{ pct(overall.mastered_count, overall.node_count) }}%</b></span>
-              <span>剩余学时 ≈ <b>{{ formatMinutes(overall.estimated_minutes_remaining) }}</b></span>
             </div>
           </section>
 
@@ -208,7 +198,7 @@ watch(
               <span class="dash-weak-rank">{{ i + 1 }}</span>
               <div class="dash-weak-info">
                 <span class="dash-weak-name">{{ w.name }}</span>
-                <span class="dash-weak-sub">{{ w.subject }} · 难度 {{ '★'.repeat(w.difficulty) }}{{ '☆'.repeat(Math.max(0, 5 - w.difficulty)) }}</span>
+                <span class="dash-weak-sub">{{ w.subject }}</span>
               </div>
               <span class="dash-weak-arrow">→</span>
             </div>

@@ -19,7 +19,7 @@
 | 特征族 | 论文信号 | 本项目准则 | 权重 |
 |---|---|---|---|
 | 链接族 | Wikipedia 超链接 | C1 正文引用（讲解 B 的正文里引用 A 的名字，且方向不对称） | 3.5 |
-| 文本族 | 术语构成 / 难度 | C2 名称包含（"树" ⊂ "二叉树"）、C6 难度差 | 2.5 / 1.0 |
+| 文本族 | 术语构成 | C2 名称包含（"树" ⊂ "二叉树"） | 2.5 |
 | 文本族 | 语义距离 | C5 嵌入相似度（高度相似 → **反对**：那是同义词，该合并而非连先修边） | 2.0 |
 | 图族   | 邻域结构 | C4 共同前置邻居（同层概念 → **反对**） | 1.5 |
 | 文档族 | 文档位置 | C3 入库顺序（≈ 教材扫读顺序，见下） | 1.0 |
@@ -28,9 +28,9 @@
 阈值是**唯一的召回/精度旋钮**（调高更保守）。
 
 ### 与论文的差异（诚实记录）
-- 论文 10 条准则 + 投票；本模块只实现 6 条 —— 其余准则依赖 Wikipedia 超链接、
+- 论文 10 条准则 + 投票；本模块只实现 5 条 —— 其余准则依赖 Wikipedia 超链接、
   课程先修标注等本项目没有的信号。缺失信号一律**弃权**，不猜。
-- 我们用加权和而非多数票：证据强度差别很大（正文引用 >> 难度差）。
+- 我们用加权和而非多数票：证据强度差别很大（正文引用 >> 入库次序）。
 - 我们多一层**无环保证**：候选按分数降序贪心加边，丢弃会成环的边
   （先修关系必须是 DAG，否则学习路径无从拓扑排序）。
 
@@ -58,10 +58,9 @@ W_NAME = 2.5         # C2 名称包含
 W_SYNONYM = 2.0      # C5 嵌入相似（反对票）
 W_COMMON = 1.5       # C4 共同前置（反对票）
 W_ORDER = 1.0        # C3 入库/教材顺序
-W_DIFFICULTY = 1.0   # C6 难度差
-TOTAL_WEIGHT = W_REFERENCE + W_NAME + W_SYNONYM + W_COMMON + W_ORDER + W_DIFFICULTY
+TOTAL_WEIGHT = W_REFERENCE + W_NAME + W_SYNONYM + W_COMMON + W_ORDER
 
-# 认定阈值：0.30 ≈ "一条强准则(3.5/11.5) 或 一条中等准则+一条弱准则" 即可成立
+# 认定阈值：0.30 ≈ "一条强准则(3.5/10.5) 或 一条中等准则+一条弱准则" 即可成立
 DEFAULT_THRESHOLD = 0.30
 # 嵌入相似度高于此值 → 视为同义词（应去重，不是先修关系）
 SYNONYM_SIM = 0.90
@@ -212,17 +211,6 @@ def _vote_order(a: str, b: str, ctx: _Context) -> Vote:
     return Vote("C3次序", -1, W_ORDER, "B 在教材/入库次序上更早")
 
 
-def _vote_difficulty(a: str, b: str, ctx: _Context) -> Vote:
-    """C6 难度差：先修通常更简单"""
-    da = int(ctx.by_id[a].get("difficulty", 3) or 3)
-    db = int(ctx.by_id[b].get("difficulty", 3) or 3)
-    if da == db:
-        return Vote("C6难度差", 0, W_DIFFICULTY, "难度相同")
-    if da < db:
-        return Vote("C6难度差", 1, W_DIFFICULTY, f"难度 {da} < {db}")
-    return Vote("C6难度差", -1, W_DIFFICULTY, f"难度 {da} > {db}")
-
-
 def _vote_common_pred(a: str, b: str, ctx: _Context) -> Vote:
     """
     C4 共同前置：前置邻居高度重合 → 同层概念，反对先修（去假阳性）
@@ -257,7 +245,7 @@ def _vote_similarity(a: str, b: str, ctx: _Context) -> Vote:
 
 
 CRITERIA = (_vote_reference, _vote_name, _vote_order,
-            _vote_difficulty, _vote_common_pred, _vote_similarity)
+            _vote_common_pred, _vote_similarity)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -295,7 +283,7 @@ def infer_prerequisites(
     推断先修关系（纯函数，不写库）。
 
     参数:
-        nodes: 同一学科的节点列表（每个含 id/name，可选 summary/difficulty/created_at）
+        nodes: 同一学科的节点列表（每个含 id/name，可选 summary/created_at）
         edges: 该学科已有边（用于跨跳过滤、环检测与 C4 共同前置），默认空
         content: {node_id: 正文文本}（C1 正文引用用；缺失则该准则弃权）
         order: {node_id: 次序}（教材权威顺序，覆盖 created_at 近似）

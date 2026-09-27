@@ -191,8 +191,6 @@ def ensure_graph(kg, data: dict, rebuild: bool) -> tuple[int, int]:
             "tags": n.get("tags", []),
             "summary": n.get("summary", ""),
             "mastery": n.get("mastery", 0),
-            "difficulty": n.get("difficulty", 3),
-            "estimated_minutes": n.get("estimated_minutes", 15),
             "added_by": "human",
         })
         if n.get("content"):

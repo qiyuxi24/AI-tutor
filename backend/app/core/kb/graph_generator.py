@@ -153,7 +153,7 @@ GRAPH_CONCEPT_TREE_SYSTEM_PROMPT = """你是一个「学科知识图谱架构师
 
 ## 粒度铁律（决定成败，逐条遵守）
 - **默认 1 个概念 = 图谱里 1 个节点**：一个概念是一个**完整、能独立讲清**的知识单元。
-- 独立成节点的硬判据：能单独出 ≥1 道**非背诵题** / 不引用上文也能读懂 / estimated_minutes 在 5–25。
+- 独立成节点的硬判据：能单独出 ≥1 道**非背诵题** / 不引用上文也能读懂 / 一次讲解（5–25 分钟）能讲清。
 - **合并判据（最关键）**：若两个节点单独看都讲不清**同一个概念**（例如「栈的基本操作」+「顺序栈的进栈与出栈操作」），**必须合并成一个节点**，用正文小节组织它们，不要拆成两个节点。
 - **反例（把下面的做法一律视为错误）**：把「栈」拆成「定义 / ADT / 顺序栈 / 链栈 / 基本操作 / 典型应用」是**错误的** —— 它们是**同一个概念的不同侧面**，应当合成**一个**「栈」节点。
 - 同理「快速排序」应是**一个**节点，不要拆成「快速排序算法 / 复杂度分析 / 选取枢轴 / 尾递归优化 / 小数组插入排序」。
@@ -180,8 +180,7 @@ GRAPH_CONCEPT_TREE_SYSTEM_PROMPT = """你是一个「学科知识图谱架构师
     {
       "name": "板块名（如 线性结构）",
       "concepts": [
-        {"id": "english_id", "name": "中文概念名", "summary": "一句话概括它讲什么、为什么重要",
-         "difficulty": 2, "estimated_minutes": 15}
+        {"id": "english_id", "name": "中文概念名", "summary": "一句话概括它讲什么、为什么重要"}
       ]
     }
   ],
@@ -198,7 +197,7 @@ GRAPH_CONCEPT_TREE_SYSTEM_PROMPT = """你是一个「学科知识图谱架构师
 1. `boards` 只放**新增**概念；现有树里已有的概念**不要**放进 boards（那是 hits）。
 2. 现有概念树为空（首次建图）时：所有概念都进 `boards`，`hits` 为空数组 `[]`。
 3. `hits[].id` 必须来自「现有节点」清单，**一个字符都不要改**；不要凭记忆编造 id。
-4. difficulty 取值 1-5（1=最简单，5=最难）；estimated_minutes 为预估学习分钟数；每个概念 id 唯一。
+4. 每个概念 id 唯一。
 5. 边只建立实质联系；edges 的 from/to 必须是 boards 概念 id 或 hits 里的现有 id。
 6. 只规划目录里真正涉及的概念，不要凭空编造内容里没有的概念。
 7. 答案必须是有效的 JSON，**字符串值内部禁止出现英文双引号**：需要引用术语时用中文引号「」或“”；代码示例里的字符串请改用单引号；字符串内的换行必须写成 \\n 转义。
@@ -1055,8 +1054,8 @@ class GraphGenerator:
                 skipped_nodes.append(nid)
                 node_id_by_name[name] = nid
                 continue
-            # tags：只放学科名（KG-D2：难度档「一级/二级/三级」不再混进 tags，
-            # 难度由独立 difficulty 列承载）；学科另显式落 subject 列（KG-D1）。
+            # tags：只放学科名（KG-D2：难度档「一级/二级/三级」不再混进 tags）；
+            # 学科另显式落 subject 列（KG-D1）。
             tags = [subject] if subject else []
             node_data = {
                 "id": nid,
@@ -1067,8 +1066,6 @@ class GraphGenerator:
                 "board": (board or "").strip(),
                 "summary": n.get("summary", ""),
                 "mastery": 0,
-                "difficulty": int(n.get("difficulty", 3)),
-                "estimated_minutes": int(n.get("estimated_minutes", 15)),
                 "added_by": "ai",
                 "source_ref": (source_ref_by_id or {}).get(nid, source_ref),
             }

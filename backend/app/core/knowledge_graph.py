@@ -286,8 +286,6 @@ class KnowledgeGraph:
                     board           TEXT DEFAULT '',
                     summary         TEXT DEFAULT '',
                     mastery         INTEGER DEFAULT 0,
-                    difficulty      INTEGER DEFAULT 3,
-                    estimated_minutes INTEGER DEFAULT 15,
                     added_by        TEXT DEFAULT 'human',
                     created_at      TEXT,
                     updated_at      TEXT,
@@ -435,6 +433,18 @@ class KnowledgeGraph:
                 self._conn.execute(
                     "ALTER TABLE nodes ADD COLUMN sources TEXT DEFAULT '[]'"
                 )
+
+        # 难度 / 预估时长已从节点模型下线（2026-09-27，前后端均不再使用）。
+        # `CREATE TABLE IF NOT EXISTS` 不会给老库删列，只能在这里补 DROP（需 SQLite ≥ 3.35）；
+        # 删不掉也不阻断启动 —— 残留列没人读，无害。
+        for col in ("difficulty", "estimated_minutes"):
+            if col not in node_cols:
+                continue
+            try:
+                with self._conn:
+                    self._conn.execute(f"ALTER TABLE nodes DROP COLUMN {col}")
+            except sqlite3.Error as e:
+                logger.warning(f"nodes.{col} 废弃列删除失败（SQLite 过旧？）：{e}")
 
         # 选片/统计走它；放迁移末尾（列此时必已存在），IF NOT EXISTS 保证幂等
         with self._conn:
@@ -795,7 +805,6 @@ class KnowledgeGraph:
                     "id": node["id"],
                     "name": node["name"],
                     "mastery": node.get("mastery", 0),
-                    "difficulty": node.get("difficulty", 3),
                     "summary": node.get("summary", ""),
                     "tags": node.get("tags", []),
                 })
@@ -1269,6 +1278,33 @@ class KnowledgeGraph:
         self.invalidate_content_cache(node_id)
         return True
 
+    def clear_sections(self, node_id: str) -> int:
+        """清掉该节点的**全部**小节（删 MD 文件 + manifest 条目），返回删除数量。
+
+        与 `delete_section` 的差别：本方法一次性清空，并**顺带摘掉指向这些小节的试卷引用**
+        —— `add_quiz_ref` 存的是 `{id, section_id}`，小节没了引用就成悬空路由（详情页的
+        「属 xx」会指向不存在的小节）。节点级引用（`section_id=""`）不属任何小节，保留。
+
+        无 manifest / 无小节 → 0（不改任何文件）。
+        """
+        with self._manifest_lock:
+            manifest = self.read_manifest(node_id)
+            sections = list(manifest.get("sections") or []) if manifest else []
+            if not sections:
+                return 0
+            gone = {s.get("id") for s in sections}
+            root = self.nodes_dir / node_id
+            for s in sections:
+                path = root / str(s.get("file") or "")
+                if path.is_file():
+                    path.unlink()
+            manifest["sections"] = []
+            manifest["quizzes"] = [q for q in (manifest.get("quizzes") or [])
+                                   if (q.get("section_id") or "") not in gone]
+            self._write_manifest(node_id, manifest)
+        self.invalidate_content_cache(node_id)
+        return len(sections)
+
     def add_quiz_ref(self, node_id: str, quiz_id: str, section_id: str = "") -> None:
         """把小节（或节点级，`section_id=""`）挂载一条试卷引用（第一版只做路由，不建题）。
 
@@ -1405,9 +1441,9 @@ class KnowledgeGraph:
         with self._conn:
             self._conn.execute("""
                 INSERT INTO nodes (id, name, file_path, tags, subject, board, summary, mastery,
-                                   difficulty, estimated_minutes, added_by, created_at, updated_at,
+                                   added_by, created_at, updated_at,
                                    confidence, content_status, source_ref, user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 node_id,
                 node_data.get("name", ""),
@@ -1417,8 +1453,6 @@ class KnowledgeGraph:
                 node_data.get("board", ""),
                 node_data.get("summary", ""),
                 node_data.get("mastery", 0),
-                node_data.get("difficulty", 3),
-                node_data.get("estimated_minutes", 15),
                 node_data.get("added_by", "human"),
                 created_at,
                 created_at,
@@ -1775,8 +1809,8 @@ class KnowledgeGraph:
 
         # 动态构建 UPDATE，只改传入的字段
         allowed_fields = {
-            "name", "tags", "subject", "board", "summary", "mastery", "difficulty",
-            "estimated_minutes", "added_by", "confidence"
+            "name", "tags", "subject", "board", "summary", "mastery",
+            "added_by", "confidence"
         }
         updates = {}
         for key in allowed_fields:
