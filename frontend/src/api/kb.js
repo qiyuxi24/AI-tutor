@@ -17,7 +17,10 @@ export const uploadKbFile = (file, parentId = null) => {
   return apiClient.post('/api/v1/kb/upload', form, {
     params,
     headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 120000, // 上传+解析+向量化可能较慢
+    // 上传 = 解析 + 分块 + 嵌入，扫描版 PDF 会走逐页 OCR，分钟级很正常。
+    // 120s 会把请求掐断（后端 CancelledError → 索引半途而废，目录里留下无索引的孤儿文件），
+    // 所以给足 10 分钟；真正的进度反馈应由上传接口自己给，不能靠超时。
+    timeout: 600000,
   })
 }
 
