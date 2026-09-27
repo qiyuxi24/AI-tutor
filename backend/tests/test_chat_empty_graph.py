@@ -32,7 +32,7 @@ def _disable_retrieval(monkeypatch):
 def _build(kg, message="帮我讲讲递归"):
     # pytest-asyncio 未安装：离线用例统一用 asyncio.run
     return asyncio.run(cs._build_system_prompt(
-        [{"role": "user", "content": message}], "adaptive", kg, inject_tools=True))
+        [{"role": "user", "content": message}], kg, inject_tools=True))
 
 
 def test_empty_graph_prompt_injected(kg, monkeypatch):
@@ -55,3 +55,19 @@ def test_empty_graph_prompt_not_injected_when_graph_has_nodes(kg, monkeypatch):
     prompt, _ = _build(kg)
 
     assert "当前学生图谱为空" not in prompt
+
+
+def test_graph_injected_once(kg, monkeypatch):
+    """回归守卫：图谱在 system prompt 中只出现一次。
+
+    历史上递归模式模板曾自拼第二份「框架节点 + 仅 prerequisite 边」副本
+    （与通用模板的 {{ knowledge_graph_summary }} 重叠，且不走注入体量控制）。
+    """
+    _disable_retrieval(monkeypatch)
+    kg.add_node({"id": "rec", "name": "递归", "tags": ["算法"]})
+
+    prompt, _ = _build(kg, message="讲讲递归")
+
+    assert prompt.count("[rec]") == 1
+    assert "### 框架节点" not in prompt
+    assert "### 依赖关系" not in prompt

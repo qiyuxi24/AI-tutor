@@ -1,14 +1,11 @@
-"""提示词加载器：从文件加载 Jinja2 模板并渲染
+"""提示词加载器：渲染唯一一套系统提示词模板。
 
-组装逻辑：
-  1. 先渲染通用模板 system_prompt_common.j2（含知识图谱摘要占位符）
-  2. 再渲染模式模板（含学生消息占位符）
-  3. 拼接返回完整系统提示词
+2026-09-26：原三种引导模式（adaptive / free_talk / recursive）合并为一套最简提示词，
+不再按 mode 分派模板。唯一模板 `system_prompt_common.j2` 包含：
+  全局底线 + 框架约束({{ knowledge_graph_summary }}) + 当前位置 + 掌握度分档
+  + 学生画像 + 教学方式({{ student_message }})
 
-递归模式（recursive）：
-  额外需要 current_node（当前教学节点 ID），不通过通用模板渲染，直接注入模式模板。
-  图谱本身统一由通用模板的 {{ knowledge_graph_summary }} 注入 —— 各模式不另拼副本
-  （2026-09-15：删掉递归模板里重复的 knowledge_graph_framework 块）。
+检索区块、工具能力说明、空图谱提示由调用方（`chat_service._build_system_prompt`）另行拼接。
 """
 from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
@@ -19,52 +16,27 @@ PROMPT_DIR = Path(__file__).parent.parent.parent.parent / "data" / "prompts"
 # 创建 Jinja2 环境
 env = Environment(loader=FileSystemLoader(str(PROMPT_DIR)))
 
-# 模式与模板文件名的映射
-MODE_TEMPLATE_MAP = {
-    "adaptive": "system_prompt_adaptive.j2",
-    "free_talk": "system_prompt_free_talk.j2",
-    "recursive": "system_prompt_recursive.j2",
-}
-
-# 通用模板名
-COMMON_TEMPLATE = "system_prompt_common.j2"
+# 唯一模板名
+TEMPLATE = "system_prompt_common.j2"
 
 
-def get_system_prompt(mode: str, student_message: str, graph_summary: str = "",
-                     user_profile: str = "", **extra_kwargs) -> str:
+def get_system_prompt(student_message: str, graph_summary: str = "",
+                     user_profile: str = "", current_position: str = "") -> str:
     """
-    根据模式、用户消息、图谱摘要和用户画像，生成最终的完整系统提示词。
+    生成完整的系统提示词。
 
     参数:
-        mode:            引导模式（adaptive / free_talk / recursive）
-        student_message: 学生当前消息内容
-        graph_summary:   知识图谱摘要文本（可选，由调用方构建后传入）
-        user_profile:    用户画像 Markdown（可选，用于个性化教学）
-        **extra_kwargs:  额外参数（递归模式需要 current_node）
+        student_message:  学生当前消息内容
+        graph_summary:    知识图谱摘要文本（可选，由调用方构建后传入）
+        user_profile:     用户画像 Markdown（可选，用于个性化教学）
+        current_position: 学生当前所处位置（未指定时由调用方给出显式「未指定」文案）
 
     返回:
-        拼接后的完整 system prompt 字符串
-
-    抛出:
-        ValueError: 未知的引导模式
+        渲染后的完整 system prompt 字符串
     """
-    template_name = MODE_TEMPLATE_MAP.get(mode)
-    if not template_name:
-        raise ValueError(f"未知引导模式：{mode}")
-
-    # 1. 渲染通用模板（含知识图谱摘要 + 用户画像 + 学生当前位置）
-    # `current_position` 由调用方放进 extra_kwargs（三种模式共用同一段），
-    # 这里显式取值而**不是**把 extra_kwargs 整体展开 —— 避免模式模板的私有变量泄漏进通用模板。
-    common = env.get_template(COMMON_TEMPLATE).render(
+    return env.get_template(TEMPLATE).render(
+        student_message=student_message,
         knowledge_graph_summary=graph_summary,
         user_profile=user_profile,
-        current_position=extra_kwargs.get("current_position", ""),
+        current_position=current_position,
     )
-
-    # 2. 渲染模式模板（含学生消息 + 额外参数）
-    render_kwargs = {"student_message": student_message}
-    render_kwargs.update(extra_kwargs)
-
-    mode_prompt = env.get_template(template_name).render(**render_kwargs)
-
-    return common + "\n\n" + mode_prompt

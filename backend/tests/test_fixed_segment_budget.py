@@ -36,7 +36,7 @@ def _disable_retrieval(monkeypatch):
 
 def _build(kg):
     return asyncio.run(cs._build_system_prompt(
-        [{"role": "user", "content": "讲讲递归"}], "adaptive", kg, inject_tools=True))[0]
+        [{"role": "user", "content": "讲讲递归"}], kg, inject_tools=True))[0]
 
 
 # ─── P0-② 固定段占比告警 ─────────────────────────────────────

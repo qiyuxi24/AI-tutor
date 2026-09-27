@@ -1,10 +1,11 @@
-"""参照系契约 L2：「当前位置」必须三种模式都有，且不得静默为空（2026-09-26，G2）。
+"""参照系契约 L2：「当前位置」不得静默为空（2026-09-26，G2）。
 
 历史（契约 §4.2 L2）：`ChatRequest.current_node` 只有 recursive 模板消费，
 adaptive / free_talk 传进来就被丢掉 → I2-1 不满足（"现在在哪"这一问没有答案）。
+2026-09-26 三种引导模式合并为一套提示词后，位置段是唯一模板的一部分，全链路共用。
 
 口径（AC）：
-- AC-L2-1：adaptive 与 free_talk 的 system prompt 也含当前位置标识；
+- AC-L2-1：system prompt 含当前位置标识；
 - AC-L2-2：前端不传位置时，服务端给出显式值（"未指定"），不得静默为空；
 - I1-2 同源加固：位置里出现的 node_id 必须真实存在于该用户图谱（防幻觉 ID 被当位置注入）。
 """
@@ -33,19 +34,18 @@ def _disable_retrieval(monkeypatch):
     monkeypatch.setattr(cs, "_build_retrieval_context", _no_retrieval)
 
 
-def _build(kg, mode, current_node=""):
+def _build(kg, current_node=""):
     return asyncio.run(cs._build_system_prompt(
-        [{"role": "user", "content": "讲讲这个"}], mode, kg,
+        [{"role": "user", "content": "讲讲这个"}], kg,
         inject_tools=True, current_node=current_node))[0]
 
 
-@pytest.mark.parametrize("mode", ["adaptive", "free_talk", "recursive"])
-def test_position_section_present_in_all_three_modes(kg, monkeypatch, mode):
-    """AC-L2-1：三种模式的 system prompt 都带位置段落"""
+def test_position_section_present(kg, monkeypatch):
+    """AC-L2-1：system prompt 带位置段落"""
     _disable_retrieval(monkeypatch)
     kg.add_node({"id": "rec", "name": "递归", "tags": ["算法"]})
 
-    prompt = _build(kg, mode, current_node="rec")
+    prompt = _build(kg, current_node="rec")
 
     assert "学生当前所处位置" in prompt
     assert "「递归」(rec)" in prompt
@@ -56,7 +56,7 @@ def test_missing_position_is_explicit_not_silent(kg, monkeypatch):
     _disable_retrieval(monkeypatch)
     kg.add_node({"id": "rec", "name": "递归", "tags": ["算法"]})
 
-    prompt = _build(kg, "adaptive", current_node="")
+    prompt = _build(kg)
 
     assert "学生当前所处位置" in prompt
     assert "未指定" in prompt
@@ -67,7 +67,7 @@ def test_hallucinated_node_id_falls_back_to_unspecified(kg, monkeypatch):
     _disable_retrieval(monkeypatch)
     kg.add_node({"id": "rec", "name": "递归", "tags": ["算法"]})
 
-    prompt = _build(kg, "adaptive", current_node="ghost_node")
+    prompt = _build(kg, current_node="ghost_node")
 
     assert "ghost_node" not in prompt
     assert "未指定" in prompt

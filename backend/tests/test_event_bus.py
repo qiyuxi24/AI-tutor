@@ -438,8 +438,8 @@ def test_non_stream_chat_also_passes_private_queue(monkeypatch):
     monkeypatch.setattr(chat_service, "KnowledgeGraph", FakeKG)
     monkeypatch.setattr(chat_service, "_analyze_and_apply", fake_analyze)
 
-    reply, mode, _ = asyncio.run(chat_service.process_message(
-        user_id=1, messages=[{"role": "user", "content": "hi"}], mode="free_talk"))
+    reply, _ = asyncio.run(chat_service.process_message(
+        user_id=1, messages=[{"role": "user", "content": "hi"}]))
 
     assert reply == "ok"
     assert captured.get("queue") is not None, \
