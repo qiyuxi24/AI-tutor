@@ -1,50 +1,29 @@
 <script setup>
 /**
- * ContextMenu.vue — 知识图谱右键菜单组件
+ * ContextMenu.vue — 通用右键菜单容器
  *
- * 根据右键点击的目标类型（节点/边/空白）显示不同的操作选项。
- * 自动检测视口边界，确保菜单不超出屏幕。
+ * 只管三件事：定位（不越出视口）、点击外部关闭、条目样式。
+ * **菜单项由使用方通过默认插槽给出**，插槽里能拿到 close()，动作执行完自己关：
  *
- * 用法（由 ForceGraph.vue 集成）：
- *   <ContextMenu
- *     :visible="menuVisible"
- *     :x="menuX" :y="menuY"
- *     :targetType="menuTargetType"
- *     :targetData="menuTargetData"
- *     @close="closeMenu"
- *     @create-node="handleCreateNode"
- *     @edit-node="handleEditNode"
- *     ...
- *   />
+ *   <ContextMenu :visible="visible" :x="x" :y="y" @close="close">
+ *     <template #default="{ close: hide }">
+ *       <div class="menu-item menu-item-danger" @click="doIt(); hide()">删除</div>
+ *     </template>
+ *   </ContextMenu>
+ *
+ * 为什么不做成「按 targetType 内置菜单项」：那样每加一个右键区域（学科栏、板块栏…）
+ * 都要改本组件，还得让组件知道各处的业务动作（组件不该认识 store）。容器 + 插槽让
+ * 改动只落在使用方一处。条目样式见下方非 scoped 样式，插槽内容照常命中。
  */
-
 import { ref, watch, nextTick } from 'vue'
 
-/* ================================================================
-   Props
-   ================================================================ */
 const props = defineProps({
   visible: { type: Boolean, default: false },
   x: { type: Number, default: 0 },
   y: { type: Number, default: 0 },
-  /** 'node' | 'edge' | 'canvas' */
-  targetType: { type: String, default: 'canvas' },
-  /** 节点对象 / 边对象 / null */
-  targetData: { type: Object, default: null },
 })
 
-/* ================================================================
-   Emits
-   ================================================================ */
-const emit = defineEmits([
-  'close',
-  'create-node',        // 空白处创建节点 → { x, y }
-  'edit-node',          // 编辑节点 → node对象
-  'delete-node',        // 删除节点 → nodeId
-  'add-edge-from-node', // 从节点出发添加边 → nodeId
-  'edit-edge',          // 编辑边 → { edge, index }
-  'delete-edge',        // 删除边 → { edge, index }
-])
+const emit = defineEmits(['close'])
 
 /* ================================================================
    边界修正：菜单定位不超出视口
@@ -53,9 +32,6 @@ const adjustedX = ref(0)
 const adjustedY = ref(0)
 const menuRef = ref(null)
 
-/**
- * 计算菜单实际位置，防止溢出视口
- */
 function adjustPosition() {
   if (!menuRef.value) {
     adjustedX.value = props.x
@@ -95,14 +71,6 @@ watch(() => props.visible, async (val) => {
     adjustPosition()
   }
 })
-
-/* ================================================================
-   事件处理（emit 后自动关闭菜单）
-   ================================================================ */
-function handleClick(action, payload = null) {
-  emit(action, payload)
-  emit('close')
-}
 </script>
 
 <template>
@@ -116,44 +84,14 @@ function handleClick(action, payload = null) {
         @contextmenu.prevent="emit('close')"
       ></div>
 
-      <!-- 菜单主体 -->
+      <!-- 菜单主体：条目由使用方插槽提供 -->
       <div
         v-if="visible"
         ref="menuRef"
         class="context-menu"
         :style="{ left: adjustedX + 'px', top: adjustedY + 'px' }"
       >
-        <!-- ── 空白区域 ── -->
-        <template v-if="targetType === 'canvas'">
-          <div class="menu-item" @click="handleClick('create-node', { x: props.x, y: props.y })">
-            <span class="menu-icon">➕</span> 创建新节点
-          </div>
-        </template>
-
-        <!-- ── 节点 ── -->
-        <template v-else-if="targetType === 'node'">
-          <div class="menu-item" @click="handleClick('edit-node', targetData)">
-            <span class="menu-icon">✏️</span> 编辑节点
-          </div>
-          <div class="menu-item" @click="handleClick('add-edge-from-node', targetData?.id)">
-            <span class="menu-icon">🔗</span> 添加关联边
-          </div>
-          <div class="menu-divider"></div>
-          <div class="menu-item menu-item-danger" @click="handleClick('delete-node', targetData?.id)">
-            <span class="menu-icon">❌</span> 删除节点
-          </div>
-        </template>
-
-        <!-- ── 边 ── -->
-        <template v-else-if="targetType === 'edge'">
-          <div class="menu-item" @click="handleClick('edit-edge', targetData)">
-            <span class="menu-icon">✏️</span> 编辑边标签
-          </div>
-          <div class="menu-divider"></div>
-          <div class="menu-item menu-item-danger" @click="handleClick('delete-edge', targetData)">
-            <span class="menu-icon">❌</span> 删除边
-          </div>
-        </template>
+        <slot :close="() => emit('close')" />
       </div>
     </div>
   </Teleport>
@@ -161,7 +99,8 @@ function handleClick(action, payload = null) {
 
 <style>
 /* ContextMenu 样式（非 scoped，因为使用 Teleport）
-   所有选择器加 .ctx-menu-root 前缀防止全局污染 */
+   所有选择器加 .ctx-menu-root 前缀防止全局污染；
+   插槽内容由使用方模板渲染，这些类是它唯一的样式来源，故必须是全局的。 */
 
 /* 遮罩层：点击即关闭菜单 */
 .ctx-menu-root .context-menu-backdrop {
@@ -214,12 +153,24 @@ function handleClick(action, payload = null) {
   background: var(--color-red-light, #fef2f2);
 }
 
-/* 图标区域 */
+/* 无操作可执行的说明项（如「未分类」不给删除）：灰字 + 不可点，点击仅关闭菜单 */
+.ctx-menu-root .menu-item-muted {
+  color: var(--color-text-muted, #94a3b8);
+  cursor: default;
+}
+
+.ctx-menu-root .menu-item-muted:hover {
+  background: transparent;
+}
+
+/* 图标区域：内联 SVG 跟随条目文字色 */
 .ctx-menu-root .menu-icon {
-  width: 18px;
-  text-align: center;
-  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
   flex-shrink: 0;
+  opacity: 0.85;
 }
 
 /* 分隔线 */
