@@ -7,6 +7,8 @@ import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css'
 // KaTeX 数学公式样式（行内/块级公式渲染必需）
 import 'katex/dist/katex.min.css'
+// Markdown 渲染主题（代码高亮配色，设置页可切换）：导入即应用上次选择
+import './utils/mdTheme.js'
 import router from './router/index.js'
 import './style.css'
 import App from './App.vue'

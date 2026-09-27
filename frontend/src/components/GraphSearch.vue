@@ -212,7 +212,7 @@ defineExpose({ focus: () => inputRef.value?.focus(), close: closeSearch })
    ════════════════════════════════════════════ */
 .graph-search {
   position: relative;
-  width: 240px;
+  width: 100%;   /* 宽度由所在侧栏决定（挂进左侧栏卡片内） */
 }
 
 .search-input-wrapper {

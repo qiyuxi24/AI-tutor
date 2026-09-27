@@ -12,13 +12,34 @@
         <el-tooltip content="上传文件" placement="top">
           <label class="kb-icon-btn">
             <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
-            <input type="file" hidden multiple :accept="acceptTypes" @change="handleUpload">
+            <input ref="fileInputRef" type="file" hidden multiple :accept="acceptTypes" @change="handleUpload">
           </label>
         </el-tooltip>
       </div>
     </div>
 
-    <!-- 目录树 -->
+    <!-- 一键生成学科图谱：勾选下方文件 / 文件夹作为书籍来源 -->
+    <div class="kb-gen">
+      <el-input
+        v-model="subjectInput"
+        placeholder="学科名，如：数据结构"
+        size="small"
+        maxlength="100"
+        @keyup.enter="handleGenerate"
+      />
+      <el-button
+        type="primary"
+        size="small"
+        :loading="generating"
+        :disabled="!tree.length"
+        @click="handleGenerate"
+      >
+        {{ generating ? '生成中...' : '一键生成图谱' }}
+      </el-button>
+    </div>
+    <p class="kb-gen-hint">勾选下方文件（或文件夹）作为来源，AI 分析内容后生成该学科的知识图谱。</p>
+
+    <!-- 目录树：勾选 = 生成来源；右键 = 单个文件的操作 -->
     <div class="kb-tree-wrap" v-if="tree.length">
       <el-tree
         ref="treeRef"
@@ -27,33 +48,22 @@
         :props="treeProps"
         :default-expand-all="false"
         :expand-on-click-node="false"
+        show-checkbox
         highlight-current
         @node-click="handleNodeClick"
         @node-dblclick="handleNodeDblClick"
       >
         <template #default="{ data }">
-          <div class="kb-node" :class="{ selected: selectedNode?.id === data.id }">
+          <div
+            class="kb-node"
+            :class="{ selected: selectedNode?.id === data.id }"
+            @contextmenu.prevent="openMenu($event, 'kb', data)"
+          >
             <span class="kb-node-icon">
               <svg v-if="data.type === 'folder'" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
               <svg v-else viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
             </span>
             <span class="kb-node-name">{{ data.name }}</span>
-            <span class="kb-node-actions">
-              <button
-                v-if="data.type === 'file'"
-                class="kb-mini-btn"
-                title="查看正文"
-                @click.stop="openPreview(data)"
-              >
-                <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
-              </button>
-              <button class="kb-mini-btn" title="放入上下文" @click.stop="setContext(data)">
-                <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M13 7h-2v4H7v2h4v4h2v-4h4v-2h-4V7zm-1-5C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/></svg>
-              </button>
-              <button class="kb-mini-btn" title="删除" @click.stop="confirmDelete(data)">
-                <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-              </button>
-            </span>
           </div>
         </template>
       </el-tree>
@@ -71,6 +81,69 @@
         <button class="kb-clear-btn" @click="clearContext">清除</button>
       </div>
     </div>
+
+    <!-- 索引统计 -->
+    <div v-if="stats.files" class="kb-stats">
+      {{ stats.files }} 个文件 · {{ stats.chunks }} 个向量分块
+    </div>
+
+    <!-- 右键菜单：单个文件 / 文件夹的操作 -->
+    <ContextMenu :visible="menuVisible" :x="menuX" :y="menuY" @close="closeMenu">
+      <template #default="{ close }">
+        <template v-if="menuNode">
+          <div class="menu-item" @click="close(); setContext(menuNode)">
+            <span class="menu-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 5v14" /><path d="M5 12h14" />
+              </svg>
+            </span>
+            放入对话上下文
+          </div>
+          <template v-if="menuNode.type === 'file'">
+            <div class="menu-item" @click="close(); openPreview(menuNode)">
+              <span class="menu-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" />
+                </svg>
+              </span>
+              查看正文
+            </div>
+          </template>
+          <template v-else>
+            <div class="menu-item" @click="close(); openCreateFolder(menuNode)">
+              <span class="menu-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                </svg>
+              </span>
+              新建子文件夹
+            </div>
+            <div class="menu-item" @click="close(); uploadInto(menuNode)">
+              <span class="menu-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+              </span>
+              上传到此文件夹
+            </div>
+          </template>
+          <div class="menu-divider"></div>
+          <div class="menu-item menu-item-danger" @click="close(); confirmDelete(menuNode)">
+            <span class="menu-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+            </span>
+            删除{{ menuNode.type === 'folder' ? '文件夹（含内容）' : '文件' }}
+          </div>
+        </template>
+      </template>
+    </ContextMenu>
 
     <!-- 新建文件夹弹窗 -->
     <el-dialog v-model="showCreateDialog" title="新建文件夹" width="320px">
@@ -95,7 +168,20 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+/**
+ * KbPanel.vue — 知识库侧栏（知识图谱页右侧，展开/收起由 HomeView 的容器控制）
+ *
+ * 职责：
+ *   - 目录树：建文件夹 / 上传 / 勾选（生成来源）/ 右键菜单（查看正文 · 放入上下文 · 删除）
+ *   - 顶部一键生成：勾选文件或文件夹 → 输入学科名 → 生成该学科知识图谱
+ *   - 底部：当前检索范围（写进 chatStore.kbContext，对话据此带 kb_node_ids）
+ *
+ * 数据流：本组件直接读写 store（与 GraphSubjectBar 同款），
+ * 不向父级转发动作——HomeView 只管它的展开与收起。
+ *
+ * 为什么文件操作放右键而不留 hover 按钮：侧栏窄，三个悬浮按钮既挤压文件名又易误触。
+ */
+import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   getKbTree,
@@ -104,20 +190,43 @@ import {
   deleteKbNode,
   getKbContext,
   getKbNodeText,
+  getKbStats,
 } from '../api/kb.js'
 import KbTextPreviewDialog from './KbTextPreviewDialog.vue'
+import ContextMenu from './ContextMenu.vue'
+import { useContextMenu } from '../utils/contextMenu.js'
+import { useChatStore } from '../stores/chatStore.js'
+
+const store = useChatStore()
 
 const treeRef = ref(null)
+const fileInputRef = ref(null)
 const tree = ref([])
 const selectedNode = ref(null)
 const showCreateDialog = ref(false)
 const newFolderName = ref('')
 const creating = ref(false)
-const uploading = ref(false)
 
 // 当前放入上下文的范围（单个文件或文件夹）
 const contextNode = ref(null)
 const contextLabel = ref('')
+
+// 索引统计（文件数 / 向量分块数）
+const stats = ref({ files: 0, chunks: 0 })
+
+// 一键生成
+const subjectInput = ref('')
+const generating = ref(false)
+
+// 右键菜单：targetData = 被右键的目录节点
+const {
+  visible: menuVisible,
+  x: menuX,
+  y: menuY,
+  targetData: menuNode,
+  open: openMenu,
+  close: closeMenu,
+} = useContextMenu()
 
 // 正文预览（只读弹窗）
 const previewVisible = ref(false)
@@ -132,14 +241,21 @@ const treeProps = {
 // 与后端 parsers 包支持的格式保持一致
 const acceptTypes = '.pdf,.docx,.pptx,.md,.markdown,.txt,.png,.jpg,.jpeg,.bmp,.webp,.tiff,.gif,.csv,.json,.log,.py,.js,.ts,.html,.xml,.epub,.fb2,.mobi,.azw,.azw3,.djvu'
 
-const emit = defineEmits(['context-change'])
-
 async function loadTree() {
   try {
     const res = await getKbTree()
     tree.value = res.data.tree || []
   } catch (e) {
     ElMessage.error('加载知识库失败：' + (e.response?.data?.detail || e.message))
+  }
+}
+
+async function loadStats() {
+  try {
+    const res = await getKbStats()
+    stats.value = { files: res.data?.files ?? 0, chunks: res.data?.chunks ?? 0 }
+  } catch {
+    // 统计只是装饰，失败静默
   }
 }
 
@@ -176,7 +292,9 @@ async function openPreview(data) {
   }
 }
 
-function openCreateFolder() {
+/** 新建文件夹：传 folder 则作为其子目录（右键菜单），否则用当前选中节点 */
+function openCreateFolder(folder = null) {
+  if (folder) selectedNode.value = folder
   newFolderName.value = ''
   showCreateDialog.value = true
 }
@@ -201,12 +319,17 @@ async function createFolder() {
   }
 }
 
+/** 右键「上传到此文件夹」：选中它再走同一条上传路径（父目录取 selectedNode） */
+function uploadInto(folder) {
+  selectedNode.value = folder
+  fileInputRef.value?.click()
+}
+
 async function handleUpload(event) {
   const files = Array.from(event.target.files || [])
   if (!files.length) return
   const parentId = selectedNode.value?.type === 'folder' ? selectedNode.value.id : null
 
-  uploading.value = true
   ElMessage.info(`正在上传 ${files.length} 个文件，解析并向量化中...`)
   try {
     for (const file of files) {
@@ -214,15 +337,49 @@ async function handleUpload(event) {
     }
     ElMessage.success(`成功上传 ${files.length} 个文件`)
     loadTree()
+    loadStats()
   } catch (e) {
     ElMessage.error('上传失败：' + (e.response?.data?.detail || e.message))
   } finally {
-    uploading.value = false
     event.target.value = ''
   }
 }
 
+/** 勾选（含半选）的文件/文件夹 ID —— 文件夹由后端自动展开为其中所有文件 */
+function getCheckedIds() {
+  const checked = treeRef.value?.getCheckedKeys() || []
+  const half = treeRef.value?.getHalfCheckedKeys() || []
+  return [...new Set([...checked, ...half])]
+}
+
+async function handleGenerate() {
+  const subject = subjectInput.value.trim()
+  if (!subject) {
+    ElMessage.warning('请输入学科名（如"数据结构"）')
+    return
+  }
+  const nodeIds = getCheckedIds()
+  if (!nodeIds.length) {
+    ElMessage.warning('请先勾选至少一个文件或文件夹作为书籍来源')
+    return
+  }
+  generating.value = true
+  try {
+    // 走 store（图谱写入的唯一前端入口）：生成后自动刷新学科列表并切到该学科
+    const d = (await store.generateSubjectGraph(subject, nodeIds)) || {}
+    ElMessage.success(
+      `「${subject}」生成完成：新增 ${(d.created_nodes || []).length} 个知识点、${d.created_edges || 0} 条关系`
+    )
+  } catch (e) {
+    ElMessage.error('生成失败：' + (e.response?.data?.detail || e.message))
+  } finally {
+    generating.value = false
+  }
+}
+
+/** 把节点设为对话检索范围（写进 store，对话请求据此带 kb_node_ids） */
 async function setContext(data) {
+  if (!data) return
   try {
     const res = await getKbContext(data.id)
     const fileCount = res.data.file_count
@@ -234,11 +391,9 @@ async function setContext(data) {
     contextLabel.value = data.type === 'folder'
       ? `${data.name}/ (${fileCount} 个文件)`
       : data.name
-    emit('context-change', {
-      nodeId: data.id,
-      nodeName: data.name,
-      fileCount,
+    store.setKbContext({
       nodeIds: res.data.node_ids || [],   // 实际检索的文件节点 ID 列表
+      name: data.name,
     })
     ElMessage.success(`已设置检索范围：${contextLabel.value}`)
   } catch (e) {
@@ -249,7 +404,7 @@ async function setContext(data) {
 function clearContext() {
   contextNode.value = null
   contextLabel.value = ''
-  emit('context-change', null)
+  store.setKbContext(null)
 }
 
 async function confirmDelete(data) {
@@ -269,21 +424,26 @@ async function confirmDelete(data) {
     ElMessage.success('已删除')
     if (contextNode.value?.id === data.id) clearContext()
     loadTree()
+    loadStats()
   } catch (e) {
     ElMessage.error('删除失败：' + (e.response?.data?.detail || e.message))
   }
 }
 
-onMounted(loadTree)
+onMounted(() => {
+  loadTree()
+  loadStats()
+})
 </script>
 
 <style scoped>
 .kb-panel {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  background: var(--color-bg-primary);
-  border-radius: 10px;
+  /* basis auto：卡片高度随内容自适应（父级 SidePanel 不给固定高度） */
+  flex: 1 1 auto;
+  min-height: 0;
+  background: transparent;
   overflow: hidden;
 }
 
@@ -291,27 +451,28 @@ onMounted(loadTree)
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--color-border);
+  padding: 12px 12px 8px;
+  flex-shrink: 0;
 }
 
 .kb-title {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
+  letter-spacing: 0.3px;
   color: var(--color-text-primary);
 }
 
 .kb-actions {
   display: flex;
-  gap: 6px;
+  gap: 4px;
 }
 
 .kb-icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   border: none;
   border-radius: 6px;
   background: transparent;
@@ -324,10 +485,38 @@ onMounted(loadTree)
   color: var(--color-text-primary);
 }
 
-.kb-tree-wrap {
+/* ── 一键生成区（侧栏顶部） ── */
+.kb-gen {
+  display: flex;
+  gap: 6px;
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+.kb-gen :deep(.el-input) {
   flex: 1;
+  min-width: 0;
+}
+.kb-gen :deep(.el-button) {
+  flex-shrink: 0;
+}
+.kb-gen-hint {
+  margin: 6px 12px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+
+.kb-tree-wrap {
+  flex: 1 1 auto;   /* 同上：内容少时按内容高度，封顶后才吃剩余空间并滚动 */
   overflow-y: auto;
-  padding: 8px;
+  padding: 0 6px 6px;
+  min-height: 0;
+}
+.kb-tree-wrap::-webkit-scrollbar { width: 4px; }
+.kb-tree-wrap::-webkit-scrollbar-thumb {
+  background: var(--color-border-light);
+  border-radius: 2px;
 }
 
 .kb-node {
@@ -363,33 +552,8 @@ onMounted(loadTree)
   text-overflow: ellipsis;
 }
 
-.kb-node-actions {
-  display: none;
-  gap: 4px;
-}
-.kb-node:hover .kb-node-actions {
-  display: flex;
-}
-
-.kb-mini-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--color-text-tertiary);
-  cursor: pointer;
-}
-.kb-mini-btn:hover {
-  background: var(--color-bg-surface);
-  color: var(--color-text-primary);
-}
-
 .kb-empty {
-  flex: 1;
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -406,8 +570,9 @@ onMounted(loadTree)
 }
 
 .kb-context {
-  padding: 10px 14px;
+  padding: 10px 12px;
   border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
 }
 .kb-context-label {
   font-size: 12px;
@@ -435,6 +600,13 @@ onMounted(loadTree)
   text-decoration: underline;
 }
 
+.kb-stats {
+  padding: 6px 12px 10px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
 /* Element Plus 深色适配 */
 .kb-panel :deep(.el-tree) {
   background: transparent;
@@ -446,5 +618,8 @@ onMounted(loadTree)
 }
 .kb-panel :deep(.el-tree-node__expand-icon) {
   color: var(--color-text-tertiary);
+}
+.kb-panel :deep(.el-checkbox) {
+  margin-right: 2px;
 }
 </style>
