@@ -1,13 +1,16 @@
 """工具 `download_resource` —— 把 URL 指向的文档/电子书下载并入库到学生知识库。
 
 与 `fetch_webpage` 的分工（都抓 URL，但目的不同）：
-- fetch_webpage    ：**只读看一眼**。网页正文 → 文本返回给模型，不落盘。
+- fetch_webpage    ：**只读看一眼**。网页正文 → 文本返回给模型；正文另存一份为图谱节点
+                     （origin="web"，双击图谱节点可查看），**不进知识库、不被 rag_search 检索**。
 - download_resource：**长期留存**。任意受支持格式（pdf/epub/docx/pptx/txt/html…）→
                      下载 bytes → 解析 → 分块 → 入知识库（`kb_manager`），
                      之后可被 `rag_search(source="kb")` 检索到。
 
 安全边界（SSRF 沿用 `..net_guard`，唯一实现不重复）：
 - 协议限 http/https；拒绝内网/回环/私有 IP
+- **只采开源来源**：许可不明 / 非开放许可一律不下载（判定唯一实现 = `core/open_source.py`）——
+  本工具产出的是「长期留存 + 可被 rag_search 检索」的内容，属真正的采集，故 fail-closed
 - 体积上限 max_mb（默认 50MB）：content-length 预检 + 流式累计双重校验
 - 扩展名白名单 = kb 解析器注册表（`is_supported`），不支持则不入库半成品
 """
@@ -24,6 +27,7 @@ import httpx
 
 from app.core.error_codes import ErrorCode, log_error
 from app.core.kb.parsers import is_supported, supported_label
+from app.core.open_source import is_open
 
 from ..net_guard import is_blocked_url
 from ..registry import _spec
@@ -149,6 +153,12 @@ def download_resource(url: str, title: str = "", subject: str = "",
     if blocked:
         log_error(ErrorCode.WEB_FETCH_BLOCKED, detail=f"{url}: {blocked}")
         return f"无法下载：{blocked}。请提供一个公网 http/https 地址。"
+
+    # 只采开源来源（fail-closed）：许可不明 / 非开放许可 → 不下载、不入库
+    if not is_open(url):
+        log_error(ErrorCode.WEB_FETCH_BLOCKED, detail=f"{url}: 非开放许可来源")
+        return ("未下载：该来源非开放许可或许可不明（本系统只留存开源来源资料）。"
+                "建议改用开放许可来源，或自行下载后上传到知识库。")
 
     try:
         with httpx.Client(timeout=_DOWNLOAD_TIMEOUT, headers=_HEADERS,

@@ -41,9 +41,9 @@ Copy-Item .env.example .env
 docker compose up -d --build
 
 # 也可用仓库根目录的一键脚本：自动判断要不要重建、等健康检查、打印访问地址
-#   .\start-docker.ps1            日常（仅当源码比镜像新才重建）
-#   .\start-docker.ps1 -Force     强制重建
-#   .\start-docker.ps1 -Port 8081 换端口
+#   .\start.ps1 -Docker            日常（仅当源码比镜像新才重建；默认探测到 Docker 也会走容器）
+#   .\start.ps1 -Docker -Force     强制重建
+#   .\start.ps1 -Docker -Port 8081 换端口
 
 # 3. 验证
 docker compose ps                    # 状态应为 healthy

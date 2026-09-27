@@ -45,6 +45,10 @@ async def assign_taxonomy(kg: KnowledgeGraph, node_data: dict) -> dict:
     """
     subject = KnowledgeGraph.node_subject(node_data)
     board = (node_data.get("board") or "").strip()
+    # KG-D1：学科落 `subject` 列（不再只靠 tags 首位被反推 —— KG-D2 后 tags 首个
+    # 元素可能是任意自由标签，如 ["递归"] 会被误判成学科）。
+    if subject:
+        node_data["subject"] = subject
     if subject and board:
         return node_data
 
@@ -61,6 +65,8 @@ async def assign_taxonomy(kg: KnowledgeGraph, node_data: dict) -> dict:
         board = board or picked.get("board", "")
 
     if subject:
+        node_data["subject"] = subject
+        # tags 里也留一份学科名：前端学科筛选/老读路径仍按 tags 看，去掉会破坏兼容
         tags = list(node_data.get("tags") or [])
         if subject not in tags:
             tags.append(subject)

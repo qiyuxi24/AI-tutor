@@ -646,12 +646,13 @@ swap=2GB
 
 ### 12.5 本项目的一键脚本
 
-仓库根目录 `start-docker.ps1` 已封装日常操作（自动判断是否重建、等健康检查、打印访问地址）：
+仓库根目录 `start.ps1` 已封装日常操作（自动判断是否重建、等健康检查、打印访问地址）；容器模式用 `-Docker` 触发（默认探测到 Docker 也会走容器）：
 
 ```powershell
-.\start-docker.ps1            # 日常启动（源码比镜像新才重建）
-.\start-docker.ps1 -Force     # 强制重建
-.\start-docker.ps1 -Port 8081 # 换端口
+.\start.ps1 -Docker            # 容器模式（源码比镜像新才重建）
+.\start.ps1 -Docker -Force     # 强制重建
+.\start.ps1 -Docker -Port 8081 # 换端口
+.\start.ps1 -Local             # 强制本机开发模式（热重载）
 ```
 
 ---

@@ -56,7 +56,7 @@ MASTERY_CORRECT_GAIN = 20
 
 
 def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
-                               correct: bool) -> str:
+                               correct: bool, evidence: str = "") -> str:
     """
     判分后**确定性**更新掌握度（这就是"答对就直接更新进度"）。
 
@@ -64,6 +64,9 @@ def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
       - 答对 → mastery = min(100, 当前 + MASTERY_CORRECT_GAIN)
       - 答错 → **不变**。不做惩罚性扣分：答错说明还没学牢，交给 AI 用苏格拉底追问补救，
         扣分只会打击学生。
+
+    参数:
+        evidence: 证据引用（题目 id），随掌握度事件落库（KG-D4）→ 可回溯"这 20 分哪来的"。
 
     返回一句给模型看的状态描述（空字符串 = 没更新）。
     """
@@ -78,7 +81,8 @@ def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
         return f"「{name}」掌握度已是满值 100，无需再提升。"
     new = min(100, current + MASTERY_CORRECT_GAIN)
     try:
-        kg.update_node_info(node_id, {"mastery": new}, caller="ai")
+        kg.update_node_info(node_id, {"mastery": new}, caller="ai",
+                            mastery_reason="quiz_correct", mastery_evidence=evidence)
     except Exception as e:
         # 人类创建的节点 AI 无权改（PermissionError）——判分照常返回，只是不改进度
         logger.warning(f"判分后更新掌握度失败（{node_id}）: {e}")
@@ -158,7 +162,7 @@ async def grade_pending(user_answer: str, *, kg=None, store=None,
     mastery_note = ""
     if kg is not None:
         mastery_note = apply_mastery_after_answer(
-            kg, node_id, bool(result["correct"]),
+            kg, node_id, bool(result["correct"]), evidence=f"question:{q['id']}",
         )
 
     return {

@@ -4,10 +4,14 @@ Wikipedia（维基百科中文站）采集适配器（B1.2，[需API]）
 搜索：action=query&list=search，返回候选（title/snippet/source_url/meta）。
 抓取：prop=revisions 取 wikitext → wikitext_to_md 转 Markdown（去模板/分类/ref/
 interwiki，公式 <math> 转 $...$，标题层级还原），落盘由 manager 复用 kb parsers。
+出口另做两件收尾（皆可单独关停，见各常量/依赖注释）：
+- **简繁统一**（zhconv → 大陆简体）：源页面普遍简繁混写，MediaWiki 只在渲染时才转换；
+- 内容型模板保留参数（`{{langx|en|…}}` 等）、HTML/魔术字残渣清理。
 
 Wikibooks 复用本文件逻辑，仅换 host（见 adapters/wikibooks.py）。
 """
 
+import logging
 import re
 from typing import Optional
 from urllib.parse import quote, unquote
@@ -16,15 +20,112 @@ from app.core.collector.adapters.base import BaseAdapter
 from app.core.collector.http import CollectorHttp
 from app.core.collector.types import CollectCandidate
 
+logger = logging.getLogger("ai-tutor")
+
+# 出口统一的字形变体：源页面普遍简繁混写（MediaWiki 只在**渲染时**转换，走 wikitext 路径绕过了它），
+# 用 zhconv 统一为**大陆简体**；zh-cn 比 zh-hans 多一层地区词（軟體→软件、雷射→激光）。
+_VARIANT_TARGET = "zh-cn"
+
+try:
+    import zhconv as _zhconv
+except ImportError:      # 依赖未装：不阻断采集，只是不做简繁统一（同 trafilatura/readability 约定）
+    _zhconv = None
+
 _API_PATH = "/w/api.php"
 # 搜索/抓取的通用请求参数（formatversion=2 使 pages 为数组）
 _COMMON = {"format": "json", "formatversion": "2"}
+
+# **内容型**模板：整段丢弃会连带丢正文 ——
+# 真网《贪心算法》的 `'''贪心算法'''（{{langx|en|greedy algorithm}}）` 曾被转成「贪心算法（）」，
+# 英文名/缩写直接消失（信息损坏，2026-09-23 修复）。命中即取「最后一个非空参数」：
+# {{langx|en|greedy algorithm}} → greedy algorithm；{{lang-en|stack}} → stack；
+# {{lang|en|ADT}} → ADT；{{nowrap|后进先出}} → 后进先出。其余模板（{{Expand}}/{{NoteTA}}/
+# {{Infobox}} 等维护与元信息模板）仍**整体丢弃**，不能把维护提示灌进正文。
+_KEEP_ARG_PREFIXES = ("lang", "transl", "nowrap", "nobr", "ipa", "langue", "rtl-lang")
+
+# 图片/文件链接整条丢弃（含中文前缀）：尾注说明文字对学习正文无价值，
+# 否则会留下 `thumb|说明` 碎片。必须在通用链接转换**之前**处理。
+_RE_FILE_LINK = re.compile(
+    r"\[\[(?:File|Image|文件|图像|檔案|档案)\s*:[^\]]*\]\]", re.IGNORECASE)
+_RE_MAGIC = re.compile(r"__[A-Z]+__")                 # __NOTOC__ / __TOC__ / __NOEDITSECTION__ …
+_RE_COMMENT = re.compile(r"<!--.*?-->", re.S)         # HTML 注释
+_RE_CODE = re.compile(r"<code>(.*?)</code>", re.S | re.I)   # 行内代码 → `x`
+_RE_BR = re.compile(r"<br\s*/?>", re.I)
+_RE_ANY_TAG = re.compile(r"</?[a-zA-Z][^>]*>")        # 其余标签（保留标签内文字）
+_RE_EMPTY_ITEM = re.compile(r"(?m)^\s*[*#;:]\s*$")    # 只剩项目符号的空列表行
+_RE_NUMBERED_ARG = re.compile(r"^\d+=")               # {{lang|1=ADT}} 这类序号参数
+# 维基外链语法 [url 说明] / [url]（不是 Markdown，原样入库时只是一对方括号文字 → 预览点不了）
+_RE_EXT_LINK = re.compile(r"\[(https?://[^\s\]]+)(?:\s+([^\]]+))?\]")
+
+
+def _to_md_link(match) -> str:
+    """`[url 说明]` → `[说明](url)`；无说明文字时用 URL 兜底"""
+    url, label = match.group(1), (match.group(2) or "").strip()
+    return f"[{label or url}]({url})"
 
 
 def _strip_html(text: str) -> str:
     """粗略剥离 HTML 标签（snippet 清理）"""
     out = re.sub(r"<[^>]+>", "", text or "")
     return out.replace("&nbsp;", " ").replace("&amp;", "&").strip()
+
+
+def _split_template(inner: str) -> tuple[str, list[str]]:
+    """把模板体切成（名字, 参数表）；只切顶层 `|`（嵌套模板在调用前已展开）"""
+    parts = inner.split("|")
+    return parts[0].strip(), [p.strip() for p in parts[1:]]
+
+
+def _render_template(inner: str) -> str:
+    """渲染一个模板（不含外层花括号）：内容型取末个非空参数，其余返回 ""（即丢弃）"""
+    inner = _replace_templates(inner)          # 先展开嵌套模板
+    name, args = _split_template(inner)
+    if not name.lower().startswith(_KEEP_ARG_PREFIXES):
+        return ""
+    for arg in reversed(args):
+        arg = _RE_NUMBERED_ARG.sub("", arg).strip()
+        if arg:
+            return arg
+    return ""
+
+
+def _replace_templates(text: str) -> str:
+    """逐个替换 {{…}}（含嵌套，简单括号计数）：内容型留参数、其余删掉。
+
+    未闭合的 `{{` 只削掉开头两位，避免死循环。
+    """
+    while "{{" in text:
+        start = text.index("{{")
+        depth = 0
+        end = -1
+        for i in range(start, len(text)):
+            pair = text[i:i + 2]
+            if pair == "{{":
+                depth += 1
+            elif pair == "}}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end < 0:
+            return text[:start] + text[start + 2:]
+        text = (text[:start] + _render_template(text[start + 2:end])
+                + text[end + 2:])
+    return text
+
+
+def _to_simplified(text: str) -> str:
+    """把正文统一为大陆简体（zh-cn）；zhconv 未装或转换失败时原样返回。
+
+    只做字形/地区词替换，不碰 `$…$` 公式（ASCII LaTeX 不受影响）、不改标题与列表结构。
+    """
+    if _zhconv is None or not text:
+        return text
+    try:
+        return _zhconv.convert(text, _VARIANT_TARGET)
+    except Exception as exc:           # 转换失败不该毁掉整篇正文
+        logger.warning("简繁转换失败，保留原文: %s", exc)
+        return text
 
 
 def _strip_variant(match) -> str:
@@ -59,22 +160,8 @@ def wikitext_to_md(text: str) -> str:
         if not replaced:
             break
 
-    # 丢弃整个模板 {{…}}（含嵌套，简单括号计数）
-    def _drop_templates(s):
-        while "{{" in s:
-            start = s.index("{{")
-            depth = 0
-            for i in range(start, len(s)):
-                if s[i:i + 2] == "{{":
-                    depth += 1
-                elif s[i:i + 2] == "}}":
-                    depth -= 1
-                    if depth == 0:
-                        s = s[:start] + s[i + 2:]
-                        break
-        return s
-
-    text = _drop_templates(text)
+    # 模板：内容型保留参数（{{langx|en|…}} / {{lang-en|…}} 等），其余整体丢弃
+    text = _replace_templates(text)
 
     # 去掉分类、语言 interwiki 与 ref
     text = re.sub(r"\[\[(Category|分类):.*?\]\]", "", text, flags=re.I)
@@ -83,19 +170,38 @@ def wikitext_to_md(text: str) -> str:
     text = re.sub(r"<ref[^>]*>.*?</ref>", "", text, flags=re.S | re.I)
     text = re.sub(r"<references\s*/>", "", text, flags=re.I)
 
+    # 图片/文件链接整条丢弃（须在通用链接转换之前，否则留下 `thumb|说明` 碎片）
+    text = _RE_FILE_LINK.sub("", text)
+
     # 内部链接 [[目标|显示]] → 显示；[[目标]] → 目标
     text = re.sub(r"\[\[([^\]|]+)\|([^\]]+)\]\]", r"\2", text)
     text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", text)
+
+    # 外部链接 [url 说明] → Markdown 链接（让它在前端渲染里可点；裸 URL 与 [1] 脚注不动）
+    text = _RE_EXT_LINK.sub(_to_md_link, text)
 
     # '''粗体''' / ''斜体''
     text = re.sub(r"'''''(.+?)'''''", r"***\1***", text)
     text = re.sub(r"'''(.+?)'''", r"**\1**", text)
     text = re.sub(r"''(.+?)''", r"*\1*", text)
 
-    # 清理孤立 `<nowiki>`、残留空行过多
+    # HTML 残渣：注释 / 行内代码 / 换行标签 / 其余标签（保留标签内文字）
+    text = _RE_COMMENT.sub("", text)
+    text = _RE_CODE.sub(r"`\1`", text)
+    text = _RE_BR.sub("\n", text)
+    text = _RE_ANY_TAG.sub("", text)
+
+    # 魔术字与游离链接括号（跨行/残缺链接的尾巴，如「…的类型]]」）
+    text = _RE_MAGIC.sub("", text)
+    text = text.replace("[[", "").replace("]]", "")
+
+    # 清理孤立 `<nowiki>`、空列表项、残留空行过多
     text = text.replace("<nowiki>", "").replace("</nowiki>", "")
+    text = _RE_EMPTY_ITEM.sub("", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+
+    # 出口统一字形：简繁混排 → 大陆简体（放在最后，前面所有标记都已处理完）
+    return _to_simplified(text.strip())
 
 
 class MediaWikiAdapter(BaseAdapter):

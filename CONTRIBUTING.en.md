@@ -39,7 +39,8 @@ Thank you for your interest in TutorAgent — whether you are here to report a b
 .\install.ps1                 # create venv + install backend deps + frontend node_modules
 copy .env.example .env        # the root .env is the single source of truth
 notepad .env                  # fill in LLM_API_KEY / DASHSCOPE_API_KEY / SECRET_KEY
-.\start.ps1                   # start backend and frontend → http://localhost:5173
+.\start.ps1                   # start (container if Docker is up, else local) → http://localhost:5173
+                              # add -Local to force local hot-reload / -Docker to force container
 ```
 
 ### Manual setup

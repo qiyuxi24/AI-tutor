@@ -1,0 +1,266 @@
+{
+  "user_id": 9902,
+  "embed": "mock",
+  "groups": {
+    "off": {
+      "rows": [
+        {
+          "case": "g1",
+          "kind": "general",
+          "expect_total": 3,
+          "expect_hit": 0,
+          "hit_names": [],
+          "mentions": 1,
+          "rag_calls": 1,
+          "rounds": 1,
+          "llm_calls": 2,
+          "tokens": 7598,
+          "answer_len": 79,
+          "answer_head": "好问题！我们一步步来想。  先问你一个基础问题：**当一个函数调用自己的时候，程序底层发生了什么？** 你觉得每次调用是\"原地变身\"，还是会产生什么新的东西？",
+          "false_empty": false,
+          "elapsed": 8.0
+        },
+        {
+          "case": "g2",
+          "kind": "general",
+          "expect_total": 3,
+          "expect_hit": 1,
+          "hit_names": [
+            "递归"
+          ],
+          "mentions": 1,
+          "rag_calls": 3,
+          "rounds": 3,
+          "llm_calls": 3,
+          "tokens": 11602,
+          "answer_len": 132,
+          "answer_head": "好问题！我们先不急着比较，先从最基本的来聊。  你已经写过递归和循环的代码了，那我问你一个直观的感受：**当你调用一个递归函数时，计算机在底层到底做了什么？每次\"递归一层\"的时候，计算机内部发生了什么\"额外的事\"？**  你先说说看，不用很精确，说说你理解的就够。",
+          "false_empty": false,
+          "elapsed": 5.0
+        },
+        {
+          "case": "d1",
+          "kind": "graph_dependent",
+          "expect_total": 3,
+          "expect_hit": 0,
+          "hit_names": [],
+          "mentions": 1,
+          "rag_calls": 6,
+          "rounds": 7,
+          "llm_calls": 5,
+          "tokens": 20694,
+          "answer_len": 347,
+          "answer_head": "老实跟你说一下情况：我刚才试了几种方式去查你的知识图谱，但都没有检索到任何节点内容——这说明你目前的知识图谱**可能还是空的，或者还没有我可见的学习记录**。  所以我没办法凭空给你推荐\"下一步该学什么\"，否则就是在瞎猜，浪费你的时间。  想帮你准确判断，我需要你先告诉我以下信息：  1. **你已经学过哪些知识点？**（比如：变量、循环、数组、递归、链表……哪怕只是大致列一下） 2. **哪些是你觉得比较扎实、掌握得不错的？** 哪些是学过但还不太确定的？ 3. **你的学习目标是什么？** 比如备战面试、刷算法题、跟课程进度、还是纯粹兴趣探索？  你可以简单回复，比如\"学过C语言基础、数组",
+          "false_empty": true,
+          "elapsed": 13.0
+        },
+        {
+          "case": "d2",
+          "kind": "graph_dependent",
+          "expect_total": 4,
+          "expect_hit": 2,
+          "hit_names": [
+            "递归",
+            "记忆化搜索"
+          ],
+          "mentions": 2,
+          "rag_calls": 9,
+          "rounds": 9,
+          "llm_calls": 6,
+          "tokens": 25203,
+          "answer_len": 518,
+          "answer_head": "我尝试了好几种方式检索你的知识图谱，但目前都没有拿到结果——可能是图谱里关于递归的内容还没有被系统检索到，也可能是连接出了点问题。我没法凭空给你编一个分析，那对你不负责任。  不过这倒是个好机会，我们可以一起做一次**自我诊断**。我问你几个问题，你凭印象回答，我们就能大致画出你的递归掌握地图：  **你回忆一下——下面这些话题，哪些你觉得自己\"能讲清楚\"，哪些只是\"听过名字\"，哪些完全没接触过？**  1. **递归的定义**：什么是递归？为什么要用递归？（跟循环比有什么不同？） 2. **递归的两个关键要素**：终止条件 + 递归公式，你能准确地说出它们的作用吗？ 3. **基础递归题目*",
+          "false_empty": false,
+          "elapsed": 23.0
+        },
+        {
+          "case": "d3",
+          "kind": "graph_dependent",
+          "expect_total": 3,
+          "expect_hit": 1,
+          "hit_names": [
+            "动态规划"
+          ],
+          "mentions": 1,
+          "rag_calls": 7,
+          "rounds": 8,
+          "llm_calls": 5,
+          "tokens": 21295,
+          "answer_len": 229,
+          "answer_head": "坦白说，我刚才尝试了几种方式去检索你的知识图谱，都没有拿到数据——可能是检索工具暂时没拿到结果，也可能图谱里目前节点还不多。在直接给你列清单之前，我想换个方式：  **先不急着看图谱，我们用一个问题帮你自己\"摸底\"。**  动态规划的核心思想，是把一个大问题拆成**同类的小问题**，然后把子问题的答案存起来、避免重复算。你觉得，要理解这个思路，最重要的前置能力是什么？  不用想得太复杂，就凭直觉说一个你觉得\"如果这块不行，动态规划肯定学不动\"的概念就行。",
+          "false_empty": false,
+          "elapsed": 30.1
+        }
+      ],
+      "by_kind": {
+        "ALL": {
+          "cases": 5,
+          "expect": "4/16",
+          "hit_rate": 0.25,
+          "mentions_avg": 1.2,
+          "rag_calls": 26,
+          "llm_calls": 21,
+          "tokens": 86392,
+          "answer_len_avg": 261,
+          "false_empty": 1
+        },
+        "general": {
+          "cases": 2,
+          "expect": "1/6",
+          "hit_rate": 0.167,
+          "mentions_avg": 1.0,
+          "rag_calls": 4,
+          "llm_calls": 5,
+          "tokens": 19200,
+          "answer_len_avg": 105,
+          "false_empty": 0
+        },
+        "graph_dependent": {
+          "cases": 3,
+          "expect": "3/10",
+          "hit_rate": 0.3,
+          "mentions_avg": 1.33,
+          "rag_calls": 22,
+          "llm_calls": 16,
+          "tokens": 67192,
+          "answer_len_avg": 364,
+          "false_empty": 1
+        }
+      }
+    },
+    "on": {
+      "rows": [
+        {
+          "case": "g1",
+          "kind": "general",
+          "expect_total": 3,
+          "expect_hit": 1,
+          "hit_names": [
+            "递归"
+          ],
+          "mentions": 1,
+          "rag_calls": 0,
+          "rounds": 0,
+          "llm_calls": 1,
+          "tokens": 4231,
+          "answer_len": 278,
+          "answer_head": "好问题！我们先不急着看答案，来做个思想实验。  假设你现在写了一个递归函数 `func(n)`，它的逻辑里只有一句话：**`return func(n-1)`**，没有别的了。  现在你调用 `func(5)`，你试着在脑子里\"跑\"一遍这个程序：  1. 调用 `func(5)` → 它返回 `func(4)` 2. 调用 `func(4)` → 它返回 `func(3)` 3. 调用 `func(3)` → 它返回 `func(2)` 4. ……  **这个链条会停下来吗？为什么停不下来？**  你从这里能看出，\"终止条件\"在递归里扮演了什么角色？",
+          "false_empty": false,
+          "elapsed": 9.5
+        },
+        {
+          "case": "g2",
+          "kind": "general",
+          "expect_total": 3,
+          "expect_hit": 1,
+          "hit_names": [
+            "递归"
+          ],
+          "mentions": 1,
+          "rag_calls": 2,
+          "rounds": 2,
+          "llm_calls": 3,
+          "tokens": 12586,
+          "answer_len": 101,
+          "answer_head": "好的，你问了一个很经典的问题。我们一步步来拆解。  先说说你的直觉——你觉得递归调用和 `for`/`while` 循环在\"运行机制\"上，最根本的差别是什么？不用很严谨，说说你脑子里冒出的第一感觉就行。",
+          "false_empty": false,
+          "elapsed": 6.8
+        },
+        {
+          "case": "d1",
+          "kind": "graph_dependent",
+          "expect_total": 3,
+          "expect_hit": 1,
+          "hit_names": [
+            "递归调用栈"
+          ],
+          "mentions": 4,
+          "rag_calls": 10,
+          "rounds": 10,
+          "llm_calls": 6,
+          "tokens": 28926,
+          "answer_len": 501,
+          "answer_head": "让我先梳理一下我在你的知识图谱里看到了什么：  我检索到了 **3 个核心节点**，它们都围绕「递归」展开：  | 节点 | 我看到的核心内容 | |------|------------------| | **函数调用** | 调用栈帧、返回地址、局部变量空间 | | **递递归终止条件** | if 终止判断、为什么必须存在 | | **递归调用栈** | 深度与栈帧的关系、栈溢出、后进先出 |  这三个节点构成了一条很清晰的学习链： **函数调用 → 递归终止条件 → 递归调用栈**  这说明你已经从\"递归是什么\"走到了\"递归在内存里怎么运作\"的层面，理论框架相当扎实了。  ---  在",
+          "false_empty": false,
+          "elapsed": 28.6
+        },
+        {
+          "case": "d2",
+          "kind": "graph_dependent",
+          "expect_total": 4,
+          "expect_hit": 4,
+          "hit_names": [
+            "递归",
+            "递归终止条件",
+            "递归调用栈",
+            "记忆化搜索"
+          ],
+          "mentions": 5,
+          "rag_calls": 5,
+          "rounds": 6,
+          "llm_calls": 7,
+          "tokens": 32200,
+          "answer_len": 436,
+          "answer_head": "根据刚才的检索，我在你的知识图谱中找到了以下与**递归**相关的节点：  | 节点 | 在递归中的角色 | |------|--------------| | **递归** | 核心概念：终止条件 + 递推关系 | | **递归终止条件** | base case，递归何时停止 | | **递归调用栈** | 栈帧、深度、栈溢出、LIFO 返回 | | **记忆化搜索** | 用缓存消除重复子问题（如 `@lru_cache` 优化斐波那契） | | **函数调用** | 递归的前置知识：每次调用产生独立栈帧 |  坦白说，我刚才尝试读取每个节点的掌握度数值时接口没返回成功，所以**没法直接给",
+          "false_empty": false,
+          "elapsed": 24.8
+        },
+        {
+          "case": "d3",
+          "kind": "graph_dependent",
+          "expect_total": 3,
+          "expect_hit": 3,
+          "hit_names": [
+            "动态规划",
+            "记忆化搜索",
+            "循环与迭代"
+          ],
+          "mentions": 6,
+          "rag_calls": 3,
+          "rounds": 3,
+          "llm_calls": 3,
+          "tokens": 13552,
+          "answer_len": 213,
+          "answer_head": "根据你的知识图谱，动态规划节点本身就标注了它需要的前置基础：  > 递归思维、终止条件与递推关系、记忆化（缓存重叠子问题）  图谱里这几个节点你都已有：**递归、递归终止条件、记忆化搜索、循环与迭代、函数调用**。  看起来\"工具\"是齐的。但——  我先不急着给你下判断。你自己摸一遍才靠谱。  先从最底层开始：**你能用一两句话说清楚\"递归\"的核心机制是什么吗？** 比如，为什么一个函数调用自己，最终还能停下来并给出结果？",
+          "false_empty": false,
+          "elapsed": 10.8
+        }
+      ],
+      "by_kind": {
+        "ALL": {
+          "cases": 5,
+          "expect": "10/16",
+          "hit_rate": 0.625,
+          "mentions_avg": 3.4,
+          "rag_calls": 20,
+          "llm_calls": 20,
+          "tokens": 91495,
+          "answer_len_avg": 305,
+          "false_empty": 0
+        },
+        "general": {
+          "cases": 2,
+          "expect": "2/6",
+          "hit_rate": 0.333,
+          "mentions_avg": 1.0,
+          "rag_calls": 2,
+          "llm_calls": 4,
+          "tokens": 16817,
+          "answer_len_avg": 189,
+          "false_empty": 0
+        },
+        "graph_dependent": {
+          "cases": 3,
+          "expect": "8/10",
+          "hit_rate": 0.8,
+          "mentions_avg": 5.0,
+          "rag_calls": 18,
+          "llm_calls": 16,
+          "tokens": 74678,
+          "answer_len_avg": 383,
+          "false_empty": 0
+        }
+      }
+    }
+  }
+}

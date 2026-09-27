@@ -141,6 +141,8 @@ class VectorStore:
                 "node_name": row["node_name"],
                 "heading": row["heading"],
                 "content": row["content"],
+                # chunk_index 供混合检索拼融合主键（{node_id}#{chunk_index}），与 whoosh 路对齐
+                "chunk_index": row["chunk_index"],
                 "score": round(score, 4),
             })
 

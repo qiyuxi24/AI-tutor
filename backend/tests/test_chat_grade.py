@@ -34,14 +34,16 @@ class _FakeKg:
         self._nodes = nodes or {}
         self._mastery_fails = mastery_fails
         self.mastery_updates = []   # [(node_id, mastery)]
+        self.mastery_meta = []      # [(reason, evidence)] —— KG-D4 事件元信息
 
     def get_node(self, node_id):
         return self._nodes.get(node_id)
 
-    def update_node_info(self, node_id, data, caller="human"):
+    def update_node_info(self, node_id, data, caller="human", **meta):
         if self._mastery_fails:
             raise PermissionError("人类创建的节点")
         self.mastery_updates.append((node_id, data.get("mastery")))
+        self.mastery_meta.append((meta.get("mastery_reason"), meta.get("mastery_evidence")))
         self._nodes.setdefault(node_id, {})["mastery"] = data.get("mastery")
 
 
@@ -88,6 +90,18 @@ def test_grade_answer_wrong_keeps_mastery(tmp_path):
     assert "答错" in out
     assert kg.mastery_updates == []                  # 不扣分
     assert "不要直接给出答案" in out
+
+
+def test_grade_answer_mastery_carries_event_evidence(tmp_path):
+    """KG-D4：判分抬升掌握度时带上事件元信息（reason=quiz_correct + 题目 id 作为证据）。"""
+    store = _store(tmp_path)
+    qid = _seed_question(store, source="chat", question_text="栈的特点是什么？",
+                         knowledge_point="stack")
+
+    kg = _FakeKg({"stack": {"id": "stack", "name": "栈", "mastery": 20}})
+    _run(chat_grade.grade_pending_answer(kg, "A", store=store))
+
+    assert kg.mastery_meta == [("quiz_correct", f"question:{qid}")]
 
 
 def test_grade_answer_mastery_capped_at_100():

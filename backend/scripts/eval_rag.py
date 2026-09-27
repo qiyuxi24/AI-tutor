@@ -7,8 +7,10 @@
 对比四种检索策略：
   - vector : 纯向量（text-embedding-v4 / mock hash）
   - bm25   : 纯稀疏关键词（whoosh bigram）
-  - hybrid : 宽召回 Top-30 + RRF 融合（当前生产默认）
-  - fuse   : 线性加权融合（alpha=0.6 向量 / 0.4 BM25）
+  - hybrid : 宽召回 Top-30 + RRF 排名融合
+  - fuse   : 线性加权融合（alpha=0.6 向量 / 0.4 BM25）—— 2026-09-23 起为生产默认
+             （真实嵌入实测 1000 query：fuse R@1 0.979 / MRR 0.9878 >
+               RRF 0.971 / 0.9828；见 eval_data/report_api.json）
 
 用法：
     python scripts/eval_rag.py --embed mock                  # 确定性 hash 向量，零网络，秒级
@@ -32,12 +34,26 @@ import numpy as np
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
-from app.core.hybrid_search.fusion import fuse, rrf_fuse  # noqa: E402
-from app.core.kb.kb_manager import KbManager  # noqa: E402
+from app.core.hybrid_search.fusion import DEFAULT_ALPHA, fuse, rrf_fuse  # noqa: E402
+from app.core.kb.kb_manager import MIN_SCORE, KbManager  # noqa: E402
 
 EVAL_USER = 990001
 RECALL_TOP_K = 30
 RRF_MIN_SCORE = 0.25
+
+
+def gated_fuse(vec_results: list[dict], sparse_results: list[dict]) -> list[dict]:
+    """
+    生产默认口径 = 加权融合 + **各路自己的**质量闸门（与 `kb_manager.search` 逐行一致）。
+
+    注意别退回"卡融合分"：单腿命中时融合分只占 alpha 或 (1-alpha) 的份额，
+    卡融合分会把"只有 BM25 命中"的文档整条误杀（2026-09-23 回归实测到的坑）。
+    """
+    bm25_ids = {r.get("chunk_id") for r in sparse_results}
+    vec_ok = {r.get("chunk_id") for r in vec_results if r.get("score", 0) >= MIN_SCORE}
+    fused = fuse(vec_results, sparse_results, alpha=DEFAULT_ALPHA)
+    return [r for r in fused
+            if r.get("chunk_id") in bm25_ids or r.get("chunk_id") in vec_ok]
 
 
 # ────────────────────────────────────────────
@@ -68,7 +84,9 @@ def load_cmrc2018(path: Path) -> tuple[list[dict], list[dict]]:
     """解析 trial 集。返回 (docs, queries)。
 
     docs: [{ctx_id, title, text}]
-    queries: [{query_id, query, doc_idx}]  doc_idx 指向 docs 下标（ground truth）
+    queries: [{query_id, query, answer, doc_idx}]  doc_idx 指向 docs 下标（ground truth）
+
+    answer 供"图谱通路段落级 gold"使用（`eval_graph_rag.py`）；kb 评测不读该字段。
     """
     raw = json.loads(path.read_text(encoding="utf-8"))
     docs, queries = [], []
@@ -79,9 +97,11 @@ def load_cmrc2018(path: Path) -> tuple[list[dict], list[dict]]:
         idx = len(docs)
         docs.append({"ctx_id": doc.get("context_id", idx), "title": doc.get("title", ""), "text": text})
         for qa in doc.get("qas", []):
+            answers = qa.get("answers") or ([qa["answer"]] if qa.get("answer") else [])
             queries.append({
                 "query_id": qa.get("query_id", ""),
                 "query": qa.get("query_text", "").strip(),
+                "answer": (answers[0] if answers else "").strip(),
                 "doc_idx": idx,
             })
     queries = [q for q in queries if q["query"]]
@@ -143,10 +163,10 @@ async def run(manager: KbManager, queries, mapping, mode: str, limit: int) -> tu
 
         _merge(metrics["vector"], *_hit(vres))
         _merge(metrics["bm25"], *_hit(bres))
-        # hybrid = 生产默认（宽召回 + RRF 融合）
+        # hybrid = RRF 排名融合（对照组）
         _merge(metrics["hybrid"], *_hit(rrf_fuse([vres, bres], min_score=RRF_MIN_SCORE)))
-        # fuse = 线性加权融合（alpha=0.6 向量 / 0.4 BM25）
-        _merge(metrics["fuse"], *_hit(fuse(vres, bres, alpha=0.6)))
+        # fuse = 生产默认（加权融合 + 各路质量闸门）
+        _merge(metrics["fuse"], *_hit(gated_fuse(vres, bres)))
 
         if i % 200 == 0 or i == len(queries):
             print(f"  [{i}/{len(queries)}] {time.time() - t0:.1f}s")

@@ -42,6 +42,13 @@
   - 未命中过的来源也在榜内（`times_referenced=0`），便于看出"采了却没人用"的源
 - [x] 测试：`test_source_stats.py`（19 例：store 累加/批量/排行/空库/排除题目源 + sources 命中/未命中/同文档去重/落库失败不抛/双路径/临时 loop + api 契约/空库/用户隔离/不遮蔽既有路由）
 
+### B3.4 正文预览 [改]（已完成 2026-09-23）
+- [x] `GET /kb/node/{node_id}/text`：读文件节点已解析正文（只读，超长截断 `KB_PREVIEW_MAX_CHARS=20_000`，返回 `chars/total_chars/truncated`）
+- [x] `kb_manager.get_document_text(user_id, node_id)`：读正文唯一出口（薄委托；用户隔离由 per-user `kb.db` 提供）
+- [x] 前端：`KbPanel` 文件节点「查看正文」按钮 + 双击文件 → `KbTextPreviewDialog.vue`（走 `renderMarkdown` 消毒，禁止绕过）
+- [x] 测试：`test_kb_node_text_api.py`（8 例：正常/截断/文件夹 400/不存在 404/同 id 不串号/空正文/401/薄委托）
+- [ ] **未做**：采集页资源列表条目入口（§4 的另一半）与采集前 URL 预览（P0）——方案见 `docs/采集_网页正文Markdown预览_方案.md` §12.5
+
 **Batch 3 验收**：开放题集灌入 quiz 可练；网页抓取 2-3 站可入库；来源排行可查。
 
 ---

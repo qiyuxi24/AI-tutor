@@ -38,7 +38,8 @@ GUIDANCE = """
 
 
 def handler(args, kg) -> str:
-    kg.update_node_info(args["node_id"], {"mastery": args["mastery"], "added_by": "ai"}, caller="ai")
+    kg.update_node_info(args["node_id"], {"mastery": args["mastery"], "added_by": "ai"},
+                        caller="ai", mastery_reason="self_report")
     return f"已将 {args['node_id']} 的掌握程度更新为 {args['mastery']}/100"
 
 

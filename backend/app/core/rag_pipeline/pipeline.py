@@ -15,16 +15,24 @@ RAG 管道：路由编排器（中间件）。
 - 不同源的结果各自带 source 标记，按分数降序合并
 - 同 content 去重（不同源可能命中相同文本）
 - 融合分数直接取各源得分（各源已归一化到约 0~1）
+- 开了 HyDE（RAG_HYDE_ENABLED=1）时会有多个 query → 改按排名 RRF 融合
+
+查询扩展（可选）：
+- HyDE 生成"假设答案"作为第二个 query，与原 query 各检索一遍（见 query_expansion.py）
 """
 
 import asyncio
 import logging
+from dataclasses import asdict, replace
 from typing import Optional
 
 logger = logging.getLogger("ai-tutor")
 
+from app.core.config import settings
+from app.core.hybrid_search.fusion import rrf_fuse
 from app.core.rag_pipeline.types import RagContext, RagHit
 from app.core.rag_pipeline import router
+from app.core.rag_pipeline.query_expansion import hyde_query
 from app.core.rag_pipeline.sources import RagSource, GraphRagSource, KbRagSource
 
 # 单个源检索超时（秒），防止某个源卡死拖慢整体
@@ -74,17 +82,28 @@ class RagPipeline:
         if not active:
             return []
 
-        # 并行检索各源，逐个带超时 + 异常隔离
+        # HyDE：假设答案当第二个 query（生成失败/未开 → 只有原 query）
+        queries = [ctx.query]
+        if settings.rag_hyde_enabled:
+            hypo = await hyde_query(ctx.query, ctx.user_id)
+            if hypo:
+                queries.append(hypo)
+
+        # 并行检索各源 × 各 query，逐个带超时 + 异常隔离
         # return_exceptions=True：任一源异常也不会传播，彻底保证不阻塞主对话
         results = await asyncio.gather(
-            *[self._safe_retrieve(source, ctx) for source in active],
+            *[self._safe_retrieve(source, replace(ctx, query=q))
+              for source in active for q in queries],
             return_exceptions=True,
         )
         # 防御：即便出现异常对象（理论上 _safe_retrieve 已吞掉），也归一化为空列表
         results = [r if isinstance(r, list) else [] for r in results]
 
-        # 跨源融合 + 去重
-        return self._fuse([hit for batch in results for hit in batch])
+        if len(queries) == 1:
+            # 单 query：沿用按分排序 + 去重（各源分数已在源内归一化，可直接比）
+            return self._fuse([hit for batch in results for hit in batch])
+        # 多 query：不同 query 的分数不可比 → 按排名融合（RAG-Fusion 口径）
+        return _rrf_fuse(results)
 
     # ────────────────────────────────────────────
     #  内部
@@ -121,6 +140,25 @@ class RagPipeline:
 
         deduped.sort(key=lambda h: h.score, reverse=True)
         return deduped
+
+
+def _rrf_fuse(batches: list[list[RagHit]]) -> list[RagHit]:
+    """
+    多 query（原问题 + HyDE 假设答案）命中融合：按排名 RRF，复用 hybrid_search 的实现。
+
+    主键用 content（RagHit 没有跨源统一的 chunk_id，而 content 本就是去重键）。
+    """
+    payload = [
+        [{**asdict(h), "chunk_id": (h.content or "").strip()} for h in batch]
+        for batch in batches
+    ]
+    return [
+        RagHit(
+            source=r["source"], content=r["content"], score=r["score"],
+            heading=r["heading"], path=r["path"], metadata=r["metadata"],
+        )
+        for r in rrf_fuse(payload)
+    ]
 
 
 # 全局 RAG 管道单例（注册内置数据源）

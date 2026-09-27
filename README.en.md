@@ -115,8 +115,10 @@ User message → pure-rule routing (greetings / very short input skip RAG) → l
 copy .env.example .env
 notepad .env        # fill in LLM_API_KEY (MiniMax) / DASHSCOPE_API_KEY / SECRET_KEY
 
-# 3. Start backend and frontend
+# 3. Start (auto: container if Docker is available, otherwise local dev mode)
 .\start.ps1
+#    .\start.ps1 -Local          force local dev mode (hot reload + admin panel 8001/5174)
+#    .\start.ps1 -Docker -Force  force container mode and rebuild (-Port 8081 to change port)
 ```
 
 Then open http://localhost:5173 (an admin account is created on first start; **for production always set `DEFAULT_ADMIN_PASSWORD` in the root `.env`** — never expose the default `admin/admin123`, see the configuration table below).

@@ -1,4 +1,6 @@
-"""节点写入收口：四条写路径全部落 `KnowledgeGraph.create_node_with_content()`。
+"""节点写入收口：五条写路径全部落 `KnowledgeGraph.create_node_with_content()`。
+
+第五条（2026-09-22）= AI 抓取的网页存档 `knowledge_writer.create_node_from_webpage`（origin="web"）。
 
 背景：原先「写一个节点 MD」有 4 套内联模板散在 knowledge_writer / kb/graph_generator /
 api/v1/knowledge.py（create_node、decompose），改一处忘一处
@@ -6,7 +8,7 @@ api/v1/knowledge.py（create_node、decompose），改一处忘一处
 
 两条防线：
 1. 行为 —— 模板只剩一份（来源标注降级成参数）、ID 冲突不留孤儿 MD、同名并轨不重复建节点；
-2. 结构 —— 四条路径各自**原样传递自己的 origin**。将来有人新增第五条写路径时，
+2. 结构 —— 五条路径各自**原样传递自己的 origin**。将来有人新增第六条写路径时，
    这条断言会逼他复用同一个模板，而不是再内联一套。
 
 全离线：不碰 LLM（各路径的归属判定被替换为直通），不碰真实 data/ 目录。
@@ -34,7 +36,7 @@ def kg(tmp_path):
 
 @pytest.fixture
 def origins(monkeypatch):
-    """记录四条路径实际传给原子方法的 origin（结构断言用）"""
+    """记录五条路径实际传给原子方法的 origin（结构断言用）"""
     seen = []
     monkeypatch.setattr(KnowledgeGraph, "create_node_with_content",
                         lambda self, node_data, content="", origin="manual":
@@ -176,7 +178,7 @@ def test_dedup_status_reported_when_embed_unavailable(kg, monkeypatch):
     assert stats["dedup_status"] == "degraded"
 
 
-# ── 结构：四条路径都走同一个落点 ────────────────────────
+# ── 结构：五条路径都走同一个落点 ────────────────────────
 
 def test_ai_write_layer_origin(kg, origins):
     kw.create_node_from_ai(kg, "n1", "队列", subject="数据结构", board="线性表")
@@ -216,6 +218,13 @@ def test_decompose_api_origin(kg, origins, monkeypatch):
     asyncio.run(kapi.decompose_question(kapi.DecomposeRequest(question="怎么学队列"), user_id=1))
 
     assert origins == ["decompose"]
+
+
+def test_webpage_archive_origin(kg, origins):
+    """第五条写路径：AI 抓取的网页存档（fetch_webpage → create_node_from_webpage）"""
+    kw.create_node_from_webpage(kg, "https://example.com/a", title="示例页", content="正文")
+
+    assert origins == ["web"]
 
 
 # ── 工具 ──────────────────────────────────────────────

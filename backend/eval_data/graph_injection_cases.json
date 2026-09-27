@@ -95,6 +95,36 @@
       "expect": ["ab_recursion", "ab_iteration", "ab_recursion_stack"]
     },
     {
+      "id": "g3",
+      "kind": "general",
+      "question": "什么是记忆化搜索？它和普通递归的区别在哪？",
+      "expect": ["ab_memo", "ab_recursion"]
+    },
+    {
+      "id": "g4",
+      "kind": "general",
+      "question": "函数被调用的时候，内存里发生了什么？",
+      "expect": ["ab_function_call", "ab_recursion_stack"]
+    },
+    {
+      "id": "g5",
+      "kind": "general",
+      "question": "动态规划自顶向下和自底向上两条路线，分别适合什么情况？",
+      "expect": ["ab_dp", "ab_memo"]
+    },
+    {
+      "id": "g6",
+      "kind": "general",
+      "question": "递归调用栈为什么会溢出？怎么排查这类报错？",
+      "expect": ["ab_recursion_stack", "ab_recursion_base", "ab_recursion"]
+    },
+    {
+      "id": "g7",
+      "kind": "general",
+      "question": "迭代和递归可以互相改写吗？改写的代价是什么？",
+      "expect": ["ab_iteration", "ab_recursion", "ab_recursion_stack"]
+    },
+    {
       "id": "d1",
       "kind": "graph_dependent",
       "question": "结合我的知识图谱，我下一步应该优先学什么？请说明你是根据我已经学过、掌握到什么程度的哪些内容做出这个判断的。",
@@ -111,6 +141,30 @@
       "kind": "graph_dependent",
       "question": "我想开始学动态规划。看看我的知识图谱，我是否已经具备了必要的前置知识？还缺什么？",
       "expect": ["ab_dp", "ab_memo", "ab_iteration"]
+    },
+    {
+      "id": "d4",
+      "kind": "graph_dependent",
+      "question": "看看我的知识图谱，我现在就上手动态规划会不会太早？",
+      "expect": ["ab_dp", "ab_memo", "ab_recursion"]
+    },
+    {
+      "id": "d5",
+      "kind": "graph_dependent",
+      "question": "我的知识图谱里哪个知识点最薄弱？请按掌握度从低到高排一下，并给出补救顺序。",
+      "expect": ["ab_dp", "ab_memo", "ab_recursion_stack"]
+    },
+    {
+      "id": "d6",
+      "kind": "graph_dependent",
+      "question": "我想巩固递归这一块，根据我的图谱先复习哪个节点比较合适？",
+      "expect": ["ab_recursion_stack", "ab_recursion_base", "ab_recursion"]
+    },
+    {
+      "id": "d7",
+      "kind": "graph_dependent",
+      "question": "按照我的知识图谱，从函数调用一路到动态规划，学习路径大概是什么样？",
+      "expect": ["ab_function_call", "ab_recursion", "ab_memo", "ab_dp"]
     }
   ]
 }

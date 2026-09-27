@@ -29,6 +29,7 @@
         :expand-on-click-node="false"
         highlight-current
         @node-click="handleNodeClick"
+        @node-dblclick="handleNodeDblClick"
       >
         <template #default="{ data }">
           <div class="kb-node" :class="{ selected: selectedNode?.id === data.id }">
@@ -38,6 +39,14 @@
             </span>
             <span class="kb-node-name">{{ data.name }}</span>
             <span class="kb-node-actions">
+              <button
+                v-if="data.type === 'file'"
+                class="kb-mini-btn"
+                title="查看正文"
+                @click.stop="openPreview(data)"
+              >
+                <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+              </button>
               <button class="kb-mini-btn" title="放入上下文" @click.stop="setContext(data)">
                 <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M13 7h-2v4H7v2h4v4h2v-4h4v-2h-4V7zm-1-5C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/></svg>
               </button>
@@ -71,6 +80,17 @@
         <el-button type="primary" :loading="creating" @click="createFolder">创建</el-button>
       </template>
     </el-dialog>
+
+    <!-- 文件正文预览（只读；采集到的网页原文 / 上传文档的解析文本） -->
+    <KbTextPreviewDialog
+      v-model:visible="previewVisible"
+      :name="preview.name"
+      :markdown="preview.markdown"
+      :chars="preview.chars"
+      :total-chars="preview.totalChars"
+      :truncated="preview.truncated"
+      :loading="previewLoading"
+    />
   </div>
 </template>
 
@@ -83,7 +103,9 @@ import {
   uploadKbFile,
   deleteKbNode,
   getKbContext,
+  getKbNodeText,
 } from '../api/kb.js'
+import KbTextPreviewDialog from './KbTextPreviewDialog.vue'
 
 const treeRef = ref(null)
 const tree = ref([])
@@ -96,6 +118,11 @@ const uploading = ref(false)
 // 当前放入上下文的范围（单个文件或文件夹）
 const contextNode = ref(null)
 const contextLabel = ref('')
+
+// 正文预览（只读弹窗）
+const previewVisible = ref(false)
+const previewLoading = ref(false)
+const preview = ref({ name: '', markdown: '', chars: 0, totalChars: 0, truncated: false })
 
 const treeProps = {
   children: 'children',
@@ -118,6 +145,35 @@ async function loadTree() {
 
 function handleNodeClick(data) {
   selectedNode.value = data
+}
+
+/** 双击文件 = 看正文（与图谱里双击节点看详情的习惯一致）；文件夹双击不做事 */
+function handleNodeDblClick(data) {
+  if (data?.type === 'file') openPreview(data)
+}
+
+/** 拉取并弹出文件正文预览（只读；node_id 来自目录树，天然按用户隔离） */
+async function openPreview(data) {
+  if (!data || data.type !== 'file') return
+  preview.value = { name: data.name, markdown: '', chars: 0, totalChars: 0, truncated: false }
+  previewVisible.value = true
+  previewLoading.value = true
+  try {
+    const res = await getKbNodeText(data.id)
+    const d = res.data || {}
+    preview.value = {
+      name: d.name || data.name,
+      markdown: d.markdown || '',
+      chars: d.chars || 0,
+      totalChars: d.total_chars || 0,
+      truncated: !!d.truncated,
+    }
+  } catch (e) {
+    previewVisible.value = false
+    ElMessage.warning(e.response?.data?.detail || e.message || '读取正文失败')
+  } finally {
+    previewLoading.value = false
+  }
 }
 
 function openCreateFolder() {

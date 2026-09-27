@@ -1,7 +1,7 @@
 """B3.2 web_page 适配器（全离线）：
 
 - 正文抽取漏斗：trafilatura 成功 / 主用失败 → readability 回退 / 双失败 → None
-- 站点授权映射 + 白名单（个人 L0~L2 / 商用 L0，默认 L2）
+- 站点授权映射 + 白名单（个人 L0~L2 / 商用 L0；**未登记默认 L3 不可采**）
 - 用户给定 URL → 候选 → 下载抽取（httpx.MockTransport，SSRF 校验注入放行以免 DNS）
 
 [需网络] 真网页端到端（白名单站点 1 条）另行手动联调。
@@ -114,22 +114,24 @@ def test_extract_returns_none_when_both_raise(monkeypatch):
 
 # ── 4. 站点授权映射 / 白名单 ────────────────────
 
-def test_license_default_l2_for_unlisted_site():
-    assert license_for_url("https://www.example.com/a/b") == "L2"
-    assert license_for_url("") == "L2"
+def test_license_default_l3_for_unlisted_site():
+    """未登记站点 = 版权不明 → L3（只采开源来源：要采必须先入开放来源表）"""
+    assert license_for_url("https://www.example.com/a/b") == "L3"
+    assert license_for_url("") == "L3"
 
 
 def test_license_mapping_matches_suffix_and_subdomain():
     assert license_for_url("https://openstax.org/books/calculus") == "L0"
     assert license_for_url("https://cn.smartedu.cn/course/1") == "L1"
     # 后缀防误伤：非该域名后缀不命中
-    assert license_for_url("https://notopenstax.org/x") == "L2"
+    assert license_for_url("https://notopenstax.org/x") == "L3"
 
 
 def test_whitelist_follows_mode_rules():
-    assert is_allowed("https://www.example.com/a", "personal") is True   # L2 个人可采
-    assert is_allowed("https://www.example.com/a", "commercial") is False  # 商用仅 L0
-    assert is_allowed("https://openstax.org/x", "commercial") is True
+    assert is_allowed("https://openstax.org/x", "personal") is True      # L0 个人可采
+    assert is_allowed("https://openstax.org/x", "commercial") is True    # 商用仅 L0
+    assert is_allowed("https://www.example.com/a", "personal") is False  # 未登记 L3 不可采
+    assert is_allowed("https://www.example.com/a", "commercial") is False
 
 
 def test_l3_site_refused_even_in_personal_mode(monkeypatch):
@@ -146,7 +148,7 @@ def test_registered_instance_and_lazy_http():
     adapter = get_adapter("web_page")
     assert isinstance(adapter, WebPageAdapter)
     assert adapter.name == "web_page"
-    assert adapter.license_level == "L2"
+    assert adapter.license_level == "L3"  # 未登记站点的兜底等级（不可采）
     assert adapter._http is None  # 惰性：注册实例不建 HTTP 客户端
 
 
@@ -158,12 +160,18 @@ def test_search_has_no_discovery_channel():
 
 def test_candidate_from_url_defaults_title_to_url():
     adapter = WebPageAdapter(guard=lambda url: None)
-    cand = adapter.candidate_from_url("https://www.example.com/lesson/1")
+    cand = adapter.candidate_from_url("https://openstax.org/lesson/1")
     assert cand is not None
     assert cand.source == "web_page"
-    assert cand.license_level == "L2"
-    assert cand.title == "https://www.example.com/lesson/1"
+    assert cand.license_level == "L0"
+    assert cand.title == "https://openstax.org/lesson/1"
     assert cand.meta["adapter"] == "web_page"
+
+
+def test_candidate_from_url_refuses_unlisted_site():
+    """未登记站点（L3）构造不出候选 —— 「只采开源来源」在候选阶段的落点"""
+    adapter = WebPageAdapter(guard=lambda url: None)
+    assert adapter.candidate_from_url("https://www.example.com/lesson/1") is None
 
 
 def test_candidate_from_url_rejects_blocked_and_empty():
@@ -179,7 +187,7 @@ def test_fetch_downloads_and_extracts_markdown():
     async def go():
         adapter, http = _adapter(lambda request: httpx.Response(200, text=PAGE_HTML))
         try:
-            cand = CollectCandidate(title="二叉树", source_url="https://example.org/tree")
+            cand = CollectCandidate(title="二叉树", source_url="https://openstax.org/tree")
             return await adapter.fetch(cand)
         finally:
             await http.close()
