@@ -101,6 +101,8 @@ class ErrorCode:
     QUIZ_GRADE_FAILED      = ("E-QUIZ-003", "判分失败，请稍后重试")
     QUIZ_NOT_FOUND         = ("E-QUIZ-004", "题目不存在")
     QUIZ_INVALID_TYPE      = ("E-QUIZ-005", "不支持的题型")
+    # 节点试题链接列表加载失败（侧边栏数据源）；端点是**降级语义**：失败返回空列表不抛
+    QUIZ_LIST_FAILED       = ("E-QUIZ-006", "题目列表加载失败")
 
     # ── 资源采集模块 (E-COLL) ──
     COLL_TASK_NOT_FOUND = ("E-COLL-001", "采集任务不存在")

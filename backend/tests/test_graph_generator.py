@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from app.core.kb import graph_generator as gg
+from app.core.kb import section_generator as sg
 
 
 class FakeKb:
@@ -337,29 +338,38 @@ def _skeleton(kg, node_id: str, name: str, source_ref: str = "") -> None:
          "added_by": "ai", "source_ref": source_ref}, origin="book")
 
 
+def _fake_section_llm(monkeypatch, body: str):
+    """替换 `section_generator.call_llm`（规划固定一节、成文返回 body）；返回收到的 prompt 列表。"""
+    prompts: list[str] = []
+
+    async def fake_call_llm(system, messages, **kw):
+        prompts.append(messages[0]["content"])
+        if kw.get("kind") == "kb_section_plan":
+            return ('{"sections":[{"title":"定义","kind":"definition","brief":"是什么"}],'
+                    '"summary":""}')
+        return body
+
+    monkeypatch.setattr(sg, "call_llm", fake_call_llm)
+    return prompts
+
+
 def test_fill_pending_nodes_resumes_from_source_ref(monkeypatch, kg):
-    """按 source_ref 找回章节原文并填充：骨架 → filled，章节标题原样传给填充 LLM"""
+    """按 source_ref 找回章节原文并填充：骨架 → 小节化 + filled，原文进生成材料"""
     book_text = "第1章　概述\n\n" + "字" * 3000
     _skeleton(kg, "queue", "队列", gg._make_source_ref(7, "第1章　概述"))
 
     gen = gg.GraphGenerator(user_id=1)
     monkeypatch.setattr(gen, "_load_book_texts",
                         lambda uid, ids: [{"node_id": 7, "name": "b", "text": book_text}])
-    seen = {}
-
-    async def _fake_fill(subject, section, text, briefs):
-        seen["section"], seen["text"] = section, text
-        return {"nodes": [{"id": "queue", "content": "队列正文内容。" * 100}]}
-
-    monkeypatch.setattr(gen, "_call_fill_llm", _fake_fill)
+    prompts = _fake_section_llm(monkeypatch, "队列正文内容。" * 100)
 
     result = asyncio.run(gen.fill_pending_nodes(kg, "数据结构"))
 
     assert result["status"] == "ok"
     assert result["filled"] == ["队列"]
     assert kg.get_node("queue")["content_status"] == "filled"
-    assert seen["section"] == "第1章　概述", "章节标题应原样带去填充（prompt 里要标来源）"
-    assert "字" in seen["text"], "喂给填充 LLM 的应是重读回来的原文"
+    assert kg.has_sections("queue"), "续填也走小节化（与建图阶段②同一路径）"
+    assert any("字" in p for p in prompts), "喂给生成管线的应是重读回来的原文"
 
 
 def test_fill_pending_nodes_skips_without_source_or_missing_section(monkeypatch, kg):
@@ -372,11 +382,7 @@ def test_fill_pending_nodes_skips_without_source_or_missing_section(monkeypatch,
     monkeypatch.setattr(gen, "_load_book_texts",
                         lambda uid, ids: [{"node_id": 7, "name": "b",
                                            "text": "第1章　概述\n\n" + "字" * 3000}])
-
-    async def _fake_fill(subject, section, text, briefs):
-        return {"nodes": [{"id": "ok_node", "content": "正常正文。" * 100}]}
-
-    monkeypatch.setattr(gen, "_call_fill_llm", _fake_fill)
+    _fake_section_llm(monkeypatch, "正常正文。" * 100)
 
     result = asyncio.run(gen.fill_pending_nodes(kg, "数据结构"))
 

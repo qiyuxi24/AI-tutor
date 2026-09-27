@@ -14,7 +14,11 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
   DELETE /knowledge/board                    - 解散板块（?subject=&board=，知识点保留）
   GET    /knowledge/boards                   - 获取某学科下的板块列表（?subject=）
   POST   /knowledge/graph/fill               - 断点续填（补齐待填充骨架节点的正文）
-  GET    /knowledge/node/{node_id}           - 获取节点详情
+  GET    /knowledge/node/{node_id}           - 获取节点详情（含小节元数据，无正文）
+  GET    /knowledge/node/{node_id}/section/{section_id}       - 读取单个小节正文
+  POST   /knowledge/node/{node_id}/sections/generate          - 触发节点小节化生成管线
+  DELETE /knowledge/node/{node_id}/section/{section_id}       - 删除单个小节
+  GET    /knowledge/node/{node_id}/quizzes                    - 获取节点试题链接（侧边栏，含小节路由）
   POST   /knowledge/node                     - 创建节点（手动，ID 自动生成）
   PUT    /knowledge/node/{node_id}           - 更新节点（含 MD 内容）
   PUT    /knowledge/node/{node_id}/info      - 更新节点基本信息
@@ -47,7 +51,9 @@ from app.core.prerequisite import (
     DEFAULT_MAX_PARENTS, DEFAULT_THRESHOLD, apply_candidates, infer_prerequisites,
 )
 from app.core import graph_middleware
-from app.api.v1.kb import is_graph_building
+from app.core.kb import graph_generator
+from app.core.error_codes import ErrorCode, log_error
+from app.core.quiz.quiz_store import quiz_manager
 from app.core.auth import get_current_user, get_current_user_from_token
 from app.core.event_bus import publish, subscribe
 from app.core.graph_analyzer import GraphAnalyzer
@@ -73,6 +79,14 @@ class RenameBoardRequest(BaseModel):
     subject: str = Field(..., min_length=1, max_length=100, description="所属学科名")
     old_name: str = Field(..., min_length=1, max_length=100, description="现板块名")
     new_name: str = Field(..., min_length=1, max_length=100, description="新板块名")
+
+
+class GenerateSectionsRequest(BaseModel):
+    """节点小节化生成请求（`POST /knowledge/node/{node_id}/sections/generate`）。
+
+    整个请求体可选 —— 缺省 / 空体等价 `force=false`（不覆盖已存在的小节）。
+    """
+    force: bool = Field(default=False, description="true = 覆盖已生成的小节重新生成")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -138,7 +152,7 @@ async def delete_graph(subject: str = Query(..., description="要删除的学科
     「未分类」是后端合成的分组（无学科归属的节点），不是真实学科 —— 传它直接 400，
     避免"点一下把散落节点全删了"；空串同理。
 
-    建图进行中（GQ-15 互斥，见 `kb.is_graph_building`）拒绝：否则建图后段会把刚删掉的
+    建图进行中（GQ-15 互斥，见 `graph_generator.is_graph_building`）拒绝：否则建图后段会把刚删掉的
     节点写回来，出现"删了一半又长出来"的状态。删除本身瞬时，不需要自己占锁。
 
     RAG 索引按节点逐个清理（与 `DELETE /knowledge/node/{node_id}` 同一口径）；
@@ -150,7 +164,7 @@ async def delete_graph(subject: str = Query(..., description="要删除的学科
             status_code=400,
             detail="请指定要删除的学科名（「未分类」不是学科，不能整科删除）",
         )
-    if is_graph_building(user_id):
+    if graph_generator.is_graph_building(user_id):
         raise HTTPException(status_code=409, detail="该学科正在建图，请等建图完成后再删除")
 
     kg = KnowledgeGraph(user_id=user_id)
@@ -279,8 +293,7 @@ async def fill_pending_graph(subject: str = Query(..., description="课名，如
     """
     kg = KnowledgeGraph(user_id=user_id)
     try:
-        from app.core.kb.graph_generator import GraphGenerator  # 延迟导入：避免拖慢 API 启动
-        result = await GraphGenerator(user_id=user_id).fill_pending_nodes(kg, subject)
+        result = await graph_generator.GraphGenerator(user_id=user_id).fill_pending_nodes(kg, subject)
         if result["status"] == "ok" and result["filled"]:
             publish("graph_updated")
         return result
@@ -290,7 +303,17 @@ async def fill_pending_graph(subject: str = Query(..., description="课名，如
 
 @router.get("/knowledge/node/{node_id}")
 async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)):
-    """返回单个节点的完整信息，包括 MD 文件内容、前置/关联节点"""
+    """返回单个节点的完整信息，包括 MD 文件内容、前置/关联节点，以及小节元数据。
+
+    小节化（内容层，见 docs/知识图谱/知识图谱_节点小节化_设计与实现方案.md §3）：
+    小节化节点的正文分散在多个平行 MD 里，走 `GET .../section/{section_id}` 按需读；
+    本端点只回**元数据**列表（`id/title/kind/status/updated_at`，**不含正文**），前端
+    据此渲染左侧小节侧边栏。
+
+    **兼容铁律（D5）**：老节点（无 manifest）必须行为不变 —— `has_sections=false`、
+    `sections=[]`、`content` 仍返回单文件全文。小节化节点没有概述主文件（D1），
+    故其 `content` 为空串。
+    """
     kg = KnowledgeGraph(user_id=user_id)
     try:
         node = kg.get_node(node_id)
@@ -303,6 +326,19 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
         if file_path.exists():
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
+
+        # 小节元数据（不含正文）；老节点无 manifest → has_sections=False、sections=[]
+        has_sections = kg.has_sections(node_id)
+        sections = [
+            {
+                "id": s.get("id"),
+                "title": s.get("title", ""),
+                "kind": s.get("kind", ""),
+                "status": s.get("status", ""),
+                "updated_at": s.get("updated_at", ""),
+            }
+            for s in (kg.list_sections(node_id) if has_sections else [])
+        ]
 
         # 前置依赖
         prerequisites = kg.get_prerequisites(node_id)
@@ -322,6 +358,8 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
             # 所属学科：前端据此切到对应学科再聚焦（图谱一次只渲染一个学科）
             "subject": kg.node_subject(node) or graph_middleware.SUBJECT_UNCLASSIFIED,
             "content": content,
+            "has_sections": has_sections,
+            "sections": sections,
             "tags": node.get("tags", []),
             "prerequisites": prerequisites,
             "related_nodes": related_ids,
@@ -331,6 +369,127 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
             "summary": node.get("summary", ""),
             "file_path": node.get("file_path", ""),
         }
+    finally:
+        kg.close()
+
+
+@router.get("/knowledge/node/{node_id}/section/{section_id}")
+async def get_node_section(node_id: str, section_id: str,
+                           user_id: int = Depends(get_current_user)):
+    """读取节点下**单个小节**的正文（小节化节点专用）。
+
+    小节不进图谱结构，只是节点文件夹里的平行 MD + manifest 路由（见设计 §3）——
+    点开哪节读哪节，正文永不全量加载。老节点（无 manifest）没有任何小节。
+
+    返回：`{"id","title","kind","status","content"}`；节点或小节不存在 → 404。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        if kg.get_node(node_id) is None:
+            raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
+        section = next((s for s in kg.list_sections(node_id)
+                        if s.get("id") == section_id), None)
+        if section is None:
+            raise HTTPException(status_code=404, detail=f"小节不存在：{section_id}")
+        return {
+            "id": section.get("id"),
+            "title": section.get("title", ""),
+            "kind": section.get("kind", ""),
+            "status": section.get("status", ""),
+            "content": kg.read_section(node_id, section_id),
+        }
+    finally:
+        kg.close()
+
+
+@router.post("/knowledge/node/{node_id}/sections/generate")
+async def generate_node_sections(node_id: str,
+                                 req: GenerateSectionsRequest | None = Body(default=None),
+                                 user_id: int = Depends(get_current_user)):
+    """触发节点**小节化生成管线**（阶段①规划 + 阶段②逐节成文，见设计 §6）。
+
+    请求体可选：`{"force": true}` 覆盖已生成的小节重新生成；缺省 / 空体 = false。
+    生成是节点建成后的**第二跳深化**，独立于建图管线（§6.3）；单节失败只标 `failed`，
+    不拖垮整批。
+
+    返回：直接透传 `SectionGenerator.generate` 的
+        `{"status","created","failed","message"}`；节点不存在 → 404。
+
+    小节不进图谱结构、不影响图渲染；仅阶段①回写 `nodes.summary` 会让地图标签变新鲜，
+    故成功后发一次 `graph_updated`（保守口径，与 `fill_pending_graph` 一致）。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        if kg.get_node(node_id) is None:
+            raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
+        from app.core.kb.section_generator import SectionGenerator  # 延迟导入：避免拖慢 API 启动
+        result = await SectionGenerator(user_id).generate(
+            kg, node_id, force=bool(req.force) if req else False)
+        if result.get("status") == "ok" and result.get("created"):
+            publish("graph_updated")
+        return result
+    finally:
+        kg.close()
+
+
+@router.delete("/knowledge/node/{node_id}/section/{section_id}")
+async def delete_node_section(node_id: str, section_id: str,
+                              user_id: int = Depends(get_current_user)):
+    """删除节点下的**单个小节**（删该节 MD + manifest 条目）。
+
+    **不删节点本体**：小节只是节点文件夹里的平行 MD，图谱里的节点与边一概不动。
+    要删知识点本体，用 `DELETE /knowledge/node/{node_id}`。
+
+    返回：`{"deleted": true}`；节点或小节不存在 → 404。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        # delete_section 返回 bool：无 manifest / 无此节 → False（口径见 KnowledgeGraph）
+        if not kg.delete_section(node_id, section_id):
+            raise HTTPException(status_code=404, detail=f"小节不存在：{section_id}")
+        return {"deleted": True}
+    finally:
+        kg.close()
+
+
+@router.get("/knowledge/node/{node_id}/quizzes")
+async def get_node_quizzes(node_id: str, user_id: int = Depends(get_current_user)):
+    """列出该节点关联的**试题链接**（节点小节化侧边栏数据源）。
+
+    数据来源两处拼装（`questions.knowledge_point` 存的就是图谱**节点 id**，
+    见 `core/quiz/chat_quiz.py`）：
+    1. 题库：`QuizStore.list_by_knowledge_point(node_id)` 取该节点的题（按 id 倒序）；
+    2. 路由：`manifest.quizzes` 把题挂到某个小节（`str(题目id) == str(ref.id)` 匹配，
+       与 `add_quiz_ref` 写入的形态无关），命中 → 回填 `section_id`，未挂号 → `""`。
+
+    返回：`{"node_id", "quizzes": [{...题目字段..., "section_id"}]}`；节点不存在 → 404。
+
+    **降级铁律**：题库不可用 / 查询异常一律返回 `quizzes: []` 并 `log_error` ——
+    侧边栏只是节点详情页的一块附属信息，绝不能因为题库故障把详情页打挂。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        if kg.get_node(node_id) is None:
+            raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
+
+        # manifest 的 quizzes 路由：题 id(str) → section_id（无 manifest → 空路由）
+        manifest = kg.read_manifest(node_id) or {}
+        section_of = {
+            str(ref.get("id")): (ref.get("section_id") or "")
+            for ref in (manifest.get("quizzes") or [])
+        }
+
+        quizzes: list[dict] = []
+        try:
+            store = quiz_manager._get_store(user_id)
+            for q in store.list_by_knowledge_point(node_id):
+                q["section_id"] = section_of.get(str(q.get("id")), "")
+                quizzes.append(q)
+        except Exception as e:
+            log_error(ErrorCode.QUIZ_LIST_FAILED, detail=str(e),
+                      context={"user_id": user_id, "node_id": node_id}, exception=e)
+
+        return {"node_id": node_id, "quizzes": quizzes}
     finally:
         kg.close()
 
@@ -822,9 +981,8 @@ async def export_knowledge(subject: str | None = Query(None, description="可选
                 lines.append(f"> {n['summary']}")
             lines.append("")
 
-            md_path = kg.nodes_dir / f"{n['id']}.md"
-            if md_path.exists():
-                md_content = md_path.read_text(encoding="utf-8").strip()
+            md_content = kg.node_content_text(n["id"]).strip()
+            if md_content:
                 if md_content.startswith("#"):
                     md_content = "\n".join(md_content.split("\n")[1:]).strip()
                 lines.append(md_content)

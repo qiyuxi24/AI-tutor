@@ -192,6 +192,56 @@ def body_of(nodes_dir: Path, user_id, node_id: str) -> str:
     return "\n".join(body).strip()
 
 
+def section_paths(nodes_dir: Path, user_id, node_id: str) -> list[Path]:
+    """小节化节点的 manifest 里登记的小节 MD 路径（未小节化 / manifest 损坏 → []）。
+
+    小节化节点**没有**主 MD（设计 D1），正文全在小节文件里，所以体检的正文口径要把它算进来。
+    """
+    d = Path(nodes_dir) / str(user_id) / node_id
+    manifest = read_manifest_file(d / "manifest.json")
+    if manifest is None:
+        return []
+    return [d / s["file"] for s in manifest.get("sections") or []
+            if isinstance(s, dict) and s.get("file")]
+
+
+def read_manifest_file(path: Path) -> dict | None:
+    """读 manifest.json（不存在或 JSON 损坏 → None，不抛）"""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def section_metrics(nodes: list[dict], nodes_dir: Path) -> dict:
+    """节点小节化体检：小节化节点数 / 小节总数 / 失败与缺失文件 / 孤儿 MD / 坏 manifest。
+
+    ponytail: 每个节点一次 manifest 读，节点上千也只有毫秒级；上万再谈索引。
+    """
+    out = {"nodes": 0, "sections": 0, "failed": 0, "broken": 0,
+           "missing_file": 0, "orphan_md": 0}
+    for n in nodes:
+        d = Path(nodes_dir) / str(n.get("user_id")) / n["id"]
+        mpath = d / "manifest.json"
+        if not mpath.exists():
+            continue
+        out["nodes"] += 1
+        manifest = read_manifest_file(mpath)
+        if manifest is None:
+            out["broken"] += 1
+            continue
+        sections = [s for s in (manifest.get("sections") or []) if isinstance(s, dict)]
+        out["sections"] += len(sections)
+        out["failed"] += sum(1 for s in sections if s.get("status") == "failed")
+        refs = {s.get("file") for s in sections if s.get("file")}
+        out["missing_file"] += sum(1 for f in refs if not (d / f).exists())
+        out["orphan_md"] += sum(1 for p in d.glob("*.md") if p.name not in refs)
+    return out
+
+
 def subject_of(node: dict) -> str:
     """节点学科：优先 `nodes.subject` 列（KG-D1 权威），回退 tags 首个非难度标签。
 
@@ -333,7 +383,14 @@ def audit(nodes: list[dict], edges: list[dict], nodes_dir: Path,
     doc_marks: `load_doc_node_marks()` 的结果（GQ-21 对齐率数据源）；None 视为「未就绪」。
     """
     ids = {n["id"] for n in nodes}
-    bodies = {n["id"]: body_of(nodes_dir, n.get("user_id"), n["id"]) for n in nodes}
+    # 正文口径：**有小节就只算小节正文**（内容层已在小节里，主 MD 对新建节点只剩骨架占位，
+    # 拿它当正文会把刚小节化的节点误判成空壳）；老节点没有小节才回落到单 MD。
+    bodies: dict[str, str] = {}
+    for n in nodes:
+        section_body = "\n".join(p.read_text(encoding="utf-8")
+                                 for p in section_paths(nodes_dir, n.get("user_id"), n["id"])
+                                 if p.exists())
+        bodies[n["id"]] = section_body or body_of(nodes_dir, n.get("user_id"), n["id"])
     lens = sorted(len(b) for b in bodies.values())
 
     # GQ-21 多源度量：数据源（nodes.sources / doc_node_marks）任一未就绪都降级为"跳过"
@@ -387,6 +444,8 @@ def audit(nodes: list[dict], edges: list[dict], nodes_dir: Path,
         "align_new": align["new"],
         "align_rate": align["rate"],
         "align_docs": align["docs"],
+        # 节点小节化（2026-09-27）：文件夹 + manifest.json + 平行小节 MD
+        "sections": section_metrics(nodes, nodes_dir),
     }
 
 
@@ -407,6 +466,17 @@ def print_report(title: str, m: dict) -> None:
     print(f"  <{SHELL_CHARS} 字（空壳）{m['shell']}（{_pct_str(m['shell'], n)}）"
           f"  <{THIN_CHARS} 字 {m['thin']}（{_pct_str(m['thin'], n)}）")
     print(f"  mastery = 0  {m['mastery_zero']}（{_pct_str(m['mastery_zero'], n)}）")
+
+    sec = m["sections"]
+    if sec["nodes"] or sec["broken"]:
+        print("\n── 节点小节（文件夹 + manifest.json，2026-09-27 起）──")
+        print(f"  小节化节点 {sec['nodes']}（{_pct_str(sec['nodes'], n)}）"
+              f" / 小节总数 {sec['sections']} / 平均 "
+              f"{round(sec['sections'] / sec['nodes'], 1) if sec['nodes'] else '-'} 节")
+        print(f"  生成失败小节 {sec['failed']}  |  manifest 损坏 {sec['broken']}"
+              f"  |  条目缺文件 {sec['missing_file']}  |  孤儿 MD {sec['orphan_md']}")
+        if sec["broken"] or sec["missing_file"] or sec["orphan_md"]:
+            print("    ⚠ 有 manifest 结构问题，手工核对该用户节点目录")
 
     print(f"\n── 重复（L1 归一化同名 + L2 字符串相似，都不依赖嵌入）──")
     dupe_nodes = sum(len(g["nodes"]) for g in m["dupes"])

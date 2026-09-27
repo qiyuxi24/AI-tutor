@@ -166,6 +166,24 @@ class QuizStore:
             ).fetchall()
         return [self._row_to_question(dict(r)) for r in rows]
 
+    def list_by_knowledge_point(self, knowledge_point: str,
+                                limit: int = 50) -> list[dict]:
+        """
+        按知识点取题目（按 id 倒序），返回与 `list_questions` 同构的题目 dict 列表。
+
+        knowledge_point 在对话内出题时存的是**图谱节点 id**（见 chat_quiz.py），
+        节点小节化侧边栏据此列出该节点的试题链接。
+        knowledge_point 为空 → []（不做全库扫描）。
+        """
+        if not knowledge_point:
+            return []
+        rows = self._conn.execute(
+            "SELECT * FROM questions WHERE knowledge_point = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (knowledge_point, limit),
+        ).fetchall()
+        return [self._row_to_question(dict(r)) for r in rows]
+
     def stats(self) -> dict:
         row = self._conn.execute(
             "SELECT COUNT(*) AS total FROM questions"

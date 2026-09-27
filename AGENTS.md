@@ -39,6 +39,7 @@
 
 - **单一事实源 / 唯一出口**：LLM 原语在 `core/llm/`（**检索侧**嵌入 `embed.py::embed_texts` —— 语义去重侧另走 `kb/embedder.py::ApiEmbedder`，共用其常量与失败语义；JSON 提取 `json_extract.py::extract_json`；`chat_create` 是唯一带 fallback 的出口；真打 LLM 仅 `agent/loop._chat_once` 与 `call_llm`）；运行记录 `core/agent/store.py`（**唯一写入方 = loop**）；工具注册表 `core/agent_tools/registry.py`；token 计量 `core/token_counter.py`；**节点来源溯源 = `KnowledgeGraph.add_sources`**（并入去重、绝不覆盖），配套 `doc_node_marks` = 「资料 → 该资料产出/影响的节点」**账本**（`evidence.kind` 区分 `new`/`hit`）+ **增补队列**（`status` 区分 `pending`/`filled`）—— 两职责**有意共用一表**（同资料、同批节点、同生命周期）；唯一写入口 `mark_doc_nodes`/`set_mark_status`，状态**单向** `pending`→`filled`。**图谱 `nodes`/`edges` 的存储布局与检索通路说明** = `docs/知识图谱/知识图谱_数据结构与检索通路_评审与改良方案.md`（表定义仍以 `knowledge_graph.py::_create_tables` 为唯一真值）；**图谱只保留最小节点与关系边** —— 主题层（`themes`/`node_themes`、聚合下钻）已于 2026-09-27 整体下线**并删表**，勿再引入任何第二级结构或聚合大节点。
 - **新建节点只有一个出口** `KnowledgeGraph.create_node_with_content(node_data, content, origin)`：4 条写路径（Agent 工具写层 `knowledge_writer` / 书籍建图 `graph_generator` / 手动 API / 问题拆解）全部走它，MD 模板唯一来源 = `knowledge_graph.ORIGIN_NOTES`。**禁止**在调用方自己 `open(kg.nodes_dir/...)` 写节点 MD；新增写路径时守住 `tests/test_node_write_paths.py`（逐条断言 origin，加了新路径而没复用模板就会红）。**同名并轨也在这一层**（2026-09-20）：命中同名（`normalize_node_name` + 同用户同学科，判重唯一实现 = `KnowledgeGraph.find_node_by_name`）则不新建、只并入正文，**返回实际落点 ID** —— 调用方必须用返回值建边/回执，别再自己写一份同名比较。建图语义去重状态 `dedup_status`（`ok`/`degraded` hash 兜底/`unavailable` 欠费）随 aggregate 带出。
+- **节点小节化（2026-09-27）= 纯文件层，不加任何表**：一个节点可以是**文件夹** `nodes/{uid}/{node_id}/`（`manifest.json` 路由 + 若干**平行**小节 MD，**没有主 MD**；老节点仍是单 `{node_id}.md`，不迁移）。读写唯一出口 = `KnowledgeGraph` 的 `manifest_path`/`has_sections`/`read_manifest`/`list_sections`/`read_section`/`create_section`/`write_section`/`set_section_status`/`delete_section`/`add_quiz_ref`（manifest 原子写 + 实例锁）。**小节不是图谱节点**：不进 `nodes`/`edges`、不参与判重建边与图渲染（图渲染/检索/统计只看 SQLite，零文件 I/O）。删节点/删学科/删号必须**连目录整删**（`remove_node`/`remove_subject`/`backend-admin::purge_user_storage` 已接，新增删除路径要跟上）。生成管线 = `kb/section_generator.py`（两阶段、逐节纯 Markdown 直出、单节失败不拖垮整批）；**建图阶段② 也走它**（`graph_generator._fill_sections`：新概念直接小节化；命中**老单 MD 节点**才走 `_fill_legacy` 单篇追加），小节化后由 `KnowledgeGraph.set_content_status` 把骨架翻 `filled`。**读节点正文一律走 `node_content_text`（小节优先）**——图谱注入 / RAG / 出题 / 导出 / 体检共用它，直读 `{node_id}.md` 会拿到骨架占位（"待完善..."）。体检口径 = `inspect_graph_quality.section_metrics`；设计见 `docs/知识图谱/知识图谱_节点小节化_设计与实现方案.md`。
 - **LLM 调用边界**：所有对话走 `run_agent_loop`（带 KG_TOOLS）；一次性文本/JSON（出题/判分/图谱生成）走 `call_llm`（不带工具）。
 - **M3 三段坑**：思考与正文**共享** `max_tokens` 预算 → 批量结构化抽取必须 `thinking=False`，长 JSON 显式调大 max_tokens（否则"空正文 / 硬截断"交替出现）。
 - **加工具 = 1 个新模块 + 1 行注册 + 3 份产物自动生成**：在 `core/agent_tools/tools/` 下**复制任一模块**（一工具一文件），改 `DESCRIPTION` / `PARAMETERS` / `GUIDANCE` / `handler` / `SPEC` 五处，再在 `tools/__init__.py` 的 `NATIVE_SPECS` 加一行；`KG_TOOLS`、执行分发、提示词「工具调用指南」全自动生效，**不要再手写第四份说明**（曾双源漂移：MCP 关闭后提示词仍教模型调不存在的工具）。编写规范/检查清单见 `core/agent_tools/tools/README.md`，一致性由 `backend/tests/test_tools_registry.py` 锁死。**MCP 工具不用改本仓库任何文件**：`core/agent_tools/mcp_host.py::_SERVERS` 加 `(前缀, 模块路径)` 即入注册表。
@@ -91,6 +92,7 @@
 | 知识图谱（**唯一参照 = 参照系契约**） | `docs/知识图谱/知识图谱_参照系契约.md` + `docs/知识图谱/知识图谱_模块结构与封装调研` / `docs/知识图谱/知识图谱_P0实现方案与核心思路` / `docs/知识图谱/知识图谱_P1扩跳与AB对照实验` / `docs/知识图谱/知识图谱_多资料综合维护调研` |
 | 图谱质量体检 / 存量同名合并 | `backend/scripts/inspect_graph_quality.py`（`--user N` 单用户、`--fix-dupes [--apply]` 合并，默认只读）；指标口径与验收基线见 `TODO_Graph_Quality.md` §0.1 |
 | **图谱数据结构（schema / 索引 / 检索通路）** | `docs/知识图谱/知识图谱_数据结构与检索通路_评审与改良方案.md`（15 项问题分级 + KG-D1~D15 改造清单）；**设计说明 / 选型理由 / 业界对比 / 准确率口径** → `docs/知识图谱/知识图谱_数据结构设计说明与业界对比.md`；表定义仍以 `knowledge_graph.py::_create_tables` 为准 |
+| **节点小节化（文件夹 + manifest.json + 平行小节 MD）** | 设计 SSOT = `docs/知识图谱/知识图谱_节点小节化_设计与实现方案.md`；读写出口 = `knowledge_graph.py` 的 manifest/section 方法；生成管线 = `kb/section_generator.py`；体检 = `inspect_graph_quality.py::section_metrics`。**已作废**：主题层 `themes`/`node_themes`（2026-09-27 连表带数据删除，原两份设计文档同删） |
 | RAG / 文档解析 / 检索 / 出题 | `docs/RAG/RAG_*.md`、`docs/教学模块/QUIZ_出题逻辑调研.md` |
 | **试卷归档（拆题 / 入库 / 知识点关联）** | `docs/教学模块/试卷归档_调研与实施方案.md`（解析引擎选型不重复，引用 `docs/RAG/RAG_视觉解析策略_调研与实施方案.md`） |
 | MCP 网页搜索 | `docs/RAG/MCP_网页搜索工具_调研与实施方案.md` |
@@ -104,6 +106,6 @@
 
 ## 6. 提交与测试纪律
 
-- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **1098 passed, 7 deselected**（2026-09-27 实测；另一会话改动多时先重跑确认）。
+- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **1164 passed, 7 deselected**（2026-09-27 实测；另一会话改动多时先重跑确认）。
 - 提交按**文件族**拆；单文件跨主题按**依赖方向**排序（先被调用方）；测试与其修复同一提交；不混无关改动。
 - 与其他 AI 会话共存：提交前 `git status` 看清别人 WIP，**路径限定 add**。

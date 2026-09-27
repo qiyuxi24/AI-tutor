@@ -3,6 +3,7 @@
 判重口径三处一致：写入层并轨（`KnowledgeGraph.find_node_by_name`）、Agent 写路径、
 以及本脚本的存量体检 —— 所以这里锁的是"归一化 + 同学科 + 同用户"这三条边界。
 """
+import json
 from app.core.knowledge_graph import KnowledgeGraph
 from scripts.inspect_graph_quality import (
     audit,
@@ -11,6 +12,7 @@ from scripts.inspect_graph_quality import (
     load_graph,
     merge_dupes,
     plan_merge,
+    section_metrics,
 )
 
 
@@ -145,6 +147,49 @@ def test_merge_dupes_preserves_mastery_and_aliases(tmp_path):
             (drop_id,)).fetchone()[0] == 0
     finally:
         after.close()
+
+
+# ════════════════════════════════════════════
+#  节点小节化（2026-09-27：文件夹 + manifest.json + 平行小节 MD）
+# ════════════════════════════════════════════
+
+def test_section_metrics_flags_broken_missing_and_orphans(tmp_path):
+    """坏 manifest / 条目缺文件 / 孤儿 MD 都要报出来（体检口径的唯一实现）"""
+    nodes_dir = tmp_path / "nodes"
+    good = nodes_dir / "1" / "double_integral"
+    good.mkdir(parents=True)
+    (good / "s01_定义.md").write_text("## 定义\n" + "内容" * 100, encoding="utf-8")
+    (good / "orphan.md").write_text("孤儿", encoding="utf-8")
+    (good / "manifest.json").write_text(json.dumps({
+        "node_id": "double_integral",
+        "sections": [{"id": "s01", "file": "s01_定义.md", "status": "filled"},
+                     {"id": "s02", "file": "s02_缺失.md", "status": "failed"}],
+    }, ensure_ascii=False), encoding="utf-8")
+    bad = nodes_dir / "1" / "broken_node"
+    bad.mkdir()
+    (bad / "manifest.json").write_text("{不是 JSON", encoding="utf-8")
+
+    m = section_metrics([_node("double_integral", "二重积分"),
+                         _node("broken_node", "坏节点")], nodes_dir)
+
+    assert m["nodes"] == 2 and m["sections"] == 2
+    assert m["failed"] == 1 and m["broken"] == 1
+    assert m["missing_file"] == 1 and m["orphan_md"] == 1
+
+
+def test_audit_counts_section_body_as_content(tmp_path):
+    """小节化节点没有主 MD，正文口径必须拼小节 —— 否则被误判成空壳"""
+    nodes_dir = tmp_path / "nodes"
+    d = nodes_dir / "1" / "double_integral"
+    d.mkdir(parents=True)
+    (d / "s01_定义.md").write_text("x" * 500, encoding="utf-8")
+    (d / "manifest.json").write_text(json.dumps({
+        "sections": [{"id": "s01", "file": "s01_定义.md", "status": "filled"}],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    m = audit([_node("double_integral", "二重积分")], [], nodes_dir)
+
+    assert m["body_missing"] == 0 and m["shell"] == 0
 
 
 

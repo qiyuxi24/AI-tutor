@@ -11,9 +11,9 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.v1 import kb as kb_module
 from app.api.v1 import knowledge as knowledge_module
 from app.core.auth import get_current_user
+from app.core.kb import graph_generator
 
 URL = "/api/v1/knowledge/graph"
 USER_ID = 5
@@ -41,7 +41,7 @@ def isolate(monkeypatch):
     """假 KG + 假 RAG + 清空模块级互斥锁；返回被清索引的 node_id 列表。"""
     from app.core.rag.manager import rag_manager
 
-    kb_module._GRAPH_INFLIGHT.clear()
+    graph_generator._GRAPH_INFLIGHT.clear()
     monkeypatch.setattr(knowledge_module, "KnowledgeGraph", _FakeKG)
     indexed: list[str] = []
     monkeypatch.setattr(rag_manager, "delete_node_index",
@@ -49,7 +49,7 @@ def isolate(monkeypatch):
     try:
         yield indexed
     finally:
-        kb_module._GRAPH_INFLIGHT.clear()
+        graph_generator._GRAPH_INFLIGHT.clear()
 
 
 @pytest.fixture
@@ -82,7 +82,7 @@ def test_missing_subject_is_422(client, isolate):
 # ── 并发护栏 ──────────────────────────────────────────
 
 def test_rejects_while_building_graph(client, isolate):
-    kb_module._GRAPH_INFLIGHT.add(USER_ID)
+    graph_generator.try_begin_graph_build(USER_ID)
 
     r = client.delete(URL, params={"subject": "数据结构"})
 

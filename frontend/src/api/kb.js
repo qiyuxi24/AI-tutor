@@ -50,9 +50,31 @@ export const getKbContext = (nodeId, maxDepth = null) => {
 /** 知识库索引统计 */
 export const getKbStats = () => apiClient.get('/api/v1/kb/stats')
 
-/** 从学科书籍生成知识图谱（AI 直接写库）；勾选文件夹会把新节点归入该板块 */
-export const generateKbGraph = (subject, nodeIds) =>
-  apiClient.post('/api/v1/kb/graph/generate', {
-    subject,
-    node_ids: nodeIds,
-  }, { timeout: 300000 })  // 生成可能较慢
+// ═══ 节点小节化：小节正文按需读取 / 生成 / 删除 ═══
+
+/**
+ * 读取单个小节正文（懒加载：点开哪节读哪节，不一次拉全部）
+ * resp: { id, title, kind, status, content }
+ */
+export const fetchNodeSection = (nodeId, sectionId) =>
+  apiClient.get(`/api/v1/knowledge/node/${nodeId}/section/${sectionId}`)
+
+/**
+ * 为节点生成小节（两阶段 LLM 管线，耗时较长）
+ * @param {boolean} [force] 强制重生成（true 覆盖已有小节）
+ * resp: { status, created, failed, message }
+ */
+export const generateNodeSections = (nodeId, force = false) =>
+  apiClient.post(`/api/v1/knowledge/node/${nodeId}/sections/generate`, { force })
+
+/** 删除单个小节 resp: { deleted: bool } */
+export const deleteNodeSection = (nodeId, sectionId) =>
+  apiClient.delete(`/api/v1/knowledge/node/${nodeId}/section/${sectionId}`)
+
+/**
+ * 列出节点下的试题（懒加载：打开节点详情时才请求，不随图谱列表批量拉）
+ * resp: { node_id, quizzes: [{ id, type, question, difficulty, knowledge_point, section_id, created_at }] }
+ * 节点不存在 → 404；题库读取异常 → quizzes: []
+ */
+export const fetchNodeQuizzes = (nodeId) =>
+  apiClient.get(`/api/v1/knowledge/node/${nodeId}/quizzes`)

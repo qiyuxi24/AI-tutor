@@ -27,14 +27,18 @@
   产出该学科的全局概念树（30~80 个概念），概念本体落为 `content_status='skeleton'`
   的骨架节点。**粒度由此确定：概念树里每个概念 = 图谱里一个节点。**
   旧实现是**逐单元**局部规划（单元边界 ≠ 概念边界）→ 实测「栈」被拆成 27 个节点。
-- **阶段 ② · 逐概念独立成文**（`_fill_concept` / `_fill_nodes`）：**一次一个概念**，用该概念
-  相关的原文片段（`_gather_concept_sources` 跨单元/跨文件汇总）独立写一篇完整讲解，
-  写入后转 `filled`。内容政策见 TODO_Graph_Quality §5.0.1：报告/文章体、不设字数目标、
-  要素清单保留但组织自由。已是 `filled` 的节点（含同名并轨命中的）不重复填充 —— 重跑幂等。
+- **阶段 ② · 逐概念小节化**（`_fill_concept` → `_fill_sections`）：**一次一个概念**，用该概念
+  相关的原文片段（`_gather_concept_sources` 跨单元/跨文件汇总）规划出它**内部的内聚小节**，
+  每节独立写一篇深度 MD 落盘 —— 复用 `kb/section_generator.py`（唯一实现），落成新数据结构的
+  正文形态（`{node_id}/manifest.json` + 平行小节 MD），节点随即转 `filled`。
+  已是 `filled` 的节点（含同名并轨命中的）不重复填充 —— 重跑幂等。
+  命中**老单 MD 节点**（有正文、无 manifest）时走 `_fill_legacy`：只在既有单 MD 上追加一篇
+  「补充讲解」，不改写既有正文、也不把老节点改造成小节节点。
 - **逐文件串行推进（GQ-22）**：填充按「概念的主来源文件」分组、按输入文件顺序串行，
   每个文件建完即完整可用；不再留一批 skeleton 等填充。
-- 深度守门：正文 < GRAPH_MIN_CONTENT_CHARS 的空壳节点拒收并计数（宁缺毋滥），
-  未达标的节点**留在 skeleton 态**等下轮补，不落"半成品正文"。
+- 深度守门：小节管线按 `SECTION_MIN_CONTENT_CHARS` **逐节**拒收截断产物（单节失败不拖垮
+  整节点，标 `failed` 可单独重试）；老单 MD 增补路径仍按 GRAPH_SHALLOW_REJECT_CHARS /
+  GRAPH_MIN_CONTENT_CHARS 两档守门。未达标的节点**留在 skeleton 态**等下轮补。
 - 来源记录（GQ-18）：写骨架/正文时调 `kg.add_sources(node_id, entries)` 累积来源（幂等）。
 - LLM：call_llm(纯 JSON 输出)，两个参数**都不能省**（2026-09-13 实测数据见 docs §10.5）：
     · max_tokens —— 默认 2000 会在几个概念后硬截断（概念树/单概念长文各自定标）；
@@ -55,9 +59,40 @@ from app.core.llm import call_llm, extract_json
 from app.core.kb.kb_manager import chunk_text, kb_manager
 from app.core.kb.embedder import HashEmbedder, get_embedder
 # 填充阶段要按 KnowledgeGraph 的唯一模板重渲染 MD（AGENTS.md §2：调用方不得自拼模板）
-from app.core.knowledge_graph import CONTENT_STATUS_SKELETON, render_node_markdown
+from app.core.knowledge_graph import (CONTENT_STATUS_FILLED, CONTENT_STATUS_SKELETON,
+                                      render_node_markdown)
 
 logger = logging.getLogger("ai-tutor")
+
+# ── 同用户建图互斥（GQ-15）────────────────────────────────────────────
+# 同一用户已有一轮建图在跑时，拒绝新的整批重跑。状态放在**本模块**（建图的唯一实现）
+# 而非某个 API 路由：kb / knowledge 两个路由模块都只调这三个函数，互不 import。
+# 建图在请求内 await 完成（非后台任务），模块级 set 即可；`uvicorn --workers 1`
+# 是硬约束（AGENTS.md §1）→ 进程内锁足够，无需跨进程分布式锁。
+# ⚠ 占位后必须在 finally 释放（异常 / 超时 / 取消都要），否则该用户被永久锁死。
+_GRAPH_INFLIGHT: set[int] = set()
+
+
+def is_graph_building(user_id: int) -> bool:
+    """该用户是否已有建图在跑（只读查询，供破坏性端点判断"现在动图谱合不合适"）。"""
+    return user_id in _GRAPH_INFLIGHT
+
+
+def try_begin_graph_build(user_id: int) -> bool:
+    """原子占位：已在建图返回 False（调用方转 409），否则占位并返回 True。
+
+    调用方必须保证"检查 + 置位"之间无 await（单事件循环下即原子）。
+    """
+    if user_id in _GRAPH_INFLIGHT:
+        return False
+    _GRAPH_INFLIGHT.add(user_id)
+    return True
+
+
+def end_graph_build(user_id: int) -> None:
+    """释放占位（必须放 finally）。"""
+    _GRAPH_INFLIGHT.discard(user_id)
+
 
 # 语义去重：嵌入相似度候选阈值（近似粗筛，最终由 LLM 二次确认）。
 # 0.78 使"栈/堆栈"(~0.80) 等中文同义词能进入候选，交由 LLM 精确判断。
@@ -124,6 +159,13 @@ GRAPH_CONCEPT_TREE_SYSTEM_PROMPT = """你是一个「学科知识图谱架构师
 - 同理「快速排序」应是**一个**节点，不要拆成「快速排序算法 / 复杂度分析 / 选取枢轴 / 尾递归优化 / 小数组插入排序」。
 - **禁止**把「本章小结」「复习回顾」「章节导读」「学习目标」这类目录性内容当作概念。
 - **板块本身不是概念**，不要单独为板块建节点。
+
+## 内聚判据（一个节点 = 一个内聚的知识点，方向相反的两条都要守住）
+- **粗粒度自检（该拆）**：若一个候选项**内部还藏着另一个能独立成节点的概念**（例如把「树」当成
+  一个节点，而它内部还包含「二叉搜索树」「平衡树」这类能各自独立成篇的东西）→ 粒度太粗，拆开。
+- **细粒度自检（该合）**：若两个候选项只是**同一个概念的不同侧面**（「栈的顺序存储」与
+  「栈的链式存储」）→ 它们是**同一节点内部的细节**，合并成一个节点。这些细节**不需要另建节点**：
+  节点建成后会在**节点内部**被拆成若干**内聚小节**、各自写成一独立 MD。
 
 ## 关系类型（与现有图谱一致）
 - prerequisite（前置依赖）：必须先掌握 A 才能理解 B，A 的知识在 B 的定义/推导中被直接使用。
@@ -688,8 +730,10 @@ class GraphGenerator:
     async def _call_fill_llm(self, subject: str, section: str, section_text: str,
                              brief_nodes: list[dict]) -> Optional[dict]:
         """
-        阶段 ②：为一个（或多个）骨架概念补正文。**生产路径一次只传一个概念**
-        （`_fill_concept`），让单次调用独享完整输出预算、互不干扰（TODO §5.0.1）。
+        **仅服务「命中老单 MD 节点」的增补路径**（`_fill_legacy`）—— 新概念 / 已小节化节点
+        一律走小节化（`_fill_sections` → `SectionGenerator`），不再写单篇长文。
+
+        生产路径一次只传一个概念，让单次调用独享完整输出预算、互不干扰（TODO §5.0.1）。
 
         参数:
             brief_nodes: [{"id","name","summary"}, ...] —— **仍是骨架态**的概念
@@ -915,6 +959,32 @@ class GraphGenerator:
             add(node_id, entries)
         except Exception as e:                    # noqa: BLE001 —— 降级语义：不抛
             logger.debug(f"记录节点 {node_id} 来源失败（忽略）：{e}")
+
+    @staticmethod
+    def _has_sections(kg, node_id: str) -> bool:
+        """节点是否**已小节化**（有 manifest + 至少一节）。缺能力 / 查询异常 → False（当老节点）。"""
+        fn = getattr(kg, "has_sections", None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn(node_id))
+        except Exception as e:                    # noqa: BLE001 —— 降级语义：不抛
+            logger.debug(f"查询节点 {node_id} 小节状态失败（当作无 manifest）：{e}")
+            return False
+
+    @staticmethod
+    def _mark_filled(kg, node_id: str) -> None:
+        """把节点标为已填充（正文在小节 MD 里，节点 MD 仍是骨架占位）。
+
+        同 `_record_sources` 的防御式口径：缺能力 / 权限不足 / 老库 → 静默跳过（不毁建图）。
+        """
+        fn = getattr(kg, "set_content_status", None)
+        if not callable(fn):
+            return
+        try:
+            fn(node_id, CONTENT_STATUS_FILLED, caller="ai")
+        except Exception as e:                    # noqa: BLE001 —— 降级语义：不抛
+            logger.debug(f"标记节点 {node_id} 已填充失败（忽略）：{e}")
 
     async def _write_skeleton(self, kg, subject: str, result: dict,
                               existing_nodes: list[dict] | None = None,
@@ -1175,15 +1245,83 @@ class GraphGenerator:
                             sources: list[dict] | None = None,
                             mode: str = "replace", doc_name: str = "") -> dict:
         """
-        阶段 ②：为**单个**概念独立写正文（**一次 LLM 调用只写一个概念** —— 输出预算不被分摊、
-        概念之间不互相干扰；见 TODO §5.0.1）。写成功即转 `filled` 并记录来源。
+        阶段 ② 的统一出口：把这个概念的内容写出来（返回契约固定为
+        `{filled, rejected_shallow, failed_fills}`）。
+
+        按**节点当前形态**分流 —— 新数据结构下"一个节点 = 一个内聚知识点 = 若干独立小节 MD"：
+        - **新概念 / 已小节化节点** → `_fill_sections`：规划内聚小节 → 逐节独立成一篇 MD；
+        - **命中"老单 MD 节点"**（有正文、无 manifest）→ `_fill_legacy`：只在它既有的单 MD 上
+          追加「补充讲解」—— 不改写既有讲解，也不把老节点改造成小节节点（前端对有 manifest
+          的节点只渲染小节，就地改造会让老正文从此看不见）。
 
         参数:
             brief:    {"id","name","summary"}
             sources:  该概念的来源条目（写正文后并入节点，GQ-18）
-            mode:     "replace"（**新增**概念：整篇覆盖骨架正文）/
-                      "append"（**命中**现有节点：作为"另一份资料的补充"追加，绝不改写既有讲解）
+            mode:     "replace"（**新增**概念）/ "append"（**命中**现有节点的增补）
             doc_name: mode="append" 时标注补充来源的资料名
+        返回: {"filled": [名字...], "rejected_shallow": [名字...], "failed_fills": n}
+        """
+        nid = str(brief.get("id") or "").strip()
+        if mode == "append" and not self._has_sections(kg, nid):
+            return await self._fill_legacy(kg, subject, section, source_text, brief,
+                                           sources, doc_name)
+        return await self._fill_sections(kg, brief, source_text, sources, mode, doc_name)
+
+    async def _fill_sections(self, kg, brief: dict, source_text: str,
+                             sources: list[dict] | None, mode: str, doc_name: str) -> dict:
+        """
+        **小节化成文**（新数据结构的正文形态）：概念 → 规划内聚小节 → 逐节独立成 MD。
+
+        复用 `SectionGenerator`（小节生成的唯一实现）：材料已在手（`source_text`），
+        故不走它默认的"按 `nodes.sources` 重读 KB 重切分"那条更贵的路。
+
+        新概念成文后把 `content_status` 翻 `filled` —— 正文在小节里，节点 MD 仍是骨架占位，
+        不翻状态会被断点续填反复重跑、被体检误判为空壳。
+        """
+        from app.core.kb.section_generator import SectionGenerator  # 惰性导入：kb 包内少牵连
+
+        nid = str(brief.get("id") or "").strip()
+        name = str(brief.get("name") or "") or nid
+        stats = await SectionGenerator(self.user_id).generate(
+            kg, nid,
+            source_text=source_text or None,
+            append=(mode == "append"),      # 命中已小节化节点 → 追加新小节，不覆盖既有节
+            title_suffix=(f"（《{doc_name}》补充）" if mode == "append" and doc_name else ""))
+        status = stats.get("status")
+        if status == "error":
+            logger.warning(
+                f"小节化失败（{name}）：{stats.get('message', '')}"
+                "（节点留在待填充态，重跑建图即可补齐）")
+            return {"filled": [], "rejected_shallow": [name], "failed_fills": 1}
+
+        created = stats.get("created") or []
+        failed = stats.get("failed") or []
+        # skipped（节点已小节化）也算"内容已在"：上次中断在"标已填充"之前时，节点会停在
+        # skeleton 并被断点续填反复重跑 —— 这里一并收口。
+        done = bool(created) or status == "skipped"
+        if created:
+            self._record_sources(kg, nid, sources)
+        if mode != "append" and done:
+            self._mark_filled(kg, nid)
+        if failed:
+            logger.warning(
+                f"小节化（{name}）：{len(failed)} 个小节成文失败（已标 failed，可单独重试），"
+                f"其余 {len(created)} 节正常")
+        return {"filled": [name] if done else [],
+                "rejected_shallow": [name] if failed else [],
+                "failed_fills": 0}
+
+    async def _fill_legacy(self, kg, subject: str, section: str, source_text: str,
+                           brief: dict, sources: list[dict] | None,
+                           doc_name: str) -> dict:
+        """
+        **老单 MD 节点的增补**（历史形态，别引到新节点上）：一次 LLM 调用写一篇完整讲解，
+        以「补充讲解」小节追加到既有的单 MD 末尾，绝不改写既有讲解。
+
+        参数:
+            brief:    {"id","name","summary"}
+            sources:  该概念的来源条目（写正文后并入节点，GQ-18）
+            doc_name: 标注补充来源的资料名
         返回: {"filled": [名字...], "rejected_shallow": [名字...], "failed_fills": n}
         """
         result = await self._call_fill_llm(subject, section, source_text, [brief])
@@ -1197,17 +1335,10 @@ class GraphGenerator:
         contents, rejected, marked = self._deep_contents(result, name_by_id)
         filled: list[str] = []
         for nid, content in contents.items():
-            node = kg.get_node(nid) or {}
             try:
-                if mode == "append":
-                    # 命中现有节点：以「补充讲解」小节追加，绝不覆盖既有正文
-                    body = f"## 补充讲解（《{doc_name}》）\n\n{content}" if doc_name else content
-                    kg.update_node_content(nid, body, mode="append", caller="ai")
-                else:
-                    # 按唯一模板重渲染（保留标题与来源标注）→ 替换骨架正文并转 filled
-                    md = render_node_markdown(node.get("name", ""), node.get("summary", ""),
-                                              content, origin="book")
-                    kg.update_node_content(nid, md, mode="replace", caller="ai")
+                # 命中现有节点：以「补充讲解」小节追加，绝不覆盖既有正文
+                body = f"## 补充讲解（《{doc_name}》）\n\n{content}" if doc_name else content
+                kg.update_node_content(nid, body, mode="append", caller="ai")
             except (ValueError, PermissionError) as e:
                 logger.info(f"填充节点 {nid} 失败: {e}")
                 continue
@@ -1228,7 +1359,7 @@ class GraphGenerator:
     async def _fill_nodes(self, kg, subject: str, section: str, section_text: str,
                           node_ids: list[str]) -> dict:
         """
-        阶段 ②：为一批骨架节点补正文 —— **逐个概念**独立成文（一次 LLM 调用只写一个概念）。
+        阶段 ②：为一批骨架节点补正文 —— **逐个概念**独立成文（各自小节化成一篇篇独立 MD）。
 
         只处理**仍是骨架态**的节点：同 run 内前一批已填充的、以及并轨命中的 filled
         节点都会被跳过 —— 这也是"重跑建图"的幂等来源（骨架不重复建、正文不重复填）。
@@ -1381,7 +1512,7 @@ class GraphGenerator:
         **按资料增量**的执行路径（GQ-19；首次建图 = 概念树为空的特例，共用同一条路径）：
 
         每份选中资料依次走：① 资料级幂等检查 → ② 对账式定树（阶段①）→ ③ 标记落表 →
-        ④ 只写「新增概念 + 被命中的现有节点」（阶段② 单概念独立成文）→ ⑤ 转 filled + 累积来源。
+        ④ 只写「新增概念 + 被命中的现有节点」（阶段② 逐概念小节化）→ ⑤ 转 filled + 累积来源。
 
         参数:
             file_ids: KB 中的**文件**节点 ID（文件夹已由 _resolve_files 展开）
@@ -1440,9 +1571,9 @@ class GraphGenerator:
         if aggregate["rejected_shallow"]:
             logger.warning(
                 f"学科图谱生成（{subject}）：{len(aggregate['rejected_shallow'])} 个节点"
-                f"正文待补（<{GRAPH_MIN_CONTENT_CHARS} 字）："
+                f"正文待补（小节成文失败 / 老路径正文 <{GRAPH_MIN_CONTENT_CHARS} 字）："
                 f"{'、'.join(aggregate['rejected_shallow'][:10])}"
-                "（模型未按要求写深正文时可调大 GRAPH_FILL_MAX_TOKENS）"
+                "（可 POST /knowledge/node/{id}/sections/generate 逐节重试）"
             )
         return aggregate
 
@@ -1532,10 +1663,12 @@ class GraphGenerator:
     async def _fill_items(self, kg, subject: str, book: dict, items: list[dict],
                           aggregate: dict) -> None:
         """
-        阶段 ②：对给定 items **逐个概念**独立成文（GQ-23），成功即推进该资料的标记。
+        阶段 ②：对给定 items **逐个概念**成文（GQ-23），成功即推进该资料的标记。
 
-        replace / append 由节点**当前状态**决定：骨架（新增概念）→ replace 整篇覆盖；
-        已有正文（命中现有节点）→ append 追加「补充讲解」，绝不改写既有讲解。
+        replace / append 由节点**当前状态**决定，交给 `_fill_concept` 分流：
+        骨架（新增概念）→ replace（小节化整篇生成）；
+        已有内容（命中现有节点）→ append（已小节化 → 追加新小节；老单 MD → 追加「补充讲解」），
+        两条都不改写既有讲解。
         """
         topic = f"建图（{subject} / {book['name']}）"
         for item in items:

@@ -1,7 +1,9 @@
-"""自顶向下三阶段建图（TODO_Graph_Quality §5.0 / GQ-16 / GQ-22 / GQ-23）。
+"""自顶向下两阶段建图（TODO_Graph_Quality §5.0 / GQ-16 / GQ-22 / GQ-23）。
 
-- 阶段① 全局概念树：一次看全学科 → themes（板块→概念）+ 骨架节点（GQ-16 粒度政策）；
-- 阶段② 单概念独立成文：一次 LLM 调用只写一个概念（GQ-23）；
+- 阶段① 全局概念树：一次看全学科 → 骨架节点（GQ-16 粒度政策 / 2026-09-27 补内聚判据）；
+- 阶段② 逐概念**小节化**：新概念 → 规划内部内聚小节 → 每节独立成一篇 MD
+  （复用 `section_generator`；节点 = 文件夹 + manifest + 平行小节 MD）；
+  命中**老单 MD 节点**仍走 legacy 单篇「补充讲解」；
 - 逐文件串行推进：填充按概念的主来源文件分组（GQ-22）；
 - 溯源：概念 → 来源条目并入节点（GQ-18）。
 
@@ -12,12 +14,42 @@ import asyncio
 import pytest
 
 from app.core.kb import graph_generator as gg
+from app.core.kb import section_generator as sg
 
 
 def _async(value):
     async def _inner(*a, **k):
         return value
     return _inner
+
+
+# 小节成文的假 LLM：规划给一节「定义」、成文给足长度（真 SectionGenerator 走完整两阶段，
+# 所以断言能看到真落盘的小节 MD 与 manifest）。
+_SECTION_PLAN = ('{"sections":[{"title":"定义","kind":"definition","brief":"是什么"}],'
+                 '"summary":""}')
+
+
+def _fake_section_llm(monkeypatch, body: str):
+    """替换 `section_generator.call_llm`（规划固定一节，成文返回 body）；返回收到的 user prompt 列表。"""
+    prompts: list[str] = []
+
+    async def fake_call_llm(system, messages, **kw):
+        prompts.append(messages[0]["content"])
+        return _SECTION_PLAN if kw.get("kind") == "kb_section_plan" else body
+
+    monkeypatch.setattr(sg, "call_llm", fake_call_llm)
+    return prompts
+
+
+def _fake_generate(monkeypatch, calls: list[str]):
+    """把 `SectionGenerator.generate` 整体替换为「报成功」的桩（只关心编排时用）。"""
+    async def _inner(self, kg, node_id, **kw):
+        calls.append(node_id)
+        return {"status": "ok",
+                "created": [{"id": "s01", "title": "定义", "kind": "definition"}],
+                "failed": [], "message": ""}
+
+    monkeypatch.setattr(sg.SectionGenerator, "generate", _inner)
 
 
 class _FakeKg:
@@ -164,19 +196,71 @@ def test_fill_nodes_is_one_llm_call_per_concept(monkeypatch, kg):
     gen = gg.GraphGenerator(user_id=1)
     _skeleton(kg, "a", "概念A")
     _skeleton(kg, "b", "概念B")
-    calls: list[list[str]] = []
-
-    async def _fake_fill(subject, section, text, briefs):
-        calls.append([b["id"] for b in briefs])
-        return {"nodes": [{"id": briefs[0]["id"], "content": "正文。" * 200}]}
-
-    monkeypatch.setattr(gen, "_call_fill_llm", _fake_fill)
+    calls: list[str] = []
+    _fake_generate(monkeypatch, calls)
 
     stats = asyncio.run(gen._fill_nodes(kg, "数据结构", "第一章", "原文", ["a", "b"]))
 
-    assert calls == [["a"], ["b"]], "每个概念一次独立 LLM 调用"
+    assert calls == ["a", "b"], "每个概念各自一次独立生成"
     assert stats["filled"] == ["概念A", "概念B"]
     assert kg.get_node("a")["content_status"] == "filled"
+
+
+def test_new_concept_is_filled_as_sections_not_single_md(monkeypatch, kg):
+    """新概念（skeleton）→ 阶段② **小节化**：manifest + 平行小节 MD，节点转 filled。
+
+    这是新数据结构的正文形态：节点 MD 只留骨架占位，正文在 `{node_id}/` 的小节 MD 里。
+    """
+    gen = gg.GraphGenerator(user_id=1)
+    _skeleton(kg, "stack", "栈")
+    _fake_section_llm(monkeypatch, "栈的深度讲解。" * 100)
+
+    source = "栈是一种后进先出的线性表，只能在栈顶插入与删除。"
+    stats = asyncio.run(gen._fill_nodes(kg, "数据结构", "第2章 线性表", source, ["stack"]))
+
+    assert stats["filled"] == ["栈"]
+    assert kg.has_sections("stack"), "新概念应小节化（文件夹 + manifest）"
+    secs = kg.list_sections("stack")
+    assert [s["status"] for s in secs] == ["filled"]
+    assert "栈的深度讲解" in kg.read_section("stack", secs[0]["id"])
+    assert kg.get_node("stack")["content_status"] == "filled", "正文在小节里，节点本身要转已填充"
+
+
+def test_hit_on_sectioned_node_appends_new_section(monkeypatch, kg):
+    """命中**已小节化**节点 → 追加一节（标题带资料名），既有小节与正文**零改动**"""
+    gen = gg.GraphGenerator(user_id=1)
+    _skeleton(kg, "stack", "栈")
+    _fake_section_llm(monkeypatch, "原有讲解。" * 100)
+    asyncio.run(gen._fill_nodes(kg, "数据结构", "第2章", "栈是后进先出。", ["stack"]))
+    before = [s["title"] for s in kg.list_sections("stack")]
+
+    _fake_section_llm(monkeypatch, "补充讲解。" * 100)
+    stats = asyncio.run(gen._fill_concept(
+        kg, "数据结构", "第9章", "栈的另一种讲法。",
+        {"id": "stack", "name": "栈", "summary": "LIFO"},
+        mode="append", doc_name="新教材.md"))
+
+    titles = [s["title"] for s in kg.list_sections("stack")]
+    assert titles[:len(before)] == before, "既有小节不动"
+    assert titles[-1] == "定义（《新教材.md》补充）", "追加的小节标题带来源资料名"
+    assert "补充讲解" in kg.read_section("stack", kg.list_sections("stack")[-1]["id"])
+    assert stats == {"filled": ["栈"], "rejected_shallow": [], "failed_fills": 0}
+
+
+def test_section_fill_failure_keeps_node_pending(monkeypatch, kg):
+    """小节化整体失败（规划空回复）→ 节点留待填充态、失败计数 +1（不毁建图）"""
+    gen = gg.GraphGenerator(user_id=1)
+    _skeleton(kg, "stack", "栈")
+
+    async def fake_call_llm(system, messages, **kw):
+        return "这不是 JSON"
+
+    monkeypatch.setattr(sg, "call_llm", fake_call_llm)
+    stats = asyncio.run(gen._fill_nodes(kg, "数据结构", "第2章", "栈是后进先出。", ["stack"]))
+
+    assert stats == {"filled": [], "rejected_shallow": ["栈"], "failed_fills": 1}
+    assert kg.get_node("stack")["content_status"] == "skeleton", "失败不得假装已填充"
+    assert not kg.has_sections("stack")
 
 
 # ── GQ-22 逐资料串行 + GQ-19 对账式增量（真 KnowledgeGraph，本地 tmp）──
@@ -258,11 +342,8 @@ def test_one_doc_failure_is_named_not_silent(monkeypatch, kg):
         return {"boards": [{"name": "线性结构", "concepts": [
             {"id": "stack", "name": "栈", "summary": "LIFO"}]}], "hits": [], "edges": []}
 
-    async def _fill(subject, section, text, briefs):
-        return {"nodes": [{"id": briefs[0]["id"], "content": "深正文。" * 200}]}
-
     monkeypatch.setattr(gen, "_call_concept_tree_llm", _tree)
-    monkeypatch.setattr(gen, "_call_fill_llm", _fill)
+    _fake_section_llm(monkeypatch, "深正文。" * 100)
 
     result = asyncio.run(gen.generate_graph(kg, "数据结构", [2, 3]))
 
@@ -270,6 +351,7 @@ def test_one_doc_failure_is_named_not_silent(monkeypatch, kg):
     assert result["failed_chunks"] == 1
     assert result["created_nodes"] == ["stack"], "成功那份照常建节点"
     assert kg.get_node("stack")["content_status"] == "filled"
+    assert kg.has_sections("stack"), "新节点按小节化落盘"
 
 
 def test_first_build_empty_tree_all_new(monkeypatch, kg):
@@ -284,11 +366,8 @@ def test_first_build_empty_tree_all_new(monkeypatch, kg):
         return {"boards": [{"name": "线性结构", "concepts": [
             {"id": "stack", "name": "栈", "summary": "LIFO"}]}], "hits": [], "edges": []}
 
-    async def _fill(subject, section, text, briefs):
-        return {"nodes": [{"id": briefs[0]["id"], "content": "深正文。" * 200}]}
-
     monkeypatch.setattr(gen, "_call_concept_tree_llm", _tree)
-    monkeypatch.setattr(gen, "_call_fill_llm", _fill)
+    _fake_section_llm(monkeypatch, "深正文。" * 100)
 
     result = asyncio.run(gen.generate_graph(kg, "数据结构", [9]))
 

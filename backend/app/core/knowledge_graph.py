@@ -17,8 +17,11 @@
 
 import json
 import logging
+import os
 import re
+import shutil
 import sqlite3
+import threading
 import unicodedata
 import uuid
 from pathlib import Path
@@ -52,6 +55,25 @@ CONTENT_STATUS_FILLED = "filled"
 MARK_PENDING = "pending"
 MARK_FILLED = "filled"
 MARK_STATUSES = (MARK_PENDING, MARK_FILLED)
+
+# 小节状态（`manifest.sections[].status`，见节点小节化方案 §3.1）：
+# `pending` = 已规划待成文；`filled` = 已成文；`failed` = 该节生成失败，可单独重试。
+SECTION_STATUS_PENDING = "pending"
+SECTION_STATUS_FILLED = "filled"
+SECTION_STATUS_FAILED = "failed"
+
+# 小节 MD 文件名安全化：去掉跨平台非法字符；剩余首尾空格另行 strip。
+# title 去干净后为空 → 文件名只用 `{section_id}.md`（见设计 §3）。
+_SECTION_FILENAME_UNSAFE_RE = re.compile(r'[\\/:*?"<>|]')
+
+
+def section_filename(section_id: str, title: str) -> str:
+    """由 `section_id` 与 title 生成小节 MD 文件名：`{section_id}_{安全title}.md`。
+
+    安全化 = 去掉 `\\ / : * ? " < > |` 与首尾空格；title 为空 → `{section_id}.md`。
+    """
+    safe = _SECTION_FILENAME_UNSAFE_RE.sub("", title or "").strip()
+    return f"{section_id}_{safe}.md" if safe else f"{section_id}.md"
 
 # 同名并轨（去重 L1 档）的判定键 = 归一化后的 name。
 # 归一化只做字符串层处理，不做语义判断（语义去重在 kb/graph_generator.py 的
@@ -215,6 +237,12 @@ class KnowledgeGraph:
         self._node_cache: Optional[list[dict]] = None
         self._edge_cache: Optional[list[dict]] = None
         self._content_cache: dict[str, str] = {}  # node_id → MD 文件内容预览
+
+        # 小节 manifest 的读改写锁（设计 §5 并发防护）：单 uvicorn worker 下，
+        # 同一实例内的多协程并发写同一节点是唯一的风险窗口 —— 实例内锁足够；
+        # 跨实例/跨进程不做锁，靠 manifest 文件级原子写兜底"最后写赢"。
+        # ponytail: 实例级锁，若将来真出现跨进程并发写再由文件锁处理。
+        self._manifest_lock = threading.Lock()
 
         # 连接数据库并建表
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
@@ -1018,11 +1046,36 @@ class KnowledgeGraph:
                 result.append(e)
         return result
 
+    def node_content_text(self, node_id: str) -> str:
+        """
+        节点正文全文 —— **所有"读节点正文"的调用方的唯一出口**。
+
+        有小节 → 拼全部小节 MD（新数据结构的正文在 `{node_id}/` 里）；否则 → 单 MD。
+        为什么必须收口：小节化节点的主 MD 只剩骨架占位（甚至没有主 MD，见小节化方案 D1），
+        绕过这里直读 `nodes_dir/{id}.md` 会拿到"待完善..."或空串 —— 图谱上下文注入、
+        RAG 索引、出题依据、先修推断全会因此失明。
+        """
+        sections = self.list_sections(node_id)
+        if sections:
+            parts = [self.read_section(node_id, s["id"])
+                     for s in sections if s.get("id")]
+            joined = "\n\n".join(p for p in parts if p and p.strip())
+            if joined:
+                return joined
+
+        md_path = self.nodes_dir / f"{node_id}.md"
+        if not md_path.is_file():
+            return ""
+        try:
+            return md_path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
     def get_node_content_preview(
         self, node_id: str, max_lines: int = 30, max_chars: int = 1000
     ) -> str:
         """
-        读取节点 MD 文件的前 N 行摘要（带缓存，减少文件 I/O 开销）
+        读取节点正文的前 N 行摘要（带缓存，减少文件 I/O 开销）；正文口径见 `node_content_text`
 
         参数:
             node_id: 节点 ID
@@ -1030,23 +1083,17 @@ class KnowledgeGraph:
             max_chars: 最大返回字符数
 
         返回:
-            MD 文件内容的预览字符串
+            正文预览字符串（小节化节点 = 各小节拼接后的前 N 行）
         """
         cache_key = f"{node_id}:{max_lines}:{max_chars}"
         if cache_key in self._content_cache:
             return self._content_cache[cache_key]
 
-        node = self.get_node(node_id)
-        if node is None:
+        if self.get_node(node_id) is None:
             return ""
 
-        md_path = self.nodes_dir / f"{node_id}.md"
-        if not md_path.exists():
-            return ""
-
-        with open(md_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        content = "".join(lines[:max_lines])[:max_chars]
+        text = self.node_content_text(node_id)
+        content = "".join(text.splitlines(keepends=True)[:max_lines])[:max_chars]
 
         self._content_cache[cache_key] = content
         return content
@@ -1064,6 +1111,228 @@ class KnowledgeGraph:
             keys_to_remove = [k for k in self._content_cache if k.startswith(f"{node_id}:")]
             for k in keys_to_remove:
                 del self._content_cache[k]
+
+    # ══════════════════════════════════════════════════════════════
+    #  节点小节化（存储层，设计见
+    #  docs/知识图谱/知识图谱_节点小节化_设计与实现方案.md §3/§5）
+    #  布局：nodes/{user_id}/{node_id}/ = manifest.json + 若干 {section_id}_{title}.md
+    #  分工：图谱结构层（nodes/edges）不动；manifest.json 是节点内**唯一路由/说明层**；
+    #        小节 MD 是**内容层**，按需读取。老节点仍是同名单文件，天然共存（D5 不迁移）。
+    #  收口：所有小节读写都经本类方法，调用方不得自己 open(nodes_dir/...)。
+    # ══════════════════════════════════════════════════════════════
+
+    def manifest_path(self, node_id: str) -> Path:
+        """节点 manifest.json 的绝对路径（存在与否不代表小节化，用 `has_sections` 判）。"""
+        return self.nodes_dir / node_id / "manifest.json"
+
+    def read_manifest(self, node_id: str) -> dict | None:
+        """读节点 manifest；**无 manifest 或 JSON 损坏 → None**（老节点 / 未小节化）。
+
+        无锁读：manifest 一律原子写（临时文件 + os.replace），读侧不会看到半截文件。
+        """
+        path = self.manifest_path(node_id)
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            logger.warning(f"manifest 解析失败，视为无小节：{path}")
+            return None
+        return data if isinstance(data, dict) else None
+
+    def has_sections(self, node_id: str) -> bool:
+        """节点是否**已小节化**（有 manifest 且至少一个小节）。
+
+        以"有无小节"为准而非"有无 manifest 文件"：仅挂过试卷引用（`add_quiz_ref`）但尚未
+        建节的节点，仍应按老节点走单文件读路径（守 D5 不迁移）。
+        """
+        manifest = self.read_manifest(node_id)
+        return bool(manifest and manifest.get("sections"))
+
+    def list_sections(self, node_id: str) -> list[dict]:
+        """小节清单（**只元数据、不含正文**）；无 manifest → []。
+
+        元素即 manifest.sections 的条目：`{id, title, kind, file, status, brief,
+        origin, created_at, updated_at}`。前端列表页据此渲染，点开某节再 `read_section`。
+        """
+        manifest = self.read_manifest(node_id)
+        if not manifest:
+            return []
+        return list(manifest.get("sections") or [])
+
+    def read_section(self, node_id: str, section_id: str) -> str:
+        """按 manifest 路由读单个小节 MD 正文；无 manifest / 无此节 / 文件缺失 → ""。"""
+        entry = self._find_section(self.read_manifest(node_id), section_id)
+        if entry is None:
+            return ""
+        path = self.nodes_dir / node_id / str(entry.get("file") or "")
+        try:
+            return path.read_text(encoding="utf-8") if path.is_file() else ""
+        except OSError:
+            return ""
+
+    def create_section(self, node_id: str, title: str, kind: str = "custom",
+                       content: str = "", brief: str = "", origin: str = "section_gen") -> str:
+        """建一个小节条目并分配 `section_id`（`s01`/`s02`…，现有最大编号 +1），返回它。
+
+        参数:
+            node_id: 节点 ID，**必须存在且属当前用户**（否则 ValueError，防跨用户写入）
+            title:   小节标题（同时用于文件名安全化）
+            kind:    软标签（`definition`/`formula`/`method`/`example`/`mistake`/`custom`…），
+                     **不做枚举校验**（配合设计 D4"模板仅供参考"）
+            content: 正文；传了 → `filled`，没传 → `pending`（生成管线阶段①先建条目、阶段②再填）
+            brief:   一句话说明（供列表/生成参考）
+            origin:  产出方（默认 `section_gen`）
+        返回:
+            新小节的 `section_id`
+        副作用:
+            落盘小节 MD（空内容也占位，保证 manifest↔文件一致）+ 原子写 manifest；
+            失效该节点的内容缓存
+        """
+        node = self.get_node(node_id)
+        if node is None:
+            raise ValueError(f"节点不存在：{node_id}")
+
+        with self._manifest_lock:
+            manifest = self.read_manifest(node_id) or self._new_manifest(node_id, node)
+            section_id = self._next_section_id(manifest.get("sections") or [])
+            filename = section_filename(section_id, title)
+            now = datetime.now().isoformat()
+            manifest.setdefault("sections", []).append({
+                "id": section_id,
+                "title": title,
+                "kind": kind,
+                "file": filename,
+                "status": SECTION_STATUS_FILLED if (content or "").strip()
+                          else SECTION_STATUS_PENDING,
+                "brief": brief,
+                "origin": origin,
+                "created_at": now,
+                "updated_at": now,
+            })
+            # 先落小节文件、再写 manifest：manifest 宁可缺一行，也不指向不存在的文件
+            target = self.nodes_dir / node_id
+            target.mkdir(parents=True, exist_ok=True)
+            (target / filename).write_text(content or "", encoding="utf-8")
+            self._write_manifest(node_id, manifest)
+        self.invalidate_content_cache(node_id)
+        return section_id
+
+    def write_section(self, node_id: str, section_id: str, content: str) -> None:
+        """写单个小节正文，并把它标为 `filled`、刷新 `updated_at`。
+
+        异常:
+            ValueError: 无 manifest 或该 `section_id` 不存在
+        """
+        with self._manifest_lock:
+            manifest = self.read_manifest(node_id)
+            entry = self._find_section(manifest, section_id)
+            if entry is None:
+                raise ValueError(f"小节不存在：{node_id}/{section_id}")
+            (self.nodes_dir / node_id / str(entry["file"])).write_text(content or "", encoding="utf-8")
+            entry["status"] = SECTION_STATUS_FILLED
+            entry["updated_at"] = datetime.now().isoformat()
+            self._write_manifest(node_id, manifest)
+        self.invalidate_content_cache(node_id)
+
+    def set_section_status(self, node_id: str, section_id: str, status: str) -> None:
+        """置小节状态（生成管线用 `failed` 标记单节失败，便于单独重试）。
+
+        异常:
+            ValueError: 无 manifest 或该 `section_id` 不存在
+        """
+        with self._manifest_lock:
+            manifest = self.read_manifest(node_id)
+            entry = self._find_section(manifest, section_id)
+            if entry is None:
+                raise ValueError(f"小节不存在：{node_id}/{section_id}")
+            entry["status"] = status
+            entry["updated_at"] = datetime.now().isoformat()
+            self._write_manifest(node_id, manifest)
+        self.invalidate_content_cache(node_id)
+
+    def delete_section(self, node_id: str, section_id: str) -> bool:
+        """删小节：删 manifest 条目 + 删对应 MD 文件。返回是否真删掉。
+
+        无 manifest / 无此节 → False。仅清本小节，不动节点本体与其他节。
+        """
+        with self._manifest_lock:
+            manifest = self.read_manifest(node_id)
+            entry = self._find_section(manifest, section_id)
+            if entry is None:
+                return False
+            manifest["sections"].remove(entry)
+            path = self.nodes_dir / node_id / str(entry.get("file") or "")
+            if path.is_file():
+                path.unlink()
+            self._write_manifest(node_id, manifest)
+        self.invalidate_content_cache(node_id)
+        return True
+
+    def add_quiz_ref(self, node_id: str, quiz_id: str, section_id: str = "") -> None:
+        """把小节（或节点级，`section_id=""`）挂载一条试卷引用（第一版只做路由，不建题）。
+
+        节点无 manifest 时按其节点信息新建空 manifest（`sections` 空 → `has_sections`
+        仍为 False，老节点照旧按单文件读）。多次挂载即追加，不去重。
+
+        异常:
+            ValueError: 节点不存在或不属于当前用户
+        """
+        node = self.get_node(node_id)
+        if node is None:
+            raise ValueError(f"节点不存在：{node_id}")
+        with self._manifest_lock:
+            manifest = self.read_manifest(node_id) or self._new_manifest(node_id, node)
+            manifest.setdefault("quizzes", []).append({
+                "id": quiz_id,
+                "section_id": section_id,
+                "source": "quiz_store",
+                "created_at": datetime.now().isoformat(),
+            })
+            self._write_manifest(node_id, manifest)
+        self.invalidate_content_cache(node_id)
+
+    def _new_manifest(self, node_id: str, node: dict) -> dict:
+        """按节点行造一个空 manifest（name/subject 用 `node_subject` 兜底，与全库写法一致）。"""
+        return {
+            "node_id": node_id,
+            "name": node.get("name", ""),
+            "subject": self.node_subject(node),
+            "version": 1,
+            "sections": [],
+            "quizzes": [],
+        }
+
+    @staticmethod
+    def _find_section(manifest: dict | None, section_id: str) -> dict | None:
+        """在 manifest.sections 里按 id 找条目（无 manifest / 未命中 → None）。"""
+        if not manifest:
+            return None
+        for s in manifest.get("sections") or []:
+            if s.get("id") == section_id:
+                return s
+        return None
+
+    @staticmethod
+    def _next_section_id(sections: list[dict]) -> str:
+        """下一个 `section_id`：扫现有 `sNN` 取最大编号 +1，零填充两位。"""
+        max_n = 0
+        for s in sections:
+            m = re.match(r"s(\d+)$", str(s.get("id") or ""))
+            if m:
+                max_n = max(max_n, int(m.group(1)))
+        return f"s{max_n + 1:02d}"
+
+    def _write_manifest(self, node_id: str, manifest: dict) -> None:
+        """原子写 manifest：写临时文件再 `os.replace`（同目录内 rename 原子）。
+
+        必须在 `self._manifest_lock` 内调用（本方法自身不加锁，避免不可重入死锁）。
+        """
+        target = self.manifest_path(node_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.parent / f".manifest.{uuid.uuid4().hex}.tmp"
+        tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, target)  # 原子替换：旧文件要么整体保留、要么被整体换掉
 
     # ════════════════════════════════════════════
     #  节点 CRUD
@@ -1263,10 +1532,13 @@ class KnowledgeGraph:
             (node_id, node_id, self.user_id)
         ).fetchone()[0]
 
-        # 删除 MD 文件
+        # 删除 MD 文件（老节点：单文件）；小节化节点：整删同名文件夹（manifest + 各节 MD）
         md_path = self.nodes_dir / f"{node_id}.md"
         if md_path.exists():
             md_path.unlink()
+        node_dir = self.nodes_dir / node_id
+        if node_dir.is_dir():
+            shutil.rmtree(node_dir, ignore_errors=True)
 
         # 删除节点（外键 CASCADE 自动删边）
         with self._conn:
@@ -1334,6 +1606,10 @@ class KnowledgeGraph:
             md_path = self.nodes_dir / f"{node_id}.md"
             if md_path.exists():
                 md_path.unlink()
+            # 小节化节点：整删节点文件夹（manifest + 各节 MD），否则删图留一堆孤儿小节
+            node_dir = self.nodes_dir / node_id
+            if node_dir.is_dir():
+                shutil.rmtree(node_dir, ignore_errors=True)
 
         self._invalidate_cache()
         self.invalidate_content_cache()
@@ -1855,6 +2131,33 @@ class KnowledgeGraph:
                     (now, node_id, self.user_id),
                 )
         self.invalidate_content_cache(node_id)
+        self._invalidate_cache()
+
+    def set_content_status(self, node_id: str, status: str, caller: str = "human") -> None:
+        """
+        只改填充状态、**不碰正文**（小节化节点的正文在 manifest / 小节 MD 里）。
+
+        为什么需要它：新概念由小节管线成文后，节点 MD 仍是骨架占位（小节节点没有主 MD），
+        `update_node_content` 又只在"有正文"时才翻状态 —— 不走这一步，节点会永远停在
+        `skeleton`：断点续填反复重跑、体检把它误判为空壳。
+
+        参数:
+            node_id: 节点 ID
+            status:  CONTENT_STATUS_* 之一
+            caller:  "human" / "ai"（AI 不得改人类创建的节点）
+
+        异常:
+            ValueError: 节点不存在
+            PermissionError: AI 试图修改人类创建的节点
+        """
+        self._guard_human_content(caller, node_id)
+        if self.get_node(node_id) is None:
+            raise ValueError(f"节点不存在：{node_id}")
+        with self._conn:
+            self._conn.execute(
+                "UPDATE nodes SET content_status = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                (status, datetime.now().isoformat(), node_id, self.user_id),
+            )
         self._invalidate_cache()
 
     # ════════════════════════════════════════════

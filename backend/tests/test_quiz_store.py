@@ -228,3 +228,30 @@ def test_user_isolation(tmp_path):
     assert store2.list_questions()[0]["subject"] == "B"
     store1.close()
     store2.close()
+
+
+def test_list_by_knowledge_point_filters_and_desc(tmp_path):
+    """按知识点取题：只含该知识点，且按 id 倒序（与 list_questions 同构）。"""
+    store = QuizStore(tmp_path)
+    ids = store.save_questions([
+        _make_question(id="a", question="甲题内容足够长满足最低长度要求。", knowledge_point="kp1"),
+        _make_question(id="b", question="乙题内容足够长满足最低长度要求。", knowledge_point="kp1"),
+        _make_question(id="c", question="丙题内容足够长满足最低长度要求。", knowledge_point="kp2"),
+    ])
+
+    got = store.list_by_knowledge_point("kp1")
+    assert [q["id"] for q in got] == [ids[1], ids[0]], "只含 kp1 且按 id 倒序"
+    assert all(q["knowledge_point"] == "kp1" for q in got)
+    # 与 list_questions 返回同构（同一 _row_to_question 投影）
+    assert set(got[0]) == set(store.list_questions()[0])
+    store.close()
+
+
+def test_list_by_knowledge_point_empty_or_unknown(tmp_path):
+    """knowledge_point 为空 → []（不扫全库）；未知知识点 → []。"""
+    store = QuizStore(tmp_path)
+    store.save_questions([_make_question(knowledge_point="kp1")])
+
+    assert store.list_by_knowledge_point("") == []
+    assert store.list_by_knowledge_point("不存在") == []
+    store.close()

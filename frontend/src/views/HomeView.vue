@@ -13,7 +13,7 @@
  * 主题切换 / 用户菜单已下沉到 ActivityBar 组件内部。
  */
 
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useChatStore } from '../stores/chatStore'
 import { useAuthStore } from '../stores/authStore'
 import { formatError, clientError } from '../utils/errorCodes.js'
@@ -79,6 +79,14 @@ const nodeDetailModal = ref(null)
 const nodeDetailVisible = ref(false)
 const nodeDetailLoading = ref(false)
 
+// ─── 节点详情 → 出题页跳转 ───
+// quizTarget = { nodeName, questionId }；questionId 为空表示只按节点名预填主题
+const quizTarget = ref(null)
+// 目标变化时重建 QuizView（v-if 在外层视图切换时已重挂，此 key 兜住"已在出题页再跳题"）
+const quizViewKey = computed(() =>
+  quizTarget.value ? `${quizTarget.value.nodeName}#${quizTarget.value.questionId ?? ''}` : 'quiz'
+)
+
 onMounted(async () => {
   // 先确保有会话（无 token 时静默登录体验账户）：init() 会立刻打一批需要 token
   // 的接口，没先登录整屏就是 401。
@@ -105,6 +113,8 @@ function handleActivitySelect(id) {
   viewMode.value = id
   // 离开对话视图时，仅收起对话侧栏（保留对话状态）
   if (id !== 'chat') sidebarCollapsed.value = true
+  // 从活动栏直接进入出题页 → 清掉上次由节点详情带来的聚焦目标，回到空白出题页
+  if (id === 'quiz') quizTarget.value = null
 }
 
 function replayOnboarding() {
@@ -129,6 +139,17 @@ async function handleNodeDblClick(nodeId) {
 
 function closeNodeDetail() {
   nodeDetailVisible.value = false
+}
+
+/**
+ * NodeDetail 侧边栏「试题」/「去出题」→ 跳到出题页。
+ * 带 questionId 则聚焦该题；不带则只按节点名预填出题主题。
+ * 需先关闭详情弹窗，否则全屏遮罩挡住出题页。
+ */
+function handleOpenQuiz({ nodeName, questionId = null }) {
+  quizTarget.value = { nodeName, questionId }
+  nodeDetailVisible.value = false
+  viewMode.value = 'quiz'
 }
 
 /**
@@ -418,8 +439,13 @@ const slideTransition = {
       <!-- 知识库页 -->
       <KnowledgeView v-if="viewMode === 'knowledge'" />
 
-      <!-- 出题页 -->
-      <QuizView v-if="viewMode === 'quiz'" />
+      <!-- 出题页（可从节点详情侧边栏「试题」跳入并聚焦某题；无跳转时行为与原来一致） -->
+      <QuizView
+        v-if="viewMode === 'quiz'"
+        :key="quizViewKey"
+        :initial-subject="quizTarget?.nodeName || ''"
+        :focus-question-id="quizTarget?.questionId || null"
+      />
 
       <!-- 资源采集页 -->
       <CollectorView v-if="viewMode === 'resources'" />
@@ -448,6 +474,7 @@ const slideTransition = {
       @save-content="handleNodeDetailSave"
       @update-mastery="handleNodeDetailMastery"
       @navigate-to-node="handleNodeDetailNavigate"
+      @open-quiz="handleOpenQuiz"
     />
 
     <!-- 用户画像面板 -->

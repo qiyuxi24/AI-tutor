@@ -31,6 +31,11 @@ class FakeKG:
         return ""
 
 
+    def node_content_text(self, node_id: str) -> str:
+        """与 KnowledgeGraph 同契约的正文读取出口（本替身没有小节 → 直接读单 MD）"""
+        md = self.nodes_dir / f"{node_id}.md"
+        return md.read_text(encoding="utf-8") if md.is_file() else ""
+
     def close(self):
         self.closed = True
 

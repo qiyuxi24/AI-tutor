@@ -12,6 +12,9 @@
 - 两个并发请求只有一个进入真实建图
 - 不同用户互不阻塞
 - HTTP 层（TestClient）：409 / 200 与锁释放
+
+互斥状态在 `core.kb.graph_generator`（建图唯一实现）—— 两个 API 模块都只调它的
+try_begin / end / is_graph_building，互不 import。
 """
 import asyncio
 
@@ -21,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from app.api.v1 import kb as kb_module
 from app.api.v1.kb import GraphGenerateRequest, generate_graph
+from app.core.kb import graph_generator
 
 URL = "/api/v1/kb/graph/generate"
 
@@ -31,10 +35,13 @@ def _req(subject="数据结构", node_ids=(1,)):
 
 @pytest.fixture(autouse=True)
 def _clear_inflight():
-    """互斥锁是模块级全局：每个用例前后都清空，避免用例之间互相污染。"""
-    kb_module._GRAPH_INFLIGHT.clear()
+    """互斥锁是模块级全局：每个用例前后都清空，避免用例之间互相污染。
+
+    清空是测试专属操作（生产只有 try_begin / end 两个入口）→ 直接碰私有集合。
+    """
+    graph_generator._GRAPH_INFLIGHT.clear()
     yield
-    kb_module._GRAPH_INFLIGHT.clear()
+    graph_generator._GRAPH_INFLIGHT.clear()
 
 
 # ── 直接调用端点协程（确定性，无需线程）──────────────────────────
@@ -52,7 +59,7 @@ def test_second_request_while_running_gets_409(monkeypatch):
     result = asyncio.run(generate_graph(_req(), user_id=42))
 
     assert result["status"] == "ok"
-    assert 42 not in kb_module._GRAPH_INFLIGHT, "正常结束必须释放锁"
+    assert not graph_generator.is_graph_building(42), "正常结束必须释放锁"
 
 
 def test_lock_released_after_exception(monkeypatch):
@@ -70,7 +77,7 @@ def test_lock_released_after_exception(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         asyncio.run(generate_graph(_req(), user_id=7))
     assert ei.value.status_code == 500
-    assert 7 not in kb_module._GRAPH_INFLIGHT, "异常后必须释放，否则用户被永久锁死"
+    assert not graph_generator.is_graph_building(7), "异常后必须释放，否则用户被永久锁死"
 
     # 第二次（故障已排除）能正常建图 —— 证明锁确实放开了
     assert asyncio.run(generate_graph(_req(), user_id=7))["status"] == "ok"
@@ -90,11 +97,11 @@ def test_lock_released_after_cancel(monkeypatch):
     async def scenario():
         task = asyncio.create_task(generate_graph(_req(), user_id=9))
         await started.wait()
-        assert 9 in kb_module._GRAPH_INFLIGHT, "运行中应占位"
+        assert graph_generator.is_graph_building(9), "运行中应占位"
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert 9 not in kb_module._GRAPH_INFLIGHT, "取消后必须释放"
+        assert not graph_generator.is_graph_building(9), "取消后必须释放"
 
     asyncio.run(scenario())
 
@@ -137,7 +144,7 @@ def test_different_users_not_blocked(monkeypatch):
         return {"subject": subject, "processed_books": 1}
 
     monkeypatch.setattr(kb_module.graph_generator, "generate_graph", ok)
-    kb_module._GRAPH_INFLIGHT.add(1)
+    graph_generator.try_begin_graph_build(1)
 
     assert asyncio.run(generate_graph(_req(), user_id=2))["status"] == "ok"
 
@@ -149,13 +156,13 @@ def test_endpoint_returns_409_when_inflight():
     from app.core.auth import get_current_user
 
     app.dependency_overrides[get_current_user] = lambda: 77
-    kb_module._GRAPH_INFLIGHT.add(77)
+    graph_generator.try_begin_graph_build(77)
     try:
         resp = TestClient(app).post(URL, json={"subject": "数据结构", "node_ids": [1]})
         assert resp.status_code == 409
         assert "尚未完成" in resp.json()["detail"]
     finally:
-        kb_module._GRAPH_INFLIGHT.discard(77)
+        graph_generator.end_graph_build(77)
         app.dependency_overrides.clear()
 
 
@@ -173,6 +180,6 @@ def test_endpoint_ok_and_releases_lock(monkeypatch):
         resp = TestClient(app).post(URL, json={"subject": "数据结构", "node_ids": [1]})
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
-        assert 88 not in kb_module._GRAPH_INFLIGHT, "HTTP 正常返回也要释放锁"
+        assert not graph_generator.is_graph_building(88), "HTTP 正常返回也要释放锁"
     finally:
         app.dependency_overrides.clear()

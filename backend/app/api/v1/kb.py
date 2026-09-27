@@ -26,23 +26,6 @@ from app.core.kb import graph_generator
 logger = logging.getLogger("ai-tutor")
 router = APIRouter()
 
-# 同用户建图互斥（GQ-15）：同一用户已有一轮建图在跑时，拒绝新的整批重跑。
-# 建图在**请求内 await 完成**（非后台任务），故模块级 set 占位即可；
-# `uvicorn --workers 1` 是硬约束（AGENTS.md §1）→ 进程内锁足够，无需跨进程分布式锁。
-# ⚠ 必须在 finally 里释放：异常 / 超时 / 客户端断开取消都要释放，否则该用户被永久锁死。
-_GRAPH_INFLIGHT: set[int] = set()
-
-
-def is_graph_building(user_id: int) -> bool:
-    """该用户是否已有建图在跑（GQ-15 互斥状态）。
-
-    对外只暴露这一条**只读**查询，供其他端点（如 `DELETE /knowledge/graph`）判断
-    "现在动这个用户的图谱合不合适"；占位/释放仍只由建图端点自己管 —— 别的模块不该
-    直接碰 `_GRAPH_INFLIGHT`（私有符号跨模块是本仓库已收敛的历史遗留，别再引回来）。
-    """
-    return user_id in _GRAPH_INFLIGHT
-
-
 class FolderCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     parent_id: Optional[int] = None
@@ -237,9 +220,8 @@ async def generate_graph(req: GraphGenerateRequest,
 
     # 占位必须在任何 await 之前完成：单事件循环里"检查 + 置位"之间无 await 即原子，
     # 两个并发请求只有一个能进（另一个在置位前就被拒）。
-    if user_id in _GRAPH_INFLIGHT:
+    if not graph_generator.try_begin_graph_build(user_id):
         raise HTTPException(status_code=409, detail="上一次建图尚未完成，请稍后再试")
-    _GRAPH_INFLIGHT.add(user_id)
 
     try:
         result = await graph_generator.generate_graph(user_id, req.subject, req.node_ids)
@@ -255,4 +237,4 @@ async def generate_graph(req: GraphGenerateRequest,
     finally:
         # 异常 / 超时 / 取消（CancelledError 属 BaseException，也会走到 finally）都要释放，
         # 否则该用户被永久锁死、此后每次建图都 409。
-        _GRAPH_INFLIGHT.discard(user_id)
+        graph_generator.end_graph_build(user_id)

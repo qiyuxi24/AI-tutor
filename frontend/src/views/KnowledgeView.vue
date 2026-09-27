@@ -12,9 +12,11 @@
  */
 
 import { ref, onMounted, nextTick } from 'vue'
-import { getKbStats, getKbTree, generateKbGraph } from '../api/kb.js'
+import { getKbStats, getKbTree } from '../api/kb.js'
 import KbPanel from '../components/KbPanel.vue'
+import { useChatStore } from '../stores/chatStore.js'
 
+const store = useChatStore()
 const stats = ref({ files: 0, chunks: 0 })
 const statsLoading = ref(true)
 const statsError = ref('')
@@ -89,8 +91,8 @@ async function handleGenerate() {
   genError.value = ''
   genResult.value = null
   try {
-    const res = await generateKbGraph(subject, nodeIds)
-    const d = res.data || {}
+    // 走 store（图谱写入的唯一前端入口）：生成后自动刷新学科列表并切到该学科视图
+    const d = (await store.generateSubjectGraph(subject, nodeIds)) || {}
     genResult.value = {
       subject,
       createdNodes: (d.created_nodes || []).length,
