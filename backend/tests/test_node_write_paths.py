@@ -20,6 +20,7 @@ import pytest
 from app.api.v1 import knowledge as kapi
 from app.core import knowledge_writer as kw
 from app.core.kb import graph_generator as gg
+from app.core.kb import section_generator as sg
 from app.core.kb.embedder import HashEmbedder
 from app.core.knowledge_graph import KnowledgeGraph, normalize_node_name
 
@@ -157,19 +158,28 @@ def test_fill_is_idempotent_after_rerun(kg, monkeypatch):
     assert [n["id"] for n in kg.nodes] == ["queue"], "同名重跑不建第二个节点"
 
     marker = "循环队列：队尾追上队头是唯一标记。"
-    body = marker + "字" * gg.GRAPH_MIN_CONTENT_CHARS
+    calls: list[str] = []
 
-    async def _fake_fill(subject, section, text, briefs, theme_context=""):
-        return {"nodes": [{"id": "queue", "content": body}]}
+    async def _fake_llm(system, messages, **kw):
+        calls.append(kw.get("kind"))
+        if kw.get("kind") == "kb_section_plan":
+            return ('{"sections":[{"title":"定义","kind":"definition","brief":"是什么"}],'
+                    '"summary":""}')
+        return marker + "字" * 500
 
-    monkeypatch.setattr(gen, "_call_fill_llm", _fake_fill)
+    monkeypatch.setattr(sg, "call_llm", _fake_llm)
     asyncio.run(gen._fill_nodes(kg, "数据结构", "第一章", "原文", ["queue"]))
     assert kg.get_node("queue")["content_status"] == "filled"
+    assert kg.has_sections("queue")
 
-    # 再来一次（模拟重跑）：节点已 filled → briefs 为空 → 不再调 LLM、正文不叠
+    n_calls = len(calls)
+    # 再来一次（模拟重跑）：节点已 filled → briefs 为空 → 不再调 LLM、小节不叠
     asyncio.run(gen._fill_nodes(kg, "数据结构", "第一章", "原文", ["queue"]))
 
-    assert _md(kg, "queue").count(marker) == 1
+    assert len(calls) == n_calls, "重跑不得再调 LLM"
+    assert len(kg.list_sections("queue")) == 1, "小节不重复追加"
+    sec = kg.list_sections("queue")[0]
+    assert kg.read_section("queue", sec["id"]).count(marker) == 1
 
 
 def test_dedup_status_reported_when_embed_unavailable(kg, monkeypatch):

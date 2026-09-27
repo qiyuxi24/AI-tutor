@@ -28,8 +28,9 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { sendMessageStream, apiClient } from '../api/index.js'
+// 注：空回复文案改用 E-CLIENT-008（`clientError('CHAT_EMPTY')`）——比通用 E-COMM-007
+// 更准确，且直接指向「可重试」；因此不再需要 fmt / ErrorDefs。
 import { clientError } from '../utils/errorCodes.js'
-import { buildVisibleGraph, isThemeNodeId, THEME_PREFIX } from '../utils/themeCollapse.js'
 
 // 按 user_id 隔离 localStorage，防止切换账号后对话历史泄露
 const _uid = (() => {
@@ -40,12 +41,6 @@ const _uid = (() => {
 })()
 const STORAGE_KEY_CONVERSATIONS = `ai_tutor_conversations_${_uid}`
 const STORAGE_KEY_CURRENT = `ai_tutor_current_${_uid}`
-// 引导模式已于 2026-09-27 整体移除（后端 `feat(prompt): 引导模式三合一` 删掉了 mode 字段，
-// 前端不再有模式选择器）—— 故不再有 STORAGE_KEY_MODE。
-// 对话 ↔ 知识节点绑定表：{ [convId]: { id, name } }
-// 独立存储、不参与后端同步：后端 conversations 表只有 (id,title,messages,created_at,updated_at)，
-// 没有节点字段 —— 挂在对话对象上会在 sync 往返时被默默丢掉。
-const STORAGE_KEY_NODE_BINDINGS = `ai_tutor_node_bindings_${_uid}`
 
 // 后端 graph_middleware.SUBJECT_UNCLASSIFIED 的对应值。
 // 「未分类」= 无学科归属节点的合成分组名，不是真实学科（不出现在学科列表里，
@@ -54,14 +49,6 @@ const UNCLASSIFIED_SUBJECT = '未分类'
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
-}
-
-/** 读取「对话 ↔ 节点」绑定表；解析失败一律当空表（绑定只是体验增强，不该阻断启动） */
-function loadNodeBindings() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY_NODE_BINDINGS) || '{}')
-    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
-  } catch { return {} }
 }
 
 function todayLabel(date) {
@@ -80,11 +67,7 @@ export const useChatStore = defineStore('chat', () => {
   // ─── 对话状态 ───
   const conversations = ref([])
   const currentId = ref(null)
-  const currentNode = ref('')      // 教学焦点节点 ID → 后端 current_node/focus_node_id
-  const currentNodeName = ref('')  // 教学焦点节点名（仅对话区上下文条显示，不参与请求）
-  // 对话 ↔ 节点绑定表：教学焦点是「对话的属性」而非全局开关，
-  // 所以切对话时焦点跟着重算（syncFocusToConversation）。
-  const nodeBindings = ref(loadNodeBindings())
+  const currentNode = ref('')  // 当前教学位置的知识点 ID（可选）
   const loading = ref(false)
   // 知识库上下文范围（用户选择放进对话上下文的文件/文件夹）
   const kbContext = ref(null)
@@ -102,11 +85,6 @@ export const useChatStore = defineStore('chat', () => {
   // 知识板块维度：学科之下的一级分组，currentBoard=null 表示查看整学科
   const boards = ref([])           // 当前学科的板块列表 [{board, node_count, ...}]
   const currentBoard = ref(null)   // 当前查看的板块名；null = 整学科
-  // 主题层级维度（KG-T4 地图式下钻）：主题树 + 节点主归属 + 展开状态。
-  // 只存事实，画布可见图由 buildVisibleGraph 派生（utils/themeCollapse.js）。
-  const themes = ref([])           // 当前学科主题扁平列表 [{id,name,level,parent_id,order_index}]
-  const themePrimary = ref({})     // {node_id: 主归属主题 id}
-  const expandedThemes = ref([])   // 已展开主题 id —— 默认全折叠：先看"省"，再逐层下钻
 
   // 学习进度维度：科技树联动数据（拓扑排序路径 + 下一步推荐）
   const learningPath = ref([])     // 按学习顺序排列的节点 [{id, name, mastery, difficulty, ...}]
@@ -220,9 +198,6 @@ export const useChatStore = defineStore('chat', () => {
       knowledgeNodes.value = []
       knowledgeEdges.value = []
       boards.value = []
-      themes.value = []
-      themePrimary.value = {}
-      expandedThemes.value = []
       graphError.value = ''
       graphLoaded.value = true
       return
@@ -252,7 +227,6 @@ export const useChatStore = defineStore('chat', () => {
       fetchLearningPath()
       fetchNextToLearn()
       fetchStats(currentSubject.value)
-      await fetchThemes(currentSubject.value)   // 等主题就绪，便于紧随其后的"展开到目标节点"
     } catch (e) {
       graphError.value = clientError('GRAPH_LOAD')
     }
@@ -376,7 +350,6 @@ export const useChatStore = defineStore('chat', () => {
     if (currentSubject.value === subject) return
     currentSubject.value = subject || null
     currentBoard.value = null            // 切换学科后回到整学科视图
-    expandedThemes.value = []            // 折叠状态归零：主题 id 是学科内的，不跨课继承
     graphLoaded.value = false
     await fetchBoards(subject || null)   // 按需加载板块列表（学科导航用）
     await fetchGraph(true)
@@ -393,81 +366,21 @@ export const useChatStore = defineStore('chat', () => {
     await fetchGraph(true)
   }
 
-  /**
-   * 拉取当前学科的主题树 + 节点主归属（地图式下钻的数据源）。
-   * 主题由聚类落库、不随 CRUD 变化，因此与图谱请求同行、失败静默降级为"不折叠"。
-   * @param {string} subject
-   */
-  async function fetchThemes(subject) {
-    if (!subject) {
-      themes.value = []
-      themePrimary.value = {}
-      return
-    }
-    try {
-      const { data } = await apiClient.get('/api/v1/knowledge/themes', { params: { subject } })
-      if (currentSubject.value !== subject) return   // 已切走学科，丢弃过期响应
-      themes.value = data.themes || []
-      themePrimary.value = data.primary || {}
-    } catch {
-      if (currentSubject.value === subject) {
-        themes.value = []            // 拿不到主题 → 退回原始节点图，不影响图谱可用
-        themePrimary.value = {}
-      }
-    }
-  }
-
-  /**
-   * 画布点击主题聚合节点 → 展开/收起它自己（同一节点同一交互双向切换）。
-   * @param {string} nodeId - ForceGraph 节点 id（聚合节点形如 `theme:<themeId>`）
-   * @returns {boolean} 是否消费了本次点击（false = 普通知识点，交给双击详情）
-   */
-  function toggleThemeNode(nodeId) {
-    if (!isThemeNodeId(nodeId)) return false
-    const tid = nodeId.slice(THEME_PREFIX.length)
-    const i = expandedThemes.value.indexOf(tid)
-    if (i >= 0) expandedThemes.value.splice(i, 1)
-    else expandedThemes.value.push(tid)
-    return true
-  }
-
-  /**
-   * 展开某知识点的主题祖先链 —— 保证它当前在画布上可见。
-   * 搜索选中、仪表盘跳转、节点详情互跳都要用：折叠态下目标可能藏在聚合节点里。
-   * @param {string} nodeId
-   */
-  function revealNode(nodeId) {
-    const t = themes.value.find(x => x.id === themePrimary.value[nodeId])
-    if (!t) return
-    const need = t.parent_id ? [t.parent_id, t.id] : [t.id]
-    expandedThemes.value = [...new Set([...expandedThemes.value, ...need])]
-  }
-
-  // ─── 地图式下钻：画布可见图（折叠 + 边向上卷后的节点/边）───
-  // 主题数据缺失时 buildVisibleGraph 原样返回，行为与折叠功能上线前一致。
-  const visibleGraph = computed(() => buildVisibleGraph({
-    nodes: knowledgeNodes.value,
-    edges: knowledgeEdges.value,
-    themes: themes.value,
-    primary: themePrimary.value,
-    expanded: expandedThemes.value,
-  }))
-  const displayNodes = computed(() => visibleGraph.value.nodes)
-  const displayEdges = computed(() => visibleGraph.value.edges)
-  const hasThemes = computed(() => themes.value.length > 0)
+  // 图谱只渲染最小节点（原子知识点）与关系边：主题层与聚合下钻已下线（2026-09-27）。
+  const displayNodes = computed(() => knowledgeNodes.value)
+  const displayEdges = computed(() => knowledgeEdges.value)
 
   /**
    * 从学科书籍生成知识图谱（AI 直接写库），生成后刷新图谱。
+   * 勾选文件夹时，新节点会归入该文件夹同名的知识板块。
    *
    * @param {string} subject - 学科名（如 '数据结构'）
    * @param {number[]} nodeIds - KB 中的文件/文件夹节点 ID 列表
-   * @param {'subject'|'section'} mode - 生成模式
    * @returns {Promise<Object>} 生成结果（created_nodes 等）
    */
-  async function generateSubjectGraph(subject, nodeIds, mode = 'subject') {
+  async function generateSubjectGraph(subject, nodeIds) {
     const { data } = await apiClient.post('/api/v1/kb/graph/generate', {
       subject,
-      mode,
       node_ids: nodeIds,
     }, { timeout: 300000 })  // 生成可能较慢
     await fetchSubjects()
@@ -477,6 +390,78 @@ export const useChatStore = defineStore('chat', () => {
     graphLoaded.value = false
     await fetchBoards(subject)   // 刷新板块列表（生成后节点可能带板块）
     await fetchGraph(true)
+    return data
+  }
+
+  /**
+   * 删除整个学科图谱（节点 / 关系 / 主题 / 节点正文），**知识库中的教材原文不受影响**。
+   *
+   * 删除后走 refreshGraph：重拉学科列表 + ensureSubjectSelected —— 当前学科已消失时
+   * 自动回退到剩余的第一个学科（该分支已存在，见 ensureSubjectSelected 注释）。
+   *
+   * @param {string} subject - 学科名（「未分类」是后端合成分组，会被后端 400 拒绝）
+   * @returns {Promise<Object>} API 响应（deleted_nodes / deleted_edges / deleted_themes）
+   */
+  async function deleteSubjectGraph(subject) {
+    const { data } = await apiClient.delete('/api/v1/knowledge/graph', { params: { subject } })
+    await refreshGraph(true)
+    return data
+  }
+
+  /**
+   * 学科改名：只改课名（节点 subject + tags 里的旧名 + 主题树归属），知识点内容不动。
+   *
+   * 正看着的就是被改名的学科时，**先**把本地 currentSubject 换成新名再刷新 —— 否则
+   * refreshGraph 里的 ensureSubjectSelected 发现旧名已不存在，会把视图切到别的学科。
+   *
+   * @param {string} oldName
+   * @param {string} newName
+   * @returns {Promise<Object>} API 响应（renamed_nodes / renamed_themes）
+   */
+  async function renameSubject(oldName, newName) {
+    const { data } = await apiClient.patch('/api/v1/knowledge/subject', {
+      old_name: oldName,
+      new_name: newName,
+    })
+    if (currentSubject.value === oldName) currentSubject.value = newName
+    await refreshGraph(true)
+    return data
+  }
+
+  /**
+   * 板块改名：只改分组名（板块内知识点、边、掌握度都不动）。
+   * @param {string} subject
+   * @param {string} oldName
+   * @param {string} newName
+   */
+  async function renameBoard(subject, oldName, newName) {
+    const { data } = await apiClient.patch('/api/v1/knowledge/board', {
+      subject,
+      old_name: oldName,
+      new_name: newName,
+    })
+    // 正在看的就是这个板块 → 视图跟着换名，别退回整学科
+    if (currentSubject.value === subject && currentBoard.value === oldName) {
+      currentBoard.value = newName
+    }
+    await refreshGraph(true)
+    return data
+  }
+
+  /**
+   * 解散板块：板块内的知识点回到「未分组」，一个都不删。
+   * @param {string} subject
+   * @param {string} board
+   */
+  async function deleteBoard(subject, board) {
+    const { data } = await apiClient.delete('/api/v1/knowledge/board', {
+      params: { subject, board },
+    })
+    // 正在看的就是这个板块 → 它没了，回整学科视图
+    if (currentSubject.value === subject && currentBoard.value === board) {
+      currentBoard.value = null
+    }
+    await refreshGraph(true)
     return data
   }
 
@@ -672,10 +657,6 @@ export const useChatStore = defineStore('chat', () => {
         conversations.value.unshift(conv)
         currentId.value = conv.id
       }
-
-      // 焦点是对话的属性：定位到当前对话后同步推导一次
-      // （刷新后若停在某节点的教学对话上，上下文条应随之回来）
-      if (currentId.value) syncFocusToConversation(currentId.value)
     } catch {
       // ignore
     }
@@ -828,8 +809,6 @@ export const useChatStore = defineStore('chat', () => {
     }
     conversations.value.unshift(conv)
     currentId.value = conv.id
-    // 新对话默认是自由对话：焦点清空（节点教学会在 startLearningNode 里重新设回）
-    syncFocusToConversation(conv.id)
     // 注意：空对话不持久化！persist() 会过滤 messages.length === 0 的对话
     persist()
     return conv
@@ -848,8 +827,6 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     currentId.value = id
-    // 焦点是对话的属性：切到节点教学对话 → 恢复其焦点；切到自由对话 → 清空
-    syncFocusToConversation(id)
     persist()
   }
 
@@ -858,7 +835,6 @@ export const useChatStore = defineStore('chat', () => {
     const idx = conversations.value.findIndex((c) => c.id === id)
     if (idx === -1) return
     conversations.value.splice(idx, 1)
-    unbindConversation(id)
     if (currentId.value === id) {
       // 如果删除的是当前对话，自动创建新对话
       const conv = {
@@ -869,118 +845,27 @@ export const useChatStore = defineStore('chat', () => {
       }
       conversations.value.unshift(conv)
       currentId.value = conv.id
-      syncFocusToConversation(conv.id)
     }
     persist()
     // 同步删除后端数据
     deleteFromBackend(id)
   }
 
-  // ─── 教学焦点 ⇄ 对话绑定 ───
-  // 模型：**焦点是对话的属性**。
-  //   - 「节点教学对话」在 nodeBindings 里登记 { id, name }
-  //   - 切对话时焦点跟着重算，所以点历史里的「学习：二叉树」会自动恢复该节点焦点
-  //   - 一个节点只允许一段教学对话（重复点「去学习」= 回到那段）
-
-  function persistNodeBindings() {
-    try {
-      localStorage.setItem(STORAGE_KEY_NODE_BINDINGS, JSON.stringify(nodeBindings.value))
-    } catch { /* 存不下就丢，不影响当前会话 */ }
-  }
-
-  /** 清掉指向已删除对话的失效绑定 */
-  function pruneStaleBindings() {
-    const alive = new Set(conversations.value.map(c => c.id))
-    let changed = false
-    for (const convId of Object.keys(nodeBindings.value)) {
-      if (!alive.has(convId)) {
-        delete nodeBindings.value[convId]
-        changed = true
-      }
-    }
-    if (changed) persistNodeBindings()
-  }
-
-  /** 该节点已有的教学对话 id（无则返回空串） */
-  function findConversationIdByNode(nodeId) {
-    for (const [convId, bind] of Object.entries(nodeBindings.value)) {
-      if (bind?.id === nodeId) return convId
-    }
-    return ''
-  }
-
-  function bindNodeToConversation(convId, nodeId, nodeName) {
-    // 同一节点只保留一段教学对话：先摘掉指向该节点的其它绑定
-    for (const [cid, bind] of Object.entries(nodeBindings.value)) {
-      if (bind?.id === nodeId && cid !== convId) delete nodeBindings.value[cid]
-    }
-    nodeBindings.value[convId] = { id: nodeId, name: nodeName }
-    persistNodeBindings()
-    // 标题带上节点名，便于在对话列表里一眼认出（send() 首句也会维持同一口径）
-    const conv = conversations.value.find(c => c.id === convId)
-    if (conv) conv.title = `学习：${nodeName}`
-  }
-
-  function unbindConversation(convId) {
-    if (nodeBindings.value[convId]) {
-      delete nodeBindings.value[convId]
-      persistNodeBindings()
-    }
-  }
-
-  /** 焦点跟随对话：绑定了节点 → 恢复焦点；自由对话 → 清空焦点 */
-  function syncFocusToConversation(convId) {
-    const bind = nodeBindings.value[convId]
-    currentNode.value = bind?.id || ''
-    currentNodeName.value = bind?.name || bind?.id || ''
-  }
-
-  // ─── 进入节点教学（图谱节点「去学习」入口） ───
+  // ─── 重命名对话 ───
   /**
-   * 教学焦点 = 后端注入图谱摘要的 focus_node_id，决定本次对话的教学可行域。
+   * 只改标题。标题本就在「localStorage 为主 + 后端全量同步」的契约里：persist() 会把新
+   * 标题带进 syncToBackend()，后端 upsert 以客户端 title 为准（conversation_store 的
+   * ON CONFLICT title = excluded.title）—— 所以**不需要再加一个改名端点**。
+   * messages 没变 → 后端不推进 updated_at，列表排序不受影响。
    *
-   * 行为：
-   *   1. 该节点**已有**教学对话 → 回到那一段（"点节点 = 接上上次进度"），不新开；
-   *   2. 否则：当前对话是空的 → 复用它；有内容 → 新开一段（避免上一节点的
-   *      历史把本节点的上下文带偏），并把新对话绑定到该节点。
-   *      （原先这里还会把引导模式切回 adaptive；模式已随后端"三合一"整体移除，
-   *       教学风格改由统一提示词 + 图谱定点决定。）
-   *
-   * currentNode 本身不持久化：刷新后由"切对话"路径重新推导，
-   * 不会出现"界面已退出、请求还带着旧节点"的不一致。
+   * @param {string} id
+   * @param {string} title - 已 trim 的非空标题
    */
-  function startLearningNode(node) {
-    const nodeId = node?.id || ''
-    if (!nodeId) return
-    const nodeName = node?.name || nodeId
-
-    pruneStaleBindings()
-    let targetId = findConversationIdByNode(nodeId)
-    if (targetId && !conversations.value.some(c => c.id === targetId)) targetId = ''
-
-    if (!targetId) {
-      targetId = (isCurrentEmpty.value && currentId.value)
-        ? currentId.value
-        : newConversation().id
-      bindNodeToConversation(targetId, nodeId, nodeName)
-    }
-
-    if (currentId.value !== targetId) switchConversation(targetId)
-
-    // 焦点最后设：newConversation / switchConversation 都会重算焦点
-    currentNode.value = nodeId
-    currentNodeName.value = nodeName
+  function renameConversation(id, title) {
+    const conv = conversations.value.find((c) => c.id === id)
+    if (!conv || conv.title === title) return
+    conv.title = title
     persist()
-  }
-
-  /**
-   * 退出焦点（对话区上下文条的 ✕）。
-   * 只清焦点、**不解除绑定**：这段历史本来就是该节点的教学记录，
-   * 从图谱再点「去学习」应当回到它，而不是另起一段。
-   */
-  function clearCurrentNode() {
-    currentNode.value = ''
-    currentNodeName.value = ''
   }
 
   // ─── 设置知识库上下文范围 ───
@@ -1037,11 +922,7 @@ export const useChatStore = defineStore('chat', () => {
     // 如果是第一条消息，自动用前 20 字设定标题
     // 此时对话从"空"变为"有内容"，需要持久化
     if (conv.messages.length === 1) {
-      // 节点教学对话固定用「学习：<节点名>」，便于在对话列表里一眼认出
-      const bind = nodeBindings.value[conv.id]
-      conv.title = bind
-        ? `学习：${bind.name || bind.id}`
-        : (text.length > 20 ? text.slice(0, 20) + '…' : text)
+      conv.title = text.length > 20 ? text.slice(0, 20) + '…' : text
     }
 
     // 添加占位 AI 消息（流式填充 + 工具/思考事件挂载）
@@ -1050,10 +931,7 @@ export const useChatStore = defineStore('chat', () => {
     // 对话已有内容，持久化（persist 内部会过滤空对话，此对话现在不会被过滤）
     persist()
 
-    // ⚠️ 参数顺序必须与 api/index.js 的签名严格一致：
-    //    sendMessageStream(messages, callbacks, currentNode, kb)
-    // 引导模式已移除 → 不再有 mode 位置参数。曾因合并残留 `mode.value` 占位，
-    // 导致 callbacks 被一个字符串顶掉、消息发出后毫无反应。
+    // 使用流式 API
     streamController = sendMessageStream(
       conv.messages.slice(0, -1), // 不含占位消息的对话历史
       {
@@ -1091,10 +969,7 @@ export const useChatStore = defineStore('chat', () => {
           } else {
             // 空回复 = 一个 token 都没收到（事件投递失败 / 收尾丢帧）。旧版在这里静默删掉
             // 占位气泡，结果"对话没有反应"且没有任何线索（2026-09-26 排查成本极高的根因之一）。
-            // 失败必须留下可见痕迹。
-            // 合并保留两侧意图：骨架用 renderAssistant（对方的重构抽象），
-            // 文案用 E-CLIENT-008（比通用 E-COMM-007 更准，且直接指向"可重试"）；
-            // failed=true 让 MessageBubble 渲染「↻ 重试」按钮（配 retryLast）。
+            // 失败必须留下可见痕迹：failed=true 让 MessageBubble 渲染「↻ 重试」按钮（配 retryLast）。
             renderAssistant(conv, {
               role: 'assistant',
               content: clientError('CHAT_EMPTY'),
@@ -1136,8 +1011,6 @@ export const useChatStore = defineStore('chat', () => {
     conversations,
     currentId,
     currentNode,
-    currentNodeName,
-    nodeBindings,
     loading,
     kbContext,
     currentConversation,
@@ -1150,8 +1023,7 @@ export const useChatStore = defineStore('chat', () => {
     newConversation,
     switchConversation,
     deleteConversation,
-    startLearningNode,
-    clearCurrentNode,
+    renameConversation,
     setKbContext,
     send,
     retryLast,
@@ -1166,16 +1038,8 @@ export const useChatStore = defineStore('chat', () => {
     boards,
     currentBoard,
     setBoard,
-    // 主题层级（地图式下钻：省/市折叠）
-    themes,
-    themePrimary,
-    expandedThemes,
     displayNodes,
     displayEdges,
-    hasThemes,
-    fetchThemes,
-    toggleThemeNode,
-    revealNode,
     ensureSubjectSelected,
     fetchBoards,
     fetchGraph,
@@ -1184,6 +1048,10 @@ export const useChatStore = defineStore('chat', () => {
     fetchSubjects,
     setSubject,
     generateSubjectGraph,
+    deleteSubjectGraph,
+    renameSubject,
+    renameBoard,
+    deleteBoard,
     // 学习进度（科技树联动）
     learningPath,
     nextToLearn,

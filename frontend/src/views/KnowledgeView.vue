@@ -12,9 +12,11 @@
  */
 
 import { ref, onMounted, nextTick } from 'vue'
-import { getKbStats, getKbTree, generateKbGraph } from '../api/kb.js'
+import { getKbStats, getKbTree } from '../api/kb.js'
 import KbPanel from '../components/KbPanel.vue'
+import { useChatStore } from '../stores/chatStore.js'
 
+const store = useChatStore()
 const stats = ref({ files: 0, chunks: 0 })
 const statsLoading = ref(true)
 const statsError = ref('')
@@ -26,7 +28,6 @@ const selectedContext = ref(null)
 const treeRef = ref(null)
 const tree = ref([])
 const subjectInput = ref('')           // 学科名
-const genMode = ref('subject')         // subject=整学科 / section=按章节
 const generating = ref(false)
 const genResult = ref(null)            // 生成结果
 const genError = ref('')
@@ -90,8 +91,8 @@ async function handleGenerate() {
   genError.value = ''
   genResult.value = null
   try {
-    const res = await generateKbGraph(subject, nodeIds, genMode.value)
-    const d = res.data || {}
+    // 走 store（图谱写入的唯一前端入口）：生成后自动刷新学科列表并切到该学科视图
+    const d = (await store.generateSubjectGraph(subject, nodeIds)) || {}
     genResult.value = {
       subject,
       createdNodes: (d.created_nodes || []).length,
@@ -191,10 +192,6 @@ onMounted(() => {
               maxlength="100"
               class="gen-subject-input"
             />
-            <el-select v-model="genMode" class="gen-mode-select">
-              <el-option label="整学科一键生成" value="subject" />
-              <el-option label="按章节增量生成" value="section" />
-            </el-select>
             <el-button
               type="primary"
               :loading="generating"
@@ -206,7 +203,7 @@ onMounted(() => {
           </div>
 
           <div class="gen-tree-wrap" v-if="tree.length">
-            <div class="gen-tree-label">选择书籍来源（可勾选文件夹，将包含其下所有文件）</div>
+            <div class="gen-tree-label">选择书籍来源（勾选文件夹会把新知识点归入同名板块，并包含其下所有文件）</div>
             <el-tree
               ref="treeRef"
               :data="tree"
@@ -427,10 +424,6 @@ onMounted(() => {
 
 .gen-subject-input {
   width: 180px;
-}
-
-.gen-mode-select {
-  width: 170px;
 }
 
 .gen-tree-wrap {

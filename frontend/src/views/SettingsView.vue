@@ -13,11 +13,16 @@ import { ElMessage } from 'element-plus'
 import { useTheme } from '../utils/theme'
 import { useAuthStore } from '../stores/authStore'
 import { getProfile, saveProfileData } from '../api/index.js'
+import { useGraphForces, setGraphForce, resetGraphForces, FORCE_FIELDS } from '../utils/graphForces'
+import { useDetailPrefs, setDetailPref, resetDetailPrefs, DETAIL_FIELDS } from '../utils/detailPrefs'
+import GraphForcePreview from '../components/GraphForcePreview.vue'
 
 const { mode, setTheme } = useTheme()
 const authStore = useAuthStore()
+const { forces } = useGraphForces()
+const { prefs: detailPrefs } = useDetailPrefs()
 
-const emit = defineEmits(['replay-onboarding', 'logout'])
+const emit = defineEmits(['replay-onboarding', 'switch-account'])
 
 function handleThemeChange(value) {
   setTheme(value)
@@ -80,6 +85,24 @@ async function handleUsageModeChange(value) {
             <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
           </svg>
           外观
+        </a>
+        <a class="sn-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="6" r="3" />
+            <circle cx="18" cy="6" r="3" />
+            <circle cx="12" cy="18" r="3" />
+            <line x1="8.6" y1="7.6" x2="10.6" y2="15.5" />
+            <line x1="15.4" y1="7.6" x2="13.4" y2="15.5" />
+          </svg>
+          知识图谱
+        </a>
+        <a class="sn-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 7V4h16v3" />
+            <line x1="9" y1="20" x2="15" y2="20" />
+            <line x1="12" y1="4" x2="12" y2="20" />
+          </svg>
+          节点详情
         </a>
         <a class="sn-item">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -162,6 +185,64 @@ async function handleUsageModeChange(value) {
         </div>
       </section>
 
+      <!-- 知识图谱（力导向参数） -->
+      <section class="sc-section">
+        <h3>知识图谱</h3>
+        <p class="usage-hint">调整力导向布局的手感，拖动即生效，并保存到本机浏览器。</p>
+
+        <div class="force-grid">
+          <div class="force-controls">
+            <div v-for="f in FORCE_FIELDS" :key="f.key" class="force-row">
+              <div class="force-row-head">
+                <span>{{ f.label }}</span>
+                <span class="force-value">{{ +Number(forces[f.key]).toFixed(3) }}</span>
+              </div>
+              <input
+                class="force-slider"
+                type="range"
+                :min="f.min"
+                :max="f.max"
+                :step="f.step"
+                :value="forces[f.key]"
+                @input="setGraphForce(f.key, $event.target.value)"
+              />
+              <div class="force-hint">{{ f.hint }}</div>
+            </div>
+            <button class="sc-btn force-reset" @click="resetGraphForces">恢复默认</button>
+          </div>
+
+          <div class="force-preview-box">
+            <GraphForcePreview />
+          </div>
+        </div>
+      </section>
+
+      <!-- 节点详情（弹窗尺寸 / 正文字号） -->
+      <section class="sc-section">
+        <h3>节点详情</h3>
+        <p class="usage-hint">双击图谱节点弹出的详情面板；拖动即生效，并保存到本机浏览器。</p>
+
+        <div class="force-controls">
+          <div v-for="f in DETAIL_FIELDS" :key="f.key" class="force-row">
+            <div class="force-row-head">
+              <span>{{ f.label }}</span>
+              <span class="force-value">{{ f.toDisplay(detailPrefs[f.key]) }}</span>
+            </div>
+            <input
+              class="force-slider"
+              type="range"
+              :min="f.min"
+              :max="f.max"
+              :step="f.step"
+              :value="detailPrefs[f.key]"
+              @input="setDetailPref(f.key, $event.target.value)"
+            />
+            <div class="force-hint">{{ f.hint }}</div>
+          </div>
+          <button class="sc-btn force-reset" @click="resetDetailPrefs">恢复默认</button>
+        </div>
+      </section>
+
       <!-- 引导 -->
       <section class="sc-section">
         <h3>引导</h3>
@@ -207,10 +288,10 @@ async function handleUsageModeChange(value) {
         </div>
         <div class="sc-row">
           <div class="sc-row-info">
-            <div class="sc-row-title">退出登录</div>
-            <div class="sc-row-desc">退出当前账号</div>
+            <div class="sc-row-title">切换账号</div>
+            <div class="sc-row-desc">登录另一个账号</div>
           </div>
-          <button class="sc-btn danger" @click="emit('logout')">退出登录</button>
+          <button class="sc-btn" @click="emit('switch-account')">切换账号</button>
         </div>
       </section>
     </main>
@@ -378,16 +459,6 @@ async function handleUsageModeChange(value) {
   color: var(--color-text-primary);
 }
 
-.sc-btn.danger {
-  color: var(--color-red);
-  border-color: var(--color-red);
-}
-
-.sc-btn.danger:hover {
-  background: var(--color-red-light);
-  color: var(--color-red);
-}
-
 /* ── 资源与版权 ── */
 .usage-hint {
   font-size: 12px;
@@ -431,5 +502,60 @@ async function handleUsageModeChange(value) {
 }
 .usage-dot.on {
   background: var(--color-accent);
+}
+
+/* ── 知识图谱（力导向参数） ── */
+.force-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 18px;
+  align-items: start;
+}
+
+/* 滑杆卡片：知识图谱力场与节点详情共用 */
+.force-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+}
+
+.force-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--color-text-primary);
+  margin-bottom: 4px;
+}
+
+.force-value {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-tertiary);
+}
+
+.force-slider {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.force-hint {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 3px;
+}
+
+.force-reset {
+  align-self: flex-start;
+}
+
+.force-preview-box {
+  height: 280px;
 }
 </style>

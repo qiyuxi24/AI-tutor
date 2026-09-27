@@ -18,6 +18,12 @@
     # ④ 确认满意后再落库
     ... --user-id 5 --node-id 12 --chapters 1 --run --write --subject 强化学习
 
+⚠ 生产路径已改（2026-09-27）：建图阶段② 不再写单篇长文，而是**节点小节化**
+（`kb/section_generator.py`：规划节点内部的内聚小节 → 每节独立成一篇 MD 落盘）。
+本脚本的 `_call_fill_llm` 预览仍走旧的单 MD 口径，只用于"看切分 / 看模型能写多深"，
+**不代表落库形态**；落库形态用 `--write` 后看
+`data/knowledge/nodes/{user_id}/{node_id}/manifest.json` 与平行小节 MD。
+
 退出码：正文中位 ≥ 600 且空壳率 ≤ 10% = 0；未达标 = 1（可直接接进 CI 手动环节）。
 """
 import argparse

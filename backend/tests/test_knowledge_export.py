@@ -30,9 +30,11 @@ class FakeKG:
                 return tag
         return ""
 
-    def get_node_themes(self, node_id):
-        """导出只读主归属主题名；替身不带主题 → 全部落「未归类」（导出降级路径）。"""
-        return []
+
+    def node_content_text(self, node_id: str) -> str:
+        """与 KnowledgeGraph 同契约的正文读取出口（本替身没有小节 → 直接读单 MD）"""
+        md = self.nodes_dir / f"{node_id}.md"
+        return md.read_text(encoding="utf-8") if md.is_file() else ""
 
     def close(self):
         self.closed = True

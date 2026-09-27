@@ -13,7 +13,7 @@
  * 主题切换 / 用户菜单已下沉到 ActivityBar 组件内部。
  */
 
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useChatStore } from '../stores/chatStore'
 import { useAuthStore } from '../stores/authStore'
 import { formatError, clientError } from '../utils/errorCodes.js'
@@ -28,6 +28,7 @@ import NodeDetail from '../components/NodeDetail.vue'
 import UserProfile from '../components/UserProfile.vue'
 import GraphSearch from '../components/GraphSearch.vue'
 import OnboardingGuide from '../components/OnboardingGuide.vue'
+import LoginDialog from '../components/LoginDialog.vue'
 import KnowledgeView from './KnowledgeView.vue'
 import QuizView from './QuizView.vue'
 import CollectorView from './CollectorView.vue'
@@ -66,6 +67,7 @@ function startGraphResize(e) {
   document.addEventListener('mouseup', onUp)
 }
 const showUserProfile = ref(false)
+const showLoginDialog = ref(false)
 const graphSearchRef = ref(null)
 const forceGraphRef = ref(null)
 const onboardingRef = ref(null)
@@ -77,14 +79,33 @@ const nodeDetailModal = ref(null)
 const nodeDetailVisible = ref(false)
 const nodeDetailLoading = ref(false)
 
-onMounted(() => {
+// ─── 节点详情 → 出题页跳转 ───
+// quizTarget = { nodeName, questionId }；questionId 为空表示只按节点名预填主题
+const quizTarget = ref(null)
+// 目标变化时重建 QuizView（v-if 在外层视图切换时已重挂，此 key 兜住"已在出题页再跳题"）
+const quizViewKey = computed(() =>
+  quizTarget.value ? `${quizTarget.value.nodeName}#${quizTarget.value.questionId ?? ''}` : 'quiz'
+)
+
+onMounted(async () => {
+  // 先确保有会话（无 token 时静默登录体验账户）：init() 会立刻打一批需要 token
+  // 的接口，没先登录整屏就是 401。
+  // ponytail: 失败一律弹登录框，不区分"口令不对"和"后端没起"——弹框里带着真实
+  // 错误信息，用户至少知道该干什么。要精确区分就让 ensureSession 返回原因而非 boolean。
+  const ok = await authStore.ensureSession()
+  if (!ok) showLoginDialog.value = true
   // init() 内部依次：fetchSubjects() → ensureSubjectSelected() → fetchGraph() → connectSSE()
   store.init()
 })
 
-function handleLogout() {
-  authStore.logout()
-  window.location.hash = '#/login'
+/** 切换账号：打开登录弹窗（#/login 路由页已取消，也不再提供"退出登录"）*/
+function openAccountSwitch() {
+  showLoginDialog.value = true
+}
+
+/** 登录/注册成功：必须重载，否则 store 里还是上一个账号的图谱与对话记录 */
+function handleLoginSuccess() {
+  window.location.reload()
 }
 
 function handleActivitySelect(id) {
@@ -92,6 +113,8 @@ function handleActivitySelect(id) {
   viewMode.value = id
   // 离开对话视图时，仅收起对话侧栏（保留对话状态）
   if (id !== 'chat') sidebarCollapsed.value = true
+  // 从活动栏直接进入出题页 → 清掉上次由节点详情带来的聚焦目标，回到空白出题页
+  if (id === 'quiz') quizTarget.value = null
 }
 
 function replayOnboarding() {
@@ -116,6 +139,17 @@ async function handleNodeDblClick(nodeId) {
 
 function closeNodeDetail() {
   nodeDetailVisible.value = false
+}
+
+/**
+ * NodeDetail 侧边栏「试题」/「去出题」→ 跳到出题页。
+ * 带 questionId 则聚焦该题；不带则只按节点名预填出题主题。
+ * 需先关闭详情弹窗，否则全屏遮罩挡住出题页。
+ */
+function handleOpenQuiz({ nodeName, questionId = null }) {
+  quizTarget.value = { nodeName, questionId }
+  nodeDetailVisible.value = false
+  viewMode.value = 'quiz'
 }
 
 /**
@@ -205,14 +239,6 @@ async function handleGraphAction({ action, payload }) {
 }
 
 /**
- * 单击节点：主题聚合节点 → 展开/收起它自己（地图式下钻，同一交互双向切换）。
- * 普通知识点的详情走双击（@node-dblclick）。
- */
-function handleGraphNodeClick(nodeId) {
-  store.toggleThemeNode(nodeId)
-}
-
-/**
  * 搜索选中节点 → 切换到图谱视图并聚焦该节点
  */
 async function handleGraphSearchSelect(nodeId) {
@@ -220,8 +246,6 @@ async function handleGraphSearchSelect(nodeId) {
     viewMode.value = 'graph'
     await new Promise(r => setTimeout(r, 450))
   }
-  store.revealNode(nodeId)                      // 目标可能藏在折叠的主题聚合节点里
-  await new Promise(r => setTimeout(r, 200))    // 等折叠状态生效、可见图重建
   forceGraphRef.value?.focusNode(nodeId)
 }
 
@@ -244,8 +268,6 @@ async function switchSubjectAndFocus(nodeId, subject) {
     // 等新学科的力导向图完成渲染
     await new Promise(r => setTimeout(r, 450))
   }
-  store.revealNode(nodeId)                      // 目标可能藏在折叠的主题聚合节点里
-  await new Promise(r => setTimeout(r, 200))    // 等折叠状态生效、可见图重建
   forceGraphRef.value?.focusNode(nodeId)
 }
 
@@ -292,19 +314,6 @@ async function handleNodeDetailNavigate(nodeId) {
   }
 }
 
-/**
- * NodeDetail「去学习」→ 切到对话视图，并把该节点设为教学焦点。
- *
- * 焦点会随每次请求作为 current_node 下发，后端据此把图谱摘要聚焦到该节点
- * （chat_service._build_graph_summary(focus_node_id=...)），即"教学可行域"。
- * 退出入口在对话区顶部的上下文条（✕）。
- */
-function handleNodeDetailLearn({ id, name }) {
-  nodeDetailVisible.value = false
-  store.startLearningNode({ id, name })
-  viewMode.value = 'chat'
-}
-
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
 }
@@ -345,7 +354,7 @@ const slideTransition = {
       :active-view="viewMode"
       @select="handleActivitySelect"
       @open-profile="showUserProfile = true"
-      @logout="handleLogout"
+      @switch-account="openAccountSwitch"
     />
 
     <div class="content-region">
@@ -421,7 +430,6 @@ const slideTransition = {
             :error="store.graphError"
             :learning-path="store.learningPath"
             :next-node-id="store.nextToLearn?.node_id || ''"
-            @node-click="handleGraphNodeClick"
             @node-dblclick="handleNodeDblClick"
             @graph-action="handleGraphAction"
           />
@@ -431,8 +439,13 @@ const slideTransition = {
       <!-- 知识库页 -->
       <KnowledgeView v-if="viewMode === 'knowledge'" />
 
-      <!-- 出题页 -->
-      <QuizView v-if="viewMode === 'quiz'" />
+      <!-- 出题页（可从节点详情侧边栏「试题」跳入并聚焦某题；无跳转时行为与原来一致） -->
+      <QuizView
+        v-if="viewMode === 'quiz'"
+        :key="quizViewKey"
+        :initial-subject="quizTarget?.nodeName || ''"
+        :focus-question-id="quizTarget?.questionId || null"
+      />
 
       <!-- 资源采集页 -->
       <CollectorView v-if="viewMode === 'resources'" />
@@ -448,7 +461,7 @@ const slideTransition = {
       <SettingsView
         v-if="viewMode === 'settings'"
         @replay-onboarding="replayOnboarding"
-        @logout="handleLogout"
+        @switch-account="openAccountSwitch"
       />
     </div>
 
@@ -461,7 +474,7 @@ const slideTransition = {
       @save-content="handleNodeDetailSave"
       @update-mastery="handleNodeDetailMastery"
       @navigate-to-node="handleNodeDetailNavigate"
-      @learn-node="handleNodeDetailLearn"
+      @open-quiz="handleOpenQuiz"
     />
 
     <!-- 用户画像面板 -->
@@ -470,6 +483,9 @@ const slideTransition = {
       @close="showUserProfile = false"
       @profile-updated="store.refreshGraph()"
     />
+
+    <!-- 登录 / 注册弹窗（切换账号） -->
+    <LoginDialog v-model:visible="showLoginDialog" @success="handleLoginSuccess" />
 
     <!-- 新手引导 -->
     <OnboardingGuide ref="onboardingRef" />

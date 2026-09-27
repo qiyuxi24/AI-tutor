@@ -52,20 +52,6 @@ const greetingMessages = [
   <div class="chat-area">
     <!-- ChatArea 内部不再有顶部栏 — 顶部栏已移到 App.vue 统一管理 -->
 
-    <!-- 教学焦点上下文条：由图谱节点「去学习」进入；✕ 退出并恢复全图谱范围 -->
-    <div v-if="store.currentNode" class="learning-scope">
-      <span class="scope-dot"></span>
-      <span class="scope-text">
-        正在教学：<strong>{{ store.currentNodeName || store.currentNode }}</strong>
-      </span>
-      <span class="scope-hint">AI 只在此知识点的可行域内教学</span>
-      <button
-        class="scope-exit"
-        title="退出该知识点，恢复全图谱范围"
-        @click="store.clearCurrentNode()"
-      >✕</button>
-    </div>
-
     <!-- 消息列表 -->
     <main class="message-list">
       <template v-if="store.currentMessages.length > 0">
@@ -110,50 +96,6 @@ const greetingMessages = [
   background: var(--color-bg-primary);
   min-width: 0;
 }
-
-/* 教学焦点上下文条（图谱「去学习」进入后显示） */
-.learning-scope {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 12px 24px 0;
-  padding: 8px 12px;
-  border: 1px solid var(--color-accent-light);
-  background: var(--color-accent-light);
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  flex-shrink: 0;
-}
-
-.scope-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-accent);
-  flex-shrink: 0;
-}
-
-.scope-text strong { color: var(--color-text-primary); font-weight: 600; }
-
-.scope-hint {
-  color: var(--color-text-muted);
-  font-size: 12px;
-}
-
-.scope-exit {
-  margin-left: auto;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  color: var(--color-text-muted);
-  font-size: 13px;
-  line-height: 1;
-  padding: 3px 6px;
-  border-radius: 4px;
-}
-
-.scope-exit:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
 
 /* 消息列表 */
 .message-list {

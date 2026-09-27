@@ -18,17 +18,13 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Body
 from pydantic import BaseModel, Field
-from typing import Optional, List, Literal
+from typing import Optional, List
 from app.core.auth import get_current_user
 from app.core.kb.kb_manager import kb_manager
-from app.core.kb.graph_generator import (
-    generate_subject_graph,
-    generate_section_graph,
-)
+from app.core.kb import graph_generator
 
 logger = logging.getLogger("ai-tutor")
 router = APIRouter()
-
 
 class FolderCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -38,13 +34,9 @@ class FolderCreate(BaseModel):
 class GraphGenerateRequest(BaseModel):
     """从学科书籍生成知识图谱的请求"""
     subject: str = Field(..., min_length=1, max_length=100, description="学科名，如'数据结构'")
-    mode: Literal["subject", "section"] = Field(
-        "subject",
-        description="subject=整学科一键生成；section=按章节增量生成"
-    )
     node_ids: List[int] = Field(
         default_factory=list,
-        description="KB 中的文件/文件夹节点 ID 列表（文件夹自动展开）"
+        description="KB 中的文件/文件夹节点 ID 列表（文件夹自动展开，其名作为知识板块）"
     )
 
 
@@ -199,20 +191,23 @@ async def stats(user_id: int = Depends(get_current_user)):
 async def generate_graph(req: GraphGenerateRequest,
                          user_id: int = Depends(get_current_user)):
     """
-    从学科书籍生成知识图谱（AI 直接写库）。
+    从选中的书籍/文件夹生成（或补全）该学科的知识图谱（AI 直接写库）。
 
     流程：
     1. 读取选中书籍/章节的解析文本
     2. 调用 LLM 从书本内容提取知识点（节点）+ 建立关系（边）
     3. 直接写入知识图谱（节点 tags 打上学科标签）
 
-    mode:
-      - subject: 整学科一键生成（收集该学科所有选中书籍文本，批量生成）
-      - section: 按章节增量生成（只分析指定范围，在已有图谱上补充）
+    勾选文件夹时，文件夹名作为「知识板块」归属新节点（文件夹自动展开为其下文件）；
+    不清空已有图谱 —— 已有节点按语义去重 / 同名并轨并入，重复调用幂等。
+
+    ⚠ GQ-15 并发互斥：同一用户**已有建图在跑**时直接返回 409 —— 否则同一批文件会被
+    反复整批重跑（每次 LLM 重新命名 → 精确同名判重失效 → 同一概念累积多个碎片节点）。
 
     返回:
       {
         "subject": str,
+        "board": str,
         "processed_books": int,
         "created_nodes": [str, ...],
         "created_edges": int,
@@ -223,11 +218,13 @@ async def generate_graph(req: GraphGenerateRequest,
     if not req.node_ids:
         raise HTTPException(status_code=400, detail="请选择至少一个文件或文件夹作为书籍来源")
 
+    # 占位必须在任何 await 之前完成：单事件循环里"检查 + 置位"之间无 await 即原子，
+    # 两个并发请求只有一个能进（另一个在置位前就被拒）。
+    if not graph_generator.try_begin_graph_build(user_id):
+        raise HTTPException(status_code=409, detail="上一次建图尚未完成，请稍后再试")
+
     try:
-        if req.mode == "subject":
-            result = await generate_subject_graph(user_id, req.subject, req.node_ids)
-        else:
-            result = await generate_section_graph(user_id, req.subject, req.node_ids)
+        result = await graph_generator.generate_graph(user_id, req.subject, req.node_ids)
 
         if result.get("error"):
             raise HTTPException(status_code=422, detail=result["error"])
@@ -237,3 +234,7 @@ async def generate_graph(req: GraphGenerateRequest,
     except Exception as e:
         logger.error(f"生成学科图谱失败: {e}")
         raise HTTPException(status_code=500, detail=f"生成学科图谱失败: {str(e)}")
+    finally:
+        # 异常 / 超时 / 取消（CancelledError 属 BaseException，也会走到 finally）都要释放，
+        # 否则该用户被永久锁死、此后每次建图都 409。
+        graph_generator.end_graph_build(user_id)

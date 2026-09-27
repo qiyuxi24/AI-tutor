@@ -1,4 +1,4 @@
-"""GraphGenerator：两种模式共用同一条执行路径（subject / section）。
+"""GraphGenerator：单一入口 generate_graph（板块归属由勾选内容决定）。
 
 只测编排（文件夹展开、板块归属、分块、失败计数），LLM 与写库全部替换为假实现。
 """
@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from app.core.kb import graph_generator as gg
+from app.core.kb import section_generator as sg
 
 
 class FakeKb:
@@ -33,7 +34,11 @@ class FakeKg:
 
 
 def _patch(monkeypatch, text, llm_result=None):
-    """替换 kb_manager / 文本读取 / LLM / 写库，返回 (gen, calls)"""
+    """替换 kb_manager / 文本读取 / LLM / 写库，返回 (gen, calls)
+
+    `calls` 收集的是**阶段① 全局概念树**收到的目录文本（outline）—— 现在整轮只有一次
+    （不再逐单元调用骨架 LLM）。
+    """
     gen = gg.GraphGenerator(user_id=1)
     kb = FakeKb()
     monkeypatch.setattr(gg, "kb_manager", kb)
@@ -41,31 +46,28 @@ def _patch(monkeypatch, text, llm_result=None):
                         lambda uid, ids: [{"node_id": 2, "name": "b", "text": text}] if ids else [])
 
     calls = []
-    themes = []
 
-    async def fake_skeleton(subject, content, existing, section="", theme_context=""):
-        calls.append(content)
-        themes.append(theme_context)
-        gen.last_section = section
+    async def fake_concept_tree(subject, outline, existing):
+        calls.append(outline)
         return llm_result
 
-    async def fake_write(kg, subject, result, existing_nodes=None, board="",
-                         source_ref=""):
+    async def fake_write_tree(kg, subject, result, *, existing_nodes=None, board="",
+                              all_units=None):
         gen.written_board = board
-        # pending_node_ids=[] → 阶段 2 不触发（本文件只测阶段 1 的编排）
+        # pending_concepts=[] → 阶段 ② 不触发（本文件只测阶段 ① 的编排）
         return {"created_nodes": ["n1"], "pending_node_ids": [], "created_edges": 1,
-                "skipped_nodes": [], "merged_nodes": [], "dedup_status": "ok"}
+                "skipped_nodes": [], "merged_nodes": [], "dedup_status": "ok",
+                "pending_concepts": [], "hit_node_ids": [], "hit_fills": []}
 
-    monkeypatch.setattr(gen, "_call_skeleton_llm", fake_skeleton)
-    monkeypatch.setattr(gen, "_write_skeleton", fake_write)
-    gen.theme_contexts = themes   # 逐单元传入的 theme_context（供主题相关用例断言）
+    monkeypatch.setattr(gen, "_call_concept_tree_llm", fake_concept_tree)
+    monkeypatch.setattr(gen, "_write_concept_tree", fake_write_tree)
     return gen, calls
 
 
-def test_section_mode_takes_folder_name_as_board(monkeypatch):
+def test_folder_selection_takes_folder_name_as_board(monkeypatch):
     """选文件夹 → 自动展开为文件，文件夹名作为知识板块"""
     gen, calls = _patch(monkeypatch, "字" * 100, llm_result={"nodes": [], "edges": []})
-    result = asyncio.run(gen.generate_section_graph(FakeKg(), "数据结构", [1]))
+    result = asyncio.run(gen.generate_graph(FakeKg(), "数据结构", [1]))
 
     assert result["board"] == "第一章 绪论"
     assert gen.written_board == "第一章 绪论"
@@ -73,38 +75,41 @@ def test_section_mode_takes_folder_name_as_board(monkeypatch):
     assert result["created_edges"] == 1
 
 
-def test_subject_mode_expands_folder_without_board(monkeypatch):
-    """整学科模式同样展开文件夹（旧实现会静默丢掉文件夹 → 零结果），但不归属板块"""
+def test_plain_file_selection_has_no_board(monkeypatch):
+    """只选散文件（不选文件夹）→ 不归属任何板块"""
     gen, calls = _patch(monkeypatch, "字" * 100, llm_result={"nodes": [], "edges": []})
-    result = asyncio.run(gen.generate_subject_graph(FakeKg(), "数据结构", [1]))
+    result = asyncio.run(gen.generate_graph(FakeKg(), "数据结构", [2]))
 
     assert result["board"] == ""
     assert gen.written_board == ""
     assert result["processed_books"] == 1
 
 
-def test_long_text_is_chunked(monkeypatch):
-    """超长文本切成多个生成单元，逐单元调用 LLM（单元受上限约束）"""
-    gen, calls = _patch(monkeypatch, "字" * 20000, llm_result={"nodes": [], "edges": []})
-    asyncio.run(gen.generate_subject_graph(FakeKg(), "S", [2]))
+def test_long_text_chunked_but_concept_tree_called_once(monkeypatch):
+    """超长文本切成多个生成单元（供阶段②定位原文），但阶段① 全局概念树**只调一次**"""
+    gen, calls = _patch(monkeypatch, "字" * 20000, llm_result={"boards": [], "edges": []})
+    result = asyncio.run(gen.generate_graph(FakeKg(), "S", [2]))
 
-    assert len(calls) >= 3          # 20000 字 → 多个单元，不是一次性喂
-    assert all(len(c) <= gg.GRAPH_UNIT_MAX_CHARS for c in calls)
+    assert result["units"] >= 3, "20000 字应切成多个生成单元"
+    assert len(calls) == 1, "全局概念树一次看全学科，不逐单元调用"
 
 
-def test_failed_chunks_counted_not_silent(monkeypatch):
-    """LLM 全失败 → 计数返回（旧实现静默丢弃，前端只看到 0 节点）"""
+def test_failed_concept_tree_counted_not_silent(monkeypatch):
+    """全局概念树失败 → 计数 + error 返回（不静默、不留 0 节点无提示）"""
     gen, calls = _patch(monkeypatch, "字" * 20000, llm_result=None)
-    result = asyncio.run(gen.generate_subject_graph(FakeKg(), "S", [2]))
+    result = asyncio.run(gen.generate_graph(FakeKg(), "S", [2]))
 
-    assert result["failed_chunks"] == len(calls) >= 3
+    assert result["failed_chunks"] == 1
+    assert result["failed_docs"] == ["b"], "失败资料必须点名（不静默）"
     assert result["created_nodes"] == []
+    assert "error" in result
 
 
 def test_bad_json_retried_once(monkeypatch):
     """模型偶发吐非法 JSON（同一块重发即成）→ 重试一次而不是丢掉整块"""
     gen = gg.GraphGenerator(user_id=1)
-    replies = ["{不是 JSON", '{"nodes":[{"id":"n1","name":"N1"}],"edges":[]}']
+    replies = ["{不是 JSON",
+               '{"boards":[{"name":"B","concepts":[{"id":"n1","name":"N1"}]}],"edges":[]}']
     calls = []
 
     async def fake_call_llm(system, messages, **kw):
@@ -112,9 +117,9 @@ def test_bad_json_retried_once(monkeypatch):
         return replies[len(calls) - 1]
 
     monkeypatch.setattr(gg, "call_llm", fake_call_llm)
-    result = asyncio.run(gen._call_skeleton_llm("S", "正文", []))
+    result = asyncio.run(gen._call_concept_tree_llm("S", "目录", []))
 
-    assert result is not None and result["nodes"][0]["id"] == "n1"
+    assert result is not None and result["boards"][0]["concepts"][0]["id"] == "n1"
     assert len(calls) == 2
     assert calls[0]["thinking"] is False          # 批量抽取关闭思考
     assert calls[0]["max_tokens"] == gg.GRAPH_MAX_TOKENS
@@ -130,13 +135,13 @@ def test_bad_json_gives_up_after_retries(monkeypatch):
         return "{还是不是 JSON"
 
     monkeypatch.setattr(gg, "call_llm", fake_call_llm)
-    assert asyncio.run(gen._call_skeleton_llm("S", "正文", [])) is None
+    assert asyncio.run(gen._call_concept_tree_llm("S", "目录", [])) is None
     assert len(calls) == gg.GRAPH_JSON_RETRIES + 1
 
 
 def test_no_readable_text_returns_error(monkeypatch):
     gen, _ = _patch(monkeypatch, "", llm_result=None)
-    result = asyncio.run(gen.generate_subject_graph(FakeKg(), "S", []))
+    result = asyncio.run(gen.generate_graph(FakeKg(), "S", []))
 
     assert "error" in result and result["subject"] == "S"
 
@@ -205,37 +210,41 @@ def test_collect_units_respects_max_depth():
     assert all(len(u["text"]) <= gg.GRAPH_UNIT_SOFT_MAX_CHARS for u in units)
 
 
-def test_units_carry_section_title_into_prompt(monkeypatch):
-    """单元切分结果带着章节标题送进 LLM（模型知道"这段属于哪一节"）"""
+def test_outline_carries_section_titles_into_concept_tree(monkeypatch):
+    """阶段① 送入 LLM 的目录带着章节标题（模型据此知道这学科由哪些章节构成）"""
     gen, calls = _patch(monkeypatch, "# 第1章 绪论\n\n" + "字" * 3000,
-                        llm_result={"nodes": [], "edges": []})
-    asyncio.run(gen.generate_subject_graph(FakeKg(), "S", [2]))
+                        llm_result={"boards": [], "edges": []})
+    asyncio.run(gen.generate_graph(FakeKg(), "S", [2]))
 
-    assert gen.last_section == "第1章 绪论"
+    assert len(calls) == 1
+    assert "第1章 绪论" in calls[0]
 
 
-def test_shallow_content_rejected_stays_skeleton():
-    """阶段 2 深度守门：正文低于下限的节点不写正文（留在骨架态等重跑补），宁缺毋滥"""
-    kept, rejected = gg.GraphGenerator._deep_contents(
+def test_two_tier_content_gate():
+    """两档守门（2026-09-26 定案）：<150 拒收（留 skeleton）；150~400 保留但标记待补；>=400 达标"""
+    kept, rejected, marked = gg.GraphGenerator._deep_contents(
         {"nodes": [
             {"id": "deep", "content": "字" * (gg.GRAPH_MIN_CONTENT_CHARS + 50)},
+            {"id": "short", "content": "字" * (gg.GRAPH_SHALLOW_REJECT_CHARS + 10)},
             {"id": "thin", "content": "只有两句话。"},
         ]},
-        {"deep": "深节点", "thin": "薄节点"},
+        {"deep": "深节点", "short": "短节点", "thin": "截断节点"},
     )
 
-    assert list(kept) == ["deep"]
-    assert rejected == ["薄节点"]
+    assert list(kept) == ["deep", "short"], "达标 + 150~400 保留档都写入正文"
+    assert rejected == ["截断节点"], "<150 = 明显截断，拒收、留 skeleton"
+    assert marked == ["短节点"], "150~400 = 保留但标记待补"
 
 
-def test_prompts_split_skeleton_and_fill():
-    """两阶段提示词各司其职：骨架阶段不写正文，填充阶段要五段式深正文"""
-    skeleton = gg.GRAPH_SKELETON_SYSTEM_PROMPT
+def test_prompts_split_concept_tree_and_fill():
+    """两阶段提示词各司其职：概念树阶段定结构（不写正文），填充阶段单概念成文"""
+    tree = gg.GRAPH_CONCEPT_TREE_SYSTEM_PROMPT
     fill = gg.GRAPH_FILL_SYSTEM_PROMPT
 
-    assert "不要输出 content 字段" in skeleton
+    assert "概念树" in tree and "板块" in tree
+    assert "boards" in tree and "concepts" in tree
+    assert "不设字数上限" in fill
     assert "300 字以内" not in fill
-    assert str(gg.GRAPH_MIN_CONTENT_CHARS) in fill
 
 
 # ── 无 Markdown 标记时的规则切章（PDF/电子书解析产物是主战场）───────
@@ -283,139 +292,18 @@ def test_split_long_text_ignores_code_comments():
     assert len(pieces) <= len(text) // 900 + 2   # 不是每个注释一块
 
 
-# ── Task 6：建图后自动触发主题归纳 + 抽取 LLM 看到主题树（D1/D2/D8）─────
-# 全离线：generate_subject_themes 一律 monkeypatch 掉（由另一 agent 并行实现，
-# 此刻可能尚未落地），主题树由 FakeKg.list_themes 假造 —— 不碰真 LLM、不碰 data/knowledge/。
-import sys
-import types
+# ── 阶段① 定树（概念树 → 骨架节点 + 边；主题层已下线）─────────────────
 
 
-def _inject_kg_themes(monkeypatch, fn):
-    """把假的 app.core.kg_themes 塞进 sys.modules。
+def test_generate_writes_skeleton_and_edges(monkeypatch):
+    """阶段① 定树：概念树落库产出骨架节点与边（不再产出 themes）。"""
+    gen, _ = _patch(monkeypatch, "字" * 100,
+                    llm_result={"boards": [{"name": "B", "concepts": []}], "edges": []})
 
-    刻意不用 `monkeypatch.setattr(app.core.kg_themes, ...)`：模块此刻可能还不存在，
-    直接 setattr 会在测试收集期 ImportError。注入 sys.modules 让 `_generate` 里的
-    **函数内延迟 import** 拿到假实现，且不依赖真模块落地。
-    """
-    mod = types.ModuleType("app.core.kg_themes")
-    mod.generate_subject_themes = fn
-    monkeypatch.setitem(sys.modules, "app.core.kg_themes", mod)
+    result = asyncio.run(gen.generate_graph(FakeKg(), "数据结构", [1]))
 
-
-def test_generate_triggers_theme_clustering(monkeypatch):
-    """D1：建图结束后自动归纳一次主题，结果写进 aggregate['themes']。"""
-    calls = {"n": 0}
-
-    async def _fake(kg, subject, user_id=None):
-        calls["n"] += 1
-        return {"status": "ok", "themes": 3, "assigned": 5, "unassigned": 0}
-
-    _inject_kg_themes(monkeypatch, _fake)
-    gen, _ = _patch(monkeypatch, "字" * 100, llm_result={"nodes": [], "edges": []})
-
-    result = asyncio.run(gen.generate_subject_graph(FakeKg(), "数据结构", [1]))
-
-    assert calls["n"] == 1, "整学科入口应触发一次主题归纳"
-    assert result["themes"] == {"status": "ok", "themes": 3, "assigned": 5, "unassigned": 0}
-
-
-def test_theme_cluster_failure_does_not_break_graph(monkeypatch):
-    """硬性失败语义：聚类抛异常 → 只记为 {'status': 'failed'}，建图本体其余键照旧。"""
-    async def _boom(kg, subject, user_id=None):
-        raise RuntimeError("聚类挂了")
-
-    _inject_kg_themes(monkeypatch, _boom)
-    gen, _ = _patch(monkeypatch, "字" * 100, llm_result={"nodes": [], "edges": []})
-
-    result = asyncio.run(gen.generate_subject_graph(FakeKg(), "数据结构", [1]))
-
-    assert result["themes"] == {"status": "failed"}, "聚类失败不得毁掉建图"
+    assert "themes" not in result
     assert result["created_edges"] == 1
-    assert result["processed_books"] == 1
-    assert result["board"] == ""
-
-
-def test_theme_tree_passed_to_llm_units(monkeypatch):
-    """D2：建图前读一次该学科主题树，渲染后逐单元作为 theme_context 参数传入 LLM。"""
-    async def _fake(kg, subject, user_id=None):
-        return {"status": "ok"}
-
-    _inject_kg_themes(monkeypatch, _fake)
-    gen, _ = _patch(monkeypatch, "字" * 100, llm_result={"nodes": [], "edges": []})
-    kg = FakeKg()
-    monkeypatch.setattr(kg, "list_themes", lambda subject: [
-        {"id": "t1", "name": "线性结构", "level": 1, "parent_id": None, "order_index": 0},
-        {"id": "c1", "name": "数组", "level": 2, "parent_id": "t1", "order_index": 0},
-    ], raising=False)
-
-    asyncio.run(gen.generate_subject_graph(kg, "数据结构", [1]))
-
-    assert gen.theme_contexts, "每个生成单元都应收到 theme_context"
-    assert "线性结构" in gen.theme_contexts[0]
-    assert "数组" in gen.theme_contexts[0]
-
-
-def test_theme_tree_read_once_passed_to_every_unit(monkeypatch):
-    """性能语义：整轮建图只读一次主题树，逐单元传入的 theme_context 与本次完全一致。"""
-    async def _fake(kg, subject, user_id=None):
-        return {"status": "ok"}
-
-    _inject_kg_themes(monkeypatch, _fake)
-    gen, calls = _patch(monkeypatch, "字" * 20000, llm_result={"nodes": [], "edges": []})
-    kg = FakeKg()
-    reads = {"n": 0}
-
-    def _list_themes(subject):
-        reads["n"] += 1
-        return [
-            {"id": "t1", "name": "线性结构", "level": 1, "parent_id": None, "order_index": 0},
-            {"id": "c1", "name": "数组", "level": 2, "parent_id": "t1", "order_index": 0},
-        ]
-
-    monkeypatch.setattr(kg, "list_themes", _list_themes, raising=False)
-
-    asyncio.run(gen.generate_subject_graph(kg, "数据结构", [2]))
-
-    assert len(calls) >= 3, "超长文本应切成多个生成单元"
-    assert reads["n"] == 1, "主题树整轮只读一次（不在每单元重复查库）"
-    assert len(gen.theme_contexts) == len(calls)
-    assert len(set(gen.theme_contexts)) == 1, "每个单元拿到的主题上下文应一致"
-    assert "线性结构" in gen.theme_contexts[0]
-
-
-def test_missing_list_themes_degrades_silently(monkeypatch):
-    """防御式：kg 没有 list_themes（假对象 / 老库）→ 静默降级为空串，不毁建图。"""
-    async def _fake(kg, subject, user_id=None):
-        return {"status": "ok"}
-
-    _inject_kg_themes(monkeypatch, _fake)
-    gen, _ = _patch(monkeypatch, "字" * 100, llm_result={"nodes": [], "edges": []})
-
-    result = asyncio.run(gen.generate_subject_graph(FakeKg(), "数据结构", [1]))
-
-    assert gen.theme_contexts and all(tc == "" for tc in gen.theme_contexts)
-    assert result["created_edges"] == 1
-
-
-def test_theme_context_injected_into_prompt(monkeypatch):
-    """D2：主题树文本落在 user_prompt 里，且位于「已有节点」与「本节内容」之间。"""
-    gen = gg.GraphGenerator(user_id=1)
-    captured = {}
-
-    async def _fake_call_llm(system, messages, **kw):
-        captured["prompt"] = messages[0]["content"]
-        return '{"nodes": [], "edges": []}'
-
-    monkeypatch.setattr(gg, "call_llm", _fake_call_llm)
-    # 主题树由 _generate 整轮读一次后逐单元传入（不再走实例属性）
-    asyncio.run(gen._call_skeleton_llm("数据结构", "正文", [],
-                                        theme_context="- 线性结构\n  - 数组"))
-
-    p = captured["prompt"]
-    assert "线性结构" in p and "数组" in p
-    assert (p.index("已有节点")
-            < p.index("本学科现有主题结构")
-            < p.index("本节内容")), "主题树小节应夹在「已有节点」与「本节内容」之间"
 
 
 # ── 断点续填（两阶段建图中断后补齐正文）────────────────────────────
@@ -450,29 +338,38 @@ def _skeleton(kg, node_id: str, name: str, source_ref: str = "") -> None:
          "added_by": "ai", "source_ref": source_ref}, origin="book")
 
 
+def _fake_section_llm(monkeypatch, body: str):
+    """替换 `section_generator.call_llm`（规划固定一节、成文返回 body）；返回收到的 prompt 列表。"""
+    prompts: list[str] = []
+
+    async def fake_call_llm(system, messages, **kw):
+        prompts.append(messages[0]["content"])
+        if kw.get("kind") == "kb_section_plan":
+            return ('{"sections":[{"title":"定义","kind":"definition","brief":"是什么"}],'
+                    '"summary":""}')
+        return body
+
+    monkeypatch.setattr(sg, "call_llm", fake_call_llm)
+    return prompts
+
+
 def test_fill_pending_nodes_resumes_from_source_ref(monkeypatch, kg):
-    """按 source_ref 找回章节原文并填充：骨架 → filled，章节标题原样传给填充 LLM"""
+    """按 source_ref 找回章节原文并填充：骨架 → 小节化 + filled，原文进生成材料"""
     book_text = "第1章　概述\n\n" + "字" * 3000
     _skeleton(kg, "queue", "队列", gg._make_source_ref(7, "第1章　概述"))
 
     gen = gg.GraphGenerator(user_id=1)
     monkeypatch.setattr(gen, "_load_book_texts",
                         lambda uid, ids: [{"node_id": 7, "name": "b", "text": book_text}])
-    seen = {}
-
-    async def _fake_fill(subject, section, text, briefs, theme_context=""):
-        seen["section"], seen["text"] = section, text
-        return {"nodes": [{"id": "queue", "content": "队列正文内容。" * 100}]}
-
-    monkeypatch.setattr(gen, "_call_fill_llm", _fake_fill)
+    prompts = _fake_section_llm(monkeypatch, "队列正文内容。" * 100)
 
     result = asyncio.run(gen.fill_pending_nodes(kg, "数据结构"))
 
     assert result["status"] == "ok"
     assert result["filled"] == ["队列"]
     assert kg.get_node("queue")["content_status"] == "filled"
-    assert seen["section"] == "第1章　概述", "章节标题应原样带去填充（prompt 里要标来源）"
-    assert "字" in seen["text"], "喂给填充 LLM 的应是重读回来的原文"
+    assert kg.has_sections("queue"), "续填也走小节化（与建图阶段②同一路径）"
+    assert any("字" in p for p in prompts), "喂给生成管线的应是重读回来的原文"
 
 
 def test_fill_pending_nodes_skips_without_source_or_missing_section(monkeypatch, kg):
@@ -485,11 +382,7 @@ def test_fill_pending_nodes_skips_without_source_or_missing_section(monkeypatch,
     monkeypatch.setattr(gen, "_load_book_texts",
                         lambda uid, ids: [{"node_id": 7, "name": "b",
                                            "text": "第1章　概述\n\n" + "字" * 3000}])
-
-    async def _fake_fill(subject, section, text, briefs, theme_context=""):
-        return {"nodes": [{"id": "ok_node", "content": "正常正文。" * 100}]}
-
-    monkeypatch.setattr(gen, "_call_fill_llm", _fake_fill)
+    _fake_section_llm(monkeypatch, "正常正文。" * 100)
 
     result = asyncio.run(gen.fill_pending_nodes(kg, "数据结构"))
 

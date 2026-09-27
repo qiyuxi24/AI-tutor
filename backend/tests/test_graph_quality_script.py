@@ -3,17 +3,16 @@
 判重口径三处一致：写入层并轨（`KnowledgeGraph.find_node_by_name`）、Agent 写路径、
 以及本脚本的存量体检 —— 所以这里锁的是"归一化 + 同学科 + 同用户"这三条边界。
 """
-import sqlite3
-
+import json
 from app.core.knowledge_graph import KnowledgeGraph
 from scripts.inspect_graph_quality import (
     audit,
     dupe_groups,
     fuzzy_pairs,
     load_graph,
-    load_theme_coverage,
     merge_dupes,
     plan_merge,
+    section_metrics,
 )
 
 
@@ -122,57 +121,6 @@ def _two_dupes(tmp_path):
     return kg, "queue", "queue_v2"
 
 
-def test_merge_dupes_moves_theme_assignments(tmp_path):
-    """node_themes 随节点级联删除 —— 合并必须先搬到保留者，并归一化唯一主归属（AC-T3）"""
-    kg, keep_id, drop_id = _two_dupes(tmp_path)
-    tid = kg.create_theme("数据结构", "线性结构", 1)
-    kg.set_node_themes(drop_id, [{"theme_id": tid, "weight": 2.0, "is_primary": True}])
-    kg.close()
-
-    db_path = tmp_path / "knowledge.db"
-    nodes, _ = load_graph(db_path)
-    stats = merge_dupes(db_path, plan_merge(dupe_groups(nodes), tmp_path / "nodes"))
-
-    assert stats["themes_moved"] == 1
-    after = KnowledgeGraph(user_id=1, data_dir=tmp_path)
-    try:
-        assert [t["theme_id"] for t in after.get_node_themes(keep_id)] == [tid], "归属要转移到保留者"
-        assert after._conn.execute(
-            "SELECT COUNT(*) FROM node_themes WHERE node_id = ? AND is_primary = 1",
-            (keep_id,)).fetchone()[0] == 1, "每节点至多一个主归属（AC-T3）"
-        assert after._conn.execute(
-            "SELECT COUNT(*) FROM node_themes WHERE node_id = ?",
-            (drop_id,)).fetchone()[0] == 0, "被并节点的归属行随节点删除"
-    finally:
-        after.close()
-
-
-def test_merge_dupes_keeps_human_primary_single(tmp_path):
-    """保留者已有 human 主归属时，重定向后仍恰好 1 个主归属，且人工主归属优先"""
-    kg, keep_id, drop_id = _two_dupes(tmp_path)
-    human_t = kg.create_theme("数据结构", "人工主题", 1)
-    ai_t = kg.create_theme("数据结构", "AI主题", 1)
-    kg.set_node_themes(keep_id, [{"theme_id": human_t, "weight": 1.0, "is_primary": True}],
-                       source="human")
-    kg.set_node_themes(drop_id, [{"theme_id": ai_t, "weight": 9.0, "is_primary": True}])
-    kg.close()
-
-    db_path = tmp_path / "knowledge.db"
-    nodes, _ = load_graph(db_path)
-    merge_dupes(db_path, plan_merge(dupe_groups(nodes), tmp_path / "nodes"))
-
-    after = KnowledgeGraph(user_id=1, data_dir=tmp_path)
-    try:
-        rows = after._conn.execute(
-            "SELECT theme_id FROM node_themes WHERE node_id = ? AND is_primary = 1",
-            (keep_id,)).fetchall()
-        assert len(rows) == 1, "重定向后仍恰好 1 个主归属"
-        assert rows[0]["theme_id"] == human_t, "human 主归属优先保留"
-        assert {t["theme_id"] for t in after.get_node_themes(keep_id)} == {human_t, ai_t}
-    finally:
-        after.close()
-
-
 def test_merge_dupes_preserves_mastery_and_aliases(tmp_path):
     """合并不得丢学习状态：掌握度取较大值（记事件），别名改指保留者、不留悬空"""
     kg, keep_id, drop_id = _two_dupes(tmp_path)
@@ -202,41 +150,46 @@ def test_merge_dupes_preserves_mastery_and_aliases(tmp_path):
 
 
 # ════════════════════════════════════════════
-#  主题覆盖率（AC-T2）与老库容错
+#  节点小节化（2026-09-27：文件夹 + manifest.json + 平行小节 MD）
 # ════════════════════════════════════════════
 
-def test_audit_reports_theme_coverage(tmp_path):
-    """体检要报主题覆盖率：有 node_themes 记录的节点数 / 带主归属者"""
-    kg, keep_id, _ = _two_dupes(tmp_path)
-    tid = kg.create_theme("数据结构", "线性结构", 1)
-    kg.set_node_themes(keep_id, [{"theme_id": tid, "weight": 1.0, "is_primary": True}])
-    kg.close()
+def test_section_metrics_flags_broken_missing_and_orphans(tmp_path):
+    """坏 manifest / 条目缺文件 / 孤儿 MD 都要报出来（体检口径的唯一实现）"""
+    nodes_dir = tmp_path / "nodes"
+    good = nodes_dir / "1" / "double_integral"
+    good.mkdir(parents=True)
+    (good / "s01_定义.md").write_text("## 定义\n" + "内容" * 100, encoding="utf-8")
+    (good / "orphan.md").write_text("孤儿", encoding="utf-8")
+    (good / "manifest.json").write_text(json.dumps({
+        "node_id": "double_integral",
+        "sections": [{"id": "s01", "file": "s01_定义.md", "status": "filled"},
+                     {"id": "s02", "file": "s02_缺失.md", "status": "failed"}],
+    }, ensure_ascii=False), encoding="utf-8")
+    bad = nodes_dir / "1" / "broken_node"
+    bad.mkdir()
+    (bad / "manifest.json").write_text("{不是 JSON", encoding="utf-8")
 
-    db_path = tmp_path / "knowledge.db"
-    nodes, edges = load_graph(db_path)
-    m = audit(nodes, edges, tmp_path / "nodes", load_theme_coverage(db_path))
+    m = section_metrics([_node("double_integral", "二重积分"),
+                         _node("broken_node", "坏节点")], nodes_dir)
 
-    assert m["themes_available"] is True
-    assert m["themes_covered"] == 1
-    assert m["themes_primary"] == 1
+    assert m["nodes"] == 2 and m["sections"] == 2
+    assert m["failed"] == 1 and m["broken"] == 1
+    assert m["missing_file"] == 1 and m["orphan_md"] == 1
 
 
-def test_audit_tolerates_old_db_without_theme_tables(tmp_path):
-    """老库没有 themes/node_themes 表：覆盖率标记不可用，且不抛异常（体检常查老库）"""
-    db = tmp_path / "knowledge.db"
-    conn = sqlite3.connect(str(db))
-    conn.execute("CREATE TABLE nodes (id TEXT PRIMARY KEY, name TEXT, tags TEXT DEFAULT '[]',"
-                 " user_id INTEGER, mastery INTEGER DEFAULT 0)")
-    conn.execute("CREATE TABLE edges (id INTEGER PRIMARY KEY, from_node TEXT,"
-                 " to_node TEXT, relation TEXT)")
-    conn.execute("INSERT INTO nodes (id, name, tags, user_id)"
-                 " VALUES ('a', '队列', '[\"数据结构\"]', 1)")
-    conn.commit()
-    conn.close()
+def test_audit_counts_section_body_as_content(tmp_path):
+    """小节化节点没有主 MD，正文口径必须拼小节 —— 否则被误判成空壳"""
+    nodes_dir = tmp_path / "nodes"
+    d = nodes_dir / "1" / "double_integral"
+    d.mkdir(parents=True)
+    (d / "s01_定义.md").write_text("x" * 500, encoding="utf-8")
+    (d / "manifest.json").write_text(json.dumps({
+        "sections": [{"id": "s01", "file": "s01_定义.md", "status": "filled"}],
+    }, ensure_ascii=False), encoding="utf-8")
 
-    nodes, edges = load_graph(db)
-    cov = load_theme_coverage(db)
-    assert cov["available"] is False
+    m = audit([_node("double_integral", "二重积分")], [], nodes_dir)
 
-    m = audit(nodes, edges, tmp_path / "nodes", cov)  # 不抛异常
-    assert m["themes_available"] is False
+    assert m["body_missing"] == 0 and m["shell"] == 0
+
+
+

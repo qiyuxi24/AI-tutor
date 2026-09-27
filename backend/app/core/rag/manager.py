@@ -55,8 +55,20 @@ def _chunk_key(node_id: str, chunk_index: int) -> str:
 
 
 def _extract_node_content(kg, node) -> str:
-    """读取节点 MD 文件内容"""
-    md_path = kg.nodes_dir / f"{node['id']}.md"
+    """读取节点正文：走 `KnowledgeGraph.node_content_text`（**小节优先**的唯一出口）。
+
+    小节化节点的主 MD 只剩骨架占位（甚至没有主 MD，见小节化方案 D1），直读单 MD
+    会让整个节点在 RAG 里"没内容"。缺该能力的老假对象 → 回落直读单 MD。
+    """
+    node_id = node["id"]
+    read_text = getattr(kg, "node_content_text", None)
+    if callable(read_text):
+        try:
+            return read_text(node_id)
+        except Exception as e:                       # noqa: BLE001 —— 降级语义：回落单 MD
+            logger.debug(f"读取节点 {node_id} 正文失败，回落单 MD：{e}")
+
+    md_path = kg.nodes_dir / f"{node_id}.md"
     if not md_path.exists():
         return ""
     with open(md_path, "r", encoding="utf-8") as f:

@@ -53,7 +53,7 @@ def _load_admin_db():
 admin_db = _load_admin_db()
 
 
-# ── 建库工具：新版库 7 张表 / 老版库 5 张表（无 themes、node_themes）──
+# ── 建库工具：新版库 6 张表 / 老版库 5 张表（无 doc_node_marks）──
 
 _FULL_SCHEMA = """
 CREATE TABLE users (
@@ -81,22 +81,18 @@ CREATE TABLE mastery_events (
     user_id INTEGER NOT NULL,
     node_id TEXT NOT NULL
 );
-CREATE TABLE themes (
-    id        TEXT PRIMARY KEY,
-    user_id   INTEGER NOT NULL,
-    name      TEXT NOT NULL,
-    parent_id TEXT,
-    level     INTEGER NOT NULL
-);
-CREATE TABLE node_themes (
-    node_id  TEXT NOT NULL,
-    theme_id TEXT NOT NULL,
-    user_id  INTEGER NOT NULL,
-    PRIMARY KEY (node_id, theme_id)
+CREATE TABLE doc_node_marks (
+    user_id    INTEGER NOT NULL,
+    doc_id     INTEGER NOT NULL,
+    node_id    TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending',
+    evidence   TEXT DEFAULT '',
+    created_at TEXT,
+    PRIMARY KEY (user_id, doc_id, node_id)
 );
 """
 
-# 老库：还没有 KG-T1 的 themes / node_themes
+# 老库：还没有 doc_node_marks
 _LEGACY_SCHEMA = """
 CREATE TABLE users (
     id       INTEGER PRIMARY KEY,
@@ -133,7 +129,7 @@ def _connect(path: Path, schema: str) -> sqlite3.Connection:
 
 
 def _seed_full(conn: sqlite3.Connection, uid: int) -> None:
-    """给 uid 在全部 7 张表各插一行（口径与生产一致：user_id 区分）。"""
+    """给 uid 在全部 6 张表各插一行（口径与生产一致：user_id 区分）。"""
     conn.execute("INSERT INTO users (id, username) VALUES (?, ?)", (uid, f"u{uid}"))
     conn.execute("INSERT INTO nodes (id, user_id) VALUES (?, ?)", (f"n{uid}", uid))
     conn.execute(
@@ -148,12 +144,9 @@ def _seed_full(conn: sqlite3.Connection, uid: int) -> None:
         "INSERT INTO mastery_events (user_id, node_id) VALUES (?, ?)", (uid, f"n{uid}")
     )
     conn.execute(
-        "INSERT INTO themes (id, user_id, name, parent_id, level) VALUES (?, ?, ?, ?, ?)",
-        (f"t{uid}", uid, f"theme{uid}", None, 1),
-    )
-    conn.execute(
-        "INSERT INTO node_themes (node_id, theme_id, user_id) VALUES (?, ?, ?)",
-        (f"n{uid}", f"t{uid}", uid),
+        "INSERT INTO doc_node_marks (user_id, doc_id, node_id, status)"
+        " VALUES (?, ?, ?, 'pending')",
+        (uid, uid, f"n{uid}"),
     )
 
 
@@ -163,8 +156,7 @@ _TABLES = (
     "edges",
     "node_aliases",
     "mastery_events",
-    "themes",
-    "node_themes",
+    "doc_node_marks",
 )
 
 
@@ -176,7 +168,7 @@ def _count(conn: sqlite3.Connection, table: str, uid: int) -> int:
 
 
 def test_delete_user_rows_clears_all_tables_and_spares_others(tmp_path):
-    """删 uid=1：7 张表该用户数据全清，uid=2 数据一条不动。"""
+    """删 uid=1：6 张表该用户数据全清，uid=2 数据一条不动。"""
     conn = _connect(tmp_path / "knowledge.db", _FULL_SCHEMA)
     try:
         _seed_full(conn, 1)
@@ -191,8 +183,8 @@ def test_delete_user_rows_clears_all_tables_and_spares_others(tmp_path):
         conn.close()
 
 
-def test_delete_user_rows_tolerates_legacy_db_without_theme_tables(tmp_path):
-    """老库（无 themes / node_themes）调用不得抛异常，且原有 5 表照常清。"""
+def test_delete_user_rows_tolerates_legacy_db(tmp_path):
+    """老库（无 doc_node_marks）调用不得抛异常，且原有 5 表照常清。"""
     conn = _connect(tmp_path / "knowledge.db", _LEGACY_SCHEMA)
     try:
         conn.execute("INSERT INTO users (id, username) VALUES (1, 'u1')")

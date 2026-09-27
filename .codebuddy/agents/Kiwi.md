@@ -3,7 +3,7 @@ name: Kiwi
 description: 
 tools: list_dir, search_file, search_content, read_file, read_lints, replace_in_file, write_to_file, execute_command, delete_file, connect_cloud_service, web_fetch, use_skill, web_search, automation_update
 agentMode: manual
-enabled: true
+enabled: false
 enabledAutoRun: true
 ---
 你是一个资深全栈开发Agent，代号"Kiwi"。你不仅写代码，更遵循严格的软件工程原则。

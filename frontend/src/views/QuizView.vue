@@ -15,9 +15,20 @@ import {
   generateQuiz,
   gradeQuizQuestion,
   getQuizStats,
+  getQuizQuestion,
   downloadQuiz,
   readBlobError,
 } from '../api/quiz.js'
+
+/**
+ * Props（均为可选，默认值即原行为）：
+ *   initialSubject: String      — 挂载时预填出题主题（仅在原为空时覆盖，不覆盖用户已输入）
+ *   focusQuestionId: Number|null — 有值时挂载后拉取该题并直接渲染（供"从节点详情跳转看某题"）
+ */
+const props = defineProps({
+  initialSubject: { type: String, default: '' },
+  focusQuestionId: { type: Number, default: null },
+})
 
 // ─── 出题配置 ───
 const subject = ref('')               // 主题/知识点
@@ -227,8 +238,39 @@ async function handleExport(fmt) {
   }
 }
 
+/**
+ * 从节点详情跳入：按题 id 拉取单题并直接渲染。
+ * 形状对齐 handleGenerate 的 questions 项（含 localIdx / dbId），使其可正常渲染与判分；
+ * 题目已在库中，故 dbId 即 q.id。失败仅 ElMessage 提示，不影响出题等其余功能。
+ */
+async function focusQuestion(id) {
+  try {
+    const res = await getQuizQuestion(id)
+    const q = res.data
+    if (!q) {
+      ElMessage.error('未找到该题目')
+      return
+    }
+    questions.value = [{ ...q, localIdx: 0, dbId: q.id }]
+    answers.value = {}
+    results.value = {}
+    rejectedCount.value = 0
+    materialsUsed.value = 0
+    requestedCount.value = 1
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '加载题目失败')
+  }
+}
+
 onMounted(() => {
   loadStats()
+  // 从节点详情跳入时：预填主题（仅在原为空时覆盖）+ 聚焦指定题目
+  if (props.initialSubject && !subject.value.trim()) {
+    subject.value = props.initialSubject
+  }
+  if (props.focusQuestionId != null) {
+    focusQuestion(props.focusQuestionId)
+  }
 })
 </script>
 

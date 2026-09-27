@@ -8,11 +8,17 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
 接口清单：
   GET    /knowledge/events                   - 图谱写通道事件流（SSE，?token=）
   GET    /knowledge/graph                    - 获取图谱（可选 ?subject= / ?subject=&board= 切片）
+  DELETE /knowledge/graph                    - 删除整个学科图谱（?subject=，不可撤销，不动知识库原文）
+  PATCH  /knowledge/subject                  - 学科改名（{"old_name","new_name"}，只改课名）
+  PATCH  /knowledge/board                    - 板块改名（{"subject","old_name","new_name"}，只改分组名）
+  DELETE /knowledge/board                    - 解散板块（?subject=&board=，知识点保留）
   GET    /knowledge/boards                   - 获取某学科下的板块列表（?subject=）
-  GET    /knowledge/themes                   - 获取课内主题层级 + 节点主归属（?subject=）
-  POST   /knowledge/themes/rebuild           - 重新归纳主题层级（?subject=，调 LLM）
   POST   /knowledge/graph/fill               - 断点续填（补齐待填充骨架节点的正文）
-  GET    /knowledge/node/{node_id}           - 获取节点详情
+  GET    /knowledge/node/{node_id}           - 获取节点详情（含小节元数据，无正文）
+  GET    /knowledge/node/{node_id}/section/{section_id}       - 读取单个小节正文
+  POST   /knowledge/node/{node_id}/sections/generate          - 触发节点小节化生成管线
+  DELETE /knowledge/node/{node_id}/section/{section_id}       - 删除单个小节
+  GET    /knowledge/node/{node_id}/quizzes                    - 获取节点试题链接（侧边栏，含小节路由）
   POST   /knowledge/node                     - 创建节点（手动，ID 自动生成）
   PUT    /knowledge/node/{node_id}           - 更新节点（含 MD 内容）
   PUT    /knowledge/node/{node_id}/info      - 更新节点基本信息
@@ -29,7 +35,7 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
   POST   /knowledge/prerequisite/infer       - 推断学科内先修关系（候选边，可 apply）
 
 前端调用者全部在 `frontend/src/stores/chatStore.js`（视图层不直连 apiClient）；
-`decompose` / `export` / `prerequisite/infer` / `graph/fill` / `themes/rebuild`
+`decompose` / `export` / `prerequisite/infer` / `graph/fill`
 无前端入口，是给运维脚本与人工调用的接口（见 docs/知识图谱/知识图谱_模块结构与封装调研.md §6）。
 """
 
@@ -38,12 +44,16 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Depends, Body, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from app.core.kg_taxonomy import assign_taxonomy
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.prerequisite import (
     DEFAULT_MAX_PARENTS, DEFAULT_THRESHOLD, apply_candidates, infer_prerequisites,
 )
 from app.core import graph_middleware
+from app.core.kb import graph_generator
+from app.core.error_codes import ErrorCode, log_error
+from app.core.quiz.quiz_store import quiz_manager
 from app.core.auth import get_current_user, get_current_user_from_token
 from app.core.event_bus import publish, subscribe
 from app.core.graph_analyzer import GraphAnalyzer
@@ -52,6 +62,31 @@ from app.models.schemas import (
 )
 
 router = APIRouter()
+
+
+# ══════════════════════════════════════════════════════════════════
+#  请求体模型（改名类操作）
+# ══════════════════════════════════════════════════════════════════
+
+class RenameSubjectRequest(BaseModel):
+    """学科改名请求（`PATCH /knowledge/subject`）"""
+    old_name: str = Field(..., min_length=1, max_length=100, description="现学科名")
+    new_name: str = Field(..., min_length=1, max_length=100, description="新学科名")
+
+
+class RenameBoardRequest(BaseModel):
+    """板块改名请求（`PATCH /knowledge/board`）"""
+    subject: str = Field(..., min_length=1, max_length=100, description="所属学科名")
+    old_name: str = Field(..., min_length=1, max_length=100, description="现板块名")
+    new_name: str = Field(..., min_length=1, max_length=100, description="新板块名")
+
+
+class GenerateSectionsRequest(BaseModel):
+    """节点小节化生成请求（`POST /knowledge/node/{node_id}/sections/generate`）。
+
+    整个请求体可选 —— 缺省 / 空体等价 `force=false`（不覆盖已存在的小节）。
+    """
+    force: bool = Field(default=False, description="true = 覆盖已生成的小节重新生成")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -105,6 +140,130 @@ async def get_graph(subject: str | None = Query(None, description="可选：按�
         kg.close()
 
 
+@router.delete("/knowledge/graph")
+async def delete_graph(subject: str = Query(..., description="要删除的学科名，如'数据结构'"),
+                       user_id: int = Depends(get_current_user)):
+    """删除**整个学科**的知识图谱：该学科的全部节点、边、主题层级与节点正文 MD。
+
+    不可撤销。`nodes` 行删除后，其别名 / 掌握度事件 / 资料账本 / 主题归属随 FK 级联
+    清空（该学科的掌握度历史一并消失）。**不动知识库原文**：上传的教材与向量索引仍在，
+    可以重新建图。
+
+    「未分类」是后端合成的分组（无学科归属的节点），不是真实学科 —— 传它直接 400，
+    避免"点一下把散落节点全删了"；空串同理。
+
+    建图进行中（GQ-15 互斥，见 `graph_generator.is_graph_building`）拒绝：否则建图后段会把刚删掉的
+    节点写回来，出现"删了一半又长出来"的状态。删除本身瞬时，不需要自己占锁。
+
+    RAG 索引按节点逐个清理（与 `DELETE /knowledge/node/{node_id}` 同一口径）；
+    清理失败只记警告不阻断 —— 图谱已删，残留索引会在重建时按节点覆盖。
+    """
+    subj = (subject or "").strip()
+    if not subj or subj == graph_middleware.SUBJECT_UNCLASSIFIED:
+        raise HTTPException(
+            status_code=400,
+            detail="请指定要删除的学科名（「未分类」不是学科，不能整科删除）",
+        )
+    if graph_generator.is_graph_building(user_id):
+        raise HTTPException(status_code=409, detail="该学科正在建图，请等建图完成后再删除")
+
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        node_ids = [n["id"] for n in kg.get_nodes_by_subject(subj)]  # 供清理 RAG 索引
+        result = kg.remove_subject(subj)
+    finally:
+        kg.close()
+
+    try:
+        from app.core.rag.manager import rag_manager
+        for node_id in node_ids:
+            rag_manager.delete_node_index(user_id, node_id)
+    except Exception as e:
+        logging.getLogger("ai-tutor").warning(
+            f"清理 RAG 索引失败（学科 {subj}，{len(node_ids)} 个节点）: {e}")
+
+    publish("graph_updated")
+    return {"status": "ok", **result}
+
+
+@router.patch("/knowledge/subject")
+async def rename_subject(req: RenameSubjectRequest,
+                         user_id: int = Depends(get_current_user)):
+    """学科改名：该学科全部节点的课名（含 tags 里的旧名）一起换。
+
+    **只改课名**：知识点正文、板块归属、边、掌握度一概不动。
+
+    「未分类」是后端合成的散落节点分组，不是真实学科 —— 新旧名双向拒绝。
+
+    请求体：`{"old_name": "数据结构", "new_name": "数据结构与算法"}`
+    返回：  `{"status": "ok", "old_subject", "new_subject", "renamed_nodes"}`
+
+    参数非法（空名 / 新旧同名 / 新名已被其他学科占用）统一 400，detail 说明原因
+    —— 同一种失败对前端而言都是"这次改名没做成、换个名字再试"，不必分状态码。
+    """
+    if graph_middleware.SUBJECT_UNCLASSIFIED in (req.old_name, req.new_name):
+        raise HTTPException(status_code=400,
+                            detail="「未分类」是系统合成的分组，不能作为学科名")
+
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        result = kg.rename_subject(req.old_name, req.new_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        kg.close()
+
+    publish("graph_updated")
+    return {"status": "ok", **result}
+
+
+@router.patch("/knowledge/board")
+async def rename_board(req: RenameBoardRequest,
+                       user_id: int = Depends(get_current_user)):
+    """板块改名：**只改分组名**，板块内的知识点、边、掌握度都不动。
+
+    板块是 `nodes.board` 上的分组标签（无独立表），且**按学科隔离** —— 别的课下同名
+    板块不受影响。改到一个已存在的板块名等于静默合并两个板块，直接 400 拒绝。
+
+    请求体：`{"subject": "数据结构", "old_name": "线性表", "new_name": "线性结构"}`
+    返回：  `{"status": "ok", "subject", "old_board", "new_board", "renamed_nodes"}`
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        result = kg.rename_board(req.subject, req.old_name, req.new_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        kg.close()
+
+    publish("graph_updated")
+    return {"status": "ok", **result}
+
+
+@router.delete("/knowledge/board")
+async def delete_board(subject: str = Query(..., description="所属学科名"),
+                       board: str = Query(..., description="要解散的板块名"),
+                       user_id: int = Depends(get_current_user)):
+    """解散知识板块：该板块下的节点回到「未分组」（`board = ''`）。
+
+    **知识点一个都不删** —— 板块只是分组标签，摘掉标签不该带走正文、边与掌握度。
+    要连知识点一起删，用 `DELETE /knowledge/graph`（整科）或 `DELETE /knowledge/node/{id}`
+    （逐个）。
+
+    返回：`{"status": "ok", "subject", "board", "moved_nodes"}`
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        result = kg.remove_board(subject, board)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        kg.close()
+
+    publish("graph_updated")
+    return {"status": "ok", **result}
+
+
 @router.get("/knowledge/boards")
 async def get_boards(subject: str = Query(..., description="学科名，如'数据结构'"),
                      user_id: int = Depends(get_current_user)):
@@ -121,50 +280,6 @@ async def get_boards(subject: str = Query(..., description="学科名，如'数�
         kg.close()
 
 
-# ══════════════════════════════════════════════════════════════════
-#  主题层级（KG-T1/T2）：课内两层分组（省 → 市）
-#  设计见 docs/知识图谱/知识图谱_主题层级_设计与实现方案.md
-# ══════════════════════════════════════════════════════════════════
-
-@router.get("/knowledge/themes")
-async def get_themes(subject: str = Query(..., description="课名，如'数据结构'"),
-                     user_id: int = Depends(get_current_user)):
-    """返回该课的主题层级 + 节点主归属（前端地图式下钻的数据源）。
-
-    - `themes`：扁平列表（含 parent_id/level/order_index），组树由前端按 parent_id 做；
-    - `primary`：{node_id: 主归属主题 id}，前端据此把节点"上卷"成省/市聚合节点。
-
-    **themes 为空 = 尚未归纳**（不是错误）→ 前端退回原始节点图。
-    """
-    kg = KnowledgeGraph(user_id=user_id)
-    try:
-        return {
-            "subject": subject,
-            "themes": kg.list_themes(subject),
-            "primary": kg.get_primary_theme_map(subject),
-        }
-    finally:
-        kg.close()
-
-
-@router.post("/knowledge/themes/rebuild")
-async def rebuild_themes(subject: str = Query(..., description="课名"),
-                         user_id: int = Depends(get_current_user)):
-    """重新归纳该课的主题层级（会调一次 LLM；`source='human'` 的数据保留）。
-
-    聚类失败不抛 HTTP 异常：直接返回 `{"status": "failed", ...}`，由前端提示。
-    """
-    kg = KnowledgeGraph(user_id=user_id)
-    try:
-        from app.core.kg_themes import generate_subject_themes  # 延迟导入：避免拖慢 API 启动
-        result = await generate_subject_themes(kg, subject, user_id=user_id)
-        if result.get("status") == "ok":
-            publish("graph_updated")
-        return result
-    finally:
-        kg.close()
-
-
 @router.post("/knowledge/graph/fill")
 async def fill_pending_graph(subject: str = Query(..., description="课名，如'数据结构'"),
                              user_id: int = Depends(get_current_user)):
@@ -174,12 +289,11 @@ async def fill_pending_graph(subject: str = Query(..., description="课名，如
     按节点的 `source_ref` 来源定位重读原书、重跑切分、找回对应章节原文后填充；
     找不到原文的（如问题拆解骨架）**不自动填**，原样跳过并在 `skipped_no_source` 里列出。
 
-    填充失败不抛 HTTP 异常，由返回体汇报（与 `/knowledge/themes/rebuild` 同一口径）。
+    填充失败不抛 HTTP 异常，由返回体汇报。
     """
     kg = KnowledgeGraph(user_id=user_id)
     try:
-        from app.core.kb.graph_generator import GraphGenerator  # 延迟导入：避免拖慢 API 启动
-        result = await GraphGenerator(user_id=user_id).fill_pending_nodes(kg, subject)
+        result = await graph_generator.GraphGenerator(user_id=user_id).fill_pending_nodes(kg, subject)
         if result["status"] == "ok" and result["filled"]:
             publish("graph_updated")
         return result
@@ -189,7 +303,17 @@ async def fill_pending_graph(subject: str = Query(..., description="课名，如
 
 @router.get("/knowledge/node/{node_id}")
 async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)):
-    """返回单个节点的完整信息，包括 MD 文件内容、前置/关联节点"""
+    """返回单个节点的完整信息，包括 MD 文件内容、前置/关联节点，以及小节元数据。
+
+    小节化（内容层，见 docs/知识图谱/知识图谱_节点小节化_设计与实现方案.md §3）：
+    小节化节点的正文分散在多个平行 MD 里，走 `GET .../section/{section_id}` 按需读；
+    本端点只回**元数据**列表（`id/title/kind/status/updated_at`，**不含正文**），前端
+    据此渲染左侧小节侧边栏。
+
+    **兼容铁律（D5）**：老节点（无 manifest）必须行为不变 —— `has_sections=false`、
+    `sections=[]`、`content` 仍返回单文件全文。小节化节点没有概述主文件（D1），
+    故其 `content` 为空串。
+    """
     kg = KnowledgeGraph(user_id=user_id)
     try:
         node = kg.get_node(node_id)
@@ -202,6 +326,19 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
         if file_path.exists():
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
+
+        # 小节元数据（不含正文）；老节点无 manifest → has_sections=False、sections=[]
+        has_sections = kg.has_sections(node_id)
+        sections = [
+            {
+                "id": s.get("id"),
+                "title": s.get("title", ""),
+                "kind": s.get("kind", ""),
+                "status": s.get("status", ""),
+                "updated_at": s.get("updated_at", ""),
+            }
+            for s in (kg.list_sections(node_id) if has_sections else [])
+        ]
 
         # 前置依赖
         prerequisites = kg.get_prerequisites(node_id)
@@ -221,6 +358,8 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
             # 所属学科：前端据此切到对应学科再聚焦（图谱一次只渲染一个学科）
             "subject": kg.node_subject(node) or graph_middleware.SUBJECT_UNCLASSIFIED,
             "content": content,
+            "has_sections": has_sections,
+            "sections": sections,
             "tags": node.get("tags", []),
             "prerequisites": prerequisites,
             "related_nodes": related_ids,
@@ -229,9 +368,128 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
             "estimated_minutes": node.get("estimated_minutes", 15),
             "summary": node.get("summary", ""),
             "file_path": node.get("file_path", ""),
-            # 主题归属（KG-T1）：主归属在前，含 theme_name/level/parent_id
-            "themes": kg.get_node_themes(node_id),
         }
+    finally:
+        kg.close()
+
+
+@router.get("/knowledge/node/{node_id}/section/{section_id}")
+async def get_node_section(node_id: str, section_id: str,
+                           user_id: int = Depends(get_current_user)):
+    """读取节点下**单个小节**的正文（小节化节点专用）。
+
+    小节不进图谱结构，只是节点文件夹里的平行 MD + manifest 路由（见设计 §3）——
+    点开哪节读哪节，正文永不全量加载。老节点（无 manifest）没有任何小节。
+
+    返回：`{"id","title","kind","status","content"}`；节点或小节不存在 → 404。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        if kg.get_node(node_id) is None:
+            raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
+        section = next((s for s in kg.list_sections(node_id)
+                        if s.get("id") == section_id), None)
+        if section is None:
+            raise HTTPException(status_code=404, detail=f"小节不存在：{section_id}")
+        return {
+            "id": section.get("id"),
+            "title": section.get("title", ""),
+            "kind": section.get("kind", ""),
+            "status": section.get("status", ""),
+            "content": kg.read_section(node_id, section_id),
+        }
+    finally:
+        kg.close()
+
+
+@router.post("/knowledge/node/{node_id}/sections/generate")
+async def generate_node_sections(node_id: str,
+                                 req: GenerateSectionsRequest | None = Body(default=None),
+                                 user_id: int = Depends(get_current_user)):
+    """触发节点**小节化生成管线**（阶段①规划 + 阶段②逐节成文，见设计 §6）。
+
+    请求体可选：`{"force": true}` 覆盖已生成的小节重新生成；缺省 / 空体 = false。
+    生成是节点建成后的**第二跳深化**，独立于建图管线（§6.3）；单节失败只标 `failed`，
+    不拖垮整批。
+
+    返回：直接透传 `SectionGenerator.generate` 的
+        `{"status","created","failed","message"}`；节点不存在 → 404。
+
+    小节不进图谱结构、不影响图渲染；仅阶段①回写 `nodes.summary` 会让地图标签变新鲜，
+    故成功后发一次 `graph_updated`（保守口径，与 `fill_pending_graph` 一致）。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        if kg.get_node(node_id) is None:
+            raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
+        from app.core.kb.section_generator import SectionGenerator  # 延迟导入：避免拖慢 API 启动
+        result = await SectionGenerator(user_id).generate(
+            kg, node_id, force=bool(req.force) if req else False)
+        if result.get("status") == "ok" and result.get("created"):
+            publish("graph_updated")
+        return result
+    finally:
+        kg.close()
+
+
+@router.delete("/knowledge/node/{node_id}/section/{section_id}")
+async def delete_node_section(node_id: str, section_id: str,
+                              user_id: int = Depends(get_current_user)):
+    """删除节点下的**单个小节**（删该节 MD + manifest 条目）。
+
+    **不删节点本体**：小节只是节点文件夹里的平行 MD，图谱里的节点与边一概不动。
+    要删知识点本体，用 `DELETE /knowledge/node/{node_id}`。
+
+    返回：`{"deleted": true}`；节点或小节不存在 → 404。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        # delete_section 返回 bool：无 manifest / 无此节 → False（口径见 KnowledgeGraph）
+        if not kg.delete_section(node_id, section_id):
+            raise HTTPException(status_code=404, detail=f"小节不存在：{section_id}")
+        return {"deleted": True}
+    finally:
+        kg.close()
+
+
+@router.get("/knowledge/node/{node_id}/quizzes")
+async def get_node_quizzes(node_id: str, user_id: int = Depends(get_current_user)):
+    """列出该节点关联的**试题链接**（节点小节化侧边栏数据源）。
+
+    数据来源两处拼装（`questions.knowledge_point` 存的就是图谱**节点 id**，
+    见 `core/quiz/chat_quiz.py`）：
+    1. 题库：`QuizStore.list_by_knowledge_point(node_id)` 取该节点的题（按 id 倒序）；
+    2. 路由：`manifest.quizzes` 把题挂到某个小节（`str(题目id) == str(ref.id)` 匹配，
+       与 `add_quiz_ref` 写入的形态无关），命中 → 回填 `section_id`，未挂号 → `""`。
+
+    返回：`{"node_id", "quizzes": [{...题目字段..., "section_id"}]}`；节点不存在 → 404。
+
+    **降级铁律**：题库不可用 / 查询异常一律返回 `quizzes: []` 并 `log_error` ——
+    侧边栏只是节点详情页的一块附属信息，绝不能因为题库故障把详情页打挂。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        if kg.get_node(node_id) is None:
+            raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
+
+        # manifest 的 quizzes 路由：题 id(str) → section_id（无 manifest → 空路由）
+        manifest = kg.read_manifest(node_id) or {}
+        section_of = {
+            str(ref.get("id")): (ref.get("section_id") or "")
+            for ref in (manifest.get("quizzes") or [])
+        }
+
+        quizzes: list[dict] = []
+        try:
+            store = quiz_manager._get_store(user_id)
+            for q in store.list_by_knowledge_point(node_id):
+                q["section_id"] = section_of.get(str(q.get("id")), "")
+                quizzes.append(q)
+        except Exception as e:
+            log_error(ErrorCode.QUIZ_LIST_FAILED, detail=str(e),
+                      context={"user_id": user_id, "node_id": node_id}, exception=e)
+
+        return {"node_id": node_id, "quizzes": quizzes}
     finally:
         kg.close()
 
@@ -705,7 +963,6 @@ async def export_knowledge(subject: str | None = Query(None, description="可选
 
         nodes.sort(key=lambda n: (n.get("difficulty", 3), n.get("mastery", 0)))
 
-        # P1：节点行带上「主归属主题名」（KG-T1）。只做加法，不改既有字段与结构。
         lines: list[str] = []
         title = f"{subject} 知识图谱" if subject else "知识图谱导出"
         lines.append(f"# {title}")
@@ -718,19 +975,14 @@ async def export_knowledge(subject: str | None = Query(None, description="可选
             mastery_label = {0: "未学", 1: "入门", 26: "熟悉", 51: "熟练", 76: "精通"}
             ml = next((v for k, v in sorted(mastery_label.items(), reverse=True)
                        if n.get("mastery", 0) >= k), "未学")
-            theme_name = "未归类"
-            primary = next((t for t in kg.get_node_themes(n["id"]) if t.get("is_primary")), None)
-            if primary and primary.get("theme_name"):
-                theme_name = primary["theme_name"]
             lines.append(f"### {n['name']} (ID: {n['id']}, 掌握度: {n.get('mastery', 0)}/{ml}, "
-                         f"难度: {n.get('difficulty', 3)}, 主题: {theme_name})")
+                         f"难度: {n.get('difficulty', 3)})")
             if n.get("summary"):
                 lines.append(f"> {n['summary']}")
             lines.append("")
 
-            md_path = kg.nodes_dir / f"{n['id']}.md"
-            if md_path.exists():
-                md_content = md_path.read_text(encoding="utf-8").strip()
+            md_content = kg.node_content_text(n["id"]).strip()
+            if md_content:
                 if md_content.startswith("#"):
                     md_content = "\n".join(md_content.split("\n")[1:]).strip()
                 lines.append(md_content)
