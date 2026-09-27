@@ -23,7 +23,18 @@ description 构成双源，实测已漂移：`WEB_SEARCH_ENABLED=false` 时该�
 """
 
 
-def _spec(name, description, parameters, handler, guidance="", timeout_secs=None):
+# ── 授权分级（「须先问」vs「免确认」）────────────────────────────────
+# 名单的**唯一声明处 = 工具自己**（`_spec(tier=...)`），提示词那两份名单由
+# `build_authorization_block()` 派生。为什么收口：这两份名单原先是
+# `chat_service.TOOL_POLICY_PROMPT` 手写 + 测试再硬编码一份，实测已漏项 ——
+# `update_mastery` / `grade_answer` 两个工具谁都没列，模型对它们没有任何分级指引。
+TIER_FREE = "free"    # 免确认：只读检索 / 只记学生本人信息 / 判分，不改图谱结构
+TIER_ASK = "ask"      # 须先问：改图谱结构 / 下载留存 / 触发出题
+TIERS = (TIER_FREE, TIER_ASK)
+
+
+def _spec(name, description, parameters, handler, guidance="", timeout_secs=None,
+          tier=TIER_ASK):
     """
     注册一条工具 spec（薄壳 handler + 领域实现拆在各自模块）。
 
@@ -36,9 +47,14 @@ def _spec(name, description, parameters, handler, guidance="", timeout_secs=None
             慢工具必须显式放宽：`quiz_generate` 要调 LLM 出题，真机实测单题 ~40s，
             默认 60s 护栏太紧（2026-09-14）。异步 handler 会被直接 await，
             同步 handler 仍放线程池执行 —— 由 dispatch.execute_kg_tool_async 判定。
+        tier:        授权分级（`TIER_FREE` / `TIER_ASK`）—— 决定它进
+            `build_authorization_block()` 的哪份名单。默认 `TIER_ASK`：新工具忘了声明时
+            落到"须先问"，宁可多问一句。`TIER_ASK` 档的工具必须在自己的 guidance 或
+            description 里自述「须先问」（`tests/test_tools_registry.py` 锁死）。
     """
     return {"name": name, "description": description, "parameters": parameters,
-            "handler": handler, "guidance": guidance, "timeout_secs": timeout_secs}
+            "handler": handler, "guidance": guidance, "timeout_secs": timeout_secs,
+            "tier": tier}
 
 
 # ── 注册表容器（就地更新：dispatch 持有同一对象引用，注册后立刻可见）──
@@ -72,6 +88,21 @@ def _resolve_spec(tool_call):
     """从 tool_call 取 (name, spec)；工具未注册时 spec 为 None。"""
     name = getattr(getattr(tool_call, "function", None), "name", None)
     return name, _TOOL_BY_NAME.get(name)
+
+
+def _tier_names(specs: list[dict], tier: str) -> str:
+    """某一档的工具名，渲染成 `` `a`、`b` ``（保持注册顺序）。"""
+    return "、".join(f"`{s['name']}`" for s in specs if s.get("tier") == tier)
+
+
+def build_authorization_block(specs: list[dict] | None = None) -> tuple[str, str]:
+    """授权分级两份名单文本：`(免确认, 须先问)`。
+
+    只读注册表 —— 新增工具在 `_spec(tier=...)` 声明一次即可，不用改提示词或测试
+    （2026-09-27 前是手写名单 + 测试硬编码，漏项不会被任何东西拦住）。
+    """
+    specs = _TOOL_SPECS if specs is None else specs
+    return _tier_names(specs, TIER_FREE), _tier_names(specs, TIER_ASK)
 
 
 def build_tools_prompt(specs: list[dict] | None = None) -> str:

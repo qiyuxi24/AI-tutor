@@ -10,7 +10,7 @@
 否则模型会拿解析当讲解直接念出来，破坏苏格拉底式教学。
 """
 
-from ..registry import _spec
+from ..registry import TIER_FREE, _spec
 
 DESCRIPTION = ("对学生刚作答的题目判分并记录（规则判分，瞬时返回）。"
                "学生回答你出的题之后调用，只需把学生的原话传进来，系统会自动找到那道待作答的题。"
@@ -48,4 +48,5 @@ async def handler(args, kg) -> str:
     return await grade_pending_answer(kg, user_answer)
 
 
-SPEC = _spec("grade_answer", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE)
+SPEC = _spec("grade_answer", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE,
+             tier=TIER_FREE)

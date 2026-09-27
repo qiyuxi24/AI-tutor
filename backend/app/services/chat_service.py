@@ -27,6 +27,7 @@ from datetime import datetime
 from app.core.prompt_loader import get_system_prompt
 from app.core.agent.loop import run_agent_loop
 from app.core.agent_tools import TOOLS_PROMPT  # 注册表生成的「工具调用指南」段落
+from app.core.agent_tools.registry import build_authorization_block
 from app.core.config import settings
 from app.core.agent.guard import trim_history_to_budget
 from app.core.graph_analyzer import GraphAnalyzer
@@ -45,7 +46,7 @@ logger = logging.getLogger("ai-tutor")
 #  逐工具指南 = 注册表生成（TOOLS_PROMPT）；跨工具策略 = 本文件 TOOL_POLICY_PROMPT
 # ══════════════════════════════════════════════════════════════════
 
-TOOL_POLICY_PROMPT = """
+_TOOL_POLICY_TEMPLATE = """
 ## 工具使用策略（跨工具）
 
 逐工具说明见上一节「工具调用指南」——它由工具注册表生成，新增工具会自动出现在其中。
@@ -57,13 +58,12 @@ TOOL_POLICY_PROMPT = """
 
 **① 免确认 —— 直接调用，不要问**
 只读检索，或只记录学生本人的信息，不改变他的知识图谱结构：
-`mcp__websearch__web_search`、`fetch_webpage`、`rag_search`、`update_user_profile`
+{free_tools}
 （学生说"帮我查一下""搜搜看"，直接搜，别先问"要不要我搜"。）
 
 **② 须先问 —— 先在对话里问过学生、他答应了，下一轮再调用**
 会改变知识图谱结构，或把资料下载留存进他的库：
-`add_knowledge_node`、`update_node_content`、`add_edge`、`delete_node`、
-`download_resource`、`quiz_generate`
+{ask_tools}
 
 铁律（违反会被学生视为"擅自操作"）：
 1. **这一类操作，本轮只输出询问文本，不要同时调用工具。**
@@ -108,6 +108,14 @@ TOOL_POLICY_PROMPT = """
 - **你创建的节点和边**（added_by="ai"）可以自由修改和删除。
 - 如果用户明确要求你修改某个特定节点（如"帮我改一下XX的内容"），你可以调用工具，系统会放行。
 """
+
+# 授权分级两份名单 = **注册表派生**（唯一声明处是各工具的 `_spec(tier=...)`）。
+# 原先这里是手写名单、测试再硬编码一份，实测已漏项：`update_mastery` / `grade_answer`
+# 谁都没列 → 模型对它们没有任何分级指引，且加新工具必须记得改三处。
+_AUTH_FREE, _AUTH_ASK = build_authorization_block()
+TOOL_POLICY_PROMPT = (_TOOL_POLICY_TEMPLATE
+                      .replace("{free_tools}", _AUTH_FREE)
+                      .replace("{ask_tools}", _AUTH_ASK))
 
 # 完整工具能力说明 = 注册表生成的逐工具指南（含 MCP 工具，随开关自动增减）+ 跨工具策略
 TOOL_CAPABILITY_PROMPT = TOOLS_PROMPT + TOOL_POLICY_PROMPT

@@ -12,6 +12,7 @@ import re
 import pytest
 
 from app.core.agent_tools import KG_TOOLS, all_specs, build_tools_prompt, register
+from app.core.agent_tools.registry import TIER_ASK, TIER_FREE, TIERS
 from app.services.chat_service import TOOL_CAPABILITY_PROMPT
 
 # 工具名特征：用于从提示词里挑出"看起来是工具名"的反引号 token（参数名 node_id 不匹配）
@@ -71,35 +72,51 @@ def test_policy_prompt_present():
 
 
 def test_authorization_tiers_present():
-    """「工具授权分级」必须在最终提示词里，且两份清单各就各位。
+    """「工具授权分级」必须在最终提示词里，且两份名单**与注册表逐条对应**。
 
-    2026-09-26 新增策略：联网搜索 / 读网页 / 检索 / 画像 = 免确认直接调用；
+    2026-09-26 起的策略：只读检索 / 记学生本人信息 / 判分 = 免确认直接调用；
     改知识图谱结构 / 下载留存 / 出题 = 先把学生问过、同意后才调用。
-    这里按**段内**查找（而非全文），防止工具名出现在别处就算通过。
+
+    2026-09-27 去掉硬编码：名单来源 = 各工具的 `_spec(tier=...)`，本测试也从注册表推导
+    —— 加新工具只需声明一次，不会再出现"改了提示词忘改测试"或反之。
+    按**段内**查找（而非全文），防止工具名出现在别处就算通过。
     """
     assert "工具授权分级" in TOOL_CAPABILITY_PROMPT
     section = TOOL_CAPABILITY_PROMPT.split("工具授权分级")[1].split("### 掌握度由谁更新")[0]
-    for name in ("add_knowledge_node", "update_node_content", "add_edge", "delete_node",
-                 "download_resource", "quiz_generate"):
-        assert f"`{name}`" in section, f"{name} 应列在「须先问」清单里"
-    for name in ("mcp__websearch__web_search", "fetch_webpage", "rag_search",
-                 "update_user_profile"):
-        assert f"`{name}`" in section, f"{name} 应列在「免确认」清单里"
+    free_block, ask_block = section.split("**② 须先问", 1)
+
+    for spec in all_specs():
+        token = f"`{spec['name']}`"
+        block = free_block if spec.get("tier") == TIER_FREE else ask_block
+        assert token in block, f"{spec['name']}（tier={spec.get('tier')}）应出现在对应名单里"
+    # 反向：免确认名单里不得混进「须先问」的工具
+    for spec in all_specs():
+        if spec.get("tier") == TIER_ASK:
+            assert f"`{spec['name']}`" not in free_block, f"{spec['name']} 不是免确认档"
 
 
-def test_write_tools_self_declare_confirmation():
-    """写类工具自己的 guidance/description 必须自述「须先问」。
+def test_every_spec_declares_a_known_tier():
+    """每个工具都得落在一个已知档里 —— 漏了它会同时从两份名单消失（静默无分级指引）。
+
+    这正是硬编码时代的实际故障：名单手写在 chat_service，`update_mastery` /
+    `grade_answer` 谁都没列，模型对它们没有任何授权指引。
+    """
+    unknown = [(s["name"], s.get("tier")) for s in all_specs() if s.get("tier") not in TIERS]
+    assert unknown == []
+
+
+def test_ask_tier_tools_self_declare_confirmation():
+    """「须先问」档的工具，自己的 guidance/description 必须自述「须先问」。
 
     为什么必须各自声明：跨工具策略段虽然写了，但单工具说明里若仍有
     "不必等用户开口就动手" 这类**更具体**的指令，模型会照更具体的那条执行
     （本项目已踩过：触发类提示词被更强的既有教学原则盖过）。
     """
-    must_ask = {"add_knowledge_node", "update_node_content", "add_edge",
-                "delete_node", "download_resource", "quiz_generate"}
     for s in all_specs():
-        if s["name"] in must_ask:
-            text = (s.get("guidance") or "") + (s.get("description") or "")
-            assert "须先问" in text, f"{s['name']} 未声明「须先问」"
+        if s.get("tier") != TIER_ASK:
+            continue
+        text = (s.get("guidance") or "") + (s.get("description") or "")
+        assert "须先问" in text, f"{s['name']} 未声明「须先问」"
 
 
 def test_duplicate_registration_rejected():

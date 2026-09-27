@@ -15,7 +15,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from ..registry import _spec
+from ..registry import TIER_FREE, _spec
 
 # 线程池：用于在同步工具执行（execute_kg_tool）里跑 async RAG 检索
 _ASYNC_TOOL_POOL = ThreadPoolExecutor(max_workers=2)
@@ -144,4 +144,5 @@ def handler(args, kg) -> str:
                       hops=int(args.get("hops", 0) or 0))
 
 
-SPEC = _spec("rag_search", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE)
+SPEC = _spec("rag_search", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE,
+             tier=TIER_FREE)
