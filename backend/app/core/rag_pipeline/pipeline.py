@@ -33,7 +33,8 @@ from app.core.hybrid_search.fusion import rrf_fuse
 from app.core.rag_pipeline.types import RagContext, RagHit
 from app.core.rag_pipeline import router
 from app.core.rag_pipeline.query_expansion import hyde_query
-from app.core.rag_pipeline.sources import RagSource, GraphRagSource, KbRagSource
+from app.core.rag_pipeline.sources import (
+    RagSource, GraphRagSource, KbRagSource, GraphStructureSource)
 
 # 单个源检索超时（秒），防止某个源卡死拖慢整体
 _SOURCE_TIMEOUT = 8.0
@@ -62,29 +63,36 @@ class RagPipeline:
         返回:
             统一命中的列表（已按分数降序、去重）；任何情况下都不抛异常。
         """
-        # 空查询直接返回
-        if not ctx or not (ctx.query or "").strip():
+        if not ctx:
             return []
 
-        # 按需检索开关（轻量版 Adaptive RAG）
-        if not router.should_retrieve(ctx.query):
-            return []
+        # 源分两类：
+        # - required（如图谱结构）：与 query 无关，每次都必须送达 —— 不受节流闸门
+        #   与 ctx.sources 影响。它们是"上下文"而不是"检索"。
+        # - 普通源：需要 query、通过节流闸门、且被调用方选中（ctx.sources）。
+        active: list[RagSource] = [
+            s for s in self._sources.values() if getattr(s, "required", False)
+        ]
 
-        # 收集"应该参与本次检索"的源
-        active: list[RagSource] = []
-        for source in self._sources.values():
-            try:
-                if source.should_query(ctx):
-                    active.append(source)
-            except Exception as e:
-                logger.warning(f"RAG 源 {source.name} should_query 异常，跳过该源: {e}")
+        query = (ctx.query or "").strip()
+        if query and router.should_retrieve(query):
+            for source in self._sources.values():
+                if getattr(source, "required", False):
+                    continue
+                if ctx.sources is not None and source.name not in ctx.sources:
+                    continue
+                try:
+                    if source.should_query(ctx):
+                        active.append(source)
+                except Exception as e:
+                    logger.warning(f"RAG 源 {source.name} should_query 异常，跳过该源: {e}")
 
         if not active:
             return []
 
         # HyDE：假设答案当第二个 query（生成失败/未开 → 只有原 query）
         queries = [ctx.query]
-        if settings.rag_hyde_enabled:
+        if query and settings.rag_hyde_enabled:
             hypo = await hyde_query(ctx.query, ctx.user_id)
             if hypo:
                 queries.append(hypo)
@@ -165,3 +173,4 @@ def _rrf_fuse(batches: list[list[RagHit]]) -> list[RagHit]:
 pipeline = RagPipeline()
 pipeline.register(GraphRagSource())
 pipeline.register(KbRagSource())
+pipeline.register(GraphStructureSource())

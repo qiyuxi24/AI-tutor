@@ -136,6 +136,30 @@ def test_run_should_query_exception_isolated(pl):
     assert [h.content for h in out] == ["ok"]
 
 
+# ── 显式源选择（ctx.sources 与检索范围正交）──────────────────
+
+def test_ctx_sources_limits_active_sources(pl):
+    pl.register(FakeSource(name="graph", hits=[_hit("图谱内容", 0.9, "graph")]))
+    pl.register(FakeSource(name="kb", hits=[_hit("资料内容", 0.8, "kb")]))
+
+    out = _run(pl, sources={"graph"})
+    assert [h.source for h in out] == ["graph"]
+
+
+def test_ctx_sources_none_means_all(pl):
+    pl.register(FakeSource(name="graph", hits=[_hit("图谱内容", 0.9, "graph")]))
+    pl.register(FakeSource(name="kb", hits=[_hit("资料内容", 0.8, "kb")]))
+
+    out = _run(pl, sources=None)
+    assert {h.source for h in out} == {"graph", "kb"}
+
+
+def test_ctx_sources_unknown_name_yields_nothing(pl):
+    """显式点名了不存在的源 → 无源可跑；不得静默回退成"跑全部"。"""
+    pl.register(FakeSource(name="graph", hits=[_hit("图谱内容", 0.9, "graph")]))
+    assert _run(pl, sources={"nope"}) == []
+
+
 # ── 注册管理 ────────────────────────────────────────────────
 
 def test_register_unregister(pl):

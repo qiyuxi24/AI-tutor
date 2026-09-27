@@ -55,6 +55,47 @@ def test_rag_search_inside_event_loop(fake_pipeline):
     assert "栈是后进先出" in r
 
 
+def _capture_ctx(monkeypatch):
+    """替换 pipeline.run，捕获本次 rag_search 构造的 RagContext。"""
+    captured = {}
+
+    async def fake_run(ctx):
+        captured.update(ctx=ctx)
+        return []
+
+    monkeypatch.setattr(real_pipeline, "run", fake_run)
+    return captured
+
+
+def test_rag_search_all_source_selects_every_source(monkeypatch):
+    """source=all（PARAMETERS 的默认值）不限定源，且不设检索范围。
+
+    回归：曾靠构造 ctx.kb 才能让知识库源参与，而 all 分支忘了构造 →
+    模型用默认参数检索时知识库源整源缺席，上传的资料永远拿不到。
+    现由 ctx.sources 表达源选择：None = 全部已注册源。
+    """
+    from app.core.agent_tools.tools.rag_search import rag_search
+    captured = _capture_ctx(monkeypatch)
+    rag_search("什么是栈", source="all", user_id=1)
+    assert captured["ctx"].sources is None      # 全部源（含知识库）
+    assert captured["ctx"].kb is None           # 不限范围 = 该用户全部上传文档
+
+
+def test_rag_search_graph_source_selects_graph_only(monkeypatch):
+    """source=graph 是"只要图谱"：用显式源选择表达，而不是靠把 kb 置空。"""
+    from app.core.agent_tools.tools.rag_search import rag_search
+    captured = _capture_ctx(monkeypatch)
+    rag_search("什么是栈", source="graph", user_id=1)
+    assert captured["ctx"].sources == {"graph"}
+
+
+def test_rag_search_kb_source_selects_kb_only(monkeypatch):
+    from app.core.agent_tools.tools.rag_search import rag_search
+    captured = _capture_ctx(monkeypatch)
+    rag_search("什么是栈", source="kb", user_id=1)
+    assert captured["ctx"].sources == {"kb"}
+
+
 def test_rag_search_no_user_id(fake_pipeline):
     from app.core.agent_tools.tools.rag_search import rag_search
     r = rag_search("什么是栈", source="all", user_id=None)

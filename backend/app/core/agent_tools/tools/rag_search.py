@@ -78,24 +78,25 @@ def rag_search(query: str, source: str = "all",
     from app.core.profile import get_usage_mode
     mode = get_usage_mode(user_id)
 
-    kb = None
-    if source == "kb":
-        # 仅检索知识库但用户未指定范围：需要全部上传文档（node_ids=None 表示全部）
-        kb = {"node_ids": None, "name": "知识库"}
-    elif source == "graph":
-        # 仅图谱：构造一个不触发 kb 源的 context（无 kb 则 KbRagSource.should_query=False）
-        kb = None
+    # 源选择与检索范围是两个正交维度，各归其位：
+    #   sources 只表达"选哪些源"（None = 全部已注册源）
+    #   kb      只表达"在哪些文件里找"（此处不限范围 → None，检索该用户全部上传资料）
+    # "知识库源要不要参与"由源自证（KbRagSource.should_query 查有无已索引资料），
+    # 不再由本函数构造 ctx.kb 决定 —— 所以 source="all"（PARAMETERS 的默认值）
+    # 天然包含知识库，不需要任何特判（曾经就是缺了这个特判，模型用默认参数检索时
+    # 知识库源整源缺席，上传的资料永远拿不到）。
+    if source == "graph":
+        sources = {"graph"}
+    elif source == "kb":
+        sources = {"kb"}
+    else:
+        sources = None
 
-    ctx = RagContext(user_id=user_id, query=query, top_k=top_k, kb=kb, mode=mode,
-                     metadata={"graph_hops": hops})
+    ctx = RagContext(user_id=user_id, query=query, top_k=top_k, sources=sources,
+                     mode=mode, metadata={"graph_hops": hops})
     hits = _run_async(pipeline.run(ctx))
 
-    # 按来源过滤（source=all 时保留全部）
-    if source == "graph":
-        hits = [h for h in hits if h.source == "graph"]
-    elif source == "kb":
-        hits = [h for h in hits if h.source == "kb"]
-
+    # 不再按 h.source 二次过滤：源选择已由 ctx.sources 在管道内完成（单一事实源）。
     if not hits:
         return "未检索到相关内容，请基于已有知识回答，或换个角度再试。"
 

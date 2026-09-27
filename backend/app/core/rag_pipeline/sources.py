@@ -23,7 +23,11 @@ from app.core.rag_pipeline.types import RagContext, RagHit
 
 @runtime_checkable
 class RagSource(Protocol):
-    """RAG 数据源协议：实现类需提供 name、should_query、retrieve。"""
+    """RAG 数据源协议：实现类需提供 name、should_query、retrieve。
+
+    可选属性 `required: bool = False`：为 True 表示"每次必须送达、不受节流与源选择影响"
+    （这类源是"上下文"而非"按需检索"，见 RagPipeline.run）。
+    """
     name: str
 
     def should_query(self, ctx: RagContext) -> bool:
@@ -116,9 +120,10 @@ class KbRagSource:
     """
     上传文档知识库源。
 
-    ctx.kb 存在即触发知识库检索：
+    参与与否由**自己**决定（见 should_query）：用户有已索引资料就参与。
+    `ctx.kb` 只是**检索范围**，不是开关：
     - ctx.kb.node_ids 非空 → 只在指定目录范围内检索（目录展开为文件列表后混合检索）
-    - ctx.kb.node_ids 为空/None → 检索该用户全部上传文档
+    - ctx.kb 为 None / node_ids 为空 → 不限范围，检索该用户全部上传文档
 
     命中后累计来源引用次数（B3.3，见 _bump_reference_stats）：按命中片段的 node_id
     累加 resources.times_referenced（同一文档多片段命中只计 1 次引用）。
@@ -127,14 +132,23 @@ class KbRagSource:
     name = "kb"
 
     def should_query(self, ctx: RagContext) -> bool:
-        # ctx.kb 存在即表示本次要检索知识库（node_ids 空则检索全部）
-        return bool(ctx.kb)
+        """
+        源自证可用性：只看"该用户有没有已索引资料"，不看调用方传了什么。
+
+        历史坑（2026-09-27）：这里曾写成 `bool(ctx.kb)` —— 把"源是否启用"外包给了
+        调用方构造的 ctx.kb。于是 chat 侧（按前端 kb_node_ids 判空）与 rag_search 侧
+        （只在 source=="kb" 时构造）各写一份开关逻辑、两处都错，上传的资料对 LLM
+        整源不可见且**不报任何错**。范围 ≠ 开关：漏传一个业务参数不该关掉一个数据源。
+        """
+        from app.core.kb.kb_manager import kb_manager
+        return kb_manager.has_indexed_content(ctx.user_id)
 
     async def retrieve(self, ctx: RagContext) -> list[RagHit]:
         from app.core.kb.kb_manager import kb_manager
 
-        node_ids = ctx.kb.get("node_ids") or []
-        kb_name = ctx.kb.get("name") or "我的知识库"
+        scope = ctx.kb or {}                    # 范围可缺省：None = 不限范围
+        node_ids = scope.get("node_ids") or []
+        kb_name = scope.get("name") or "我的知识库"
 
         # 目录节点 → 递归展开为文件节点 ID 列表
         file_node_ids: list[int] = []
@@ -187,3 +201,39 @@ class KbRagSource:
             return path
         heading = r.get("heading") or ""
         return heading
+
+
+class GraphStructureSource:
+    """
+    图谱**结构**注入源：把 `graph_analyzer.build_graph_context` 的产物作为一条命中返回。
+
+    与 GraphRagSource 职责不同：
+    - 本源给"结构"（有哪些知识点 / 掌握度 / 关系）—— 教学的唯一边界，必须每次送达
+    - GraphRagSource 给"内容"（与当前话题相关的节点正文片段）—— 按需检索
+
+    required=True：不受 query 节流与调用方 `ctx.sources` 影响（见 RagPipeline.run）。
+    kg 实例由调用方经 `ctx.metadata["kg"]` 传入；未传则返回空 —— **不得**自行打开
+    KnowledgeGraph（会让没有 kg 的调用方/测试去碰真实数据库）。
+    """
+
+    name = "graph_structure"
+    required = True
+
+    def should_query(self, ctx: RagContext) -> bool:
+        return True
+
+    async def retrieve(self, ctx: RagContext) -> list[RagHit]:
+        from app.core.graph_analyzer import build_graph_context
+
+        kg = ctx.metadata.get("kg")
+        if kg is None:
+            return []
+        text = build_graph_context(
+            kg,
+            detailed=bool(ctx.metadata.get("graph_detailed", True)),
+            focus_node_id=ctx.metadata.get("focus_node_id") or "",
+            max_chars=ctx.metadata.get("graph_max_chars"),
+        )
+        if not text or not text.strip():
+            return []
+        return [RagHit(source=self.name, content=text, score=1.0)]

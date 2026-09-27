@@ -35,10 +35,18 @@ class RagContext:
     """
     一次检索请求的上下文。
 
+    ⚠ 两个正交维度必须分清（曾混在一个字段里，是"上传资料对 LLM 不可见"的根因）：
+    - `sources` = **选哪些源**（源选择）；None = 全部已注册源
+    - `kb`      = **在哪些文件里找**（检索范围，仅知识库源消费）；None = 不限范围
+
+    "某个源要不要参与"由源自己决定（`RagSource.should_query` 自证可用性），
+    **不由**调用方漏传/传入某个字段决定 —— 否则调用方每写错一处，就静默关掉一个数据源。
+
     user_id:    用户 ID（每个用户数据隔离）
     query:      查询文本（通常是学生最新一条消息）
     top_k:      期望返回条数
-    kb:         知识库范围 {node_ids: [...], name: str} | None（仅知识库源使用）
+    kb:         知识库**检索范围** {node_ids: [...], name: str} | None（None = 不限范围）
+    sources:    参与本次检索的源名集合（None = 全部）；如 {"graph"} 表示只要图谱
     mode:       用途模式 "personal"（默认）/ "commercial"，商用模式源自行过滤非商用资料
     metadata:   附加上下文（如当前节点、教学模式等），供各源自行消费
     """
@@ -46,5 +54,6 @@ class RagContext:
     query: str
     top_k: int = 5
     kb: Optional[dict] = None
+    sources: Optional[set[str]] = None
     mode: str = "personal"
     metadata: dict[str, Any] = field(default_factory=dict)

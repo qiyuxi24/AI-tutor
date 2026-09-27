@@ -76,7 +76,7 @@ def test_degrades_graph_injection_when_over_line(kg, monkeypatch, caplog):
 
     caps: list[int | None] = []
 
-    def spy(_kg, detailed=True, focus_node_id="", max_chars=None):
+    async def spy(_kg, detailed=True, focus_node_id="", max_chars=None):
         caps.append(max_chars)
         n = 1_500 if max_chars is None else max(1, max_chars // 7)   # 每块 7 字符
         return "图谱注入内容。" * n
@@ -102,7 +102,7 @@ def test_keep_error_and_send_when_shrink_not_enough(kg, monkeypatch, caplog):
     _disable_retrieval(monkeypatch)
     kg.add_node({"id": "rec", "name": "递归", "tags": ["算法"]})
 
-    def spy(_kg, detailed=True, focus_node_id="", max_chars=None):
+    async def spy(_kg, detailed=True, focus_node_id="", max_chars=None):
         return "图谱注入内容。" * 1_500  # 无论上限多少都不缩，模拟"压不动"
 
     monkeypatch.setattr(cs, "_build_graph_summary", spy)
