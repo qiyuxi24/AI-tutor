@@ -66,7 +66,7 @@ User message → pure-rule routing (greetings / very short input skip RAG) → l
 
 | Module | Description | Status |
 |------|------|------|
-| **Chat = Agent Loop** | Four modes (adaptive guidance / free talk / recursive teaching / path recommendation); background multi-round tool loop (max 5 rounds, per-tool timeout, trace persisted) | ✅ |
+| **Chat = Agent Loop** | A single tutoring prompt driving knowledge-graph-guided learning; background multi-round tool loop (max 5 rounds, per-tool timeout, trace persisted) | ✅ |
 | **Streaming + events** | SSE token-by-token output plus background graph-operation events that refresh the UI automatically | ✅ |
 | **Knowledge graph** | D3 force-directed visualization + CRUD + topologically sorted learning path (Kahn) + search-to-focus | ✅ |
 | **Skill-tree graph** | Nodes colored by mastery level + legend + learning-path highlight + weak-point pulse | ✅ |

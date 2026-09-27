@@ -230,7 +230,7 @@ assert execute_kg_tool(tc, None) == "echo:1"
 | Skills / 渐进披露 | **不做** | 12 个工具的规模下，全量 schema + 一段提示词足够；渐进披露收益不抵成本（YAGNI）。工具数上量再议 |
 | 插件热加载 | **不做** | 注册表在 import 时组装一次（`_specs_cache` 缓存 MCP 结果）。运行期改工具集 = 重启进程 |
 | 工具并行执行 | **未做** | 同一轮的多个 `tool_calls` 目前逐个 `await`（顺序执行）；如需并行，改 `agent/loop.py` |
-| 工具级权限模型 | **未做** | 权限在 handler 内部（`KnowledgeGraph` 的 `added_by` 校验），中间件不做 ACL |
+| 工具级权限模型 | **未做**（另有提示词级软约束） | 硬权限在 handler 内部（`KnowledgeGraph` 的 `added_by` 校验），中间件不做 ACL。「须先问」授权分级是 `chat_service.TOOL_POLICY_PROMPT` 的**提示词约束**，不是 ACL —— 模型理论上仍可违反，无代码拦截（2026-09-26） |
 | `guidance` 的语义分层 | **未做** | `description`（模型侧）与 `guidance`（提示词侧）靠人工分工，未强制"不重复" |
 | 工具按领域合并文件 | **刻意不做** | 合并会让"该放哪个文件"每次都需重新论证；一工具一文件的规则不需要判断力。见 `tools/README.md` §3 |
 | 同步异步桥 | **4 份拷贝** | `tools/rag_search` / `tools/download_resource` / `mcp_host` / `kg_taxonomy` 各持单例池（刻意互不干扰），见 `tools/README.md` §6 |
@@ -244,7 +244,7 @@ assert execute_kg_tool(tc, None) == "echo:1"
 |---|---|
 | `tools/README.md` | **加/改工具的第一入口**：一个工具一个模块的规范与检查清单 |
 | `core/agent/loop.py` | 唯一调用方（主循环、超时、事件、证据） |
-| `services/chat_service.py` | 提示词组装：`TOOL_CAPABILITY_PROMPT = TOOLS_PROMPT + TOOL_POLICY_PROMPT`（跨工具策略：掌握度主信号 / "学生说懂了就出题"铁律 / 权限限制） |
+| `services/chat_service.py` | 提示词组装：`TOOL_CAPABILITY_PROMPT = TOOLS_PROMPT + TOOL_POLICY_PROMPT`（跨工具策略：**工具授权分级「免确认 vs 须先问」** / 掌握度主信号 / "学生说懂了就**提议**出题"铁律 / 权限限制） |
 | `mcp_host.py` · `app/mcp_servers/` | MCP 宿主与 server 本体 |
 | `core/knowledge_writer.py` | AI 写图谱层（`add_knowledge_node` 的落点）。**不属工具层**：被本目录与 `chat_service` 共用 |
 | `core/quiz/chat_quiz.py` | `quiz_generate` / `grade_answer` 的落点 |

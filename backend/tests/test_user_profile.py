@@ -170,6 +170,22 @@ def test_update_field_unknown(profile):
         profile.update_field("unknown.field", "x")
 
 
+def test_append_goals_dedup_keeps_existing(profile):
+    """增量记目标：不覆盖已有目标，重复的丢弃（update_field 本身是整体替换）。"""
+    profile.append_goals("过六级")
+    profile.append_goals("学 Python\n过六级")
+    assert profile.get()["goals"] == ["过六级", "学 Python"]
+
+
+def test_has_note_exact_match_only(profile):
+    """逐字判重：仅用于挡住 AI 每轮重复记同一条，同义改写不进此列。"""
+    assert not profile.has_note("做题容易粗心")
+    profile.add_note("做题容易粗心")
+    assert profile.has_note("做题容易粗心")
+    assert not profile.has_note("做题有点马虎")
+    assert not profile.has_note("")
+
+
 # ── AI 观察笔记 ───────────────────────────────────────────────
 
 def test_add_delete_note(profile):

@@ -7,16 +7,6 @@ const store = useChatStore()
 const text = ref('')
 const textareaRef = ref(null)
 
-const MODE_OPTIONS = [
-  { value: 'adaptive', label: '自适应引导' },
-  { value: 'free_talk', label: '自由对话' },
-  { value: 'recursive', label: '递归式教学' },
-]
-
-function handleModeChange(e) {
-  store.setMode(e.target.value)
-}
-
 async function handleSend() {
   if (!text.value.trim() || store.loading) return
   const msg = text.value
@@ -36,29 +26,6 @@ function handleKeydown(e) {
 
 <template>
   <div class="input-area">
-    <!-- 模式选择 -->
-    <div class="mode-bar">
-      <span class="mode-label">引导模式：</span>
-      <div class="mode-select-wrapper">
-        <select
-          :value="store.mode"
-          @change="handleModeChange"
-          class="mode-select"
-        >
-          <option
-            v-for="opt in MODE_OPTIONS"
-            :key="opt.value"
-            :value="opt.value"
-          >
-            {{ opt.label }}
-          </option>
-        </select>
-        <svg class="select-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
-      </div>
-    </div>
-
     <!-- 输入框 + 发送按钮 -->
     <div class="input-row">
       <textarea
@@ -90,52 +57,6 @@ function handleKeydown(e) {
   border-top: 1px solid var(--color-border);
   padding: 16px 24px 20px;
   background: var(--color-bg-primary);
-}
-
-/* 模式选择 */
-.mode-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.mode-label {
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  white-space: nowrap;
-}
-
-.mode-select-wrapper {
-  position: relative;
-  display: inline-flex;
-}
-
-.mode-select {
-  appearance: none;
-  padding: 5px 28px 5px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  font-size: 13px;
-  color: var(--color-text-primary);
-  background: var(--color-bg-surface);
-  cursor: pointer;
-  outline: none;
-  transition: border-color 0.2s, box-shadow 0.2s;
-}
-
-.mode-select:focus {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px var(--color-accent-light);
-}
-
-.select-arrow {
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  pointer-events: none;
-  color: var(--color-text-tertiary);
 }
 
 /* 输入行 */

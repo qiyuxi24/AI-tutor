@@ -28,7 +28,8 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { sendMessageStream, apiClient } from '../api/index.js'
-import { clientError } from '../utils/errorCodes.js'
+import { clientError, fmt, ErrorDefs } from '../utils/errorCodes.js'
+import { buildVisibleGraph, isThemeNodeId, THEME_PREFIX } from '../utils/themeCollapse.js'
 
 // 按 user_id 隔离 localStorage，防止切换账号后对话历史泄露
 const _uid = (() => {
@@ -85,6 +86,11 @@ export const useChatStore = defineStore('chat', () => {
   // 知识板块维度：学科之下的一级分组，currentBoard=null 表示查看整学科
   const boards = ref([])           // 当前学科的板块列表 [{board, node_count, ...}]
   const currentBoard = ref(null)   // 当前查看的板块名；null = 整学科
+  // 主题层级维度（KG-T4 地图式下钻）：主题树 + 节点主归属 + 展开状态。
+  // 只存事实，画布可见图由 buildVisibleGraph 派生（utils/themeCollapse.js）。
+  const themes = ref([])           // 当前学科主题扁平列表 [{id,name,level,parent_id,order_index}]
+  const themePrimary = ref({})     // {node_id: 主归属主题 id}
+  const expandedThemes = ref([])   // 已展开主题 id —— 默认全折叠：先看"省"，再逐层下钻
 
   // 学习进度维度：科技树联动数据（拓扑排序路径 + 下一步推荐）
   const learningPath = ref([])     // 按学习顺序排列的节点 [{id, name, mastery, difficulty, ...}]
@@ -198,6 +204,9 @@ export const useChatStore = defineStore('chat', () => {
       knowledgeNodes.value = []
       knowledgeEdges.value = []
       boards.value = []
+      themes.value = []
+      themePrimary.value = {}
+      expandedThemes.value = []
       graphError.value = ''
       graphLoaded.value = true
       return
@@ -227,6 +236,7 @@ export const useChatStore = defineStore('chat', () => {
       fetchLearningPath()
       fetchNextToLearn()
       fetchStats(currentSubject.value)
+      await fetchThemes(currentSubject.value)   // 等主题就绪，便于紧随其后的"展开到目标节点"
     } catch (e) {
       graphError.value = clientError('GRAPH_LOAD')
     }
@@ -282,9 +292,8 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 获取学科列表 + 每个学科的分量统计（学科收藏栏数据源）。
    *
-   * 单请求来源：/knowledge/stats 的 by_subject 已含全部学科及聚合，
-   * 与 /knowledge/subjects 同源（graph_middleware.compute_stats），
-   * 因此不再另打一次 subjects 接口。
+   * 单请求来源：/knowledge/stats 的 by_subject 已含全部学科及聚合
+   * （唯一实现 = graph_middleware.compute_stats），因此不必再设 subjects 接口。
    *
    * by_subject 可能含「未分类」（无学科归属节点的合成项）：保留在
    * subjectSummaries 供收藏栏渲染，但从 subjects 剔除——subjects 的契约是
@@ -351,6 +360,7 @@ export const useChatStore = defineStore('chat', () => {
     if (currentSubject.value === subject) return
     currentSubject.value = subject || null
     currentBoard.value = null            // 切换学科后回到整学科视图
+    expandedThemes.value = []            // 折叠状态归零：主题 id 是学科内的，不跨课继承
     graphLoaded.value = false
     await fetchBoards(subject || null)   // 按需加载板块列表（学科导航用）
     await fetchGraph(true)
@@ -366,6 +376,69 @@ export const useChatStore = defineStore('chat', () => {
     graphLoaded.value = false
     await fetchGraph(true)
   }
+
+  /**
+   * 拉取当前学科的主题树 + 节点主归属（地图式下钻的数据源）。
+   * 主题由聚类落库、不随 CRUD 变化，因此与图谱请求同行、失败静默降级为"不折叠"。
+   * @param {string} subject
+   */
+  async function fetchThemes(subject) {
+    if (!subject) {
+      themes.value = []
+      themePrimary.value = {}
+      return
+    }
+    try {
+      const { data } = await apiClient.get('/api/v1/knowledge/themes', { params: { subject } })
+      if (currentSubject.value !== subject) return   // 已切走学科，丢弃过期响应
+      themes.value = data.themes || []
+      themePrimary.value = data.primary || {}
+    } catch {
+      if (currentSubject.value === subject) {
+        themes.value = []            // 拿不到主题 → 退回原始节点图，不影响图谱可用
+        themePrimary.value = {}
+      }
+    }
+  }
+
+  /**
+   * 画布点击主题聚合节点 → 展开/收起它自己（同一节点同一交互双向切换）。
+   * @param {string} nodeId - ForceGraph 节点 id（聚合节点形如 `theme:<themeId>`）
+   * @returns {boolean} 是否消费了本次点击（false = 普通知识点，交给双击详情）
+   */
+  function toggleThemeNode(nodeId) {
+    if (!isThemeNodeId(nodeId)) return false
+    const tid = nodeId.slice(THEME_PREFIX.length)
+    const i = expandedThemes.value.indexOf(tid)
+    if (i >= 0) expandedThemes.value.splice(i, 1)
+    else expandedThemes.value.push(tid)
+    return true
+  }
+
+  /**
+   * 展开某知识点的主题祖先链 —— 保证它当前在画布上可见。
+   * 搜索选中、仪表盘跳转、节点详情互跳都要用：折叠态下目标可能藏在聚合节点里。
+   * @param {string} nodeId
+   */
+  function revealNode(nodeId) {
+    const t = themes.value.find(x => x.id === themePrimary.value[nodeId])
+    if (!t) return
+    const need = t.parent_id ? [t.parent_id, t.id] : [t.id]
+    expandedThemes.value = [...new Set([...expandedThemes.value, ...need])]
+  }
+
+  // ─── 地图式下钻：画布可见图（折叠 + 边向上卷后的节点/边）───
+  // 主题数据缺失时 buildVisibleGraph 原样返回，行为与折叠功能上线前一致。
+  const visibleGraph = computed(() => buildVisibleGraph({
+    nodes: knowledgeNodes.value,
+    edges: knowledgeEdges.value,
+    themes: themes.value,
+    primary: themePrimary.value,
+    expanded: expandedThemes.value,
+  }))
+  const displayNodes = computed(() => visibleGraph.value.nodes)
+  const displayEdges = computed(() => visibleGraph.value.edges)
+  const hasThemes = computed(() => themes.value.length > 0)
 
   /**
    * 从学科书籍生成知识图谱（AI 直接写库），生成后刷新图谱。
@@ -645,21 +718,19 @@ export const useChatStore = defineStore('chat', () => {
     if (!conv) return
     if (!data.ok) {
       // 不能让 AI 说的"稍等片刻"变成永远没有下文，失败也要给个交代
-      conv.messages.push({
+      renderAssistant(conv, {
         role: 'assistant',
         content: `（出题没能完成：${data.message || '请稍后再试'}）`,
         thinking: [], tools: [],
       })
-      persist()
       return
     }
-    conv.messages.push({
+    renderAssistant(conv, {
       role: 'assistant',
       content: formatQuizMessage(data),
       thinking: [], tools: [],
       quiz: data.questions || [],   // 留字段：P1 换成可点选项卡片时直接用
     })
-    persist()
   }
 
   /** 把推送来的题目渲染成 markdown（P0 先用纯文本，P1 再换可点卡片） */
@@ -794,6 +865,34 @@ export const useChatStore = defineStore('chat', () => {
   // ─── 流式请求的 AbortController（用于取消） ───
   let streamController = null
 
+  // ─── 流式渲染：把"事件 → 改 store"收敛成一份（回调只负责转交） ───
+  /**
+   * 用 patch 产出的字段就地替换对话末尾的 assistant 气泡（渲染的单一出口）。
+   * 流式回调（onToken/onThinking/onToolStart/onToolResult）都走这里 —— 回调只把
+   * 事件数据交给本函数，不再各自重复"取最后一条 → splice 替换"。
+   * @param {object} conv - 目标对话
+   * @param {(msg: object) => object} patch - 收到末尾消息，返回要合并进去的字段
+   */
+  function patchLastAssistant(conv, patch) {
+    const idx = conv.messages.length - 1
+    const msg = conv.messages[idx]
+    if (msg && msg.role === 'assistant') {
+      conv.messages.splice(idx, 1, { ...msg, ...patch(msg) })
+    }
+  }
+
+  /**
+   * 落定一条 assistant 消息并持久化（onDone 空回复 / onError / quiz_ready 共用）。
+   * @param {object} conv - 目标对话
+   * @param {object} msg - 完整消息对象（字段由调用方按事件语义给出）
+   * @param {boolean} [replaceLast] - true=先 pop 掉末尾占位气泡再 push（onDone/onError）
+   */
+  function renderAssistant(conv, msg, replaceLast = false) {
+    if (replaceLast) conv.messages.pop()
+    conv.messages.push(msg)
+    persist()
+  }
+
   // ─── 发送消息（流式） ───
   async function send(text) {
     if (!text.trim()) return
@@ -827,65 +926,51 @@ export const useChatStore = defineStore('chat', () => {
       mode.value,
       {
         // 每收到一个 token，追加到占位消息
-        onToken: (token) => {
-          const lastIdx = conv.messages.length - 1
-          const lastMsg = conv.messages[lastIdx]
-          if (lastMsg.role === 'assistant') {
-            conv.messages.splice(lastIdx, 1, {
-              ...lastMsg,
-              content: lastMsg.content + token,
-            })
-          }
-        },
+        onToken: (token) =>
+          patchLastAssistant(conv, (msg) => ({ content: msg.content + token })),
         // AI 思考过程
-        onThinking: (text) => {
-          const lastIdx = conv.messages.length - 1
-          const lastMsg = conv.messages[lastIdx]
-          if (lastMsg.role === 'assistant') {
-            const thinking = lastMsg.thinking || []
+        onThinking: (text) =>
+          patchLastAssistant(conv, (msg) => {
+            const thinking = msg.thinking || []
             thinking.push(text)
-            conv.messages.splice(lastIdx, 1, { ...lastMsg, thinking })
-          }
-        },
+            return { thinking }
+          }),
         // 工具开始执行
-        onToolStart: (data) => {
-          const lastIdx = conv.messages.length - 1
-          const lastMsg = conv.messages[lastIdx]
-          if (lastMsg.role === 'assistant') {
-            const tools = lastMsg.tools || []
+        onToolStart: (data) =>
+          patchLastAssistant(conv, (msg) => {
+            const tools = msg.tools || []
             tools.push({ ...data, status: 'running', result: null })
-            conv.messages.splice(lastIdx, 1, { ...lastMsg, tools })
-          }
-        },
+            return { tools }
+          }),
         // 工具执行完毕
-        onToolResult: (data) => {
-          const lastIdx = conv.messages.length - 1
-          const lastMsg = conv.messages[lastIdx]
-          if (lastMsg.role === 'assistant') {
-            const tools = (lastMsg.tools || []).map(t =>
+        onToolResult: (data) =>
+          patchLastAssistant(conv, (msg) => ({
+            tools: (msg.tools || []).map((t) =>
               t.tool === data.tool && t.round === data.round && t.status === 'running'
                 ? { ...t, status: data.ok ? 'done' : 'error', result: data }
                 : t
-            )
-            conv.messages.splice(lastIdx, 1, { ...lastMsg, tools })
-          }
-        },
+            ),
+          })),
         // 流式完成
         onDone: (fullReply) => {
           loading.value = false
-          // 如果流式没给任何内容，移除占位消息
-          if (!fullReply) {
-            conv.messages.pop()
+          if (fullReply) {
+            persist()
+          } else {
+            // 空回复 = 一个 token 都没收到（事件投递失败）。旧版在这里静默删掉占位气泡，
+            // 结果"对话没有反应"且没有任何线索（2026-09-26 排查成本极高的根因之一）。
+            // 失败必须留下可见痕迹。
+            renderAssistant(conv, {
+              role: 'assistant',
+              content: fmt(ErrorDefs.COMM.UNKNOWN_RESPONSE, { detail: '未收到任何流式数据' }),
+            }, true)
           }
-          persist()
         },
         // 出错
         onError: (errorMsg) => {
           loading.value = false
           // 移除占位消息，替换为错误消息
-          conv.messages.pop()
-          conv.messages.push({ role: 'assistant', content: errorMsg })
-          persist()
+          renderAssistant(conv, { role: 'assistant', content: errorMsg }, true)
         },
       },
       currentNode.value,
@@ -925,6 +1010,16 @@ export const useChatStore = defineStore('chat', () => {
     boards,
     currentBoard,
     setBoard,
+    // 主题层级（地图式下钻：省/市折叠）
+    themes,
+    themePrimary,
+    expandedThemes,
+    displayNodes,
+    displayEdges,
+    hasThemes,
+    fetchThemes,
+    toggleThemeNode,
+    revealNode,
     ensureSubjectSelected,
     fetchBoards,
     fetchGraph,

@@ -55,6 +55,7 @@
 - **版权/开源边界**：`core/open_source.py` = 「来源能否留存」**唯一判定出口**（fail-closed 到 L3）；采集侧未登记站点默认 L3。**新增"会留存内容"的 URL 入口必须同时过 `net_guard.is_blocked_url` 与 `is_open`**；联网侧唯一存档出口 = `core/agent_tools/web_archive.py`。维基用 **zhconv** 统一简体（可选依赖，测试 `importorskip`）。
 - 画像 `core/profile/`；quiz：API 5 端点 + agent 工具（`quiz_generate` 后台异步 → `quiz_ready` → `grade_answer`；`_INFLIGHT` 必须在 `create_task` 前占位）。
 - 未接线（有实现+测试+零生产引用）：`collector/pipeline_ingest.py`+`chapterizer.py`、`collector/quiz_splitter.py`。
+- **试卷归档（2026-09-26 立项，未实施）**：SSOT = `docs/教学模块/试卷归档_调研与实施方案.md`。本期只做归档（解析→拆题→落库→关联），**不做前端展示/题目渲染**。三个关键决策：① LLM 只做语义补全、**不做切分边界**（边界归正则，防长卷截断静默丢题）；② 题目→知识点用 `question_nodes` 多对多（照抄 `node_themes`），知识点→题目**只反查、不写节点 MD**（撞 AI 权限护栏 + 双写不一致）；③ 不上 QTI（仅外部 LMS 交付时才需导出适配器）。
 - 测试基线（2026-09-24 实测）：`pytest backend/tests -q -m "not llm_api"` → **962 passed, 7 deselected**。真实 API 测试已授权（`-m llm_api` / `scripts/smoke_*.py`，须 `$env:PYTHONPATH="."` 从 backend 跑）；离线 mock 通过 ≠ 真机通过。
 
 ## 比赛选题（AIC 第八届）

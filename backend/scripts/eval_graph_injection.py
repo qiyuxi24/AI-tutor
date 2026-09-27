@@ -239,7 +239,7 @@ async def build_prompt(kg, question: str, inject_graph: bool) -> str:
     graph_summary = build_graph_context(kg, detailed=True) if inject_graph else ""
     profile_text = UserProfile(kg.user_id).get_summary()
 
-    prompt = get_system_prompt(mode="adaptive", student_message=question,
+    prompt = get_system_prompt(student_message=question,
                                graph_summary=graph_summary, user_profile=profile_text)
 
     # 检索注入两组都调：关闭组的图谱内容已由 pipeline.unregister("graph") 挡住，

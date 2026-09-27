@@ -8,7 +8,7 @@
   （/chat/stream 消费转发 SSE，每事件带 run_id 便于前端回源）。
 
 提示词组装逻辑：
-  通用模板 (system_prompt_common.j2) + 模式模板 → 完整 system prompt
+  唯一模板 (system_prompt_common.j2，2026-09-26 由三种引导模式合并) → 完整 system prompt
   统一注入工具能力说明（TOOL_CAPABILITY_PROMPT = 注册表生成的逐工具指南 + 跨工具策略），
   进入 agent 循环。逐工具说明的唯一来源是 core/agent_tools/tools/*.py 的 GUIDANCE
   （2026-09-15 收敛：原先这里手写一份，与 spec.description 构成双源且已实测漂移）。
@@ -34,7 +34,7 @@ from app.core.knowledge_graph import KnowledgeGraph
 from app.core.profile import UserProfile
 from app.core.token_counter import count_tokens
 from app.core.error_codes import ErrorCode, log_error, publish_error_event
-from app.core.event_bus import publish, subscribe, get_user_queue, TEXT_DELTA
+from app.core.event_bus import publish, TEXT_DELTA
 from app.core.knowledge_writer import apply_suggestion, load_suggestions, save_suggestions
 
 logger = logging.getLogger("ai-tutor")
@@ -51,6 +51,29 @@ TOOL_POLICY_PROMPT = """
 逐工具说明见上一节「工具调用指南」——它由工具注册表生成，新增工具会自动出现在其中。
 下面几条是**跨工具**的硬性策略，优先级高于任何单个工具的说明。
 
+### 工具授权分级（先看清哪些要问，再动手）
+
+你的工具分两类，**用错类别会让学生觉得你擅自动了他的东西**：
+
+**① 免确认 —— 直接调用，不要问**
+只读检索，或只记录学生本人的信息，不改变他的知识图谱结构：
+`mcp__websearch__web_search`、`fetch_webpage`、`rag_search`、`update_user_profile`
+（学生说"帮我查一下""搜搜看"，直接搜，别先问"要不要我搜"。）
+
+**② 须先问 —— 先在对话里问过学生、他答应了，下一轮再调用**
+会改变知识图谱结构，或把资料下载留存进他的库：
+`add_knowledge_node`、`update_node_content`、`add_edge`、`delete_node`、
+`download_resource`、`quiz_generate`
+
+铁律（违反会被学生视为"擅自操作"）：
+1. **这一类操作，本轮只输出询问文本，不要同时调用工具。**
+   正确：只说"我把它整理成一个知识点加进你的图谱，方便以后复习，要吗？"
+   错误：一边问"要吗？"一边已经调用了 `add_knowledge_node`。
+2. **学生明确要求 = 已授权**（"帮我加个节点""把这个删掉""考考我""把这篇存下来"）→
+   直接调用，不要再问一遍。
+3. **学生拒绝或没回应就不做**，也不要换个说法反复劝。
+4. 同一件事只问一次；已在同一轮获得同意，就直接调用，不要重复确认。
+
 ### 掌握度由谁更新（重要，别搞错）
 
 掌握度是学生学习进度的唯一量化指标，**主信号 = 出题判分**：
@@ -61,19 +84,21 @@ TOOL_POLICY_PROMPT = """
 **不要**因为"学生说懂了""学生回答得不错"就调 `update_mastery` —— 这类主观判断不可复核，
 历史上导致掌握度长期不动。你的手动通道已收敛到 3 种硬证据（见 `update_mastery` 的说明）。
 
-### 学生说"我懂了"时：**出题，不要再追问**（铁律，优先于其他引导策略）
+### 学生说"我懂了"时：**提议出题，不要再追问**（铁律，优先于其他引导策略）
 
 这是最容易做错的地方。**当学生表示已理解某个知识点**（"懂了""明白了""我学会了""对吧？"），
 或**正确回答了你的引导问题**时：
 
-- ✅ **正确做法**：立刻调用 `quiz_generate(node_id=该知识点的 id)` 出一道题检验，
-  然后用一句话说"我出一道题检验一下，稍等片刻"收尾。
-- ❌ **错误做法**：继续反问（"你能用自己的话解释一下吗？""那你觉得为什么…"）。
-  学生刚说懂了、你又追问，会让他觉得你不相信他；更要紧的是**掌握度永远得不到更新**——
-  掌握度只由答题判分更新，不由你的主观感觉更新。
+- ✅ **正确做法**：用一句话**提议**出题——"要不要我出一道题检验一下？"
+  学生答应后（"好""可以""来"），**下一轮**立刻调用 `quiz_generate(node_id=该知识点的 id)`。
+- ❌ **错误做法（两种）**：① 继续反问（"你能用自己的话解释一下吗？""那你觉得为什么…"）——
+  学生刚说懂了、你又追问，会让他觉得你不相信他，而且**掌握度永远得不到更新**
+  （掌握度只由答题判分更新，不由你的主观感觉更新）；
+  ② 边问"要吗"边已经把题出了 —— 那属于"擅自出题"。
+- ⚡ **学生主动要求练习**（"考考我""练一道"）＝ 已授权，直接出题，不用再问。
 
 **"追问"和"出题"分工不同，不要混用**：追问用于把困惑的学生问明白；
-出题用于确认学生是否真的明白了。学生一旦表态理解，就该切换到出题。
+出题用于确认学生是否真的明白了。学生一旦表态理解，就该切换到"提议出题"。
 
 ### ⚠️ 权限限制（严格执行）
 
@@ -165,7 +190,7 @@ def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True,
                                max_chars=max_chars)
 
 
-async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
+async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
                               inject_tools: bool = False, current_node: str = "",
                               kb: dict | None = None) -> tuple[str, str]:
     """
@@ -175,7 +200,7 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
         inject_tools: True=注入详细图谱 + 工具能力说明（生产唯一用法：/chat 与 /chat/stream 都传它）
                       False=精简图谱、不注入工具说明（旧两段式架构"流式阶段"的遗留开关，
                       已无生产调用点，保留给"纯教学、不给工具"的实验）
-        current_node: 递归模式：当前正在教学的知识点 ID
+        current_node: 当前教学位置的知识点 ID（可选；不存在时位置段写「未指定」）
         kb: 知识库上下文范围 {node_ids: [...], name: str}，可选；
             传入后在所选目录范围内检索文档片段注入提示词
     返回: (system_prompt, last_user_message)
@@ -192,12 +217,14 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
     profile = UserProfile(user_id=kg.user_id)
     profile_text = profile.get_summary()
 
-    # 递归模式额外参数。
-    # 图谱统一由上面的 graph_summary 注入：模板不再自拼第二份「框架节点 + 仅 prerequisite 边」——
-    # 那份与 graph_summary 信息重叠（节点 + 全量带 relation 标签的边），且不走注入体量控制。
-    extra_kwargs = {}
-    if mode == "recursive":
-        extra_kwargs["current_node"] = current_node or "未知节点"
+    # 学生当前位置（参照系契约 I2-1 / AC-L2-2）：不得静默为空。
+    # 传了就校验 ID 真实存在（I1-2 同源：不把图谱里没有的 ID 当位置注入），
+    # 没传或 ID 不存在则显式写「未指定」，由模型按对话推断 —— 不新增任何检索。
+    _focus = kg.get_node(current_node) if current_node else None
+    current_position = (
+        f"「{_focus['name']}」({_focus['id']})" if _focus
+        else "未指定（由本次对话内容推断，推断出后固定在同一知识点上）"
+    )
 
     # 注入检索上下文（RAG 是增强而非必需：检索失败或为空时不影响主提示词）
     # 去耦合：检索编排统一走 rag_pipeline，一次 run 按数据源分组生成图谱/知识库两个区块
@@ -209,11 +236,10 @@ async def _build_system_prompt(messages: list, mode: str, kg: KnowledgeGraph,
     def _assemble(graph_text: str) -> str:
         """按固定顺序拼装 system prompt（= 固定段 S2–S7 全集）。"""
         prompt = get_system_prompt(
-            mode=mode,
             student_message=last_user_msg,
             graph_summary=graph_text,
             user_profile=profile_text,
-            **extra_kwargs,
+            current_position=current_position,
         )
         if retrieval:
             prompt += retrieval
@@ -477,20 +503,19 @@ async def _index_applied_nodes(applied_list: list[dict], user_id: int, kg) -> No
 #  对话处理入口
 # ══════════════════════════════════════════════════════════════════
 
-async def process_message(user_id: int, messages: list, mode: str,
+async def process_message(user_id: int, messages: list,
                         current_node: str = "",
-                        kb: dict | None = None) -> tuple[str, str, dict]:
+                        kb: dict | None = None) -> tuple[str, dict]:
     """
     处理一条学生消息。
 
     参数:
         user_id:      数据库用户 ID（从 JWT 解析）
         messages:     完整对话历史（Pydantic ChatMessage 列表）
-        mode:         引导模式（adaptive / free_talk / recursive）
-        current_node: 递归模式：当前正在教学的知识点 ID
+        current_node: 当前教学位置的知识点 ID
 
     返回:
-        (AI回复文本, 使用的模式, 图谱分析结果)
+        (AI回复文本, 图谱分析结果)
 
     注意：
         图谱分析（_analyze_and_apply）作为后台任务异步执行，
@@ -501,7 +526,7 @@ async def process_message(user_id: int, messages: list, mode: str,
     try:
         # 1. 构建系统提示词（含图谱上下文 + RAG + 工具能力）
         system_prompt, last_user_msg = await _build_system_prompt(
-            messages, mode, kg, inject_tools=True, current_node=current_node, kb=kb
+            messages, kg, inject_tools=True, current_node=current_node, kb=kb
         )
 
         # 2. 发送前守卫：清理较早工具结果 + 历史超预算时分层压缩（统计由守卫内部记日志）
@@ -509,7 +534,11 @@ async def process_message(user_id: int, messages: list, mode: str,
 
         # 3. Agent 主循环：LLM ↔ 工具 多轮串联，直到自然给出最终回复
         #    ★ 传 user_id：即使无 SSE 订阅，运行记录也写入 agent_runs（默认可观测）
-        result = await run_agent_loop(system_prompt, messages, kg=kg, user_id=user_id)
+        #    ★ 传私有队列：本路径不消费事件，但请求内事件**不得**走 event_bus 的
+        #      per-user 广播队列 —— 常驻长连接 /knowledge/events 会抢走并丢弃它们，
+        #      还会污染通知流（见 core/agent/events.py）。队列无人读取，随 run 回收。
+        result = await run_agent_loop(system_prompt, messages, kg=kg, user_id=user_id,
+                                      event_queue=asyncio.Queue())
         reply = result.text
 
         # 4. 图谱分析作为后台任务执行，不阻塞对话回复
@@ -522,12 +551,12 @@ async def process_message(user_id: int, messages: list, mode: str,
             error_msg = log_error(ErrorCode.CHAT_PROCESS_FAILED, detail=str(e), exception=e)
         publish_error_event(ErrorCode.CHAT_PROCESS_FAILED, error_msg, "chat_service", str(e)[:200])
         kg.close()
-        return error_msg, mode, {"suggestions": [], "applied": [], "pending": []}
+        return error_msg, {"suggestions": [], "applied": [], "pending": []}
 
     # ★ 修复：_analyze_and_apply 传入 user_id，让它自己管理 kg 生命周期。
     # 此处的 kg 在 run_agent_loop 结束后已无后续操作，可安全关闭。
     kg.close()
-    return reply, mode, {"suggestions": [], "applied": [], "pending": []}
+    return reply, {"suggestions": [], "applied": [], "pending": []}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -536,7 +565,6 @@ async def process_message(user_id: int, messages: list, mode: str,
 
 async def process_message_stream(
     messages: list,
-    mode: str,
     user_id: int,
     current_node: str = "",
     kb: dict | None = None,
@@ -546,34 +574,38 @@ async def process_message_stream(
     循环内的事件（thinking/tool_start/tool_result/text_delta）实时推到前端。
 
     架构：
-      1. 启动 agent_loop 作为 asyncio.Task（带 user_id → 事件投递到用户队列）
-      2. 同时 subscribe(user_id) 消费事件 → 转 SSE yield
-      3. agent_loop 完成后做图谱分析 + trace 落盘 + graph_updated 事件
+      1. 建**本请求私有队列**（event_queue），启动 agent_loop 作为 asyncio.Task
+         （事件直投该队列，不经 event_bus 的 per-user 队列）
+      2. 同时消费该队列 → 转 SSE yield
+      3. agent_loop 完成后做图谱分析 + trace 落盘 + graph_updated 事件（走全局广播）
       4. yield [DONE]
+
+    ⚠️ 队列必须私有：per-user 队列是**两个消费者共享**的（本函数 + 常驻长连接
+    /knowledge/events），共享时 text_delta 会被长连接抢走并丢弃 → 前端拿到空流。
+    详见 core/agent/events.py 的说明（2026-09-26 故障根因）。
 
     向后兼容：旧前端收到 {"token": "..."} 仍正常（text_delta 事件转 token 格式）。
     """
     kg = KnowledgeGraph(user_id=user_id)
     try:
         tool_prompt, _ = await _build_system_prompt(
-            messages, mode, kg, inject_tools=True,
+            messages, kg, inject_tools=True,
             current_node=current_node, kb=kb
         )
-
-        # 预创建用户事件队列，确保 agent 发出的第一个事件不丢失
-        # （旧实现先启动 agent 再 subscribe，agent 可能在队列创建前就发了事件 → 静默丢弃）
-        get_user_queue(user_id)
 
         # 发送前守卫：清理较早工具结果 + 历史超预算时分层压缩（统计由守卫内部记日志）
         messages, _ = trim_history_to_budget(tool_prompt, messages)
 
-        # 启动 agent loop 为后台任务（事件通过 event_bus 投递到用户队列）
+        # 本请求私有事件队列：先建队列再起 agent，agent 的第一个事件不会丢；
+        # 且不占用 per-user 广播队列（否则常驻长连接会抢走 text_delta）
+        event_queue: asyncio.Queue = asyncio.Queue()
         agent_task = asyncio.create_task(
-            run_agent_loop(tool_prompt, messages, kg=kg, user_id=user_id)
+            run_agent_loop(tool_prompt, messages, kg=kg, user_id=user_id,
+                           event_queue=event_queue)
         )
 
-        # 消费用户事件队列 → SSE
-        async for sse_data in _consume_agent_events(user_id, agent_task):
+        # 消费本请求私有队列 → SSE
+        async for sse_data in _consume_agent_events(event_queue, agent_task):
             yield sse_data
 
         # 获取 agent 结果（运行记录已由 run_agent_loop 内部写入 agent_runs，无需再 save_trace）
@@ -597,21 +629,26 @@ async def process_message_stream(
         kg.close()
 
 
-async def _consume_agent_events(user_id: int, agent_task: asyncio.Task) -> AsyncGenerator[str, None]:
+async def _consume_agent_events(queue: asyncio.Queue,
+                                agent_task: asyncio.Task) -> AsyncGenerator[str, None]:
     """
-    消费 agent 事件队列，转为 SSE 格式 yield。
+    消费**本请求私有**事件队列，转为 SSE 格式 yield。
 
-    旧实现的致命缺陷：用 `async for sse in subscribe(user_id)` 消费，
+    为什么队列是入参而不是 user_id：`event_bus` 的 per-user 队列被两个消费者共享
+    （本函数 + 常驻长连接 /knowledge/events），共享时事件被谁取到是随机的 ——
+    实测长连接抢走 text_delta 并丢弃，对话侧拿到空流（2026-09-26 故障）。
+
+    旧实现的另一个缺陷：用 `async for sse in subscribe(user_id)` 消费，
     而 subscribe 内部是 `while True: await q.get()`。当 agent_task 完成
     且队列排空后，下一次 q.get() 会永久阻塞——break 检查在循环体内，
     要 q.get() 返回后才能执行到，但队列已空永远不会返回。
 
-    新实现用 asyncio.wait 竞争 q.get() 与 agent_task 完成信号：
+    现实现用 asyncio.wait 竞争 q.get() 与 agent_task 完成信号：
       - 事件先到 → 处理事件，继续循环
       - agent 先完成 → 排空剩余事件后退出
       - 同时完成 → 处理当前事件，排空剩余后退出
     """
-    q = get_user_queue(user_id)
+    q = queue
 
     while True:
         get_task = asyncio.ensure_future(q.get())
@@ -633,7 +670,7 @@ async def _consume_agent_events(user_id: int, agent_task: asyncio.Task) -> Async
             except (asyncio.CancelledError, Exception):
                 pass
 
-        # agent 完成 → 让 call_soon_threadsafe 回调落地后排空剩余事件
+        # agent 完成 → 排空剩余事件（先让一轮循环，兼容生产者走 call_soon 的投递方式）
         if agent_task in done:
             await asyncio.sleep(0)
             while not q.empty():
@@ -644,13 +681,18 @@ async def _consume_agent_events(user_id: int, agent_task: asyncio.Task) -> Async
 
 
 def _format_agent_sse(event: dict) -> str | None:
-    """把事件 dict 格式化为 SSE data 行；未知类型返回 None（静默丢弃）。"""
+    """把事件 dict 格式化为 SSE data 行；未知类型返回 None（静默丢弃）。
+
+    本通道只承载 **agent run 内事件**（见 core/agent/events.py 的私有队列）。
+    graph_updated / quiz_ready / error 走 event_bus 全局或 per-user 广播，
+    由常驻长连接消费，不经过这里；节点相关事件在对话流里出现即属接错线。
+    """
     evt_type = event.get("type")
 
     if evt_type == TEXT_DELTA:
         return f"data: {json.dumps({'token': event.get('text', '')})}\n\n"
     if evt_type in ("thinking", "tool_start", "tool_result",
-                    "agent_start", "agent_done", "graph_updated", "quiz_ready", "error"):
+                    "agent_start", "agent_done"):
         return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
     logger.debug(f"未知事件类型已丢弃: {evt_type}")
     return None

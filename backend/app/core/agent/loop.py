@@ -508,6 +508,7 @@ async def run_agent_loop(
     max_consecutive_fails: int = AGENT_MAX_CONSECUTIVE_FAILS,
     user_id: int | None = None,
     emitter: AgentEventEmitter | None = None,
+    event_queue=None,
     db_dir=None,
 ) -> AgentRunResult:
     """
@@ -530,6 +531,9 @@ async def run_agent_loop(
         emitter:       消息发射中间件（可选，公开层见本包 events.py）。
                        默认按 user_id 构造 AgentEventEmitter（绑定 run_id；user_id
                        为空时自动静默不推）；注入自定义 emitter 可接管消息分发。
+        event_queue:   事件私有队列（可选）。传入时默认 emitter 直投该队列，不占用
+                       event_bus 的 per-user 队列 —— 对话流必须传，否则常驻的
+                       /knowledge/events 长连接会抢走 text_delta（见 events.py 说明）。
         db_dir:        agent_runs 库所在目录（默认 backend/data/agent_runs；测试注入临时目录用）
 
     返回:
@@ -548,7 +552,7 @@ async def run_agent_loop(
     rlog = RunLogger(run_id, user_id=user_id, db_dir=db_dir)
     # 消息发射中间件：默认构造绑定本 run 的 run_id + user_id（user_id 为空自动静默）；
     # 调用方注入自定义 emitter 可接管分发（分发/管理策略后续都在 agent_events 层扩展）。
-    emitter = emitter or AgentEventEmitter(run_id, user_id)
+    emitter = emitter or AgentEventEmitter(run_id, user_id, queue=event_queue)
     try:
         result = await _loop_core(
             system_prompt, messages, kg=kg, max_rounds=max_rounds,

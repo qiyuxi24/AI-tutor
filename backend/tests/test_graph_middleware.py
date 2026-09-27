@@ -1,4 +1,4 @@
-"""知识图谱按需切片中间件测试：slice_graph / list_subjects / list_boards
+"""知识图谱按需切片中间件测试：slice_graph / list_boards
 
 用 FakeKG 模拟 KnowledgeGraph，覆盖三种切片粒度：
 全量（subject=None）→ 学科 → 板块；以及边界（board 参数被忽略等）。
@@ -6,7 +6,7 @@
 import pytest
 
 from app.core.graph_middleware import (
-    SUBJECT_UNCLASSIFIED, list_boards, list_subjects, mastery_bucket, slice_graph,
+    SUBJECT_UNCLASSIFIED, list_boards, mastery_bucket, slice_graph,
 )
 
 
@@ -142,11 +142,7 @@ def test_slice_unclassified_empty_when_all_tagged(kg):
     assert out["edge_count"] == 0
 
 
-# ── list_subjects / list_boards ─────────────────────────────
-
-def test_list_subjects(kg):
-    assert list_subjects(kg) == ["数据结构", "C语言"]
-
+# ── list_boards ─────────────────────────────────────────────
 
 def test_list_boards(kg):
     boards = list_boards(kg, "数据结构")

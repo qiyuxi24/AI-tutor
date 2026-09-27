@@ -5,7 +5,7 @@
  * 职责：
  *   1. 页面入口图标导航（对话 / 图谱 / 知识库）
  *   2. 品牌 logo
- *   3. 底部：主题切换 / 设置 / 用户菜单（含用户画像、退出登录）
+ *   3. 底部：主题切换 / 设置 / 用户菜单（含用户画像、切换账号）
  *
  * 组件自包含主题与账号逻辑，HomeView 无需参与。
  */
@@ -18,7 +18,7 @@ defineProps({
   activeView: { type: String, default: 'chat' },
 })
 
-const emit = defineEmits(['select', 'open-profile'])
+const emit = defineEmits(['select', 'open-profile', 'switch-account'])
 
 const { isDark, toggleTheme } = useTheme()
 const authStore = useAuthStore()
@@ -41,7 +41,7 @@ function handleSelect(id) {
 function handleUserMenu(action) {
   showUserMenu.value = false
   if (action === 'profile') emit('open-profile')
-  if (action === 'logout') emit('logout')
+  if (action === 'switch-account') emit('switch-account')
 }
 </script>
 
@@ -163,13 +163,14 @@ function handleUserMenu(action) {
               </svg>
               用户画像
             </button>
-            <button class="ab-user-item danger" @click="handleUserMenu('logout')">
+            <button class="ab-user-item" @click="handleUserMenu('switch-account')">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-                <polyline points="16 17 21 12 16 7" />
-                <line x1="21" y1="12" x2="9" y2="12" />
+                <path d="M8 3 4 7l4 4" />
+                <path d="M4 7h16" />
+                <path d="m16 21 4-4-4-4" />
+                <path d="M20 17H4" />
               </svg>
-              退出登录
+              切换账号
             </button>
           </div>
         </Transition>
@@ -329,13 +330,6 @@ function handleUserMenu(action) {
 
 .ab-user-item:hover {
   background: var(--color-bg-hover);
-}
-
-.ab-user-item.danger {
-  color: var(--color-red);
-}
-.ab-user-item.danger:hover {
-  background: var(--color-red-light);
 }
 
 .ab-menu-fade-enter-active, .ab-menu-fade-leave-active {

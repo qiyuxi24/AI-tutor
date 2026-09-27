@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from app.core.agent_tools import KG_TOOLS                      # noqa: E402
 from app.core.config import settings                           # noqa: E402
 from app.core.graph_analyzer import build_graph_context        # noqa: E402
-from app.core.prompt_loader import MODE_TEMPLATE_MAP, PROMPT_DIR  # noqa: E402
+from app.core.prompt_loader import PROMPT_DIR, TEMPLATE  # noqa: E402
 from app.core.token_counter import count_tokens                # noqa: E402
 from app.services import chat_service as cs                    # noqa: E402
 from tests.test_graph_injection import FakeKg                  # noqa: E402
@@ -28,11 +28,8 @@ def add(name, text):
     rows.append((name, text))
 
 
-add("S2 静态指令（common 模板）",
-    (PROMPT_DIR / "system_prompt_common.j2").read_text(encoding="utf-8"))
-for mode, filename in MODE_TEMPLATE_MAP.items():
-    add(f"  └ 模式模板 {mode}",
-        (PROMPT_DIR / filename).read_text(encoding="utf-8"))
+add("S2 静态指令（唯一提示词模板）",
+    (PROMPT_DIR / TEMPLATE).read_text(encoding="utf-8"))
 add("S3 工具指南（注册表生成 TOOLS_PROMPT）", cs.TOOLS_PROMPT)
 add("S3 工具策略（TOOL_POLICY_PROMPT）", cs.TOOL_POLICY_PROMPT)
 add("S3 工具 schema（KG_TOOLS → API tools=）", json.dumps(KG_TOOLS, ensure_ascii=False))
@@ -51,18 +48,17 @@ for name, text in rows:
     print(f"{name:<44} {len(text):>8} {tok:>8} {100 * tok / B:>5.1f}%")
 print("-" * 70)
 
-# 真实组合的固定成本（S2–S7）：只取一种模式模板 / 一张图谱，不把"备选行"叠起来
-common = count_tokens((PROMPT_DIR / "system_prompt_common.j2").read_text(encoding="utf-8"))
-one_mode = count_tokens((PROMPT_DIR / MODE_TEMPLATE_MAP["adaptive"]).read_text(encoding="utf-8"))
+# 真实组合的固定成本（S2–S7）：唯一模板 / 一张图谱，不把"备选行"叠起来
+static = count_tokens((PROMPT_DIR / TEMPLATE).read_text(encoding="utf-8"))
 graph_120 = count_tokens(build_graph_context(FakeKg(120, 119), detailed=True))
 retrieval = count_tokens("字" * 2500)
-fixed_real = (common + one_mode + count_tokens(cs.TOOLS_PROMPT)
+fixed_real = (static + count_tokens(cs.TOOLS_PROMPT)
               + count_tokens(cs.TOOL_POLICY_PROMPT)
               + count_tokens(json.dumps(KG_TOOLS, ensure_ascii=False))
               + graph_120 + retrieval)
 
 warn_line = int(WARN_RATIO * B)
-print(f"固定成本 S2–S7（common+adaptive+指南+策略+schema+图谱120+检索5段）"
+print(f"固定成本 S2–S7（模板+指南+策略+schema+图谱120+检索5段）"
       f"= {fixed_real} token = {100 * fixed_real / B:.1f}%B")
 print(f"  固定段告警线 {WARN_RATIO:.0%}×B = {warn_line} → 已占 {100 * fixed_real / warn_line:.1f}%")
 print(f"  S8+S9 可用 = B - 固定 - S1 = {B - fixed_real - OUT_RESERVE} token"

@@ -6,22 +6,31 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
 每个请求通过 JWT 识别当前用户，创建隔离的 KnowledgeGraph 实例。
 
 接口清单：
-  GET    /knowledge/graph                    - 获取完整图谱（可选 ?subject= 按学科过滤）
-  GET    /knowledge/subjects                 - 获取所有学科列表
+  GET    /knowledge/events                   - 图谱写通道事件流（SSE，?token=）
+  GET    /knowledge/graph                    - 获取图谱（可选 ?subject= / ?subject=&board= 切片）
+  GET    /knowledge/boards                   - 获取某学科下的板块列表（?subject=）
+  GET    /knowledge/themes                   - 获取课内主题层级 + 节点主归属（?subject=）
+  POST   /knowledge/themes/rebuild           - 重新归纳主题层级（?subject=，调 LLM）
+  POST   /knowledge/graph/fill               - 断点续填（补齐待填充骨架节点的正文）
   GET    /knowledge/node/{node_id}           - 获取节点详情
-  GET    /knowledge/node-ids                 - 获取所有节点 ID 列表
   POST   /knowledge/node                     - 创建节点（手动，ID 自动生成）
   PUT    /knowledge/node/{node_id}           - 更新节点（含 MD 内容）
   PUT    /knowledge/node/{node_id}/info      - 更新节点基本信息
   PUT    /knowledge/node/{node_id}/mastery   - 更新掌握程度
   DELETE /knowledge/node/{node_id}           - 删除节点
   POST   /knowledge/edge                     - 创建边
-  PUT    /knowledge/edge/{edge_index}        - 更新边
-  DELETE /knowledge/edge/{edge_index}        - 删除边
-  POST   /knowledge/ai/edit                  - AI 编辑图谱（向后兼容）
+  PUT    /knowledge/edge/{edge_id}           - 更新边
+  DELETE /knowledge/edge/{edge_id}           - 删除边
   POST   /knowledge/decompose                - 问题拆解为知识点依赖树
   GET    /knowledge/learning-path            - 获取学习路径（拓扑排序）
   GET    /knowledge/next-to-learn            - 获取下一步学习推荐
+  GET    /knowledge/stats                    - 学习进度聚合统计（仪表盘数据源）
+  GET    /knowledge/export                   - 导出为合并 Markdown（下载）
+  POST   /knowledge/prerequisite/infer       - 推断学科内先修关系（候选边，可 apply）
+
+前端调用者全部在 `frontend/src/stores/chatStore.js`（视图层不直连 apiClient）；
+`decompose` / `export` / `prerequisite/infer` / `graph/fill` / `themes/rebuild`
+无前端入口，是给运维脚本与人工调用的接口（见 docs/知识图谱/知识图谱_模块结构与封装调研.md §6）。
 """
 
 import logging
@@ -39,10 +48,7 @@ from app.core.auth import get_current_user, get_current_user_from_token
 from app.core.event_bus import publish, subscribe
 from app.core.graph_analyzer import GraphAnalyzer
 from app.models.schemas import (
-    CreateNodeRequest, UpdateNodeInfoRequest,
-    CreateEdgeRequest, UpdateEdgeRequest,
-    UpdateMasteryRequest, UpdateNodeContentRequest,
-    DecomposeRequest, LearningPathResponse, NextToLearnResponse,
+    DecomposeRequest, UpdateEdgeRequest, UpdateNodeInfoRequest,
 )
 
 router = APIRouter()
@@ -88,7 +94,7 @@ async def get_graph(subject: str | None = Query(None, description="可选：按�
         - 传 subject+board → 返回该学科下指定板块的局部子图
 
     推荐的前端按需流程：
-        1. GET /knowledge/subjects        拿学科列表
+        1. GET /knowledge/stats           拿学科列表（`by_subject`）+ 聚合统计
         2. GET /knowledge/boards?subject=X 拿某学科的板块列表
         3. GET /knowledge/graph?subject=X&board=Y 按板块拉取局部子图
     """
@@ -115,12 +121,68 @@ async def get_boards(subject: str = Query(..., description="学科名，如'数�
         kg.close()
 
 
-@router.get("/knowledge/subjects")
-async def get_subjects(user_id: int = Depends(get_current_user)):
-    """返回当前用户知识图谱中已有的所有学科列表"""
+# ══════════════════════════════════════════════════════════════════
+#  主题层级（KG-T1/T2）：课内两层分组（省 → 市）
+#  设计见 docs/知识图谱/知识图谱_主题层级_设计与实现方案.md
+# ══════════════════════════════════════════════════════════════════
+
+@router.get("/knowledge/themes")
+async def get_themes(subject: str = Query(..., description="课名，如'数据结构'"),
+                     user_id: int = Depends(get_current_user)):
+    """返回该课的主题层级 + 节点主归属（前端地图式下钻的数据源）。
+
+    - `themes`：扁平列表（含 parent_id/level/order_index），组树由前端按 parent_id 做；
+    - `primary`：{node_id: 主归属主题 id}，前端据此把节点"上卷"成省/市聚合节点。
+
+    **themes 为空 = 尚未归纳**（不是错误）→ 前端退回原始节点图。
+    """
     kg = KnowledgeGraph(user_id=user_id)
     try:
-        return {"subjects": graph_middleware.list_subjects(kg)}
+        return {
+            "subject": subject,
+            "themes": kg.list_themes(subject),
+            "primary": kg.get_primary_theme_map(subject),
+        }
+    finally:
+        kg.close()
+
+
+@router.post("/knowledge/themes/rebuild")
+async def rebuild_themes(subject: str = Query(..., description="课名"),
+                         user_id: int = Depends(get_current_user)):
+    """重新归纳该课的主题层级（会调一次 LLM；`source='human'` 的数据保留）。
+
+    聚类失败不抛 HTTP 异常：直接返回 `{"status": "failed", ...}`，由前端提示。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        from app.core.kg_themes import generate_subject_themes  # 延迟导入：避免拖慢 API 启动
+        result = await generate_subject_themes(kg, subject, user_id=user_id)
+        if result.get("status") == "ok":
+            publish("graph_updated")
+        return result
+    finally:
+        kg.close()
+
+
+@router.post("/knowledge/graph/fill")
+async def fill_pending_graph(subject: str = Query(..., description="课名，如'数据结构'"),
+                             user_id: int = Depends(get_current_user)):
+    """断点续填：把该课**仍是骨架态**（`content_status='skeleton'`）的节点补上正文。
+
+    场景：一次建图被中断（LLM 失败 / 进程重启 / 关页面），阶段 1 落下的骨架节点没填正文。
+    按节点的 `source_ref` 来源定位重读原书、重跑切分、找回对应章节原文后填充；
+    找不到原文的（如问题拆解骨架）**不自动填**，原样跳过并在 `skipped_no_source` 里列出。
+
+    填充失败不抛 HTTP 异常，由返回体汇报（与 `/knowledge/themes/rebuild` 同一口径）。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        from app.core.kb.graph_generator import GraphGenerator  # 延迟导入：避免拖慢 API 启动
+        result = await GraphGenerator(user_id=user_id).fill_pending_nodes(kg, subject)
+        if result["status"] == "ok" and result["filled"]:
+            publish("graph_updated")
+        return result
     finally:
         kg.close()
 
@@ -167,17 +229,9 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
             "estimated_minutes": node.get("estimated_minutes", 15),
             "summary": node.get("summary", ""),
             "file_path": node.get("file_path", ""),
+            # 主题归属（KG-T1）：主归属在前，含 theme_name/level/parent_id
+            "themes": kg.get_node_themes(node_id),
         }
-    finally:
-        kg.close()
-
-
-@router.get("/knowledge/node-ids")
-async def get_node_ids(user_id: int = Depends(get_current_user)):
-    """返回当前用户所有节点 ID 列表（供前端下拉选择等场景使用）"""
-    kg = KnowledgeGraph(user_id=user_id)
-    try:
-        return {"node_ids": kg.get_node_ids()}
     finally:
         kg.close()
 
@@ -185,6 +239,50 @@ async def get_node_ids(user_id: int = Depends(get_current_user)):
 # ══════════════════════════════════════════════════════════════════
 #  节点 CRUD
 # ══════════════════════════════════════════════════════════════════
+
+async def _create_node_via_pipeline(kg: KnowledgeGraph, data: dict) -> tuple[str, dict]:
+    """
+    「手动建一个节点」写流程：补 ID → 构造 node_data → 归属判定 → 收口写入
+    → 回写真实落点 → 发图变更事件。
+
+    入参 data: 直出请求体（可含 id/name/content/...），**会被就地补 id**。
+    返回: (real_id, node_data)
+        real_id:   实际落点 ID —— 同名并轨命中已有节点时是**已有节点**的 ID；
+        node_data: 已回写 real_id 的节点字典（调用端点把它塞进回执）。
+
+    异常: KeyError（缺 name，转 400「缺少必填字段」）、ValueError（ID 冲突等）原样抛出，
+    HTTP 状态口径由调用端点决定。
+    """
+    if not data.get("id"):  # 未给 ID → 自动生成
+        data["id"] = kg.generate_node_id(data.get("name", ""))
+
+    node_data = {
+        "id": data["id"],
+        "name": data["name"],
+        "file": f"nodes/{data['id']}.md",
+        "tags": data.get("tags", []),
+        "board": data.get("board", ""),
+        "summary": data.get("summary", ""),
+        "mastery": data.get("mastery", 0),
+        "difficulty": data.get("difficulty", 3),
+        "estimated_minutes": data.get("estimated_minutes", 15),
+        "added_by": data.get("added_by", "human"),
+        "confidence": data.get("confidence"),
+    }
+
+    await assign_taxonomy(kg, node_data)
+
+    # 建库 + 写 MD 一次完成（模板收口在 KnowledgeGraph）。
+    # 返回的是**实际落点**的 ID：同名并轨命中已有节点时是已有节点的 ID，
+    # 回执必须用它，否则前端拿到一个不存在的 id。
+    real_id = kg.create_node_with_content(node_data, data.get("content") or "",
+                                          origin="manual")
+    node_data["id"] = real_id
+    node_data["file"] = f"nodes/{real_id}.md"
+
+    publish("graph_updated")
+    return real_id, node_data
+
 
 @router.post("/knowledge/node")
 async def create_node(data: dict = Body(...), user_id: int = Depends(get_current_user)):
@@ -207,35 +305,8 @@ async def create_node(data: dict = Body(...), user_id: int = Depends(get_current
     """
     kg = KnowledgeGraph(user_id=user_id)
     try:
-        # 如果调用方没有提供 ID → 手动创建模式，自动生成
-        if "id" not in data or not data.get("id"):
-            data["id"] = kg.generate_node_id(data.get("name", ""))
-
-        node_data = {
-            "id": data["id"],
-            "name": data["name"],
-            "file": f"nodes/{data['id']}.md",
-            "tags": data.get("tags", []),
-            "board": data.get("board", ""),
-            "summary": data.get("summary", ""),
-            "mastery": data.get("mastery", 0),
-            "difficulty": data.get("difficulty", 3),
-            "estimated_minutes": data.get("estimated_minutes", 15),
-            "added_by": data.get("added_by", "human"),
-            "confidence": data.get("confidence"),
-        }
-
-        await assign_taxonomy(kg, node_data)
-
-        # 建库 + 写 MD 一次完成（模板收口在 KnowledgeGraph）。
-        # 返回的是**实际落点**的 ID：同名并轨命中已有节点时是已有节点的 ID，
-        # 回执必须用它，否则前端拿到一个不存在的 id。
-        real_id = kg.create_node_with_content(node_data, data.get("content") or "",
-                                              origin="manual")
-        node_data["id"] = real_id
-        node_data["file"] = f"nodes/{real_id}.md"
-
-        publish("graph_updated")
+        # 未给 ID 时自动生成；缺 name 时走 KeyError → 400。
+        _, node_data = await _create_node_via_pipeline(kg, data)
         return {"status": "ok", "node": node_data}
 
     except ValueError as e:
@@ -438,44 +509,6 @@ async def delete_edge(edge_id: int, user_id: int = Depends(get_current_user)):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  AI 编辑（向后兼容）
-# ══════════════════════════════════════════════════════════════════
-
-@router.post("/knowledge/ai/edit")
-async def ai_edit_graph(data: dict = Body(...), user_id: int = Depends(get_current_user)):
-    """AI 助手编辑知识图谱（向后兼容的快捷接口）"""
-    action = data.get("action")
-    kg = KnowledgeGraph(user_id=user_id)
-    try:
-        if action == "add_node":
-            kg.add_node(data["node"])
-            publish("graph_updated")
-            return {"status": "ok"}
-        elif action == "add_edge":
-            kg.add_edge(data["edge"])
-            publish("graph_updated")
-            return {"status": "ok"}
-        elif action == "update_node":
-            node = kg.get_node(data["node_id"])
-            if node is None:
-                raise HTTPException(status_code=404, detail=f"节点不存在：{data['node_id']}")
-            update_data = {}
-            for key in ["mastery", "difficulty", "estimated_minutes", "summary", "tags"]:
-                if key in data:
-                    update_data[key] = data[key]
-            if update_data:
-                kg.update_node_info(data["node_id"], update_data)
-            publish("graph_updated")
-            return {"status": "ok"}
-        else:
-            raise HTTPException(status_code=400, detail=f"未知操作：{action}")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        kg.close()
-
-
-# ══════════════════════════════════════════════════════════════════
 #  学习路径推荐
 # ══════════════════════════════════════════════════════════════════
 
@@ -672,6 +705,7 @@ async def export_knowledge(subject: str | None = Query(None, description="可选
 
         nodes.sort(key=lambda n: (n.get("difficulty", 3), n.get("mastery", 0)))
 
+        # P1：节点行带上「主归属主题名」（KG-T1）。只做加法，不改既有字段与结构。
         lines: list[str] = []
         title = f"{subject} 知识图谱" if subject else "知识图谱导出"
         lines.append(f"# {title}")
@@ -684,7 +718,12 @@ async def export_knowledge(subject: str | None = Query(None, description="可选
             mastery_label = {0: "未学", 1: "入门", 26: "熟悉", 51: "熟练", 76: "精通"}
             ml = next((v for k, v in sorted(mastery_label.items(), reverse=True)
                        if n.get("mastery", 0) >= k), "未学")
-            lines.append(f"### {n['name']} (ID: {n['id']}, 掌握度: {n.get('mastery', 0)}/{ml}, 难度: {n.get('difficulty', 3)})")
+            theme_name = "未归类"
+            primary = next((t for t in kg.get_node_themes(n["id"]) if t.get("is_primary")), None)
+            if primary and primary.get("theme_name"):
+                theme_name = primary["theme_name"]
+            lines.append(f"### {n['name']} (ID: {n['id']}, 掌握度: {n.get('mastery', 0)}/{ml}, "
+                         f"难度: {n.get('difficulty', 3)}, 主题: {theme_name})")
             if n.get("summary"):
                 lines.append(f"> {n['summary']}")
             lines.append("")

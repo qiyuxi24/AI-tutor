@@ -13,7 +13,7 @@
 | `POST` | `/api/v1/auth/login` | `authStore.login()` | 登录，返回 `{ token, user }` |
 | `GET` | `/api/v1/auth/me` | `authStore.checkAuth()` | 验证 token 有效性，返回 `{ user_id, username }` |
 
-**错误码**：`[E-AUTH-xxx]` 前缀，401 时 `apiClient` 拦截器自动清除凭据并跳转登录页。
+**错误码**：`[E-AUTH-xxx]` 前缀。登录/注册接口自身的 401 是"账号密码错"，由弹窗内联提示；其他接口 401 由 `apiClient` 拦截器清除凭据后静默重新登录（站点无登录墙）。
 
 ---
 
@@ -21,12 +21,12 @@
 
 | 方法 | 路径 | 调用位置 | 说明 |
 |------|------|----------|------|
-| `POST` | `/api/v1/chat/stream` | `sendMessageStream()` → `chatStore.send()` | **SSE 流式对话**，body: `{ messages, mode }` |
+| `POST` | `/api/v1/chat/stream` | `sendMessageStream()` → `chatStore.send()` | **SSE 流式对话**，body: `{ messages, current_node, kb_node_ids, kb_node_name }` |
 
 **数据流**：
 ```
 InputArea → chatStore.send()
-  → sendMessageStream(messages, mode, { onToken, onDone, onError })
+  → sendMessageStream(messages, { onToken, onDone, onError })
   → fetch POST /api/v1/chat/stream
   → SSE 逐 token 推送 → onToken 更新消息内容
   → [DONE] 信号 → onDone
@@ -110,7 +110,7 @@ export const apiClient = axios.create({ timeout: 300000 })
 
 **拦截器**：
 - **请求**：自动附加 `Authorization: Bearer <token>`
-- **响应**：401 自动清除凭据 → 跳转 `/login`
+- **响应**：401 自动清除凭据 → 静默重新登录体验账户（`/auth/login`、`/auth/register` 自身除外，见 5.3）
 
 ### 5.2 localStorage 键名
 
@@ -120,14 +120,17 @@ export const apiClient = axios.create({ timeout: 300000 })
 | `ai_tutor_user` | 用户信息 JSON | `authStore`, `chatStore`（取 user_id） |
 | `ai_tutor_conversations_{uid}` | 对话历史 | `chatStore` |
 | `ai_tutor_current_{uid}` | 当前对话 ID | `chatStore` |
-| `ai_tutor_mode_{uid}` | 引导模式 | `chatStore` |
 
 ### 5.3 路由
 
 | 路径 | 组件 | 权限 |
 |------|------|------|
-| `#/login` | `LoginView.vue` | 仅 guest（已登录自动跳 `/`） |
-| `#/` | `HomeView.vue` | 需登录（未登录跳 `/login`） |
+| `#/` | `HomeView.vue` | 无守卫（挂载时 `authStore.ensureSession()` 静默登录体验账户，失败则弹出 `LoginDialog`） |
+| `#/*` | → 重定向 `#/` | 兜底（含老书签 `#/login`） |
+
+> **已取消 `#/login` 路由页与路由守卫**（2026-09-26）：站点无登录墙，登录/注册表单由
+> `components/LoginDialog.vue` 承载，入口是左侧活动栏头像菜单与设置页的「切换账号」。
+> 后端 `/api/v1/auth/*` 契约不变。加回登录页需**三处同步**：路由 + 守卫 + `api` 层 401 跳转。
 
 ---
 
@@ -166,7 +169,7 @@ export const apiClient = axios.create({ timeout: 300000 })
 
 | 错误码 | 消息 | 触发位置 |
 |--------|------|----------|
-| `E-CLIENT-001` | 输入内容不符合要求 | `LoginView` 表单校验 |
+| `E-CLIENT-001` | 输入内容不符合要求 | `LoginDialog` 表单校验 |
 | `E-CLIENT-002` | 知识图谱加载失败 | `chatStore.fetchGraph()` catch |
 | `E-CLIENT-003` | 节点保存失败 | （预留） |
 | `E-CLIENT-004` | 节点删除失败 | （预留） |

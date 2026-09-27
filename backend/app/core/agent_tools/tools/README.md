@@ -19,7 +19,7 @@
 | `update_mastery` | `update_mastery.py` | 图谱 | `KnowledgeGraph` | **只认 3 种硬证据**；主信号是出题判分 |
 | `add_edge` | `add_edge.py` | 图谱 | `KnowledgeGraph` | 关系不明确**不要**连边（质量 > 数量） |
 | `delete_node` | `delete_node.py` | 图谱 | `KnowledgeGraph` | 人类建的删不掉，别重试 |
-| `update_user_profile` | `update_user_profile.py` | 画像 | `core/profile/` | 与已有笔记重复的不要再记 |
+| `update_user_profile` | `update_user_profile.py` | 画像 | `core/profile/` | 结构化字段只填学生**明说**的事实；`goals` 是追加语义 |
 | `fetch_webpage` | `fetch_webpage.py` | 资料 | 本模块 + `core/knowledge_writer.create_node_from_webpage`（+ `../net_guard.py`、`core/open_source.py`） | **只读**返回；抓到的正文同时存档为图谱节点（origin="web"），但**只存档开放许可来源** |
 | `download_resource` | `download_resource.py` | 资料 | 本模块（+ `../net_guard.py`、`core/open_source.py`） | **留存**，入库才能被检索；**只采开放许可来源**（fail-closed） |
 | `rag_search` | `rag_search.py` | 资料 | `core/rag_pipeline/` | `hops` 只反向补前置，字面不相似但必须先学 |

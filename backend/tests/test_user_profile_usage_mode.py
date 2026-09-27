@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from app.core.profile import UserProfile, FIELD_WEIGHTS
+from app.core.profile import AI_WRITABLE_FIELDS, UserProfile, FIELD_WEIGHTS
 
 
 @pytest.fixture
@@ -33,6 +33,8 @@ def test_usage_mode_in_whitelist_weight_zero(profile):
     # 白名单放行 update_field；weight=0 不计入完整度权重
     assert "preferences.usage_mode" in FIELD_WEIGHTS
     assert FIELD_WEIGHTS["preferences.usage_mode"] == 0
+    # 但 AI 工具不得代改版权开关（用户策略，见 schema.AI_WRITABLE_FIELDS）
+    assert "preferences.usage_mode" not in AI_WRITABLE_FIELDS
 
 
 def test_update_usage_mode_via_whitelist(profile):

@@ -69,27 +69,37 @@ def _report_split(text: str, units: list[dict]) -> None:
 
 
 async def _run(user_id: int, units: list[dict], subject: str, write: bool) -> int:
-    """逐单元真调 LLM；返回退出码"""
+    """逐单元真调 LLM（骨架 → 填充两阶段）；返回退出码"""
     gen = gg.GraphGenerator(user_id)
     kept: list[dict] = []
     rejected: list[tuple[str, int]] = []
-    generated: list[dict] = []      # 已生成的局部图谱，--write 时复用，不重复调 LLM
-    failed = 0
+    generated: list[dict] = []      # 已生成的骨架，--write 时复用（骨架不重复调 LLM）
+    failed = fill_failed = 0
 
     for i, unit in enumerate(units, 1):
         print(f"\n[{i}/{len(units)}] 生成：{unit['title'] or '(无标题前言)'}"
               f"（{len(unit['text'])} 字符）")
-        result = await gen._call_generator_llm(subject, unit["text"], [], section=unit["title"])
-        if not result:
+        skeleton = await gen._call_skeleton_llm(subject, unit["text"], [],
+                                                section=unit["title"])
+        if not skeleton:
             failed += 1
-            print("    ✗ LLM 失败（空回复或 JSON 不可解析）")
+            print("    ✗ 骨架 LLM 失败（空回复或 JSON 不可解析）")
             continue
-        generated.append(result)
-        for node in result.get("nodes", []):
-            if not isinstance(node, dict):
-                continue
+        briefs = [n for n in skeleton["nodes"] if isinstance(n, dict)]
+        print(f"    骨架：{len(briefs)} 个节点 / {len(skeleton['edges'])} 条边")
+        generated.append({"title": unit["title"], "text": unit["text"],
+                          "skeleton": skeleton})
+
+        fill = await gen._call_fill_llm(subject, unit["title"], unit["text"], briefs)
+        if not fill:
+            fill_failed += 1
+            print("    ✗ 填充 LLM 失败（骨架已生成，正文待补）")
+            continue
+        name_by_id = {str(n.get("id") or ""): str(n.get("name") or "?") for n in briefs}
+        for node in fill["nodes"]:
+            nid = str(node.get("id") or "").strip()
             content = str(node.get("content") or "").strip()
-            name = str(node.get("name") or "?")
+            name = name_by_id.get(nid, nid or "?")
             if len(content) < gg.GRAPH_MIN_CONTENT_CHARS:
                 rejected.append((name, len(content)))
                 print(f"    ✗ 拒收 {name}（{len(content)} 字 < "
@@ -102,22 +112,27 @@ async def _run(user_id: int, units: list[dict], subject: str, write: bool) -> in
         print("\n落库中（--write）…")
         print(f"  已写入 {await _write_all(gen, generated, subject)} 个节点")
 
+    if fill_failed:
+        print(f"（{fill_failed} 个单元的正文填充失败，其骨架节点落库后会停在待填充态）")
+
     return _summary(kept, rejected, failed, len(units))
 
 
 async def _write_all(gen, generated: list[dict], subject: str) -> int:
-    """把**已生成**的局部图谱写进真实图谱（只在 --write 时调用，不重新调 LLM）"""
+    """落库：复用**已生成的骨架**（不再调骨架 LLM），正文由生产填充路径补齐（会再调一次填充 LLM）"""
     from app.core.knowledge_graph import KnowledgeGraph
 
     kg = KnowledgeGraph(user_id=gen.user_id)
     created = 0
     try:
         existing = kg.get_nodes_by_subject(subject)
-        for result in generated:
-            stats = await gen._write_to_graph(kg, subject, result,
+        for item in generated:
+            stats = await gen._write_skeleton(kg, subject, item["skeleton"],
                                               existing_nodes=existing, board="")
             created += len(stats["created_nodes"])
             existing = kg.get_nodes_by_subject(subject)
+            await gen._fill_nodes(kg, subject, item["title"], item["text"],
+                                  stats["pending_node_ids"])
     finally:
         kg.close()
     return created

@@ -17,6 +17,7 @@ import 约定：
 from .manager import UserProfile
 from .markdown import parse_markdown_to_data, render_profile_markdown
 from .schema import (
+    AI_WRITABLE_FIELDS,
     FIELD_WEIGHTS,
     PROFILE_SCHEMA_VERSION,
     TOTAL_WEIGHT,
@@ -42,6 +43,7 @@ __all__ = [
     "render_profile_markdown",
     "parse_markdown_to_data",
     "FIELD_WEIGHTS",
+    "AI_WRITABLE_FIELDS",
     "TOTAL_WEIGHT",
     "PROFILE_SCHEMA_VERSION",
 ]

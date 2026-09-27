@@ -20,6 +20,10 @@ RUN npm config set registry https://registry.npmmirror.com \
 
 # 拷贝源码并构建
 COPY frontend/ ./
+# 体验账户口令（构建期烘进前端，须与后端 DEFAULT_ADMIN_PASSWORD 一致）：
+# 传空则用前端源码里的默认值。只在本阶段存在，不会进入最终运行镜像。
+ARG VITE_DEMO_PASSWORD
+ENV VITE_DEMO_PASSWORD=${VITE_DEMO_PASSWORD}
 RUN npm run build
 
 # ──────────────────────────────────────────────
