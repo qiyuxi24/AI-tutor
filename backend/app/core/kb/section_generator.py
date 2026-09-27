@@ -98,6 +98,15 @@ SECTION_WRITE_SYSTEM_PROMPT = """你是一位「学科知识讲解专家」。�
 从第一个字符起就是正文（可用 `## 小节标题` 起头），到结束为止；不要出现「以下是正文」之类的说明。"""
 
 
+def _instruction_block(instruction: str) -> str:
+    """把「学生/教师的额外要求」渲染成提示词片段（空 → 空串，两阶段共用一份措辞）。"""
+    instruction = (instruction or "").strip()
+    if not instruction:
+        return ""
+    return ("\n学生/教师对本次重写的**额外要求**（务必满足，优先级高于资料片段）："
+            f"{instruction}\n")
+
+
 class SectionGenerator:
     """把单个图谱节点「小节化」为若干独立成章的 MD（两阶段：规划 → 逐节成文）。
 
@@ -118,7 +127,9 @@ class SectionGenerator:
                        source_text: Optional[str] = None,
                        related: Optional[list[str]] = None,
                        append: bool = False,
-                       title_suffix: str = "") -> dict:
+                       title_suffix: str = "",
+                       replace: bool = False,
+                       instruction: str = "") -> dict:
         """
         为一个节点生成小节（两阶段）：规划 → 逐节成文落盘。
 
@@ -133,6 +144,11 @@ class SectionGenerator:
                      False = 整篇小节化（已有 manifest 则幂等跳过，见方案 §6.1）
             title_suffix: append 时给小节标题加的后缀（如「（《资料名》补充）」）——
                      只改清单/文件名，不进给模型的标题（避免把后缀写进正文小标题）
+            replace: True = **先清掉该节点现有全部小节**再重写（"重新修改"语义）。
+                     ⚠️ 只有**规划成功后**才清 —— 规划失败直接返回，旧内容原样保留
+                     （否则"清空 + 生成失败"会把节点搞成空壳）。与 append 互斥，replace 优先。
+            instruction: 学生/教师对本次重写的**额外要求**（如"太浅了""多给两道例题"），
+                     注入阶段①②的提示词；空串 = 不干预。
 
         返回:
             {"status": "ok"|"skipped"|"error",
@@ -148,8 +164,8 @@ class SectionGenerator:
         if not node:
             return self._error(f"节点不存在：{node_id}")
 
-        # 幂等：已有 manifest 且非强制、非追加 → 不重复生成（方案 §6.1 的「重跑幂等」）
-        if not force and not append and self._has_sections(kg, node_id):
+        # 幂等：已有 manifest 且非强制、非追加、非重写 → 不重复生成（方案 §6.1 的「重跑幂等」）
+        if not force and not append and not replace and self._has_sections(kg, node_id):
             logger.info(f"节点小节化（{node_id}）：已有 manifest 且 force=False，跳过")
             return {"status": "skipped", "created": [], "failed": [],
                     "message": "该节点已小节化，跳过（force=False）"}
@@ -157,6 +173,7 @@ class SectionGenerator:
         name = str(node.get("name") or "").strip()
         subject = str(node.get("subject") or "").strip()
         summary = str(node.get("summary") or "").strip()
+        instruction = (instruction or "").strip()
         if source_text is None:
             source_text = self._collect_source_text(kg, node_id, name)
         if related is None:
@@ -168,7 +185,8 @@ class SectionGenerator:
                 f"节点小节化（{node_id}）：无溯源资料、无摘要、无关联节点，收集不到可讲材料")
             return self._error(f"节点「{name or node_id}」收集不到任何可讲材料")
 
-        plan = await self._plan_sections(name, subject, summary, source_text, related)
+        plan = await self._plan_sections(name, subject, summary, source_text, related,
+                                         instruction)
         if plan is None:
             logger.warning(
                 f"节点小节化（{node_id}）：规划失败（空回复或 JSON 不可解析），放弃本节点")
@@ -177,6 +195,11 @@ class SectionGenerator:
         sections = plan.get("sections")
         if not isinstance(sections, list) or not sections:
             return self._error("规划结果没有有效小节")
+
+        # replace：**规划成功之后**才清旧小节（上面任何一条失败路径都已 return，内容未动）
+        if replace and self._has_sections(kg, node_id):
+            cleared = kg.clear_sections(node_id)
+            logger.info(f"节点小节化（{node_id}）：replace 模式，已清掉旧小节 {cleared} 个")
 
         # 规划摘要回写节点（地图层标签保鲜）。回写失败只降级告警，不阻断成文。
         new_summary = str(plan.get("summary") or "").strip()
@@ -200,7 +223,7 @@ class SectionGenerator:
             store_title = f"{title}{title_suffix}" if title_suffix else title
             sid = kg.create_section(node_id, store_title, kind, "")
             content = await self._write_section(
-                name, subject, title, brief, summary, source_text, related)
+                name, subject, title, brief, summary, source_text, related, instruction)
             if content is not None and len(content.strip()) >= SECTION_MIN_CONTENT_CHARS:
                 kg.write_section(node_id, sid, content)
                 created.append({"id": sid, "title": store_title, "kind": kind})
@@ -225,7 +248,8 @@ class SectionGenerator:
     # ────────────────────────────────────────────
 
     async def _plan_sections(self, name: str, subject: str, summary: str,
-                             source_text: str, related: list[str]) -> Optional[dict]:
+                             source_text: str, related: list[str],
+                             instruction: str = "") -> Optional[dict]:
         """
         阶段①：一次 JSON 调用，产出该节点的小节清单 + 一行摘要。
 
@@ -234,6 +258,7 @@ class SectionGenerator:
         """
         related_line = "、".join(related) if related else "（无）"
         material = source_text[:SECTION_SOURCE_CHARS] if source_text else "（无资料片段，请依据知识点本身的常规范畴规划）"
+        extra = _instruction_block(instruction)
         user_prompt = f"""知识点名称：{name}
 学科：{subject or "（未标注）"}
 一句话摘要：{summary or "（无）"}
@@ -243,7 +268,7 @@ class SectionGenerator:
 ---
 {material}
 ---
-
+{extra}
 请梳理这个知识点**内部内聚的小节**（每一节都会各自写成一篇独立的 MD），并按格式输出 JSON。"""
         data = await self._call_json_llm(SECTION_PLAN_SYSTEM_PROMPT, user_prompt,
                                          kind="kb_section_plan",
@@ -261,7 +286,8 @@ class SectionGenerator:
     # ────────────────────────────────────────────
 
     async def _write_section(self, name: str, subject: str, title: str, brief: str,
-                             summary: str, source_text: str, related: list[str]) -> Optional[str]:
+                             summary: str, source_text: str, related: list[str],
+                             instruction: str = "") -> Optional[str]:
         """
         阶段②：为**单个**小节写正文（**纯 Markdown 直出**，不经 JSON 包裹）。
 
@@ -269,6 +295,7 @@ class SectionGenerator:
         """
         related_line = "、".join(related) if related else "（无）"
         material = source_text[:SECTION_SOURCE_CHARS] if source_text else "（无资料片段，请依据知识点本身的常规范畴讲解）"
+        extra = _instruction_block(instruction)
         user_prompt = f"""知识点：{name}
 学科：{subject or "（未标注）"}
 本小节标题：{title}
@@ -280,7 +307,7 @@ class SectionGenerator:
 ---
 {material}
 ---
-
+{extra}
 请**只**为本小节写一篇可独立阅读的 Markdown 讲解，直接输出正文。"""
         try:
             return await call_llm(
@@ -461,3 +488,55 @@ class SectionGenerator:
     def _error(message: str) -> dict:
         """统一的失败返回（created/failed 保持契约形状）。"""
         return {"status": "error", "created": [], "failed": [], "message": message}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  后台重写入口（Agent 工具 `update_node_sections` 用）
+# ══════════════════════════════════════════════════════════════════
+
+# 正在重写的 (user_id, node_id)：同一节点同时只跑一个任务。
+# 为什么必须去重：两次 replace 并发会在"清旧小节"与"写新小节"之间互相踩 ——
+# 后启动的那次把前一次刚写好的小节清掉，结果是半成品。
+_INFLIGHT: set[tuple[int, str]] = set()
+
+
+async def _run_regeneration(user_id: int, node_id: str, *, replace: bool,
+                            append: bool, instruction: str) -> dict:
+    """后台任务体：自建 KnowledgeGraph（不跨协程共享实例），**无论成败**都推 graph_updated。
+
+    推事件的理由：前端只认这条通知刷新图谱/详情 —— 失败也推一次，学生那点开看到的就是
+    "内容没变"（而不是界面永远停在旧数据上以为改成功了）。
+    """
+    from app.core.event_bus import GRAPH_UPDATED, publish
+    from app.core.knowledge_graph import KnowledgeGraph
+
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        result = await SectionGenerator(user_id).generate(
+            kg, node_id, replace=replace, append=append, instruction=instruction)
+        logger.info(f"后台小节重写（{node_id}）：{result.get('message', '')}")
+        return result
+    except Exception as e:                              # noqa: BLE001 —— 后台任务不裸抛
+        logger.error(f"后台小节重写失败（{node_id}）：{e}")
+        return {"status": "error", "created": [], "failed": [], "message": str(e)}
+    finally:
+        kg.close()
+        _INFLIGHT.discard((user_id, node_id))
+        publish(GRAPH_UPDATED, {"node_id": node_id}, user_id=user_id)
+
+
+def start_background_regeneration(user_id: int, node_id: str, *, replace: bool = False,
+                                  append: bool = False, instruction: str = "") -> bool:
+    """起一个后台小节重写任务；同节点已在跑 → False（不重复触发）。
+
+    为什么放后台（而不是让工具同步等）：一次重写 = 1 次规划 + N 次成文调用（实测 30~120s），
+    同步会顶穿单工具 60s 超时、吃掉 180s run 墙钟；更糟的是中途被掐会留下"旧小节已清、
+    新小节没写完"的半成品节点。
+    """
+    key = (user_id, node_id)
+    if key in _INFLIGHT:
+        return False
+    _INFLIGHT.add(key)
+    asyncio.create_task(_run_regeneration(
+        user_id, node_id, replace=replace, append=append, instruction=instruction))
+    return True

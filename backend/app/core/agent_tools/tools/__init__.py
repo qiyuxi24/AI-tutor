@@ -32,6 +32,7 @@ from . import (
     rag_search,
     update_mastery,
     update_node_content,
+    update_node_sections,
     update_user_profile,
 )
 
@@ -41,6 +42,7 @@ NATIVE_SPECS = [
     # 图谱工具
     add_knowledge_node.SPEC,
     update_node_content.SPEC,
+    update_node_sections.SPEC,
     update_mastery.SPEC,
     add_edge.SPEC,
     delete_node.SPEC,
