@@ -13,7 +13,7 @@
  * 主题切换 / 用户菜单已下沉到 ActivityBar 组件内部。
  */
 
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useChatStore } from '../stores/chatStore'
 import { useAuthStore } from '../stores/authStore'
 import { formatError, clientError } from '../utils/errorCodes.js'
@@ -24,6 +24,7 @@ import ChatArea from '../components/ChatArea.vue'
 import ForceGraph from '../components/ForceGraph.vue'
 import GraphSubjectBar from '../components/GraphSubjectBar.vue'
 import GraphBoardSidebar from '../components/GraphBoardSidebar.vue'
+import PathBoard from '../components/PathBoard.vue'
 import NodeDetail from '../components/NodeDetail.vue'
 import UserProfile from '../components/UserProfile.vue'
 import GraphSearch from '../components/GraphSearch.vue'
@@ -71,6 +72,34 @@ const showLoginDialog = ref(false)
 const graphSearchRef = ref(null)
 const forceGraphRef = ref(null)
 const onboardingRef = ref(null)
+
+// ─── 右侧「学习任务栏」───
+// 路径不画在图上（图上一淡出就丢上下文），改成右侧弹出的分层看板。
+const showPathBoard = ref(false)
+
+function togglePathBoard() {
+  showPathBoard.value = !showPathBoard.value
+}
+
+/**
+ * 任务栏数据只在面板打开时拉、且打开着的时候切学科/板块要跟着重算
+ * （否则表里是上一个学科的知识点，和画布对不上）。
+ */
+watch(
+  () => [showPathBoard.value, store.currentSubject, store.currentBoard],
+  ([open]) => { if (open) store.fetchPathBoard() },
+  { immediate: true }
+)
+
+/** 任务栏「在图谱中定位」：把画布视角移到该节点（引擎自带平滑聚焦） */
+function handlePathBoardFocus(nodeId) {
+  forceGraphRef.value?.focusNode(nodeId)
+}
+
+/** 任务栏「修改掌握度」：复用节点详情弹窗（掌握度滑块在那儿，不做第二套入口） */
+async function handlePathBoardEdit(nodeId) {
+  await handleNodeDblClick(nodeId)
+}
 
 const SIDEBAR_WIDTH = 260
 
@@ -188,6 +217,8 @@ async function refreshGraph() {
       nodeDetailModal.value = await store.fetchNodeDetail(nodeDetailModal.value.id)
     } catch { /* ignore */ }
   }
+  // 任务栏打开时一并重算：改完掌握度要立刻看到解锁状态与追溯结果变化
+  if (showPathBoard.value) store.fetchPathBoard()
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -428,11 +459,29 @@ const slideTransition = {
             :edges="store.displayEdges"
             :loading="!store.graphLoaded"
             :error="store.graphError"
-            :learning-path="store.learningPath"
             :next-node-id="store.nextToLearn?.node_id || ''"
+            :path-board-open="showPathBoard"
             @node-dblclick="handleNodeDblClick"
+            @toggle-path-board="togglePathBoard"
             @graph-action="handleGraphAction"
           />
+
+          <!-- 右侧：学习任务栏（分层看板；点底部「学习路径」开关） -->
+          <Transition name="view-fade">
+            <PathBoard
+              v-if="showPathBoard"
+              class="graph-path-board"
+              :items="store.pathBoard.items"
+              :recommended="store.pathBoard.recommended"
+              :stats="store.pathBoard.stats"
+              :loading="store.pathBoardLoading"
+              :subject="store.pathBoard.subject || ''"
+              :board="store.pathBoard.board || ''"
+              @close="showPathBoard = false"
+              @focus-node="handlePathBoardFocus"
+              @edit-node="handlePathBoardEdit"
+            />
+          </Transition>
         </div>
       </Transition>
 
@@ -597,6 +646,17 @@ const slideTransition = {
   z-index: 20;
   display: flex;
   align-items: stretch;
+}
+
+/* ── 图谱右侧「学习任务栏」（分层看板）──
+   与左侧导航同一套卡片语言；同样从 64px 起，给顶部搜索栏让位。 */
+.graph-path-board {
+  position: absolute;
+  top: 64px;
+  right: 12px;
+  bottom: 12px;
+  width: 360px;
+  z-index: 22;
 }
 
 .graph-panel-stack {

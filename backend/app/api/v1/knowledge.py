@@ -29,6 +29,8 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
   DELETE /knowledge/edge/{edge_id}           - 删除边
   POST   /knowledge/decompose                - 问题拆解为知识点依赖树
   GET    /knowledge/learning-path            - 获取学习路径（拓扑排序）
+  GET    /knowledge/main-path                - 获取切片内的一条主路径（先修最长链 + 起点）
+  GET    /knowledge/path-board               - 获取切片内的分层学习看板（前置/解锁/向前追溯）
   GET    /knowledge/next-to-learn            - 获取下一步学习推荐
   GET    /knowledge/stats                    - 学习进度聚合统计（仪表盘数据源）
   GET    /knowledge/export                   - 导出为合并 Markdown（下载）
@@ -882,6 +884,62 @@ async def get_learning_path(
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取学习路径失败：{str(e)}")
+    finally:
+        kg.close()
+
+
+@router.get("/knowledge/main-path")
+async def get_main_path(subject: str | None = Query(None, description="可选：按学科切片，与 /knowledge/graph 同一口径"),
+                        board: str | None = Query(None, description="可选：按知识板块切片，需同时指定 subject"),
+                        user_id: int = Depends(get_current_user)):
+    """
+    获取当前切片内的**一条主路径**（先修关系上的最长链），供图谱「学习路径」开关高亮。
+
+    与 `/knowledge/learning-path` 的区别：
+        - learning-path  = 全部知识点的**拓扑顺序**（仪表盘"下一步学什么"、进度统计用）；
+          拿它当高亮数据 = 整张图都在路上，看不出该从哪起步；
+        - main-path      = 一条链（骨架路径）+ 明确起点（`start_node_id`），
+          让图上能"亮出一条该走的路"。
+
+    切片口径与 `/knowledge/graph` 完全一致（同走 `graph_middleware.slice_graph`），
+    否则高亮会指到画布上不存在的节点。
+
+    没有先修关系或先修成环时返回空 `path` + 可读 `reason`（不报错）：前端据此给提示，
+    而不是"按了开关什么都没发生"。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        return graph_middleware.main_path(kg, subject=subject, board=board)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取主路径失败：{str(e)}")
+    finally:
+        kg.close()
+
+
+@router.get("/knowledge/path-board")
+async def get_path_board(subject: str | None = Query(None, description="可选：按学科切片，与 /knowledge/graph 同一口径"),
+                         board: str | None = Query(None, description="可选：按知识板块切片，需同时指定 subject"),
+                         user_id: int = Depends(get_current_user)):
+    """
+    获取当前切片内的**分层学习看板**（前端「学习任务栏」的数据源）。
+
+    与 `/knowledge/main-path` 的分工：
+        - main-path  = 一条最长链（图上一眼看清该走哪条）；
+        - path-board = 全部知识点 + 每个的前置 / 解锁 / **向前追溯**，
+          供任务栏表达"哪些并排在最上面（无前置）、哪些还没解锁、卡住的根源在哪"。
+
+    「向前追溯」的语义：某个知识点没掌握时，沿前置关系反向追到**最根源的未掌握
+    知识点** —— 不能只看直接前置，因为"直接前置已掌握、但它自己的前置没掌握"
+    很常见，只盯直接前置会把人继续按在卡住的那一步上。
+
+    状态口径 = `graph_middleware.mastery_bucket` 四档（unstarted/weak/learning/mastered）
+    —— 与图谱节点配色同源，不在前端另算一套。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        return graph_middleware.path_board(kg, subject=subject, board=board)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取学习任务栏失败：{str(e)}")
     finally:
         kg.close()
 

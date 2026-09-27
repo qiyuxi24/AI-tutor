@@ -47,6 +47,12 @@ const STORAGE_KEY_CURRENT = `ai_tutor_current_${_uid}`
 // 但作为一个可选分组出现在 subjectSummaries 中）。
 const UNCLASSIFIED_SUBJECT = '未分类'
 
+// 学习任务栏空值（分层看板）：未选学科 / 拉取失败时用它。
+// 冻结：消费方（PathBoard.vue）永远拿到同一结构，不会有人就地改它。
+const EMPTY_PATH_BOARD = Object.freeze({
+  items: [], recommended: [], stats: {}, subject: null, board: null,
+})
+
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
@@ -86,8 +92,11 @@ export const useChatStore = defineStore('chat', () => {
   const boards = ref([])           // 当前学科的板块列表 [{board, node_count, ...}]
   const currentBoard = ref(null)   // 当前查看的板块名；null = 整学科
 
-  // 学习进度维度：科技树联动数据（拓扑排序路径 + 下一步推荐）
-  const learningPath = ref([])     // 按学习顺序排列的节点 [{id, name, mastery, difficulty, ...}]
+  // 学习进度维度：科技树联动数据（下一步推荐 + 分层看板）
+  // 学习任务栏（右侧分层看板）：切片内全部知识点 + 前置 / 解锁 / 向前追溯。
+  // 只在面板打开时拉取（fetchPathBoard），不在 fetchGraph 里预取 —— 大图会白跑一次。
+  const pathBoard = ref(EMPTY_PATH_BOARD)
+  const pathBoardLoading = ref(false)
   const nextToLearn = ref(null)    // 下一步推荐节点 {node_id, name, mastery, reason}
 
   // 学习进度统计（仪表盘）：聚合自图谱 mastery，单一数据源
@@ -223,8 +232,10 @@ export const useChatStore = defineStore('chat', () => {
       }))
       graphLoaded.value = true
       graphError.value = ''
-      // 图谱变更 → 学习路径/下一步推荐/统计随之刷新（单一数据源 = 图谱）
-      fetchLearningPath()
+      // 图谱变更 → 下一步推荐 / 统计随之刷新（单一数据源 = 图谱）
+      // 注：路径类数据（分层看板）改在面板打开时按需拉（fetchPathBoard）——
+      // 原先这里无条件拉全量拓扑序（每个节点的 name/mastery/summary），
+      // 而消费它的图内高亮已撑销 → 白跑一次请求。
       fetchNextToLearn()
       fetchStats(currentSubject.value)
     } catch (e) {
@@ -233,18 +244,28 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 获取按学习顺序排列的拓扑路径（后端 Kahn 算法，mastery<50 优先）。
-   * 用于图谱"显示学习路径"高亮 + 仪表盘"下一步学什么"。
+   * 获取「学习任务栏」数据：当前切片的分层看板。
+   *
+   * 切片口径**必须与 fetchGraph 一致**（同一 subject/board），否则任务栏里会出现
+   * 画布上没有的知识点、而画布上的又不在表里。
+   * 只在面板打开时调（见 HomeView 的 watch），不做预取。
    */
-  async function fetchLearningPath() {
+  async function fetchPathBoard() {
+    if (!currentSubject.value) {
+      pathBoard.value = EMPTY_PATH_BOARD
+      return
+    }
+    pathBoardLoading.value = true
     try {
-      const { data } = await apiClient.get('/api/v1/knowledge/learning-path')
-      learningPath.value = data.nodes_detail && data.nodes_detail.length
-        ? data.nodes_detail
-        : (data.ordered_nodes || []).map(id => ({ id }))
+      const params = { subject: currentSubject.value }
+      if (currentBoard.value) params.board = currentBoard.value
+      const { data } = await apiClient.get('/api/v1/knowledge/path-board', { params })
+      pathBoard.value = data || EMPTY_PATH_BOARD
     } catch {
-      // 学习路径失败不影响图谱使用，静默降级
-      learningPath.value = []
+      // 拉取失败不影响图谱使用：静默降级为空表（面板自己显示空态）
+      pathBoard.value = EMPTY_PATH_BOARD
+    } finally {
+      pathBoardLoading.value = false
     }
   }
 
@@ -1053,9 +1074,10 @@ export const useChatStore = defineStore('chat', () => {
     renameBoard,
     deleteBoard,
     // 学习进度（科技树联动）
-    learningPath,
+    pathBoard,
+    pathBoardLoading,
     nextToLearn,
-    fetchLearningPath,
+    fetchPathBoard,
     fetchNextToLearn,
     // 学习进度统计（仪表盘）
     stats,
