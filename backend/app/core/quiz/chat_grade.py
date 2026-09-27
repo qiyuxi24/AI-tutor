@@ -192,7 +192,11 @@ async def grade_pending_answer(kg, user_answer: str, *, store=None,
     r = await grade_pending(user_answer, kg=kg, store=store, source=source)
     if not r["ok"]:
         return r["message"]
+    return _format_grade_for_model(r)
 
+
+def _format_grade_for_model(r: dict) -> str:
+    """把 `grade_pending()` 的结构化结果转成给模型看的文案（工具与自动判分共用）。"""
     lines = [
         f"判分结果：{'答对' if r['correct'] else '答错'}"
         f"（{r['score']}/{r['max_score']} 分）。{r['comment']}",
@@ -207,3 +211,35 @@ async def grade_pending_answer(kg, user_answer: str, *, store=None,
         "答错 → **不要直接给出答案**，回到苏格拉底式追问，把学生引到正确思路上。"
     )
     return "\n".join(lines)
+
+
+async def auto_grade_pending(kg, user_answer: str, *, store=None,
+                             source: str = DEFAULT_SOURCE) -> str:
+    """
+    对话入口的**确定性判分钩子**：只要存在待作答的题，就把本轮学生输入当作答判一次。
+
+    为什么必须有这一层（真机问题，2026-09-27）
+        判分的入口原本是"模型主动调 `grade_answer`"这个**软约束** ——
+        而本项目已实测同一类软约束不管用（见本文件顶部：模型 12 次运行 0 次主动调
+        `update_mastery`）。后果：学生答完题，AI 把它当普通话说、不判题、
+        掌握度原地不动。这里把"检测到作答"也改成确定性路径，模型只负责"怎么回应"。
+
+    返回给模型看的文案（空字符串 = 没有待作答的题 / 判分不可用，调用方无需注入）。
+    """
+    try:
+        store = _resolve_store(store, user_id=getattr(kg, "user_id", None), kg=kg)
+        if store.get_pending_question(source=source) is None:
+            return ""
+        r = await grade_pending(user_answer, kg=kg, store=store, source=source)
+        if not r.get("ok"):
+            return ""
+        return (
+            "【系统自动判分】学生这一轮的输入已按「作答」机械判分（无需你再调 grade_answer）：\n"
+            f"{_format_grade_for_model(r)}\n"
+            "⚠️ 例外：如果学生这轮其实不是在作答，而是在提新问题 / 换话题，"
+            "请忽略上面的判分结果，按学生的真实意图回应。"
+        )
+    except Exception as e:
+        # 判分是增强项，任何异常都不能阻断对话
+        logger.warning(f"自动判分失败（不阻断对话）: {e}")
+        return ""

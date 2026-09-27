@@ -41,6 +41,9 @@ export const ErrorDefs = {
     EDGE_OP:          { code: 'E-CLIENT-005', msg: '边操作失败' },
     NODE_LOAD:        { code: 'E-CLIENT-006', msg: '节点详情加载失败' },
     UNKNOWN:          { code: 'E-CLIENT-007', msg: '发生未知错误，请刷新页面后重试' },
+    // 后端已生成文本、但流式传输中未能送达（如 SSE 收尾丢帧）。
+    // 不能用空内容静默处理，否则用户只看到「AI 思考中」然后气泡凭空消失。
+    CHAT_EMPTY:       { code: 'E-CLIENT-008', msg: 'AI 未返回内容，回答可能在传输中丢失，请重试' },
   },
 }
 

@@ -17,6 +17,7 @@
  *   close: ()                  — 关闭弹窗
  *   refresh: ()                — 请求父组件刷新数据
  *   save-content: ({ nodeId, content }) — 保存节点内容（父组件调用 Store）
+ *   learn-node: ({ id, name })  — 去学习：父组件切到对话视图并把该节点设为教学焦点
  */
 
 import { ref, computed, watch } from 'vue'
@@ -29,7 +30,7 @@ const props = defineProps({
   visible: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node', 'update-mastery'])
+const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node', 'update-mastery', 'learn-node'])
 
 const mode = ref('view')        // 'view' | 'edit'
 const editContent = ref('')
@@ -88,6 +89,14 @@ async function handleSave() {
   })
 }
 
+/**
+ * 「去学习」：把节点交给父组件，由父组件切到对话视图并设为教学焦点。
+ * 组件不直接碰 Store/路由（与 save-content 同一去耦约定）。
+ */
+function handleLearn() {
+  emit('learn-node', { id: props.nodeInfo.id, name: props.nodeInfo.name })
+}
+
 /* 掌握程度映射 */
 function masteryLabel(m) {
   if (m == null || m === 0) return '未掌握'
@@ -123,6 +132,20 @@ async function handleMasteryChange() {
         <div class="modal-header">
           <h2 class="modal-title">{{ nodeInfo.name }}</h2>
           <div class="modal-actions">
+            <!-- 去学习：切到对话视图，以该节点为教学焦点（主操作，故排在编辑之前） -->
+            <button
+              v-if="mode === 'view'"
+              class="action-btn learn-btn"
+              title="进入对话，让 AI 专门讲这个知识点"
+              @click="handleLearn"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <path d="M22 10v6M2 10l10-5 10 5-10 5z"/>
+                <path d="M6 12v5c3 3 9 3 12 0v-5"/>
+              </svg>
+              去学习
+            </button>
             <!-- 阅读/编辑切换 -->
             <button
               v-if="mode === 'view'"
@@ -275,6 +298,14 @@ async function handleMasteryChange() {
   white-space: nowrap;
 }
 .action-btn:hover { background: var(--color-bg-hover); border-color: var(--color-border-light); }
+/* 「去学习」= 主操作：实心强调色，与次要的「编辑」区分开 */
+.learn-btn {
+  background: var(--color-accent); border-color: var(--color-accent);
+  color: var(--color-text-inverse); font-weight: 600;
+}
+.learn-btn:hover {
+  background: var(--color-accent-hover); border-color: var(--color-accent-hover);
+}
 .edit-btn { color: var(--color-accent); border-color: var(--color-accent-light); }
 .edit-btn:hover { background: var(--color-accent-light); }
 .save-btn { color: var(--color-green); border-color: var(--color-green-light); }

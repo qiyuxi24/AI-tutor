@@ -280,6 +280,19 @@ async function handleNodeDetailNavigate(nodeId) {
   }
 }
 
+/**
+ * NodeDetail「去学习」→ 切到对话视图，并把该节点设为教学焦点。
+ *
+ * 焦点会随每次请求作为 current_node 下发，后端据此把图谱摘要聚焦到该节点
+ * （chat_service._build_graph_summary(focus_node_id=...)），即"教学可行域"。
+ * 退出入口在对话区顶部的上下文条（✕）。
+ */
+function handleNodeDetailLearn({ id, name }) {
+  nodeDetailVisible.value = false
+  store.startLearningNode({ id, name })
+  viewMode.value = 'chat'
+}
+
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value
 }
@@ -435,6 +448,7 @@ const slideTransition = {
       @save-content="handleNodeDetailSave"
       @update-mastery="handleNodeDetailMastery"
       @navigate-to-node="handleNodeDetailNavigate"
+      @learn-node="handleNodeDetailLearn"
     />
 
     <!-- 用户画像面板 -->

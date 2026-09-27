@@ -188,3 +188,80 @@ def test_grade_pending_source_can_include_quiz_page_questions(tmp_path):
     assert _run(chat_grade.grade_pending("A", store=store))["ok"] is False
     r = _run(chat_grade.grade_pending("A", store=store, source=""))
     assert r["ok"] is True and r["score"] == 10
+
+
+# ══════════════════════════════════════════════════════════════════
+#  对话入口的确定性自动判分（auto_grade_pending）
+#
+#  背景：判分入口原本只靠"模型主动调 grade_answer"这个软约束，而同类软约束
+#  已被实测证伪（模型 12 次运行 0 次主动调 update_mastery）→ 学生答完题
+#  AI 把它当普通话说、不判题、掌握度不动。下面锁住"不依赖模型也能判分"。
+# ══════════════════════════════════════════════════════════════════
+
+def test_auto_grade_no_pending_returns_empty(tmp_path):
+    """没有待作答的题 → 空串（调用方不注入任何东西），且完全不碰图谱。"""
+    store = _store(tmp_path)
+    kg = _FakeKg(nodes={"stack": {"name": "栈", "mastery": 0}})
+
+    note = _run(chat_grade.auto_grade_pending(kg, "随便聊点什么", store=store))
+
+    assert note == ""
+    assert kg.mastery_updates == []
+
+
+def test_auto_grade_correct_updates_mastery_without_model(tmp_path):
+    """有待答题 + 答对 → 机械判分并确定性抬升掌握度，模型无需调任何工具。"""
+    store = _store(tmp_path)
+    _seed_question(store, source="chat", question_text="栈的特点是什么？",
+                   knowledge_point="stack")
+    kg = _FakeKg(nodes={"stack": {"name": "栈", "mastery": 0}})
+
+    note = _run(chat_grade.auto_grade_pending(kg, "A", store=store))
+
+    assert "答对" in note
+    assert "栈的特点是什么？" in note              # 题目一并交给模型
+    assert "不要直接给出答案" in note              # 与工具共用同一份文案
+    assert kg.mastery_updates == [("stack", 20)]   # 确定性 +20
+    assert store.get_pending_question() is None     # 已记录作答，不会重复判
+
+
+def test_auto_grade_wrong_keeps_mastery(tmp_path):
+    """答错 → 照常判分与记录，但掌握度不变（不做惩罚性扣分）。"""
+    store = _store(tmp_path)
+    _seed_question(store, source="chat", question_text="栈的特点是什么？",
+                   knowledge_point="stack")
+    kg = _FakeKg(nodes={"stack": {"name": "栈", "mastery": 40}})
+
+    note = _run(chat_grade.auto_grade_pending(kg, "B", store=store))
+
+    assert "答错" in note
+    assert kg.mastery_updates == []
+    assert store.get_pending_question() is None
+
+
+def test_auto_grade_allows_model_to_ignore_when_student_not_answering(tmp_path):
+    """文案必须给模型"忽略判分"的出口 —— 学生可能只是换了话题。
+
+    否则"学生问了新问题"会被硬判成答错，模型还可能顺着作答语境回应。
+    """
+    store = _store(tmp_path)
+    _seed_question(store, source="chat", question_text="栈的特点是什么？",
+                   knowledge_point="stack")
+    kg = _FakeKg(nodes={"stack": {"name": "栈", "mastery": 0}})
+
+    note = _run(chat_grade.auto_grade_pending(kg, "我们换个话题，讲讲队列", store=store))
+
+    assert "忽略" in note
+
+
+def test_auto_grade_swallows_store_error(tmp_path):
+    """题库异常 → 返回空串，绝不阻断对话（判分只是增强项）。"""
+    class _BoomStore:
+        def get_pending_question(self, source=""):
+            raise RuntimeError("db down")
+
+    kg = _FakeKg()
+    note = _run(chat_grade.auto_grade_pending(kg, "A", store=_BoomStore()))
+
+    assert note == ""
+

@@ -36,6 +36,7 @@ from app.core.token_counter import count_tokens
 from app.core.error_codes import ErrorCode, log_error, publish_error_event
 from app.core.event_bus import publish, subscribe, get_user_queue, TEXT_DELTA
 from app.core.knowledge_writer import apply_suggestion, load_suggestions, save_suggestions
+from app.core.quiz.chat_grade import auto_grade_pending
 
 logger = logging.getLogger("ai-tutor")
 
@@ -147,6 +148,16 @@ def _truncation_note(shown: int, dropped: int) -> str:
         return ""
     return (f"\n\n> 说明：本区块为控制上下文体量已截断，仅展示最相关的 {shown} 条"
             f"（共 {shown + dropped} 条）；需要更多依据时可再次检索。")
+
+
+def _last_user_text(messages: list) -> str:
+    """取最后一条用户消息的文本（messages 元素可能是 dict 或 pydantic 对象）"""
+    for m in reversed(messages or []):
+        role = m.get("role") if isinstance(m, dict) else getattr(m, "role", "")
+        if role == "user":
+            content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
+            return (content or "").strip()
+    return ""
 
 
 def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True,
@@ -560,6 +571,14 @@ async def process_message_stream(
             current_node=current_node, kb=kb
         )
 
+        # 确定性判分（2026-09-27）：学生答完题后，不能指望模型主动调 grade_answer
+        # —— 同一类软约束已被实测证伪（它连 update_mastery 都 12 次运行 0 次主动调）。
+        # 这里在进 loop 前把「待答题 + 本轮输入」机械判一次，结果注入提示词，
+        # 模型只负责把判分结果讲给学生听（答对则掌握度已确定性 +20）。
+        auto_grade_note = await auto_grade_pending(kg, _last_user_text(messages))
+        if auto_grade_note:
+            tool_prompt = f"{tool_prompt}\n\n{auto_grade_note}"
+
         # 预创建用户事件队列，确保 agent 发出的第一个事件不丢失
         # （旧实现先启动 agent 再 subscribe，agent 可能在队列创建前就发了事件 → 静默丢弃）
         get_user_queue(user_id)
@@ -586,6 +605,13 @@ async def process_message_stream(
             await _analyze_and_apply(last_user, result.text, user_id)
 
         publish("graph_updated")
+
+        # 冗余兜底帧：agent loop 的最终文本是「收尾一次性单帧」下发的（非逐 token），
+        # 那一帧若在 _consume_agent_events 的排空窗口丢失，前端会整条消息拿不到内容，
+        # 表现为气泡凭空消失。这里在 [DONE] 前再带一份，
+        # 前端仅在「一帧 token 都没收到」时用它兜底（见 api/index.js finalReply）。
+        if result.text:
+            yield f"data: {json.dumps({'type': 'final', 'text': result.text}, ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n"
     except Exception as e:

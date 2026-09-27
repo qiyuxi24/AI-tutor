@@ -40,6 +40,10 @@ const _uid = (() => {
 const STORAGE_KEY_CONVERSATIONS = `ai_tutor_conversations_${_uid}`
 const STORAGE_KEY_CURRENT = `ai_tutor_current_${_uid}`
 const STORAGE_KEY_MODE = `ai_tutor_mode_${_uid}`
+// 对话 ↔ 知识节点绑定表：{ [convId]: { id, name } }
+// 独立存储、不参与后端同步：后端 conversations 表只有 (id,title,messages,created_at,updated_at)，
+// 没有节点字段 —— 挂在对话对象上会在 sync 往返时被默默丢掉。
+const STORAGE_KEY_NODE_BINDINGS = `ai_tutor_node_bindings_${_uid}`
 
 // 后端 graph_middleware.SUBJECT_UNCLASSIFIED 的对应值。
 // 「未分类」= 无学科归属节点的合成分组名，不是真实学科（不出现在学科列表里，
@@ -48,6 +52,14 @@ const UNCLASSIFIED_SUBJECT = '未分类'
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+}
+
+/** 读取「对话 ↔ 节点」绑定表；解析失败一律当空表（绑定只是体验增强，不该阻断启动） */
+function loadNodeBindings() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY_NODE_BINDINGS) || '{}')
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  } catch { return {} }
 }
 
 function todayLabel(date) {
@@ -67,7 +79,11 @@ export const useChatStore = defineStore('chat', () => {
   const conversations = ref([])
   const currentId = ref(null)
   const mode = ref('adaptive')
-  const currentNode = ref('')  // 递归模式：当前教学知识点 ID
+  const currentNode = ref('')      // 教学焦点节点 ID → 后端 current_node/focus_node_id
+  const currentNodeName = ref('')  // 教学焦点节点名（仅对话区上下文条显示，不参与请求）
+  // 对话 ↔ 节点绑定表：教学焦点是「对话的属性」而非全局开关，
+  // 所以切对话时焦点跟着重算（syncFocusToConversation）。
+  const nodeBindings = ref(loadNodeBindings())
   const loading = ref(false)
   // 知识库上下文范围（用户选择放进对话上下文的文件/文件夹）
   const kbContext = ref(null)
@@ -583,6 +599,10 @@ export const useChatStore = defineStore('chat', () => {
         conversations.value.unshift(conv)
         currentId.value = conv.id
       }
+
+      // 焦点是对话的属性：定位到当前对话后同步推导一次
+      // （刷新后若停在某节点的教学对话上，上下文条应随之回来）
+      if (currentId.value) syncFocusToConversation(currentId.value)
     } catch {
       // ignore
     }
@@ -738,6 +758,8 @@ export const useChatStore = defineStore('chat', () => {
     }
     conversations.value.unshift(conv)
     currentId.value = conv.id
+    // 新对话默认是自由对话：焦点清空（节点教学会在 startLearningNode 里重新设回）
+    syncFocusToConversation(conv.id)
     // 注意：空对话不持久化！persist() 会过滤 messages.length === 0 的对话
     persist()
     return conv
@@ -756,6 +778,8 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     currentId.value = id
+    // 焦点是对话的属性：切到节点教学对话 → 恢复其焦点；切到自由对话 → 清空
+    syncFocusToConversation(id)
     persist()
   }
 
@@ -764,6 +788,7 @@ export const useChatStore = defineStore('chat', () => {
     const idx = conversations.value.findIndex((c) => c.id === id)
     if (idx === -1) return
     conversations.value.splice(idx, 1)
+    unbindConversation(id)
     if (currentId.value === id) {
       // 如果删除的是当前对话，自动创建新对话
       const conv = {
@@ -774,6 +799,7 @@ export const useChatStore = defineStore('chat', () => {
       }
       conversations.value.unshift(conv)
       currentId.value = conv.id
+      syncFocusToConversation(conv.id)
     }
     persist()
     // 同步删除后端数据
@@ -784,6 +810,114 @@ export const useChatStore = defineStore('chat', () => {
   function setMode(newMode) {
     mode.value = newMode
     persist()
+  }
+
+  // ─── 教学焦点 ⇄ 对话绑定 ───
+  // 模型：**焦点是对话的属性**。
+  //   - 「节点教学对话」在 nodeBindings 里登记 { id, name }
+  //   - 切对话时焦点跟着重算，所以点历史里的「学习：二叉树」会自动恢复该节点焦点
+  //   - 一个节点只允许一段教学对话（重复点「去学习」= 回到那段）
+
+  function persistNodeBindings() {
+    try {
+      localStorage.setItem(STORAGE_KEY_NODE_BINDINGS, JSON.stringify(nodeBindings.value))
+    } catch { /* 存不下就丢，不影响当前会话 */ }
+  }
+
+  /** 清掉指向已删除对话的失效绑定 */
+  function pruneStaleBindings() {
+    const alive = new Set(conversations.value.map(c => c.id))
+    let changed = false
+    for (const convId of Object.keys(nodeBindings.value)) {
+      if (!alive.has(convId)) {
+        delete nodeBindings.value[convId]
+        changed = true
+      }
+    }
+    if (changed) persistNodeBindings()
+  }
+
+  /** 该节点已有的教学对话 id（无则返回空串） */
+  function findConversationIdByNode(nodeId) {
+    for (const [convId, bind] of Object.entries(nodeBindings.value)) {
+      if (bind?.id === nodeId) return convId
+    }
+    return ''
+  }
+
+  function bindNodeToConversation(convId, nodeId, nodeName) {
+    // 同一节点只保留一段教学对话：先摘掉指向该节点的其它绑定
+    for (const [cid, bind] of Object.entries(nodeBindings.value)) {
+      if (bind?.id === nodeId && cid !== convId) delete nodeBindings.value[cid]
+    }
+    nodeBindings.value[convId] = { id: nodeId, name: nodeName }
+    persistNodeBindings()
+    // 标题带上节点名，便于在对话列表里一眼认出（send() 首句也会维持同一口径）
+    const conv = conversations.value.find(c => c.id === convId)
+    if (conv) conv.title = `学习：${nodeName}`
+  }
+
+  function unbindConversation(convId) {
+    if (nodeBindings.value[convId]) {
+      delete nodeBindings.value[convId]
+      persistNodeBindings()
+    }
+  }
+
+  /** 焦点跟随对话：绑定了节点 → 恢复焦点；自由对话 → 清空焦点 */
+  function syncFocusToConversation(convId) {
+    const bind = nodeBindings.value[convId]
+    currentNode.value = bind?.id || ''
+    currentNodeName.value = bind?.name || bind?.id || ''
+  }
+
+  // ─── 进入节点教学（图谱节点「去学习」入口） ───
+  /**
+   * 教学焦点 = 后端注入图谱摘要的 focus_node_id，决定本次对话的教学可行域。
+   *
+   * 行为：
+   *   1. 该节点**已有**教学对话 → 回到那一段（"点节点 = 接上上次进度"），不新开；
+   *   2. 否则：当前对话是空的 → 复用它；有内容 → 新开一段（避免上一节点的
+   *      历史把本节点的上下文带偏），并把新对话绑定到该节点；
+   *   3. 模式固定回 adaptive（保持"不直接给答案"的产品口径），
+   *      需要直给式精讲时由用户手动切「递归式教学」。
+   *
+   * currentNode 本身不持久化：刷新后由"切对话"路径重新推导，
+   * 不会出现"界面已退出、请求还带着旧节点"的不一致。
+   */
+  function startLearningNode(node) {
+    const nodeId = node?.id || ''
+    if (!nodeId) return
+    const nodeName = node?.name || nodeId
+
+    pruneStaleBindings()
+    let targetId = findConversationIdByNode(nodeId)
+    if (targetId && !conversations.value.some(c => c.id === targetId)) targetId = ''
+
+    if (!targetId) {
+      targetId = (isCurrentEmpty.value && currentId.value)
+        ? currentId.value
+        : newConversation().id
+      bindNodeToConversation(targetId, nodeId, nodeName)
+    }
+
+    if (currentId.value !== targetId) switchConversation(targetId)
+
+    // 焦点最后设：newConversation / switchConversation 都会重算焦点
+    currentNode.value = nodeId
+    currentNodeName.value = nodeName
+    mode.value = 'adaptive'
+    persist()
+  }
+
+  /**
+   * 退出焦点（对话区上下文条的 ✕）。
+   * 只清焦点、**不解除绑定**：这段历史本来就是该节点的教学记录，
+   * 从图谱再点「去学习」应当回到它，而不是另起一段。
+   */
+  function clearCurrentNode() {
+    currentNode.value = ''
+    currentNodeName.value = ''
   }
 
   // ─── 设置知识库上下文范围 ───
@@ -812,7 +946,11 @@ export const useChatStore = defineStore('chat', () => {
     // 如果是第一条消息，自动用前 20 字设定标题
     // 此时对话从"空"变为"有内容"，需要持久化
     if (conv.messages.length === 1) {
-      conv.title = text.length > 20 ? text.slice(0, 20) + '…' : text
+      // 节点教学对话固定用「学习：<节点名>」，便于在对话列表里一眼认出
+      const bind = nodeBindings.value[conv.id]
+      conv.title = bind
+        ? `学习：${bind.name || bind.id}`
+        : (text.length > 20 ? text.slice(0, 20) + '…' : text)
     }
 
     // 添加占位 AI 消息（流式填充 + 工具/思考事件挂载）
@@ -873,9 +1011,19 @@ export const useChatStore = defineStore('chat', () => {
         // 流式完成
         onDone: (fullReply) => {
           loading.value = false
-          // 如果流式没给任何内容，移除占位消息
+          // ⚠️ 曾经是 `if (!fullReply) conv.messages.pop()` —— 静默删掉整条助手消息。
+          // 后果：后端已生成文本但帧未送达时，用户只看到「AI 思考中」(或思考面板)
+          // 然后气泡凭空消失、毫无提示。现改为保留气泡 + 明确失败提示 + 可重试。
           if (!fullReply) {
-            conv.messages.pop()
+            const lastIdx = conv.messages.length - 1
+            const lastMsg = conv.messages[lastIdx]
+            if (lastMsg?.role === 'assistant') {
+              conv.messages.splice(lastIdx, 1, {
+                ...lastMsg,
+                content: clientError('CHAT_EMPTY'),
+                failed: true,
+              })
+            }
           }
           persist()
         },
@@ -893,12 +1041,31 @@ export const useChatStore = defineStore('chat', () => {
     )
   }
 
+  /**
+   * 重试上一次失败的回答：撤掉失败气泡与对应的提问，用同一句话重发。
+   * 只处理「最后两条是 user + failed assistant」的情形，正常对话不受影响。
+   */
+  function retryLast() {
+    const conv = currentConversation.value
+    if (!conv || loading.value) return
+    const msgs = conv.messages
+    if (msgs.length < 2) return
+    const last = msgs[msgs.length - 1]
+    const prev = msgs[msgs.length - 2]
+    if (last?.role !== 'assistant' || !last.failed || prev?.role !== 'user') return
+    const text = prev.content
+    msgs.splice(msgs.length - 2, 2)
+    send(text)
+  }
+
   return {
     // 对话
     conversations,
     currentId,
     mode,
     currentNode,
+    currentNodeName,
+    nodeBindings,
     loading,
     kbContext,
     currentConversation,
@@ -912,8 +1079,11 @@ export const useChatStore = defineStore('chat', () => {
     switchConversation,
     deleteConversation,
     setMode,
+    startLearningNode,
+    clearCurrentNode,
     setKbContext,
     send,
+    retryLast,
     // 图谱数据
     knowledgeNodes,
     knowledgeEdges,

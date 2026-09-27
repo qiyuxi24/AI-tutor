@@ -132,6 +132,10 @@ export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = 
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let fullReply = ''
+      // 冗余兜底：后端在 [DONE] 前会再带一份最终文本。
+      // agent loop 的最终文本是「收尾一次性单帧」下发的（非逐 token），
+      // 那一帧若在事件排空窗口丢失，前端会整条消息都拿不到内容。
+      let finalReply = ''
       let buffer = ''
 
       while (true) {
@@ -148,6 +152,11 @@ export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = 
           if (!line.startsWith('data: ')) continue
           const data = line.slice(6).trim()
           if (data === '[DONE]') {
+            // 一帧 token 都没收到 → 用冗余帧兜底（否则 onDone 收到空串会当成空回答）
+            if (!fullReply && finalReply) {
+              fullReply = finalReply
+              onToken?.(finalReply)
+            }
             onDone?.(fullReply)
             return
           }
@@ -178,6 +187,10 @@ export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = 
             else if (parsed.type === 'graph_updated') {
               // 图谱更新：前端知识树刷新由 knowledgeStore 独立 SSE 处理，此处忽略
             }
+            else if (parsed.type === 'final') {
+              // 冗余最终文本：先存下，等 onDone 时仅在"没收到任何 token"时兜底
+              finalReply = parsed.text || ''
+            }
             else if (parsed.error) {
               onError?.(parsed.error)
               return
@@ -189,6 +202,10 @@ export const sendMessageStream = (messages, mode, callbacks = {}, currentNode = 
       }
 
       // 流结束但没有 [DONE] 信号
+      if (!fullReply && finalReply) {
+        fullReply = finalReply
+        onToken?.(finalReply)
+      }
       onDone?.(fullReply)
     })
     .catch((err) => {
