@@ -48,8 +48,10 @@ docker compose up -d --build
 # 3. 验证
 docker compose ps                    # 状态应为 healthy
 curl http://localhost:8080/api/health
-# 浏览器打开 http://localhost:8080  → 应看到登录页
-# 若配置了 DEFAULT_ADMIN_PASSWORD，首次登录用 admin / 该密码
+# 浏览器打开 http://localhost:8080  → 应直接进入主界面（无登录页）
+# 站点无登录页：前端挂载时静默登录体验账户 admin/admin123（不存在时自动注册）。
+# 设了 DEFAULT_ADMIN_PASSWORD 就一并设 VITE_DEMO_PASSWORD（同一口令），否则静默
+# 登录失败 → 首屏弹登录框，需手工用 admin / 该密码登录一次（左下角头像可随时切换）
 
 # 4. 查看日志
 docker compose logs -f
