@@ -62,14 +62,6 @@ export const getKbStats = () => apiClient.get('/api/v1/kb/stats')
 export const fetchNodeSection = (nodeId, sectionId) =>
   apiClient.get(`/api/v1/knowledge/node/${nodeId}/section/${sectionId}`)
 
-/**
- * 为节点生成小节（两阶段 LLM 管线，耗时较长）
- * @param {boolean} [force] 强制重生成（true 覆盖已有小节）
- * resp: { status, created, failed, message }
- */
-export const generateNodeSections = (nodeId, force = false) =>
-  apiClient.post(`/api/v1/knowledge/node/${nodeId}/sections/generate`, { force })
-
 /** 删除单个小节 resp: { deleted: bool } */
 export const deleteNodeSection = (nodeId, sectionId) =>
   apiClient.delete(`/api/v1/knowledge/node/${nodeId}/section/${sectionId}`)
