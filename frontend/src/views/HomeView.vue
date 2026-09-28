@@ -19,6 +19,8 @@ import { useChatStore, BACKEND_RELOADED_EVENT } from '../stores/chatStore'
 import { useAuthStore } from '../stores/authStore'
 import { formatError, clientError } from '../utils/errorCodes.js'
 import { notifyError, notifyInfo } from '../utils/feedback'
+import { ballPrefs, loadBallPrefs } from '../utils/floatingBall.js'
+import FloatingBall from '../components/FloatingBall.vue'
 import ActivityBar from '../components/ActivityBar.vue'
 import ConversationSidebar from '../components/ConversationSidebar.vue'
 import ChatArea from '../components/ChatArea.vue'
@@ -93,6 +95,8 @@ onMounted(async () => {
   if (!ok) showLoginDialog.value = true
   // init() 内部依次：fetchSubjects() → ensureSubjectSelected() → fetchGraph() → connectSSE()
   store.init()
+  // 悬浮球开关（真值源 = 服务端账号偏好，跟账号走）→ 写入共享状态，供 FloatingBall 使用
+  loadBallPrefs()
   // 后端重载 → 局部刷新（开发态，见 handleBackendReloaded）
   if (import.meta.env.DEV) {
     window.addEventListener(BACKEND_RELOADED_EVENT, handleBackendReloaded)
@@ -352,6 +356,9 @@ const slideTransition = {
 
 <template>
   <div class="app-container">
+    <!-- 站内悬浮球 + 只放对话的小窗：只在非对话页显示（对话页已有完整对话区） -->
+    <FloatingBall :visible="ballPrefs.enabled && viewMode !== 'chat'" />
+
     <!-- ═══ 活动栏 + 内容区域（无顶部栏，全沉浸） ═══ -->
     <ActivityBar
       :active-view="viewMode"
