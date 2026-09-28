@@ -2,8 +2,12 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/svg+xml" href="/brand-star.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 声明本页自行处理明暗两套配色（见 src/utils/theme.js + style.css 的 html.dark）：
+         不声明的话，系统夜间模式下浏览器的「自动深色/强制暗色」会把亮色页面反色，
+         表现成"浅紫底黑字"被翻成"灰底白字"。 -->
+    <meta name="color-scheme" content="light dark" />
     <title>TutorAgent</title>
   </head>
   <body>

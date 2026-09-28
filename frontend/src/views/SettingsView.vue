@@ -19,6 +19,7 @@ import { useGraphForces, setGraphForce, resetGraphForces, FORCE_FIELDS } from '.
 import { useDetailPrefs, setDetailPref, resetDetailPrefs, DETAIL_FIELDS } from '../utils/detailPrefs'
 import GraphForcePreview from '../components/GraphForcePreview.vue'
 import { ballPrefs, normalizeBallPrefs, saveBallPrefs } from '../utils/floatingBall.js'
+import { avatarState, removeAvatar, uploadAvatar } from '../utils/avatar.js'
 
 const { mode, setTheme } = useTheme()
 const { mdTheme, setMdTheme } = useMdTheme()
@@ -127,6 +128,47 @@ async function handleUsageModeChange(value) {
     usageMode.value = value === 'commercial' ? 'personal' : 'commercial'
   } finally {
     usageSaving.value = false
+  }
+}
+
+// ─── 头像（真值源 = 服务端头像图片，见 backend /api/v1/profile/avatar）───
+// avatarState 是共享响应式状态：这里上传成功，活动栏与对话里的头像立刻跟着变。
+const avatarFileInput = ref(null)
+const avatarBusy = ref(false)
+
+/** 打开系统文件选择框（真正的上传在 @change 里做） */
+function pickAvatarFile() {
+  if (avatarBusy.value) return
+  avatarFileInput.value?.click()
+}
+
+async function handleAvatarFile(event) {
+  const file = event.target.files?.[0]
+  // 清空 value：否则"选了同一个文件再传一次"不会触发 change
+  event.target.value = ''
+  if (!file) return
+  avatarBusy.value = true
+  try {
+    await uploadAvatar(file)
+    ElMessage.success('头像已更新')
+  } catch (e) {
+    // 后端按 413/415/422 分了级，detail 是可直接读的中文说明
+    ElMessage.error(e.response?.data?.detail || e.message || '上传失败')
+  } finally {
+    avatarBusy.value = false
+  }
+}
+
+async function handleAvatarReset() {
+  if (avatarBusy.value || !avatarState.url) return
+  avatarBusy.value = true
+  try {
+    await removeAvatar()
+    ElMessage.success('已恢复默认头像')
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message || '操作失败')
+  } finally {
+    avatarBusy.value = false
   }
 }
 </script>
@@ -432,6 +474,44 @@ async function handleUsageModeChange(value) {
             <div class="sc-row-title">对话页</div>
             <div class="sc-row-desc">对话页不显示悬浮球（那里已经有完整对话区），点开小窗聊的内容与对话页是同一个会话</div>
           </div>
+        </div>
+      </section>
+
+      <!-- 头像 -->
+      <section class="sc-section">
+        <h3>头像</h3>
+        <p class="usage-hint">
+          上传一张本地照片作为头像，会保存在你的账号下（换设备也生效）。
+          非方形照片按中心自动裁剪，支持 PNG / JPG / WebP，不超过 2MB。
+        </p>
+        <div class="sc-row">
+          <div class="avatar-preview">
+            <img v-if="avatarState.url" class="avatar-preview-img" :src="avatarState.url" alt="当前头像" />
+            <svg v-else class="avatar-preview-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+          </div>
+          <div class="sc-row-info">
+            <div class="sc-row-title">{{ avatarState.url ? '当前头像' : '默认头像' }}</div>
+            <div class="sc-row-desc">改动即时生效，活动栏和对话里会同步</div>
+          </div>
+          <div class="avatar-actions">
+            <button class="usage-radio" :disabled="avatarBusy" @click="pickAvatarFile">
+              <span class="usage-dot" :class="{ on: !!avatarState.url }"></span>
+              <span>{{ avatarBusy ? '处理中…' : (avatarState.url ? '更换' : '上传') }}</span>
+            </button>
+            <button class="usage-radio" :disabled="avatarBusy || !avatarState.url" @click="handleAvatarReset">
+              <span>恢复默认</span>
+            </button>
+          </div>
+          <input
+            ref="avatarFileInput"
+            class="avatar-file-input"
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            @change="handleAvatarFile"
+          />
         </div>
       </section>
 
@@ -773,5 +853,43 @@ html.dark .md-theme-select {
 
 .force-preview-box {
   height: 280px;
+}
+
+/* ── 头像 ── */
+.avatar-preview {
+  flex-shrink: 0;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--color-bg-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.avatar-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar-preview-icon {
+  width: 26px;
+  height: 26px;
+  color: var(--color-text-tertiary);
+}
+
+.avatar-actions {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 原生文件选择框藏起来，由「上传 / 更换」按钮代为触发 */
+.avatar-file-input {
+  display: none;
 }
 </style>

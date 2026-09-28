@@ -65,6 +65,8 @@ def client(tmp_path, monkeypatch):
     # 数据目录也必须指到 tmp：删号用例会 rmtree 这些路径
     monkeypatch.setattr(settings, "backend_data_dir", str(tmp_path / "backend_data"))
     monkeypatch.setattr(settings, "conversations_db", str(tmp_path / "conversations.db"))
+    # 头像目录同理：不指到 tmp 的话，"删号清头像"的断言会去删开发机上真实的头像文件
+    monkeypatch.setattr(settings, "profiles_dir", str(tmp_path / "profiles"))
     init_db()
 
     # Agent 运行记录库（backend/data/agent_runs）
@@ -318,6 +320,11 @@ def test_delete_user_removes_rows_and_files(client, tmp_path):
     ):
         path.mkdir(parents=True, exist_ok=True)
         (path / "leftover.txt").write_text("x", encoding="utf-8")
+    # 头像：与上面几项不同，它是**单文件**（data/profiles/avatars/{uid}.png），
+    # 只 rmtree 目录的清理逻辑会把它漏下 → 这条断言专门盯这个
+    avatar = Path(settings.profiles_dir) / "avatars" / "1.png"
+    avatar.parent.mkdir(parents=True, exist_ok=True)
+    avatar.write_bytes(b"\x89PNG")
 
     r = client.delete("/api/v1/admin/users/1", headers=headers)
     assert r.status_code == 200, r.text
@@ -344,6 +351,8 @@ def test_delete_user_removes_rows_and_files(client, tmp_path):
 
     assert not (Path(settings.db_path).parent / "nodes" / "1").exists()
     assert not (Path(settings.backend_data_dir) / "kb" / "1").exists()
+    assert not avatar.exists()
+    assert (Path(settings.profiles_dir) / "avatars").exists()  # 只删文件，别把整个头像目录端了
 
 
 def test_delete_user_is_audited(client):
@@ -367,7 +376,12 @@ def _make_user_leftovers(user_id: int) -> tuple[Path, ...]:
     for path in roots:
         path.mkdir(parents=True, exist_ok=True)
         (path / "leftover.txt").write_text("x", encoding="utf-8")
-    return roots
+    # 头像：单文件而非目录，一并放进返回值 —— 调用方那句
+    # `for path in roots: assert not path.exists()` 就顺带把文件也断言了
+    avatar = Path(settings.profiles_dir) / "avatars" / f"{user_id}.png"
+    avatar.parent.mkdir(parents=True, exist_ok=True)
+    avatar.write_bytes(b"\x89PNG")
+    return roots + (avatar,)
 
 
 def test_batch_delete_rejects_oversized_selection(client):

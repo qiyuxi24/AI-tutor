@@ -200,7 +200,7 @@ def delete_user_rows(conn: sqlite3.Connection, user_id: int) -> None:
 
 
 def purge_user_storage(user_id: int) -> None:
-    """清掉该用户遗留的磁盘数据（对话行、知识库/向量目录、题库目录、节点 MD 目录）。
+    """清掉该用户遗留的磁盘数据（对话行、知识库/向量目录、题库目录、节点 MD 目录、头像文件）。
 
     必须排在事务提交之后调用：这些写入与文件删除**无法参与事务回滚**，顺序反了
     会出现「连接回滚了、文件却已删掉」的半残状态。
@@ -235,6 +235,15 @@ def purge_user_storage(user_id: int) -> None:
     )
     for path in roots:
         shutil.rmtree(path, ignore_errors=True)
+
+    # 用户头像（主系统 `core/profile/avatar_store.py` = data/profiles/avatars/{uid}.png）：
+    # 是**单文件**，不能塞进上面的 roots —— rmtree 对文件无效，会静默什么都不做，
+    # 结果就是删号后头像永久残留。目录名要与 avatar_store.AVATAR_DIRNAME 保持一致。
+    avatar = Path(settings.profiles_dir) / "avatars" / f"{user_id}.png"
+    try:
+        avatar.unlink()
+    except OSError:
+        pass  # 本来就没设置过头像 / 目录不存在，不算失败
 
 
 def init_db() -> None:

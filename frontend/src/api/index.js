@@ -92,6 +92,28 @@ export const addProfileNote = (content) =>
 export const deleteProfileNote = (noteId) =>
   apiClient.delete(`/api/v1/profile/notes/${noteId}`)
 
+// ═══ 用户头像 ═══
+// 必须走 axios 取二进制：原生 <img src="/api/..."> 带不上 Authorization 头
+//（token 在 localStorage，由上面的请求拦截器挂），直接写 URL 会 401。
+// 调用方拿 blob 后转 objectURL 交给 <img>，见 utils/avatar.js。
+
+/** 取头像图片；未设置时后端返回 404（调用方按"没有头像"处理） */
+export const getAvatarBlob = () =>
+  apiClient.get('/api/v1/profile/avatar', { responseType: 'blob' })
+
+/** 上传 / 替换头像（multipart，字段名沿用知识库上传约定：file） */
+export const uploadAvatarFile = (file) => {
+  const form = new FormData()
+  form.append('file', file)
+  return apiClient.post('/api/v1/profile/avatar', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 60000,
+  })
+}
+
+/** 恢复默认头像 */
+export const deleteAvatar = () => apiClient.delete('/api/v1/profile/avatar')
+
 /**
  * 流式发送对话消息（两阶段分离）
  *

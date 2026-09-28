@@ -20,6 +20,7 @@ import { useAuthStore } from '../stores/authStore'
 import { formatError, clientError } from '../utils/errorCodes.js'
 import { notifyError, notifyInfo } from '../utils/feedback'
 import { ballPrefs, loadBallPrefs } from '../utils/floatingBall.js'
+import { loadAvatar } from '../utils/avatar.js'
 import FloatingBall from '../components/FloatingBall.vue'
 import ActivityBar from '../components/ActivityBar.vue'
 import ConversationSidebar from '../components/ConversationSidebar.vue'
@@ -148,6 +149,8 @@ onMounted(async () => {
   store.init()
   // 悬浮球开关（真值源 = 服务端账号偏好，跟账号走）→ 写入共享状态，供 FloatingBall 使用
   loadBallPrefs()
+  // 用户头像（真值源 = 服务端的头像图片）→ 写入共享状态，供 ActivityBar / MessageBubble 使用
+  loadAvatar()
   // 后端重载 → 局部刷新（开发态，见 handleBackendReloaded）
   if (import.meta.env.DEV) {
     window.addEventListener(BACKEND_RELOADED_EVENT, handleBackendReloaded)

@@ -23,6 +23,9 @@ class Settings:
     # 仅用于「查看用户数据量」与「删除用户时清理数据」，读不到/表不存在时按 0 处理。
     backend_data_dir: str = str(_PROJECT_ROOT / "backend" / "data")
     conversations_db: str = str(_PROJECT_ROOT / "data" / "conversations" / "conversations.db")
+    # 用户画像与头像（主系统 core/profile/store.py::default_data_dir）：
+    # 头像落 <profiles_dir>/avatars/{uid}.png，删号必须一并清（avatar_store.AVATAR_DIRNAME）
+    profiles_dir: str = str(_PROJECT_ROOT / "data" / "profiles")
 
     # 运维后台独立密钥：与主系统 SECRET_KEY 分开，两边 token 互不通用
     secret_key: str = "admin-secret-key-change-in-production"
@@ -41,6 +44,7 @@ class Settings:
             db_path=os.getenv("ADMIN_DB_PATH", cls.db_path),
             backend_data_dir=os.getenv("ADMIN_BACKEND_DATA_DIR", cls.backend_data_dir),
             conversations_db=os.getenv("ADMIN_CONVERSATIONS_DB", cls.conversations_db),
+            profiles_dir=os.getenv("ADMIN_PROFILES_DIR", cls.profiles_dir),
             secret_key=os.getenv("ADMIN_SECRET_KEY", cls.secret_key),
             algorithm=os.getenv("ADMIN_JWT_ALGORITHM", "HS256"),
             access_token_expire_minutes=int(

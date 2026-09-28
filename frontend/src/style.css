@@ -1,90 +1,267 @@
 /* ═══════════════════════════════════════
-  TutorAgent — Global Styles + Theme Variables
-  
-  :root         → 浅色主题（默认）
-  html.dark     → 深色主题
-  
-  使用: 组件中引用 var(--color-xxx)，切换主题只需在 <html> 上增删 .dark class
-  （由 src/utils/theme.js 统一管理，并对齐 Element Plus 官方暗色模式）
-  ═══════════════════════════════════════ */
+   TutorAgent — 全局样式 + 设计 Token
 
-/* ──────────── 深色主题 ──────────── */
-html.dark {
-  /* 背景 */
-  --color-bg-primary:    #1e1e2e;
-  --color-bg-secondary:  #11111b;
-  --color-bg-tertiary:   #181825;
-  --color-bg-surface:    #313244;
-  --color-bg-hover:      rgba(255, 255, 255, 0.06);
-  --color-bg-overlay:    rgba(0, 0, 0, 0.55);
+   本文件是前端设计变量的**唯一事实源**，分三层：
 
-  /* 文字 */
-  --color-text-primary:    #cdd6f4;
-  --color-text-secondary:  #a6adc8;
-  --color-text-tertiary:   #6c7086;
-  --color-text-muted:      rgba(205, 214, 244, 0.45);
-  --color-text-inverse:    #ffffff;
+     ① :root       设计 Token（浅色主题，默认）—— 新代码只用这一层
+     ② html.dark   只覆盖 Token 的**取值**（深色主题），别名自动跟随
+     ③ 兼容别名     旧组件引用的 --color-bg-primary / --color-accent 等
+                    → 指向 ①，仅为不动存量组件而保留，新代码请忽略
 
-  /* 边框 */
-  --color-border:         #313244;
-  --color-border-light:   rgba(255, 255, 255, 0.15);
-  --color-border-subtle:  rgba(255, 255, 255, 0.08);
+   命名规范：
+     颜色  --color-{用途}-{层级}   例 --color-text-secondary / --color-bg-card
+     圆角  --radius-{xs…full}
+     阴影  --shadow-{sm|md|lg}     间距 --space-{xs…2xl}
+     字号  --font-size-{xs…xl}     行高 --line-height-{sm|base|lg}
 
-  /* 强调色 */
-  --color-accent:         #4f46e5;
-  --color-accent-hover:   #4338ca;
-  --color-accent-light:   rgba(79, 70, 229, 0.18);
-  --color-blue:           #60a5fa;
-  --color-blue-hover:     #3b82f6;
-  --color-blue-light:     #89b4fa;
-  --color-green:          #10b981;
-  --color-green-light:    rgba(16, 185, 129, 0.14);
-  --color-red:            #f87171;
-  --color-red-light:      rgba(243, 139, 168, 0.12);
-  --color-yellow:         #f59e0b;
-  --color-orange:         #fb923c;
-  --color-purple:         #8b5cf6;
+   设计基调：紫色主色、中等圆角、弱阴影、base = 14px、页面纯白。
+   组件类（.card / .btn-* / .input-default / .sidebar / .tag / .modal / .empty-state）
+   见 src/styles/components.css。
 
-  /* 对话区域（暗色系：气泡/输入区贴合暗底，用户气泡用柔和的紫） */
-  --color-chat-bg:          #1e1e2e;
-  --color-chat-bubble-ai:   #313244;
-  --color-chat-bubble-user: #7c3aed;
-  --color-chat-text:        #cdd6f4;
-  --color-chat-subtle:      #a6adc8;
-  --color-chat-border:      #313244;
+   主题切换由 src/utils/theme.js 管理（切换 <html> 上的 .dark class），
+   并对齐 Element Plus 官方暗色模式（--el-* 变量同步覆盖）。
+   ═══════════════════════════════════════ */
+
+/* ──────────── ① 设计 Token：浅色主题（默认） ──────────── */
+:root {
+  /* ── 主色：紫色系，科技 AI 风格 ── */
+  --color-primary:       #8b5cf6;
+  --color-primary-light: #a78bfa;
+  --color-primary-dark:  #7c3aed;
+  /* 主色派生的浅底 / 聚焦光环：避免各组件手写 rgba 造成同一颜色多处定义 */
+  --color-primary-soft:  rgba(139, 92, 246, 0.10);
+  --color-primary-ring:  rgba(139, 92, 246, 0.15);
+
+  /* ── 辅助色：成功 / 警告 / 错误 / 信息 ── */
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger:  #ef4444;
+  --color-info:    #6366f1;
+  /* 辅助色对应的浅底（徽标 / 标签底色） */
+  --color-success-soft: rgba(16, 185, 129, 0.12);
+  --color-warning-soft: rgba(245, 158, 11, 0.14);
+  --color-danger-soft:  rgba(239, 68, 68, 0.10);
+  --color-info-soft:    rgba(99, 102, 241, 0.12);
+
+  /* ── 文本色 ── */
+  --color-text-primary:     #111827;    /* 标题文字 */
+  --color-text-secondary:   #4b5563;    /* 次要说明文字 */
+  --color-text-placeholder: #9ca3af;    /* 占位 / 弱化文字 */
+  --color-text-inverse:     #ffffff;    /* 深色背景上的白色文字 */
+
+  /* ── 背景色：纯白基调 ── */
+  --color-bg-page:     #ffffff;   /* 页面整体背景【纯白】 */
+  --color-bg-card:     #ffffff;   /* 卡片 / 面板背景 */
+  --color-bg-hover:    #f3f4f6;   /* hover 背景 */
+  --color-bg-disabled: #e5e7eb;   /* 禁用态 / 次级填充（进度槽、胶囊底） */
+  --color-bg-overlay:  rgba(0, 0, 0, 0.35);  /* 遮罩层 */
+
+  /* ── 边框色 ──
+     浅边框叫 --color-border-soft（不叫 light）：存量的 --color-border-light 语义是
+     "可见的浅分隔线"（≈ default），同一个名字不能承载两种含义，见下方别名。 */
+  --color-border-default: #e5e7eb;
+  --color-border-soft:    #f3f4f6;
+  --color-border-focus:   #8b5cf6;
+
+  /* ── 圆角 ── */
+  --radius-xs:   2px;
+  --radius-sm:   4px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-xl:   16px;
+  --radius-full: 9999px;
+
+  /* ── 阴影：弱阴影，扁平化 ── */
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 2px 6px 0 rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 4px 12px 0 rgba(0, 0, 0, 0.08);
+  /* 浮层专用（弹窗 / 下拉）：需比 --shadow-lg 更明确地脱离页面 */
+  --shadow-popup: 0 8px 24px rgba(0, 0, 0, 0.12);
+  --shadow-card:  var(--shadow-md);
+
+  /* ── 字体 & 字号：base = 14px ── */
+  --font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono: Consolas, Monaco, 'Courier New', monospace;
+
+  --font-size-xs:   10px;
+  --font-size-sm:   12px;
+  --font-size-base: 14px;
+  --font-size-md:   16px;
+  --font-size-lg:   18px;
+  --font-size-xl:   20px;
+
+  --line-height-sm:   1.3;
+  --line-height-base: 1.5;
+  --line-height-lg:   1.7;
+
+  /* ── 间距 ── */
+  --space-xs:  4px;
+  --space-sm:  8px;
+  --space-md:  12px;
+  --space-lg:  16px;
+  --space-xl:  24px;
+  --space-2xl: 32px;
+
+  /* ═══ ③ 兼容别名：旧组件仍在引用的名字（新代码请忽略本节） ═══ */
+  --color-bg-primary:   var(--color-bg-page);
+  --color-bg-secondary: var(--color-bg-card);
+  --color-bg-tertiary:  var(--color-bg-hover);     /* 进度槽 / 代码块底 */
+  --color-bg-surface:   var(--color-bg-disabled);  /* 胶囊 / 次级按钮底 */
+
+  --color-text-tertiary: var(--color-text-placeholder);
+  --color-text-muted:    rgba(17, 24, 39, 0.35);
+
+  --color-border:        var(--color-border-default);
+  --color-border-light:  var(--color-border-default);   /* 存量语义：可见的浅分隔线 */
+  --color-border-subtle: var(--color-border-soft);
+
+  --color-accent:       var(--color-primary);
+  --color-accent-hover: var(--color-primary-dark);
+  --color-accent-light: var(--color-primary-soft);
+  --color-purple:       var(--color-primary);
+  --color-green:        var(--color-success);
+  --color-green-light:  var(--color-success-soft);
+  --color-red:          var(--color-danger);
+  --color-red-light:    var(--color-danger-soft);
+  --color-yellow:       var(--color-warning);
+  --color-orange:       #f97316;
+  --color-blue:         #3b82f6;
+  --color-blue-hover:   #2563eb;
+  --color-blue-light:   #60a5fa;
+
+  /* 对话区域（气泡 / 输入区） */
+  --color-chat-bg:        var(--color-bg-card);
+  --color-chat-bubble-ai: #f3f4f6;
+  /* 用户气泡：日间 = 浅紫底 + 深字；夜间换灰底 + 白字，见 html.dark */
+  --color-chat-bubble-user:      #ddd6fe;
+  --color-chat-bubble-user-text: #111827;
+  --color-chat-text:        #1f2937;
+  --color-chat-subtle:      var(--color-text-placeholder);
+  --color-chat-border:      var(--color-border-default);
 
   /* 图谱 */
-  --color-graph-node:     #9ca3af;
-  --color-graph-edge:     #4b5563;
+  --color-graph-node: #94a3b8;
+  --color-graph-edge: #cbd5e1;
 
-  /* 阴影 */
+  /* ── Element Plus 变量覆盖（对齐自定义配色，让 EP 控件跟随主题） ── */
+  --el-color-primary:          #8b5cf6;
+  --el-color-primary-light-3:  #a78bfa;
+  --el-color-primary-light-5:  #c4b5fd;
+  --el-color-primary-light-7:  #ddd6fe;
+  --el-color-primary-light-8:  #ede9fe;
+  --el-color-primary-light-9:  #f5f3ff;
+  --el-color-primary-dark-2:   #7c3aed;
+  --el-bg-color:               #ffffff;
+  --el-bg-color-page:          #ffffff;
+  --el-bg-color-overlay:       #ffffff;
+  --el-fill-color-blank:       #ffffff;
+  --el-fill-color:             #f3f4f6;
+  --el-fill-color-light:       #f9fafb;
+  --el-fill-color-lighter:     #fafafa;
+  --el-fill-color-extra-light: #fafafa;
+  --el-fill-color-dark:        #e5e7eb;
+  --el-fill-color-darker:      #d1d5db;
+  --el-fill-color-empty:       transparent;
+  --el-text-color-primary:     #111827;
+  --el-text-color-regular:     #4b5563;
+  --el-text-color-secondary:   #4b5563;
+  --el-text-color-placeholder: #9ca3af;
+  --el-text-color-disabled:    #d1d5db;
+  --el-border-color:             #e5e7eb;
+  --el-border-color-light:       #e5e7eb;
+  --el-border-color-lighter:     #f3f4f6;
+  --el-border-color-extra-light: #f3f4f6;
+  --el-border-color-hover:       #d1d5db;
+  --el-border-color-dark:        #d1d5db;
+  --el-border-color-darker:      #9ca3af;
+  --el-mask-color:               rgba(0, 0, 0, 0.4);
+  --el-box-shadow:               var(--shadow-popup);
+  --el-box-shadow-light:         var(--shadow-lg);
+  --el-box-shadow-lighter:       var(--shadow-md);
+}
+
+/* ──────────── ② 深色主题：只覆盖 Token 取值（别名自动跟随） ──────────── */
+html.dark {
+  /* 主色：暗底沿用同一支紫（填充按钮上仍是白字，提亮会掉对比度）；
+     需要更亮的紫做图标/文字时用 --color-primary-light */
+  --color-primary:       #8b5cf6;
+  --color-primary-light: #a78bfa;
+  --color-primary-dark:  #7c3aed;
+  --color-primary-soft:  rgba(139, 92, 246, 0.18);
+  --color-primary-ring:  rgba(139, 92, 246, 0.35);
+
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger:  #f87171;
+  --color-info:    #818cf8;
+  --color-success-soft: rgba(52, 211, 153, 0.16);
+  --color-warning-soft: rgba(251, 191, 36, 0.16);
+  --color-danger-soft:  rgba(248, 113, 113, 0.16);
+  --color-info-soft:    rgba(129, 140, 248, 0.16);
+
+  --color-text-primary:     #e5e7eb;
+  --color-text-secondary:   #9ca3af;
+  --color-text-placeholder: #6b7280;
+  --color-text-inverse:     #ffffff;
+
+  --color-bg-page:     #181825;
+  --color-bg-card:     #1e1e2e;
+  --color-bg-hover:    rgba(255, 255, 255, 0.06);
+  --color-bg-disabled: #313244;
+  --color-bg-overlay:  rgba(0, 0, 0, 0.55);
+
+  --color-border-default: #313244;
+  --color-border-soft:    rgba(255, 255, 255, 0.08);
+  --color-border-focus:   #a78bfa;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.30);
+  --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.40);
   --shadow-popup: 0 8px 32px rgba(0, 0, 0, 0.45);
-  --shadow-card:  0 8px 32px rgba(0, 0, 0, 0.4);
 
-  /* ── Element Plus 变量覆盖（对齐自定义配色，让 EP 表单控件跟随主题） ── */
-  --el-color-primary:        #4f46e5;
-  --el-color-primary-light-3: #7c6ef0;
-  --el-color-primary-light-5: #9d93f4;
-  --el-color-primary-light-7: #beb7f8;
-  --el-color-primary-light-8: #cec9fa;
-  --el-color-primary-light-9: #dedbfc;
-  --el-color-primary-dark-2: #4338ca;
-  --el-bg-color:            #181825;
-  --el-bg-color-page:       #11111b;
+  /* 以下取值的别名本体在 :root，这里只覆盖随主题变化的部分 */
+  --color-text-muted: rgba(229, 231, 235, 0.45);
+  --color-blue:       #60a5fa;
+  --color-blue-hover: #3b82f6;
+  --color-blue-light: #89b4fa;
+  --color-orange:     #fb923c;
+
+  --color-chat-bubble-ai: #313244;
+  --color-chat-text:      #cdd6f4;
+  --color-chat-subtle:    #a6adc8;
+  /* 用户气泡：夜间 = 灰底 + 白字（日间是浅紫底 + 深字，见 :root）。
+     必须显式覆盖 —— 否则会继承 :root 的浅紫底，在暗色页面上变成一块刺眼的亮色。 */
+  --color-chat-bubble-user:      #313244;
+  --color-chat-bubble-user-text: #e5e7eb;
+
+  --color-graph-node: #9ca3af;
+  --color-graph-edge: #4b5563;
+
+  /* Element Plus（暗色下 light-N 反向加深，与 EP 官方约定一致） */
+  --el-color-primary:         #8b5cf6;
+  --el-color-primary-light-3: #7c3aed;
+  --el-color-primary-light-5: #6d28d9;
+  --el-color-primary-light-7: #5b21b6;
+  --el-color-primary-light-8: #4c1d95;
+  --el-color-primary-light-9: #2e1065;
+  --el-color-primary-dark-2:  #a78bfa;
+  --el-bg-color:            #1e1e2e;
+  --el-bg-color-page:       #181825;
   --el-bg-color-overlay:    #1e1e2e;
-  --el-fill-color-blank:    #181825;
+  --el-fill-color-blank:    #1e1e2e;
   --el-fill-color:          #313244;
-  --el-fill-color-light:    #181825;
-  --el-fill-color-lighter:  #11111b;
-  --el-fill-color-extra-light: #181825;
+  --el-fill-color-light:    #2a2a3c;
+  --el-fill-color-lighter:  #24243a;
+  --el-fill-color-extra-light: #20203a;
   --el-fill-color-dark:     #313244;
-  --el-fill-color-darker:   #313244;
+  --el-fill-color-darker:   #3b3b52;
   --el-fill-color-empty:    transparent;
-  --el-text-color-primary:   #cdd6f4;
-  --el-text-color-regular:   #a6adc8;
-  --el-text-color-secondary: #a6adc8;
-  --el-text-color-placeholder: #6c7086;
-  --el-text-color-disabled:  #6c7086;
+  --el-text-color-primary:   #e5e7eb;
+  --el-text-color-regular:   #9ca3af;
+  --el-text-color-secondary: #9ca3af;
+  --el-text-color-placeholder: #6b7280;
+  --el-text-color-disabled:  #6b7280;
   --el-border-color:         #313244;
   --el-border-color-light:   #313244;
   --el-border-color-lighter: #313244;
@@ -93,94 +270,9 @@ html.dark {
   --el-border-color-dark:    #45475a;
   --el-border-color-darker:  #45475a;
   --el-mask-color:           rgba(0, 0, 0, 0.6);
-  --el-box-shadow:           0 8px 32px rgba(0, 0, 0, 0.45);
-  --el-box-shadow-light:     0 8px 24px rgba(0, 0, 0, 0.35);
-  --el-box-shadow-lighter:   0 4px 16px rgba(0, 0, 0, 0.3);
-}
-
-/* ──────────── 浅色主题（默认） ──────────── */
-:root {
-  --color-bg-primary:    #f8f9fa;
-  --color-bg-secondary:  #ffffff;
-  --color-bg-tertiary:   #e9ecef;
-  --color-bg-surface:    #dee2e6;
-  --color-bg-hover:      rgba(0, 0, 0, 0.05);
-  --color-bg-overlay:    rgba(0, 0, 0, 0.35);
-
-  --color-text-primary:    #212529;
-  --color-text-secondary:  #495057;
-  --color-text-tertiary:   #868e96;
-  --color-text-muted:      rgba(33, 37, 41, 0.35);
-  /* 强调色背景上的反色文字：无论主题如何，置于紫色背景上的文字恒为白色 */
-  --color-text-inverse:    #ffffff;
-
-  --color-border:         #dee2e6;
-  --color-border-light:   rgba(0, 0, 0, 0.12);
-  --color-border-subtle:  rgba(0, 0, 0, 0.06);
-
-  --color-accent:         #4f46e5;
-  --color-accent-hover:   #4338ca;
-  --color-accent-light:   rgba(79, 70, 229, 0.10);
-  --color-blue:           #3b82f6;
-  --color-blue-hover:     #2563eb;
-  --color-blue-light:     #60a5fa;
-  --color-green:          #059669;
-  --color-green-light:    rgba(5, 150, 105, 0.10);
-  --color-red:            #ef4444;
-  --color-red-light:      rgba(239, 68, 68, 0.08);
-  --color-yellow:         #d97706;
-  --color-orange:         #f97316;
-  --color-purple:         #7c3aed;
-
-  /* 对话区域（亮色系：用户气泡用更鲜艳的紫，与浅底区分明显） */
-  --color-chat-bg:          #ffffff;
-  --color-chat-bubble-ai:   #f1f5f9;
-  --color-chat-bubble-user: #6d28d9;
-  --color-chat-text:        #1e293b;
-  --color-chat-subtle:      #94a3b8;
-  --color-chat-border:      #e2e8f0;
-
-  --color-graph-node:     #94a3b8;
-  --color-graph-edge:     #cbd5e1;
-
-  --shadow-popup: 0 8px 24px rgba(0, 0, 0, 0.12);
-  --shadow-card:  0 4px 16px rgba(0, 0, 0, 0.10);
-
-  /* ── Element Plus 变量覆盖（对齐自定义配色，让 EP 表单控件跟随主题） ── */
-  --el-color-primary:        #4f46e5;
-  --el-color-primary-light-3: #818cf8;
-  --el-color-primary-light-5: #a5b4fc;
-  --el-color-primary-light-7: #c7d2fe;
-  --el-color-primary-light-8: #dbeafe;
-  --el-color-primary-light-9: #eef2ff;
-  --el-color-primary-dark-2: #4338ca;
-  --el-bg-color:            #ffffff;
-  --el-bg-color-page:       #f8f9fa;
-  --el-bg-color-overlay:    #ffffff;
-  --el-fill-color-blank:    #ffffff;
-  --el-fill-color:          #f0f0f0;
-  --el-fill-color-light:    #f5f5f5;
-  --el-fill-color-lighter:  #fafafa;
-  --el-fill-color-extra-light: #fafafa;
-  --el-fill-color-dark:     #e0e0e0;
-  --el-fill-color-darker:   #dcdcdc;
-  --el-fill-color-empty:    transparent;
-  --el-text-color-primary:   #212529;
-  --el-text-color-regular:   #495057;
-  --el-text-color-secondary: #495057;
-  --el-text-color-placeholder: #868e96;
-  --el-text-color-disabled:  #adb5bd;
-  --el-border-color:         #dee2e6;
-  --el-border-color-light:   #e9ecef;
-  --el-border-color-lighter: #e9ecef;
-  --el-border-color-extra-light: #f1f3f5;
-  --el-border-color-hover:   #ced4da;
-  --el-border-color-dark:    #ced4da;
-  --el-border-color-darker:  #adb5bd;
-  --el-mask-color:           rgba(0, 0, 0, 0.4);
-  --el-box-shadow:           0 8px 24px rgba(0, 0, 0, 0.12);
-  --el-box-shadow-light:     0 4px 16px rgba(0, 0, 0, 0.08);
-  --el-box-shadow-lighter:   0 2px 8px rgba(0, 0, 0, 0.06);
+  --el-box-shadow:           var(--shadow-popup);
+  --el-box-shadow-light:     var(--shadow-lg);
+  --el-box-shadow-lighter:   var(--shadow-md);
 }
 
 /* ═══════════════════════════════════════
@@ -196,11 +288,11 @@ html, body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
-  font-size: 16px;
-  line-height: 1.5;
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);   /* base = 14px */
+  line-height: var(--line-height-base);
   color: var(--color-text-primary);
-  background: var(--color-bg-secondary);
+  background: var(--color-bg-page);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   transition: background 0.3s ease, color 0.3s ease;
@@ -209,6 +301,12 @@ html, body {
 #app {
   width: 100%;
   height: 100%;
+}
+
+/* 表单控件默认继承字体（原生 button/input 不继承，需显式声明） */
+button, input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
 }
 
 /* ═══════════════════════════════════════
