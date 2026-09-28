@@ -426,7 +426,35 @@ cd backend && venv/Scripts/python.exe scripts/inspect_graph_quality.py          
     `add_sources` / `get_sources`（并入去重 `(doc_id, chunk_id, section)`、**绝不覆盖**、用户隔离）；回归 `tests/test_kg_sources.py`（25 例，含迁移/幂等/越权）
   - ✅ **写入路径已贯通**（2026-09-26，graph-core）：`_record_sources`（防御式调 `kg.add_sources`，无方法/抛异常/空 entries 均静默跳过）+ `source_ref_by_id` 逐概念定位
   - ⏳ **刻意暂缓**：`edges.sources`（边级溯源）—— 现无消费者，待 L2 冲突层启动时再补（勿因"调研文档说 nodes/edges 都要"而补写没人读的字段）
+  - ✅ **反查消费者已落地**（2026-09-28）：`GET /knowledge/source/{doc_id}/nodes`（走 `doc_node_marks`
+    的 `(user_id, doc_id)` 索引）+ 知识库右键「在图谱中显示」→ 高亮该资料产出的节点；打开节点再高亮
+    属于该资料的小节（`sections[].sources`）与题目（`questions.source_docs`）。至此本条的验收
+    「列出支撑它的资料段落数 / 按资料反查这本书贡献了哪些节点」两条都有出口。
   - ⏳ 第三处同步「`scripts/inspect_graph_quality.py` 体检口径」待该脚本 owner（tools-and-guard）落实
+
+- [ ] **GQ-26 溯源粒度：从「章节标题」升到「切片 / 段落」** 🟠 P2（2026-09-28 讨论挂账，**本次只记录不出手**）
+  - **现状**（已核对代码）：来源条目里 `doc_id`=文件、`section`=**建图单元的标题**（1500~5000 字，
+    `GRAPH_UNIT_MIN/MAX_CHARS`）、`chunk_id` **恒为 `None`** —— 实际粒度 =「文件 + 章节标题」，
+    去重键 `(doc_id, chunk_id, section)` 退化成 `(doc_id, None, title)`。各层：节点/小节 = 文件+章节；
+    题目（`questions.source_docs`）= 只到文件。
+  - **`chunk_id` 不是忘了填，是填不了**：索引侧 `doc_chunks`（`chunk_text`，500 字滑窗 / 50 重叠）与
+    建图侧（`build_section_tree` + `collect_units`，同 `extract_text` **重新切**）是**两套独立切分**，
+    边界不共享 → 拿不到对应的 chunk id。
+  - **章节级内部还有两处精度损失**：① 超长单元被 `_split_long_text` 硬切后继承同一 `title`
+    → 在 sources 去重成一条，"命中哪一段"丢失；② 合并单元 title 取第一个 + 无标题长文 `section=""`
+    → 退化成纯文件级。
+  - **另一个独立缺口**：对话 RAG 检索命中**带真 `chunk_id`**（含 heading / 父级扩展），但
+    **不落任何溯源账本** → "AI 刚才这句依据了哪些切片"目前无法回溯（溯源只覆盖建图路径）。
+  - **三条升级路（按用途选一条，别全做）**：
+    1. 对齐切分体系（units 由 `doc_chunks` 组成）→ `chunk_id` 直接可填；代价 = 500 字粒度会把
+       "一节讲一件事"切碎（正是 `GRAPH_UNIT_MIN_CHARS=1500` 要治的病），需改切块参数或维护
+       unit ↔ chunk_ids 映射表。**用途：细粒度覆盖度统计 / 冲突裁决**。
+    2. **加引文**（硬切时记 `part_index` + 片段前 ~80 字存进条目）：零新表、人可读可核对，
+       定位靠字符串比对而非 id。**用途：人工核对节点内容对不对**。
+    3. 检索命中记账进当轮 `agent_runs` 证据（不污染 `nodes.sources` 的长期事实）。
+       **用途：回溯 AI 回答依据**。
+  - **暂缓理由**：现无消费者 —— 反查（GQ-18 的「在图谱中显示」）到文件/章节级已够用；
+    等 L2 冲突层启动或"AI 依据可审计"成为需求时再启，避免先写没人读的粒度。
 
 - [ ] **GQ-25 建图失败/跳过对用户可见** 🟠 P1（2026-09-26 验收新增）
   - 现状：`aggregate.failed_docs`（定树失败被跳过的资料）与 `skipped_docs`（幂等跳过）**前端无展示** → 用户勾 5 份、2 份失败，界面仍显示"生成完成" → **静默的知识缺失**（与 263 个待填骨架同性质）

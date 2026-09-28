@@ -344,7 +344,7 @@ function handleCancel() {
 
 .btn {
   padding: 8px 20px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -364,13 +364,13 @@ function handleCancel() {
 }
 
 .btn-primary {
-  background: var(--color-blue);
-  color: var(--color-bg-secondary);
-  border-color: var(--color-blue);
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
+  border-color: var(--color-primary);
 }
 
 .btn-primary:hover {
-  background: var(--color-blue-hover);
-  border-color: var(--color-blue-hover);
+  background: var(--color-primary-dark);
+  border-color: var(--color-primary-dark);
 }
 </style>

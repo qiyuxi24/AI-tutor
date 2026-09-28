@@ -78,7 +78,7 @@ def create_node_from_ai(kg: KnowledgeGraph, node_id: str, node_name: str,
 
     **同名并轨**：ID 不同但**中文名完全相同**（同一学科内）时也走更新模式 ——
     模型每轮都可能给同一个概念编出不同 ID（实测：`harmony_dev_intro` / `harmonyos_intro`
-    同名「鸿蒙开发入门」并存，见 `docs/知识图谱/知识图谱_模块结构与封装调研.md` §7）。
+    同名「鸿蒙开发入门」并存，见 `docs/归档/知识图谱/知识图谱_模块结构与封装调研.md` §7）。
 
     参数:
         kg:               KnowledgeGraph 实例（已绑定 user_id）

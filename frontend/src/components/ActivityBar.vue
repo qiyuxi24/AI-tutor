@@ -14,6 +14,7 @@
 import { ref } from 'vue'
 import { useTheme } from '../utils/theme'
 import { useAuthStore } from '../stores/authStore'
+import { avatarState } from '../utils/avatar.js'
 
 defineProps({
   activeView: { type: String, default: 'chat' },
@@ -47,11 +48,9 @@ function handleUserMenu(action) {
 
 <template>
   <aside class="activity-bar">
-    <!-- 顶部品牌 -->
+    <!-- 顶部品牌：像素小星（public/brand-star.svg，自带配色） -->
     <div class="ab-logo" title="TutorAgent">
-      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 0 2h-1.08A7 7 0 0 1 14 21v1h-4v-1a7 7 0 0 1-5.92-5H3a1 1 0 0 1 0-2h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z" />
-      </svg>
+      <img class="ab-logo-img" src="/brand-star.svg" alt="TutorAgent" />
     </div>
 
     <!-- 中部导航区 -->
@@ -138,7 +137,9 @@ function handleUserMenu(action) {
       <!-- 用户菜单 -->
       <div class="ab-user-wrap" v-click-outside="() => showUserMenu = false">
         <button class="ab-item ab-avatar" :title="authStore.username || '用户'" @click="showUserMenu = !showUserMenu">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <!-- 设置了自定义头像就显示照片，否则回落到人形图标 -->
+          <img v-if="avatarState.url" class="ab-avatar-img" :src="avatarState.url" alt="" />
+          <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
             <circle cx="12" cy="7" r="4" />
           </svg>
@@ -189,15 +190,20 @@ function handleUserMenu(action) {
   flex-shrink: 0;
 }
 
-/* 品牌 logo */
+/* 品牌 logo：像素星（图形自带配色，不再用 currentColor 跟随主题色） */
 .ab-logo {
   width: 52px;
   height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--color-accent);
   flex-shrink: 0;
+}
+
+.ab-logo-img {
+  display: block;
+  width: 28px;   /* viewBox 14x13，等比：26 * 14/13 */
+  height: 26px;
 }
 
 /* 中部导航 */
@@ -264,6 +270,15 @@ function handleUserMenu(action) {
 }
 .ab-avatar:hover {
   background: var(--color-bg-hover);
+}
+
+/* 自定义头像照片：铺满按钮内的圆形区域（按钮本身 42px，留一圈内边距） */
+.ab-avatar-img {
+  display: block;
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 50%;
 }
 
 /* 用户下拉菜单 */

@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.core.admin_auth import hash_password, verify_password
 from app.core.config import settings
-from app.core.db import init_db
+from app.core.db import init_db, llm_usage_summary
 
 
 @pytest.fixture()
@@ -65,6 +65,8 @@ def client(tmp_path, monkeypatch):
     # 数据目录也必须指到 tmp：删号用例会 rmtree 这些路径
     monkeypatch.setattr(settings, "backend_data_dir", str(tmp_path / "backend_data"))
     monkeypatch.setattr(settings, "conversations_db", str(tmp_path / "conversations.db"))
+    # 头像目录同理：不指到 tmp 的话，"删号清头像"的断言会去删开发机上真实的头像文件
+    monkeypatch.setattr(settings, "profiles_dir", str(tmp_path / "profiles"))
     init_db()
 
     # Agent 运行记录库（backend/data/agent_runs）
@@ -75,6 +77,19 @@ def client(tmp_path, monkeypatch):
         """
         CREATE TABLE agent_runs (run_id TEXT PRIMARY KEY, user_id INTEGER);
         INSERT INTO agent_runs VALUES ('r1', 1), ('r2', 1), ('r3', 2);
+
+        -- 调用级 token 真值（主系统 core/llm/usage.py 落库）：命中/输入/输出三个维度
+        CREATE TABLE llm_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL, kind TEXT, model TEXT, user_id INTEGER, run_id TEXT,
+            prompt_tokens INTEGER, completion_tokens INTEGER,
+            cached_tokens INTEGER, reasoning_tokens INTEGER, duration_ms INTEGER
+        );
+        INSERT INTO llm_usage
+            (ts, kind, model, user_id, prompt_tokens, completion_tokens, cached_tokens)
+            VALUES (strftime('%s','now') + 0, 'agent_loop',    'MiniMax-M3', 1, 1000, 100, 200),
+                   (strftime('%s','now') + 0, 'agent_loop',    'MiniMax-M3', 2, 3000, 200, 100),
+                   (strftime('%s','now') + 0, 'quiz_generate', 'MiniMax-M3', 1, 1000,   0, 900);
         """
     )
     conn.commit()
@@ -318,6 +333,11 @@ def test_delete_user_removes_rows_and_files(client, tmp_path):
     ):
         path.mkdir(parents=True, exist_ok=True)
         (path / "leftover.txt").write_text("x", encoding="utf-8")
+    # 头像：与上面几项不同，它是**单文件**（data/profiles/avatars/{uid}.png），
+    # 只 rmtree 目录的清理逻辑会把它漏下 → 这条断言专门盯这个
+    avatar = Path(settings.profiles_dir) / "avatars" / "1.png"
+    avatar.parent.mkdir(parents=True, exist_ok=True)
+    avatar.write_bytes(b"\x89PNG")
 
     r = client.delete("/api/v1/admin/users/1", headers=headers)
     assert r.status_code == 200, r.text
@@ -344,6 +364,8 @@ def test_delete_user_removes_rows_and_files(client, tmp_path):
 
     assert not (Path(settings.db_path).parent / "nodes" / "1").exists()
     assert not (Path(settings.backend_data_dir) / "kb" / "1").exists()
+    assert not avatar.exists()
+    assert (Path(settings.profiles_dir) / "avatars").exists()  # 只删文件，别把整个头像目录端了
 
 
 def test_delete_user_is_audited(client):
@@ -367,7 +389,12 @@ def _make_user_leftovers(user_id: int) -> tuple[Path, ...]:
     for path in roots:
         path.mkdir(parents=True, exist_ok=True)
         (path / "leftover.txt").write_text("x", encoding="utf-8")
-    return roots
+    # 头像：单文件而非目录，一并放进返回值 —— 调用方那句
+    # `for path in roots: assert not path.exists()` 就顺带把文件也断言了
+    avatar = Path(settings.profiles_dir) / "avatars" / f"{user_id}.png"
+    avatar.parent.mkdir(parents=True, exist_ok=True)
+    avatar.write_bytes(b"\x89PNG")
+    return roots + (avatar,)
 
 
 def test_batch_delete_rejects_oversized_selection(client):
@@ -652,3 +679,55 @@ def test_change_own_password_requires_old_password(client):
         "/api/v1/admin/login", json={"username": "admin", "password": "admin123"}
     ).status_code == 401
     _login(client, "admin", "new-pw-1")
+
+
+# ---------- 用量与缓存命中 ----------
+
+def test_usage_requires_token(client):
+    assert client.get("/api/v1/admin/usage").status_code == 401
+
+
+def test_usage_aggregates_cache_hit_rate_and_cost(client):
+    """全站聚合 + 命中率 + 金额换算（单价见 db._PRICE_*）。"""
+    body = client.get("/api/v1/admin/usage?since_hours=24", headers=_auth(client)).json()
+    total = body["total"]
+
+    assert body["group_by"] == "kind"
+    assert total["calls"] == 3
+    assert total["prompt_tokens"] == 5000
+    assert total["completion_tokens"] == 300
+    assert total["cached_tokens"] == 1200
+    assert total["cache_hit_rate"] == 0.24          # 1200 / 5000
+    # 实付 = 未命中 3800×4.20 + 命中 1200×0.84 + 输出 300×16.80（元 / 百万 token）
+    assert total["cost_total_yuan"] == round(
+        (3800 * 4.20 + 1200 * 0.84 + 300 * 16.80) / 1e6, 4
+    )
+    assert total["cached_saving_yuan"] == round(1200 * (4.20 - 0.84) / 1e6, 4)
+
+    # 按消耗降序：agent_loop(1000+100 & 3000+200) 排在 quiz_generate(1000) 前面
+    assert [g["dim"] for g in body["groups"]] == ["agent_loop", "quiz_generate"]
+    assert body["groups"][0]["cache_hit_rate"] == 0.075   # 300 / 4000
+    assert body["groups"][1]["cache_hit_rate"] == 0.9     # 900 / 1000
+
+
+def test_usage_group_by_whitelist_and_empty_defaults(client):
+    """group_by 会拼进 SQL —— 白名单外必须退回 kind。"""
+    headers = _auth(client)
+    by_model = client.get("/api/v1/admin/usage?group_by=model", headers=headers).json()
+    assert [g["dim"] for g in by_model["groups"]] == ["MiniMax-M3"]
+
+    bogus = client.get(
+        "/api/v1/admin/usage?group_by=kind;DROP TABLE llm_usage --", headers=headers
+    ).json()
+    assert bogus["group_by"] == "kind"
+    # 表还在（没被注入语句干掉）
+    assert client.get("/api/v1/admin/usage", headers=headers).json()["total"]["calls"] == 3
+
+
+def test_usage_summary_tolerates_missing_db(tmp_path, monkeypatch):
+    """记账库还没建（新部署）时返回空结构，不能把运维页面打挂。"""
+    monkeypatch.setattr(settings, "backend_data_dir", str(tmp_path / "nope"))
+    out = llm_usage_summary()
+    assert out["total"]["calls"] == 0
+    assert out["total"]["cache_hit_rate"] == 0.0
+    assert out["groups"] == []

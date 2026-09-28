@@ -207,10 +207,12 @@ def test_delete_user_rows_tolerates_legacy_db(tmp_path):
 
 
 def test_purge_user_storage_removes_all_per_user_dirs(tmp_path, monkeypatch):
-    """删号后的磁盘清理必须覆盖「节点 MD / kb / rag / **quiz**」四个按用户分目录。
+    """删号后的磁盘清理必须覆盖「节点 MD / kb / rag / **quiz**」四个按用户分目录 + 头像文件。
 
     回归来源（2026-09-26 审计）：roots 漏了题库（`core/quiz/quiz_store.py::_QUIZ_DIR`
     = `backend/data/quiz/<uid>`，与 kb/rag 同数据根）→ 删号后该用户题目与判分记录残留。
+    2026-09-28 追加头像：它是**单文件**（`data/profiles/avatars/{uid}.png`），
+    只 rmtree 目录的清理逻辑会把它整条漏掉，所以单独断言。
     """
     data_root = tmp_path / "backend_data"
     mine = [data_root / kind / "1" for kind in ("kb", "rag", "quiz")]
@@ -218,6 +220,9 @@ def test_purge_user_storage_removes_all_per_user_dirs(tmp_path, monkeypatch):
     for d in mine:
         d.mkdir(parents=True)
         (d / "keep.txt").write_text("x", encoding="utf-8")
+    avatar = tmp_path / "profiles" / "avatars" / "1.png"
+    avatar.parent.mkdir(parents=True)
+    avatar.write_bytes(b"\x89PNG")
     other = data_root / "quiz" / "2"
     other.mkdir(parents=True)
 
@@ -225,10 +230,12 @@ def test_purge_user_storage_removes_all_per_user_dirs(tmp_path, monkeypatch):
         db_path=str(tmp_path / "knowledge" / "knowledge.db"),
         backend_data_dir=str(data_root),
         conversations_db=str(tmp_path / "conversations.db"),
+        profiles_dir=str(tmp_path / "profiles"),
     ))
 
     admin_db.purge_user_storage(1)
 
     for d in mine:
         assert not d.exists(), f"{d} 未被清理"
+    assert not avatar.exists(), "头像文件未被清理"
     assert other.exists(), "其他用户的目录不得被删"

@@ -33,7 +33,7 @@ logger = logging.getLogger("ai-tutor")
 # 新节点 MD 的「来源标注」唯一真值。
 # 原先「写一个节点 MD」有 4 套内联模板散在 knowledge_writer / kb/graph_generator /
 # api/v1/knowledge.py（create_node、decompose）里，新增写路径就会长出第 5 套 ——
-# 收口见 docs/知识图谱/知识图谱_模块结构与封装调研.md §7 第二步。
+# 收口见 docs/归档/知识图谱/知识图谱_模块结构与封装调研.md §7 第二步。
 ORIGIN_NOTES = {
     "ai": "由 AI 自动创建",
     "book": "由 AI 从学科书籍自动生成",
@@ -1162,7 +1162,10 @@ class KnowledgeGraph:
         """小节清单（**只元数据、不含正文**）；无 manifest → []。
 
         元素即 manifest.sections 的条目：`{id, title, kind, file, status, brief,
-        origin, created_at, updated_at}`。前端列表页据此渲染，点开某节再 `read_section`。
+        origin, sources, created_at, updated_at}`。前端列表页据此渲染，点开某节再 `read_section`。
+
+        `sources` 是**本节**的资料来源（`[{doc_id, doc_name, section, chunk_id}, ...]`，
+        对齐 `get_sources` 的条目形状）；老 manifest 无此键 → 前端按空列表处理。
         """
         manifest = self.read_manifest(node_id)
         if not manifest:
@@ -1181,7 +1184,8 @@ class KnowledgeGraph:
             return ""
 
     def create_section(self, node_id: str, title: str, kind: str = "custom",
-                       content: str = "", brief: str = "", origin: str = "section_gen") -> str:
+                       content: str = "", brief: str = "", origin: str = "section_gen",
+                       sources: list[dict] | None = None) -> str:
         """建一个小节条目并分配 `section_id`（`s01`/`s02`…，现有最大编号 +1），返回它。
 
         参数:
@@ -1192,6 +1196,8 @@ class KnowledgeGraph:
             content: 正文；传了 → `filled`，没传 → `pending`（生成管线阶段①先建条目、阶段②再填）
             brief:   一句话说明（供列表/生成参考）
             origin:  产出方（默认 `section_gen`）
+            sources: 本节的资料来源（GQ-18 同款五键 `{doc_id, doc_name, section, chunk_id, extracted_at}`）；
+                     与 `nodes.sources` 的差别是**粒度到节**、且是**本次生成时的快照**，不入库、随小节走
         返回:
             新小节的 `section_id`
         副作用:
@@ -1216,6 +1222,9 @@ class KnowledgeGraph:
                           else SECTION_STATUS_PENDING,
                 "brief": brief,
                 "origin": origin,
+                # 复用 L0 的规范化：去未知键（如材料自带的 text）、补 extracted_at、
+                # 丢非法条目 —— 调用方直接甩 materials 进来也不会把 manifest 撑大。
+                "sources": [e for e in (normalize_source_entry(s) for s in (sources or [])) if e],
                 "created_at": now,
                 "updated_at": now,
             })

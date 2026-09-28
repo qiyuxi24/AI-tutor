@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue'
 import { renderMarkdown } from '../utils/markdown.js'
+import { avatarState } from '../utils/avatar.js'
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -18,25 +19,6 @@ const bubbleRef = ref(null)
 const hasTools = computed(() => !isUser.value && props.message.tools?.length > 0)
 const hasThinking = computed(() => !isUser.value && props.message.thinking?.length > 0)
 const showThinking = ref(false)
-
-// 工具图标映射
-const toolIcons = {
-  add_knowledge_node: '🔗',
-  update_node_content: '✏️',
-  update_mastery: '📊',
-  add_edge: '🔗',
-  delete_node: '🗑️',
-  update_user_profile: '👤',
-  fetch_webpage: '🌐',
-  rag_search: '🔍',
-  quiz_generate: '📝',
-  grade_answer: '✅',
-  mcp__websearch__web_search: '🔎',
-}
-
-function getToolIcon(name) {
-  return toolIcons[name] || '🔧'
-}
 
 function getToolDisplayName(name) {
   const names = {
@@ -129,8 +111,15 @@ watch(renderedContent, () => {
 
 <template>
   <div class="bubble-wrapper" :class="{ 'is-user': isUser }">
-    <div class="avatar" :class="{ 'user-avatar': isUser }">
-      {{ isUser ? '👤' : '🤖' }}
+    <!-- 头像：AI 侧用站点品牌像素星（public/brand-star.svg）；用户侧优先用上传的照片，
+         没有则回落到人形 SVG（原先这里是 👤 emoji，与"项目禁 emoji"的约定冲突） -->
+    <div class="avatar" :class="{ 'user-avatar': isUser, 'ai-avatar': !isUser }">
+      <img v-if="!isUser" class="avatar-img" src="/brand-star.svg" alt="AI" />
+      <img v-else-if="avatarState.url" class="avatar-photo" :src="avatarState.url" alt="我的头像" />
+      <svg v-else class="avatar-person" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+        <circle cx="12" cy="7" r="4" />
+      </svg>
     </div>
     <div class="bubble" :class="{ 'user-bubble': isUser, 'ai-bubble': !isUser }" ref="bubbleRef">
       <div v-if="isUser" class="text">{{ message.content }}</div>
@@ -147,19 +136,15 @@ watch(renderedContent, () => {
               'tool-error': tool.status === 'error',
             }"
           >
-            <span class="tool-index">{{ idx + 1 }}</span>
-            <span class="tool-icon">{{ getToolIcon(tool.tool) }}</span>
             <span class="tool-name">{{ getToolDisplayName(tool.tool) }}</span>
             <span v-if="tool.status === 'running'" class="tool-spinner"></span>
-            <span v-else-if="tool.status === 'done'" class="tool-status">✓ {{ tool.result?.duration_ms }}ms</span>
-            <span v-else-if="tool.status === 'error'" class="tool-status tool-status-error">✗ 失败</span>
+            <span v-else-if="tool.status === 'error'" class="tool-status tool-status-error">失败</span>
           </div>
         </div>
 
         <!-- 思考折叠面板 -->
         <div v-if="hasThinking" class="thinking-panel">
           <button class="thinking-toggle" @click="showThinking = !showThinking">
-            <span class="thinking-icon">💭</span>
             <span class="thinking-label">AI 思考过程</span>
             <span class="thinking-count">{{ message.thinking.length }} 段</span>
             <span class="thinking-arrow" :class="{ expanded: showThinking }">▾</span>
@@ -222,6 +207,33 @@ watch(renderedContent, () => {
   background: var(--color-accent-light);
 }
 
+/* AI 头像：直接用品牌像素星，不垫圆形底色（星形本身自带留白与配色） */
+.ai-avatar {
+  background: transparent;
+}
+
+.avatar-img {
+  display: block;
+  width: 26px;   /* brand-star.svg viewBox 14x13，等比：24 * 14/13 */
+  height: 24px;
+}
+
+/* 用户上传的照片：铺满整个圆形头像位（正方形输出，cover 保证不拉伸） */
+.avatar-photo {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
+
+/* 没有照片时的默认人形图标（替代原 👤 emoji） */
+.avatar-person {
+  width: 18px;
+  height: 18px;
+  color: var(--color-primary);
+}
+
 .bubble {
   padding: 12px 16px;
   border-radius: 18px;
@@ -232,7 +244,7 @@ watch(renderedContent, () => {
 
 .user-bubble {
   background: var(--color-chat-bubble-user, var(--color-accent));
-  color: var(--color-text-inverse);
+  color: var(--color-chat-bubble-user-text, #111827);
   border-bottom-right-radius: 4px;
 }
 
@@ -273,14 +285,6 @@ watch(renderedContent, () => {
   to   { opacity: 1; transform: translateY(0); }
 }
 
-.tool-index {
-  min-width: 12px;
-  text-align: right;
-  font-size: 10px;
-  font-weight: 400;
-  opacity: 0.5;
-}
-
 .tool-running {
   color: var(--color-accent);
 }
@@ -291,10 +295,6 @@ watch(renderedContent, () => {
 
 .tool-error {
   color: rgb(220, 38, 38);
-}
-
-.tool-icon {
-  font-size: 13px;
 }
 
 .tool-name {
@@ -365,10 +365,6 @@ watch(renderedContent, () => {
 
 .thinking-toggle:hover {
   background: var(--color-bg-hover);
-}
-
-.thinking-icon {
-  font-size: 13px;
 }
 
 .thinking-label {

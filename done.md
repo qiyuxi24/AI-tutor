@@ -63,7 +63,7 @@
 - **聊天限流**：`RateLimiter` 泛化（`LoginRateLimiter` 保留别名）+ `chat_rate_limiter`（20 次/60 秒）覆盖 `/chat` 与 `/chat/stream`，超限 429 + `Retry-After`
 - **结构化日志**：`RotatingFileHandler` 写 `logs/tutor.log`（10 MB 轮转 × 5 备份）+ 控制台双输出；`LOG_LEVEL` / `LOG_DIR` / `LOG_MAX_BYTES` / `LOG_BACKUP_COUNT` 可配
 - **.github CI + 测试收敛**：workflow run 加 `-m "not llm_api"`；顺手修 `token_counter` 根因 bug（退化路径对空 content 强给 1 token，改 `... if content else 0`）
-- **节点掌握度手动调整**：NodeDetail 加 0-100 range 滑块 → `PUT /knowledge/node/{id}/mastery`
+- **节点掌握度手动调整**（2026-09-28 已移除）：曾给 NodeDetail 加 0-100 range 滑块 → `PUT /knowledge/node/{id}/mastery`；现掌握度只由出题判分写入
 - **图谱知识一键导出**：`GET /knowledge/export?subject=` 返回合并 Markdown（节点列表 + 依赖关系），`Content-Disposition: attachment`
 - **节点内容 Markdown 分屏编辑**（2026-09-10）：NodeDetail 编辑模式改双栏（左源码 / 右实时预览），复用 `frontend/src/utils/markdown.js`，窄屏 <760px 自动堆叠；零新依赖、单文件改动
 - **空图谱行动顺序（提示词层 MPV）**（2026-09-13）：图谱为空时注入 `chat_service.EMPTY_GRAPH_PROMPT` —— 先 `add_knowledge_node` 建图谱 → 再 `add_edge`/`update_mastery`；并禁止向学生断言"你的图谱是空的"（防模型个人数据幻觉）

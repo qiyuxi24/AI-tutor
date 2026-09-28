@@ -42,10 +42,13 @@ class FakeKG:
     def list_sections(self, node_id):
         return self.manifests.get(node_id, {}).get("sections", [])
 
-    def create_section(self, node_id, title, kind, content=""):
+    def create_section(self, node_id, title, kind, content="", brief="", sources=None):
         m = self.manifests.setdefault(node_id, {"sections": []})
         sid = f"s{len(m['sections']) + 1:02d}"
-        m["sections"].append({"id": sid, "title": title, "kind": kind, "status": "pending"})
+        # 与真存储同口径：落条目的来源不带材料正文（见 KnowledgeGraph.create_section）
+        src = [{k: v for k, v in s.items() if k != "text"} for s in (sources or [])]
+        m["sections"].append({"id": sid, "title": title, "kind": kind, "status": "pending",
+                              "brief": brief, "sources": src})
         if content:
             self.writes[(node_id, sid)] = content
         return sid
@@ -363,6 +366,79 @@ def test_related_names_alone_are_enough_material(monkeypatch):
 
     assert result["status"] == "ok"
     assert len(result["created"]) == 1
+
+
+# ── 小节级溯源：来源条目落到每节 manifest 条目 ────────────────────────
+
+def _materials():
+    return [
+        {"doc_id": 7, "doc_name": "数据结构.md", "section": "第1章 栈",
+         "chunk_id": None, "text": "栈是后进先出的线性表。"},
+        {"doc_id": 7, "doc_name": "数据结构.md", "section": "第2章 队列",
+         "chunk_id": None, "text": "队列是先进先出的线性表。"},
+    ]
+
+
+def test_source_refs_recorded_per_section(monkeypatch):
+    """阶段① 标注 source_refs → 每节条目落**该节自己的**来源（真正的逐节溯源）"""
+    plan = ('{"sections":['
+            '{"title":"栈","kind":"definition","brief":"LIFO","source_refs":[1]},'
+            '{"title":"队列","kind":"definition","brief":"FIFO","source_refs":[2]}],'
+            '"summary":""}')
+    _make_fake_llm(monkeypatch, plan, lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", materials=_materials()))
+
+    assert result["status"] == "ok"
+    secs = {s["title"]: s for s in kg.list_sections("double_integral")}
+    assert secs["栈"]["sources"] == [{"doc_id": 7, "doc_name": "数据结构.md",
+                                      "section": "第1章 栈", "chunk_id": None}]
+    assert secs["队列"]["sources"][0]["section"] == "第2章 队列"
+
+
+def test_missing_or_invalid_source_refs_fall_back_to_all(monkeypatch):
+    """标注缺失 / 越界 → 回退全集（宁可宽，不可张冠李戴）"""
+    plan = ('{"sections":['
+            '{"title":"栈","kind":"definition","brief":"b"},'          # 无 source_refs
+            '{"title":"队列","kind":"definition","brief":"b","source_refs":[9,true]}],'
+            '"summary":""}')
+    _make_fake_llm(monkeypatch, plan, lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+
+    asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", materials=_materials()))
+
+    secs = kg.list_sections("double_integral")
+    assert all(len(s["sources"]) == 2 for s in secs)
+
+
+def test_section_sources_carry_no_text(monkeypatch):
+    """manifest 是路由层：落条目的来源**不得带正文**（否则 manifest 膨胀）"""
+    plan = '{"sections":[{"title":"栈","kind":"definition","brief":"b","source_refs":[1]}],"summary":""}'
+    _make_fake_llm(monkeypatch, plan, lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+
+    asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", materials=_materials()))
+
+    src = kg.list_sections("double_integral")[0]["sources"][0]
+    assert set(src) == {"doc_id", "doc_name", "section", "chunk_id"}
+
+
+def test_plan_prompt_numbers_materials(monkeypatch):
+    """阶段① 必须把材料**编号**喂进去（source_refs 才有可引用的锚点）"""
+    plan = '{"sections":[{"title":"栈","kind":"definition","brief":"b"}],"summary":""}'
+    calls = _make_fake_llm(monkeypatch, plan, lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+
+    asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", materials=_materials()))
+
+    prompt = calls[0]["messages"][0]["content"]
+    assert "[1] 《数据结构.md》第1章 栈" in prompt
+    assert "[2] 《数据结构.md》第2章 队列" in prompt
 
 
 # ── 提示词铁律关键词断言（D3/D4 的落点，必须有）─────────────────────

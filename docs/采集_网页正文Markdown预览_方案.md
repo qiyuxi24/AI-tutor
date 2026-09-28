@@ -407,7 +407,7 @@ backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"
 
 1. 采集一条网页（或构造 resources 行走 `_ingest`）→ 图谱视图（`viewMode === 'graph'`）出现该节点（名字 = 网页标题）。
 2. **双击**该节点 → 弹窗正文区显示**格式化后的** Markdown（标题/列表/代码块/公式）。
-3. 既有节点行为不变（仍双击打开；`NodeDetail` 的编辑/保存/掌握度滑块照常工作）。
+3. 既有节点行为不变（仍双击打开；`NodeDetail` 的编辑/保存照常工作）。
 4. 回归：`pytest backend/tests -q -m "not llm_api"` → 基线 `798 passed` + 本次新增全绿。
 
 ### 10.7 本路线禁区（"只添加"的边界，越界即停）

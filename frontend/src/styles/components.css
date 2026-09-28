@@ -1,0 +1,532 @@
+/* ═══════════════════════════════════════
+   TutorAgent — 通用组件样式（设计系统层）
+
+   与 style.css 的分工：
+     style.css       设计 Token（颜色 / 圆角 / 阴影 / 字号 / 间距）—— 唯一事实源
+     components.css  用 Token 拼出的**通用组件类**，各视图直接复用
+
+   本文件全局生效（不受组件 scoped 约束），因此：
+     · 类名刻意保持具体，避免与存量组件的 scoped 类互抢；
+     · 与存量 scoped 类同名者（.btn / .empty-state / .modal-* / .card-*），
+       取值与存量保持一致 —— scoped 规则优先级更高，两边不会打架。
+
+   已提供：
+     卡片 .card            按钮 .btn-*        表单 .input-default / .field-*
+     侧边栏 .sidebar-*     标签 .tag-*        弹窗 .modal-*     空状态 .empty-state-*
+
+   用量示例：
+     <div class="card"><div class="card-header">…</div><div class="card-body">…</div></div>
+     <button class="btn btn-primary">保存</button>
+     <input class="input-default" />
+     <span class="tag tag-success">已索引</span>
+   ═══════════════════════════════════════ */
+
+/* ════════════ 卡片 ════════════ */
+.card {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+/* 无阴影版：用在已有边框/分隔的密集区域，避免层层叠影 */
+.card-flat {
+  box-shadow: none;
+}
+
+/* 可点击卡片：hover 抬升 */
+.card-hover {
+  transition: box-shadow 0.2s, border-color 0.2s, transform 0.2s;
+  cursor: pointer;
+}
+.card-hover:hover {
+  box-shadow: var(--shadow-lg);
+  border-color: var(--color-primary-light);
+}
+
+/* 内衬：卡片内部再降一层背景（表头、配置区等） */
+.card-inset {
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-sm);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--color-border-soft);
+}
+
+.card-title {
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  line-height: var(--line-height-sm);
+  color: var(--color-text-primary);
+}
+
+.card-body {
+  padding: var(--space-lg);
+}
+
+.card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  border-top: 1px solid var(--color-border-soft);
+}
+
+/* ════════════ 按钮 ════════════ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-lg);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-card);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-base);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s, color 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-primary-ring);
+}
+
+.btn:disabled,
+.btn.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 主按钮：实心主色 */
+.btn-primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-text-inverse);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-primary-dark);
+  border-color: var(--color-primary-dark);
+}
+
+/* 次按钮：白底描边（默认外观，显式写出来方便与 .btn 区分意图） */
+.btn-secondary {
+  background: var(--color-bg-card);
+  border-color: var(--color-border-default);
+  color: var(--color-text-primary);
+}
+.btn-secondary:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+/* 幽灵按钮：无底无框，用于工具栏 / 列表行内操作 */
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--color-text-secondary);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+/* 危险按钮：删除等不可逆操作 */
+.btn-danger {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  color: var(--color-text-inverse);
+}
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+/* 弱化主按钮：主色浅底 + 主色文字，用于次级强调 */
+.btn-primary-soft {
+  background: var(--color-primary-soft);
+  border-color: transparent;
+  color: var(--color-primary);
+}
+.btn-primary-soft:hover:not(:disabled) {
+  background: var(--color-primary-ring);
+}
+
+/* 尺寸 / 布局修饰 */
+.btn-sm {
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--font-size-sm);
+}
+.btn-lg {
+  padding: var(--space-md) var(--space-xl);
+  font-size: var(--font-size-md);
+}
+.btn-block {
+  width: 100%;
+}
+
+/* 纯图标按钮：正方形容器 */
+.btn-icon {
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
+  background: transparent;
+  border-color: transparent;
+}
+.btn-icon:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+/* ════════════ 表单 ════════════ */
+.input-default {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.input-default::placeholder {
+  color: var(--color-text-placeholder);
+}
+
+.input-default:focus {
+  border-color: var(--color-border-focus);
+  box-shadow: 0 0 0 2px var(--color-primary-ring);
+}
+
+.input-default:disabled {
+  background: var(--color-bg-disabled);
+  cursor: not-allowed;
+}
+
+/* 校验失败 */
+.input-default.is-error {
+  border-color: var(--color-danger);
+}
+.input-default.is-error:focus {
+  box-shadow: 0 0 0 2px var(--color-danger-soft);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.field-label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.field-hint {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-placeholder);
+}
+
+.field-error {
+  font-size: var(--font-size-sm);
+  color: var(--color-danger);
+}
+
+/* ════════════ 侧边栏 ════════════
+   结构：[.sidebar-header] + [.sidebar-body(滚动)] + [.sidebar-footer]
+   宽度 / 折叠 / 拖拽动画由 SidePanel.vue 负责，这里只管内部排版。 */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--color-bg-card);
+  border-right: 1px solid var(--color-border-default);
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  flex-shrink: 0;
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--color-border-soft);
+}
+
+.sidebar-title {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.sidebar-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-sm);
+}
+
+.sidebar-footer {
+  flex-shrink: 0;
+  padding: var(--space-md);
+  border-top: 1px solid var(--color-border-soft);
+}
+
+/* 分组标题（小号、大写、弱化） */
+.sidebar-group-title {
+  padding: var(--space-md) var(--space-sm) var(--space-xs);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-placeholder);
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 导航项：可 button 可 a，统一外观 */
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-sm);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.sidebar-item:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+/* 用 .is-active 而非 .active：避免与组件内 scoped 的 .active 语义混淆 */
+.sidebar-item.is-active {
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.sidebar-item:disabled,
+.sidebar-item.is-disabled {
+  color: var(--color-text-placeholder);
+  cursor: not-allowed;
+}
+
+.sidebar-divider {
+  height: 1px;
+  border: 0;
+  margin: var(--space-sm) 0;
+  background: var(--color-border-soft);
+}
+
+/* ════════════ 标签 / 徽标 ════════════ */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 1px var(--space-sm);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.tag-primary {
+  background: var(--color-primary-soft);
+  border-color: transparent;
+  color: var(--color-primary);
+}
+.tag-success {
+  background: var(--color-success-soft);
+  border-color: transparent;
+  color: var(--color-success);
+}
+.tag-warning {
+  background: var(--color-warning-soft);
+  border-color: transparent;
+  color: var(--color-warning);
+}
+.tag-danger {
+  background: var(--color-danger-soft);
+  border-color: transparent;
+  color: var(--color-danger);
+}
+.tag-info {
+  background: var(--color-info-soft);
+  border-color: transparent;
+  color: var(--color-info);
+}
+
+/* 描边版：底色不参与语义时用 */
+.tag-plain {
+  background: transparent;
+  border-color: var(--color-border-default);
+  color: var(--color-text-secondary);
+}
+
+/* 圆点：与标签同色（currentColor） */
+.tag-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+}
+
+.tag-sm {
+  padding: 0 var(--space-xs);
+  font-size: var(--font-size-xs);
+  border-radius: var(--radius-xs);
+}
+
+/* ════════════ 弹窗 ════════════
+   结构：.modal-overlay > .modal-panel > [.modal-header / .modal-body / .modal-footer]
+   存量弹窗（NodeDetail / KbTextPreviewDialog）已有同名 scoped 类且取值一致，
+   此处是给新弹窗的默认外观，两边可共存。 */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg-overlay);
+}
+
+.modal-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 92vw);
+  max-height: 85vh;
+  overflow: hidden;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-popup);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  flex-shrink: 0;
+  padding: var(--space-lg) var(--space-xl);
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.modal-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+/* 正文只给布局，不设字体/颜色：交由内容自己决定，避免压掉存量的排版 */
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-xl);
+}
+
+.modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  flex-shrink: 0;
+  padding: var(--space-md) var(--space-xl);
+  border-top: 1px solid var(--color-border-default);
+}
+
+.modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-placeholder);
+  font-size: var(--font-size-md);
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.modal-close:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+/* ════════════ 空状态 ════════════
+   基础块用 text-align 居中（与存量 .empty-state 一致），
+   需要图标 + 标题 + 描述 + 操作时再挂内层类。 */
+.empty-state {
+  padding: var(--space-2xl) var(--space-lg);
+  text-align: center;
+  color: var(--color-text-placeholder);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-lg);
+}
+
+.empty-state-icon {
+  margin-bottom: var(--space-md);
+  font-size: 32px;
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.empty-state-title {
+  margin-bottom: var(--space-xs);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.empty-state-desc {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-placeholder);
+}
+
+.empty-state-action {
+  margin-top: var(--space-lg);
+}

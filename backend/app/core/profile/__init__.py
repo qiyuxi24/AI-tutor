@@ -14,6 +14,8 @@ import 约定：
     不要直接 import 子模块（内部结构可能调整）
 """
 
+from .avatar_image import AVATAR_SIZE, AvatarError, process_avatar
+from .avatar_store import AvatarStore
 from .manager import UserProfile
 from .markdown import parse_markdown_to_data, render_profile_markdown
 from .schema import (
@@ -38,6 +40,10 @@ def get_usage_mode(user_id: int) -> str:
 
 __all__ = [
     "UserProfile",
+    "AVATAR_SIZE",
+    "AvatarError",
+    "AvatarStore",
+    "process_avatar",
     "get_usage_mode",
     "default_profile_data",
     "render_profile_markdown",

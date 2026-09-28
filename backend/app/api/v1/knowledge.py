@@ -17,12 +17,13 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
   GET    /knowledge/node/{node_id}           - 获取节点详情（含小节元数据，无正文）
   GET    /knowledge/node/{node_id}/section/{section_id}       - 读取单个小节正文
   POST   /knowledge/node/{node_id}/sections/generate          - 触发节点小节化生成管线
+  POST   /knowledge/node/{node_id}/section/{section_id}/quiz  - 针对某小节出题（后台）
   DELETE /knowledge/node/{node_id}/section/{section_id}       - 删除单个小节
-  GET    /knowledge/node/{node_id}/quizzes                    - 获取节点试题链接（侧边栏，含小节路由）
+  GET    /knowledge/node/{node_id}/quizzes                    - 获取节点试题链接（侧边栏，含小节路由与来源）
+  GET    /knowledge/source/{doc_id}/nodes                     - 反查某资料影响了哪些节点（图谱高亮用）
   POST   /knowledge/node                     - 创建节点（手动，ID 自动生成）
   PUT    /knowledge/node/{node_id}           - 更新节点（含 MD 内容）
   PUT    /knowledge/node/{node_id}/info      - 更新节点基本信息
-  PUT    /knowledge/node/{node_id}/mastery   - 更新掌握程度
   DELETE /knowledge/node/{node_id}           - 删除节点
   POST   /knowledge/edge                     - 创建边
   PUT    /knowledge/edge/{edge_id}           - 更新边
@@ -38,7 +39,7 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
 
 前端调用者全部在 `frontend/src/stores/chatStore.js`（视图层不直连 apiClient）；
 `decompose` / `export` / `prerequisite/infer` / `graph/fill`
-无前端入口，是给运维脚本与人工调用的接口（见 docs/知识图谱/知识图谱_模块结构与封装调研.md §6）。
+无前端入口，是给运维脚本与人工调用的接口（见 docs/归档/知识图谱/知识图谱_模块结构与封装调研.md §6）。
 """
 
 import logging
@@ -309,8 +310,8 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
 
     小节化（内容层，见 docs/知识图谱/知识图谱_节点小节化_设计与实现方案.md §3）：
     小节化节点的正文分散在多个平行 MD 里，走 `GET .../section/{section_id}` 按需读；
-    本端点只回**元数据**列表（`id/title/kind/status/updated_at`，**不含正文**），前端
-    据此渲染左侧小节侧边栏。
+    本端点只回**元数据**列表（`id/title/kind/status/sources/updated_at`，**不含正文**），
+    前端据此渲染左侧小节侧边栏与「来源」标注。
 
     **兼容铁律（D5）**：老节点（无 manifest）必须行为不变 —— `has_sections=false`、
     `sections=[]`、`content` 仍返回单文件全文。小节化节点没有概述主文件（D1），
@@ -337,6 +338,8 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
                 "title": s.get("title", ""),
                 "kind": s.get("kind", ""),
                 "status": s.get("status", ""),
+                # 小节级溯源：本节的资料来源（`[{doc_id, doc_name, section, chunk_id}]`）
+                "sources": s.get("sources") or [],
                 "updated_at": s.get("updated_at", ""),
             }
             for s in (kg.list_sections(node_id) if has_sections else [])
@@ -430,6 +433,72 @@ async def generate_node_sections(node_id: str,
         return result
     finally:
         kg.close()
+
+
+@router.get("/knowledge/source/{doc_id}/nodes")
+async def get_nodes_by_source(doc_id: int, user_id: int = Depends(get_current_user)):
+    """反查「这份资料产出了/影响了哪些节点」（右键知识库文件 → 在图谱中显示的数据源）。
+
+    数据来源 = `doc_node_marks`（GQ-19 的 doc→node 账本，带 `(user_id, doc_id)` 索引）——
+    它是「资料 → 节点」的**唯一专门账本**，比去 `nodes.sources` 的 JSON 文本里做子串
+    匹配可靠（后者 `doc_id=7` 会命中 `17`）。
+
+    ⚠️ **只有建图路径写这个账本**：手动创建的节点、对话里 AI 现建的节点都没有资料来源，
+    查不到属正常（不是故障），前端据此提示"这份资料还没有关联的知识点"。
+
+    小节级/题目级的细化不需要本端点：节点详情已返回 `sections[].sources` 与
+    `quizzes[].source_docs`，前端按 doc_id 本地过滤即可（零额外请求）。
+
+    返回：`{"doc_id", "subjects": [...], "nodes": [{id, name, subject}]}`；
+    `subjects` 按节点出现顺序去重 —— 一份资料可能横跨多学科，而图谱一次只渲染一个学科，
+    调用方据此决定跳到哪个（前端取命中最多的那个）。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        nodes: list[dict] = []
+        subjects: list[str] = []
+        for mark in kg.list_doc_marks(doc_id):
+            node = kg.get_node(mark["node_id"])
+            if not node:
+                continue          # marks 已被级联清理的孤儿（理论不该有）→ 跳过
+            subject = kg.node_subject(node) or ""
+            nodes.append({"id": node["id"], "name": node.get("name", ""),
+                          "subject": subject})
+            if subject and subject not in subjects:
+                subjects.append(subject)
+        return {"doc_id": doc_id, "subjects": subjects, "nodes": nodes}
+    finally:
+        kg.close()
+
+
+@router.post("/knowledge/node/{node_id}/section/{section_id}/quiz")
+async def generate_section_quiz(node_id: str, section_id: str,
+                                user_id: int = Depends(get_current_user)):
+    """针对某个**小节**出一道题（后台生成，几秒后推 `quiz_ready`）。
+
+    与对话内出题共用 `chat_quiz` 的同一去重位（`_INFLIGHT` 是 per-user 的），
+    所以同用户已有出题任务在跑时返回 409 —— 前端据此提示"稍后再试"。
+
+    与节点级出题的三点差别（见 `chat_quiz.generate_and_publish`）：
+    1. 出题依据只喂**该节正文**（更聚焦）；2. 题目挂到该节（`manifest.quizzes` 路由，
+    侧边栏显示「属 ⟨小节⟩」）；3. 题目 `source_docs` 记该节的来源文件。
+
+    返回：`{"status","node_id","section_id"}`；节点/小节不存在 → 404，已在出题 → 409。
+    """
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        if kg.get_node(node_id) is None:
+            raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
+        # has_sections 内部读 manifest；无 manifest → 空列表 → 判 404（老节点没有小节可点）
+        if not any(s.get("id") == section_id for s in kg.list_sections(node_id)):
+            raise HTTPException(status_code=404, detail=f"小节不存在：{section_id}")
+    finally:
+        kg.close()
+
+    from app.core.quiz.chat_quiz import start_background_generation  # 延迟导入：避免拖慢启动
+    if not start_background_generation(user_id, node_id=node_id, section_id=section_id):
+        raise HTTPException(status_code=409, detail="已有一道题在生成中，请稍后再试")
+    return {"status": "ok", "node_id": node_id, "section_id": section_id}
 
 
 @router.delete("/knowledge/node/{node_id}/section/{section_id}")
@@ -655,30 +724,6 @@ async def delete_node(node_id: str, user_id: int = Depends(get_current_user)):
         return {"deleted": True, "node_id": node_id, "removed_edges": removed_edges}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    finally:
-        kg.close()
-
-
-@router.put("/knowledge/node/{node_id}/mastery")
-async def update_mastery(node_id: str, data: dict = Body(...),
-                         user_id: int = Depends(get_current_user)):
-    """更新节点的掌握程度（0-100）"""
-    kg = KnowledgeGraph(user_id=user_id)
-    try:
-        node = kg.get_node(node_id)
-        if node is None:
-            raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
-
-        mastery = data.get("mastery")
-        if mastery is None or not (0 <= mastery <= 100):
-            raise HTTPException(status_code=400, detail="mastery 必须在 0-100 之间")
-
-        kg.update_node_info(node_id, {
-            "mastery": mastery,
-            "added_by": data.get("added_by", "ai")
-        })
-        publish("graph_updated")
-        return {"status": "ok", "node_id": node_id, "mastery": mastery}
     finally:
         kg.close()
 

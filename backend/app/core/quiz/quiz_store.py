@@ -48,6 +48,7 @@ class QuizStore:
                     comment_prompt TEXT DEFAULT '',
                     knowledge_point TEXT DEFAULT '',
                     source         TEXT DEFAULT '',    -- 出题依据（参考片段，可选）
+                    source_docs    TEXT NOT NULL DEFAULT '', -- 题目来源**文件**：[{doc_id, doc_name}] 的 JSON
                     created_at     TEXT DEFAULT (datetime('now'))
                 )
             """)
@@ -66,6 +67,18 @@ class QuizStore:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_questions_subject ON questions (subject)"
             )
+        self._ensure_columns()
+
+    def _ensure_columns(self) -> None:
+        """就地补列：`CREATE TABLE IF NOT EXISTS` **不给老表加字段**（AGENTS.md §1）。
+
+        `source_docs` 是 2026-09-28 加的（题目来源文件），老用户库里没有这一列。
+        """
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(questions)")}
+        if "source_docs" not in cols:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE questions ADD COLUMN source_docs TEXT NOT NULL DEFAULT ''")
 
     def close(self) -> None:
         self._conn.close()
@@ -73,7 +86,8 @@ class QuizStore:
     # ── 保存题目 ──
     def save_questions(self, questions: list[Question | dict],
                        subject: str = "", node_id: Optional[int] = None,
-                       difficulty: str = "medium", source: str = "") -> list[int]:
+                       difficulty: str = "medium", source: str = "",
+                       source_docs: Optional[list[dict]] = None) -> list[int]:
         """
         批量保存题目，返回题目 id 列表（兼容 Question 对象或 dict）。
 
@@ -81,7 +95,11 @@ class QuizStore:
             source: 题目来源标记。对话内出题（quiz_generate 工具）传 "chat"，
                     用于 `get_pending_question` 精确取"学生刚被推送到的那道题"，
                     避免误取题库页历史里未作答的题。
+            source_docs: 题目来源**文件**清单 `[{doc_id, doc_name}, ...]`（可为空）。
+                    对话内出题取该图谱节点的资料来源（`KnowledgeGraph.get_sources`）；
+                    按小节出题时取该节的 `sources`。存 JSON 文本，读侧解析回列表。
         """
+        docs_json = json.dumps(source_docs or [], ensure_ascii=False)
         ids = []
         with self._conn:
             for q in questions:
@@ -91,8 +109,8 @@ class QuizStore:
                     INSERT INTO questions
                         (node_id, subject, type, question, options_json, answer_json,
                          points, difficulty, analysis, comment_prompt, knowledge_point,
-                         source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         source, source_docs)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     node_id,
                     subject,
@@ -106,6 +124,7 @@ class QuizStore:
                     q.comment_prompt,
                     q.knowledge_point,
                     source,
+                    docs_json,
                 ))
                 ids.append(cur.lastrowid)
         return ids
@@ -218,6 +237,7 @@ class QuizStore:
             "analysis": row["analysis"],
             "comment_prompt": row["comment_prompt"],
             "knowledge_point": row["knowledge_point"],
+            "source_docs": json.loads(row.get("source_docs") or "[]"),
             "created_at": row["created_at"],
         }
 

@@ -4,6 +4,7 @@ import Layout from './views/Layout.vue'
 import Users from './views/Users.vue'
 import Admins from './views/Admins.vue'
 import AuditLogs from './views/AuditLogs.vue'
+import Usage from './views/Usage.vue'
 
 const routes = [
   { path: '/login', name: 'Login', component: Login },
@@ -15,6 +16,7 @@ const routes = [
       { path: 'users', name: 'Users', component: Users },
       { path: 'admins', name: 'Admins', component: Admins },
       { path: 'audit-logs', name: 'AuditLogs', component: AuditLogs },
+      { path: 'usage', name: 'Usage', component: Usage },
     ]
   }
 ]

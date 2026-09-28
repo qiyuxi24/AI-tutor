@@ -101,6 +101,17 @@
             放入对话上下文
           </div>
           <template v-if="menuNode.type === 'file'">
+            <div class="menu-item" @click="close(); emitShowInGraph(menuNode)">
+              <span class="menu-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" />
+                  <path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </span>
+              在图谱中显示
+            </div>
             <div class="menu-item" @click="close(); openPreview(menuNode)">
               <span class="menu-icon">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -108,7 +119,17 @@
                   <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" />
                 </svg>
               </span>
-              查看正文
+              预览
+            </div>
+            <div class="menu-item" @click="close(); openInBrowser(menuNode)">
+              <span class="menu-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M15 3h6v6" /><path d="M10 14 21 3" />
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                </svg>
+              </span>
+              在浏览器中打开
             </div>
           </template>
           <template v-else>
@@ -154,10 +175,12 @@
       </template>
     </el-dialog>
 
-    <!-- 文件正文预览（只读；采集到的网页原文 / 上传文档的解析文本） -->
+    <!-- 文件预览（只读）：PDF/Word/Excel/图片渲染原件，其余渲染解析正文 -->
     <KbTextPreviewDialog
       v-model:visible="previewVisible"
       :name="preview.name"
+      :file-type="previewExt"
+      :raw-blob="previewBlob"
       :markdown="preview.markdown"
       :chars="preview.chars"
       :total-chars="preview.totalChars"
@@ -172,7 +195,7 @@
  * KbPanel.vue — 知识库侧栏（知识图谱页右侧，展开/收起由 HomeView 的容器控制）
  *
  * 职责：
- *   - 目录树：建文件夹 / 上传 / 勾选（生成来源）/ 右键菜单（查看正文 · 放入上下文 · 删除）
+ *   - 目录树：建文件夹 / 上传 / 勾选（生成来源）/ 右键菜单（预览 · 在浏览器中打开 · 放入上下文 · 删除）
  *   - 顶部一键生成：勾选文件或文件夹 → 输入学科名 → 生成该学科知识图谱
  *   - 底部：当前检索范围（写进 chatStore.kbContext，对话据此带 kb_node_ids）
  *
@@ -182,7 +205,8 @@
  * 为什么文件操作放右键而不留 hover 按钮：侧栏窄，三个悬浮按钮既挤压文件名又易误触。
  */
 import { ref, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '../utils/feedback'
 import {
   getKbTree,
   createKbFolder,
@@ -190,14 +214,19 @@ import {
   deleteKbNode,
   getKbContext,
   getKbNodeText,
+  getKbNodeRaw,
   getKbStats,
 } from '../api/kb.js'
 import KbTextPreviewDialog from './KbTextPreviewDialog.vue'
 import ContextMenu from './ContextMenu.vue'
 import { useContextMenu } from '../utils/contextMenu.js'
+import { previewKindOf } from '../utils/filePreview.js'
 import { useChatStore } from '../stores/chatStore.js'
 
 const store = useChatStore()
+
+/* 「在图谱中显示」要切图谱视图并驱动画布高亮 —— 那是 HomeView 的职责，本组件只发意图 */
+const emit = defineEmits(['show-in-graph'])
 
 const treeRef = ref(null)
 const fileInputRef = ref(null)
@@ -228,9 +257,11 @@ const {
   close: closeMenu,
 } = useContextMenu()
 
-// 正文预览（只读弹窗）
+// 文件预览（只读弹窗）：rawBlob 有值 = 渲染原件，否则渲染解析正文
 const previewVisible = ref(false)
 const previewLoading = ref(false)
+const previewExt = ref('')
+const previewBlob = ref(null)
 const preview = ref({ name: '', markdown: '', chars: 0, totalChars: 0, truncated: false })
 
 const treeProps = {
@@ -268,11 +299,76 @@ function handleNodeDblClick(data) {
   if (data?.type === 'file') openPreview(data)
 }
 
-/** 拉取并弹出文件正文预览（只读；node_id 来自目录树，天然按用户隔离） */
+/**
+ * 右键文件 → 在图谱中显示：把「这份资料影响了哪些知识图谱节点」交给 HomeView
+ * （切图谱视图 + 高亮 + 选中该文件的小节/题目）。
+ * 注意 `data.id` 就是 KB 的 file 节点 id，也就是来源条目里的 `doc_id`（同一个命名空间）。
+ */
+function emitShowInGraph(data) {
+  if (!data || data.type !== 'file') return
+  emit('show-in-graph', { docId: data.id, docName: data.name })
+}
+
+/**
+ * 拉取并弹出文件预览（只读；node_id 来自目录树，天然按用户隔离）。
+ *
+ * 有原件渲染器的格式（PDF/Word/Excel/图片）拉 `/raw` 出真件，
+ * 其余走 `/text` 出解析正文；`data.file_type` 就是 documents.file_type，不用从文件名猜。
+ * 历史文件（改动前上传）没存原件 → `/raw` 404，**静默回退**正文预览（有解析文本可看，
+ * 弹「原件不存在」的报错对用户毫无帮助）。
+ */
 async function openPreview(data) {
   if (!data || data.type !== 'file') return
+  const ext = data.file_type || ''
   preview.value = { name: data.name, markdown: '', chars: 0, totalChars: 0, truncated: false }
+  previewExt.value = ext
+  previewBlob.value = null
   previewVisible.value = true
+
+  if (previewKindOf(ext) !== 'text') {
+    previewLoading.value = true
+    try {
+      const res = await getKbNodeRaw(data.id)
+      previewBlob.value = res.data
+      return
+    } catch {
+      // 落到下面的正文预览
+    } finally {
+      previewLoading.value = false
+    }
+  }
+  await loadPreviewText(data)
+}
+
+/**
+ * 右键「在浏览器中打开」：把原件交给浏览器原生处理（PDF/图片 直接内置阅读器，
+ * 其余格式浏览器能认的认、认不了的（docx/pptx）自动下载）—— 比在弹窗里渲染省事得多。
+ *
+ * 开窗必须**同步**先做：await 之后用户手势已过期，再 window.open 会被弹窗拦截；
+ * 拿不到窗口就明确提示，而不是退回 `location.href`（那会把整个应用替换掉）。
+ */
+async function openInBrowser(data) {
+  if (!data || data.type !== 'file') return
+  const win = window.open('', '_blank')
+  if (!win) {
+    ElMessage.warning('浏览器拦截了新标签页，请允许弹出窗口后重试')
+    return
+  }
+  try {
+    const res = await getKbNodeRaw(data.id)
+    const url = URL.createObjectURL(res.data)
+    win.location.href = url
+    // ponytail: 60s 后回收，够新标签页读完；长会话反复开大文件会各留一份 blob，不回收就是显存泄漏
+    setTimeout(() => URL.revokeObjectURL(url), 60000)
+  } catch (e) {
+    win.close()
+    ElMessage.warning(e.response?.status === 404
+      ? '该文件没有原件（历史数据），无法在浏览器中打开'
+      : (e.message || '打开失败'))
+  }
+}
+
+async function loadPreviewText(data) {
   previewLoading.value = true
   try {
     const res = await getKbNodeText(data.id)
@@ -408,17 +504,12 @@ function clearContext() {
 }
 
 async function confirmDelete(data) {
-  try {
-    await ElMessageBox.confirm(
-      data.type === 'folder'
-        ? `确定删除文件夹「${data.name}」及其所有内容吗？`
-        : `确定删除文件「${data.name}」吗？`,
-      '删除确认',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-    )
-  } catch {
-    return
-  }
+  const ok = await confirmAction(
+    data.type === 'folder'
+      ? `确定删除文件夹「${data.name}」及其所有内容吗？此操作不可撤销。`
+      : `确定删除文件「${data.name}」吗？此操作不可撤销。`
+  )
+  if (!ok) return
   try {
     await deleteKbNode(data.id)
     ElMessage.success('已删除')

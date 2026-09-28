@@ -1,6 +1,7 @@
 """运维后台数据访问层：纯 sqlite3，复用主系统数据库文件"""
 import shutil
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,6 +159,106 @@ def user_data_summary(user_id: int) -> dict:
     }
 
 
+# ════════════════════════════════════════════
+#  LLM 用量 / prompt 缓存命中（只读聚合）
+# ════════════════════════════════════════════
+
+# 聚合维度白名单，口径与主系统 backend/app/core/llm/usage.py::_GROUPS 一致
+# （值直接拼进 SQL，白名单外一律退回 kind）。主系统那边加维度时这里要跟上。
+_USAGE_GROUPS = {
+    "kind": "kind",
+    "model": "model",
+    "day": "date(ts, 'unixepoch', 'localtime')",
+    "user": "user_id",
+}
+
+# MiniMax-M3 标准价（元 / 百万 token，2026-09-28 取自官方按量计费页）。
+# 只用于把 token 换算成金额展示；**单价变动必须同步改这里**（含缓存命中价）。
+_PRICE_INPUT_PER_M = 4.20   # 新增输入
+_PRICE_CACHED_PER_M = 0.84  # 缓存命中输入（约为输入价的 1/5）
+_PRICE_OUTPUT_PER_M = 16.80
+
+
+def _usage_row(r: sqlite3.Row) -> dict:
+    """给一行聚合结果补上 cache_hit_rate（命中输入 ÷ 总输入；无输入时不除零）。"""
+    d = dict(r)
+    d["cache_hit_rate"] = (
+        round(d["cached_tokens"] / d["prompt_tokens"], 4) if d["prompt_tokens"] else 0.0
+    )
+    return d
+
+
+def llm_usage_summary(since_hours: float = 168.0, group_by: str = "kind") -> dict:
+    """全站 LLM 用量与 prompt 缓存命中（主系统 `llm_usage` 表的只读聚合）。
+
+    **token 明细是计费真值**：每行来自一次真实调用响应里的 `usage`
+    （含 `prompt_tokens_details.cached_tokens`），由主系统 `core/llm/usage.py::record`
+    落库 —— 不是本地 tiktoken 估算，所以命中率可直接当成本口径用。
+
+    库/表缺失（新部署还没跑过对话）按空结果返回，绝不让运维页面打挂
+    —— 与 `_count` 的「缺表按 0 处理」同一口径。
+    """
+    dim = _USAGE_GROUPS.get(group_by, "kind")
+    result = {
+        "since_hours": since_hours,
+        "group_by": group_by if group_by in _USAGE_GROUPS else "kind",
+        "total": {
+            "calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            "cached_tokens": 0, "cache_hit_rate": 0.0,
+            "cost_total_yuan": 0.0, "cached_saving_yuan": 0.0,
+        },
+        "groups": [],
+    }
+
+    path = _agent_runs_db()
+    if not path.exists():
+        return result
+
+    sql = (
+        f"SELECT {dim} AS dim, COUNT(*) AS calls,"
+        " COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,"
+        " COALESCE(SUM(completion_tokens), 0) AS completion_tokens,"
+        " COALESCE(SUM(cached_tokens), 0) AS cached_tokens"
+        " FROM llm_usage WHERE ts >= ?"
+        " GROUP BY dim ORDER BY (SUM(prompt_tokens) + SUM(completion_tokens)) DESC"
+    )
+    try:
+        conn = sqlite3.connect(str(path))
+        conn.row_factory = sqlite3.Row
+        try:
+            groups = [_usage_row(r) for r in conn.execute(
+                sql, (time.time() - since_hours * 3600.0,))]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return result
+
+    total = {
+        "calls": sum(g["calls"] for g in groups),
+        "prompt_tokens": sum(g["prompt_tokens"] for g in groups),
+        "completion_tokens": sum(g["completion_tokens"] for g in groups),
+        "cached_tokens": sum(g["cached_tokens"] for g in groups),
+    }
+    total["cache_hit_rate"] = (
+        round(total["cached_tokens"] / total["prompt_tokens"], 4)
+        if total["prompt_tokens"] else 0.0
+    )
+    # 实付 = 未命中输入 × 输入价 + 命中输入 × 命中价 + 输出 × 输出价
+    total["cost_total_yuan"] = round(
+        (total["prompt_tokens"] - total["cached_tokens"]) * _PRICE_INPUT_PER_M / 1e6
+        + total["cached_tokens"] * _PRICE_CACHED_PER_M / 1e6
+        + total["completion_tokens"] * _PRICE_OUTPUT_PER_M / 1e6,
+        4,
+    )
+    # 命中相对"全按输入价"省下的钱 = 唯一的缓存收益口径
+    total["cached_saving_yuan"] = round(
+        total["cached_tokens"] * (_PRICE_INPUT_PER_M - _PRICE_CACHED_PER_M) / 1e6, 4
+    )
+    result["total"] = total
+    result["groups"] = groups
+    return result
+
+
 # 删号时要清空的 knowledge.db 表，顺序 = 「先叶子后主表」。
 # 见 delete_user_rows 的 docstring：本连接未开 FK 级联，顺序只能自己保证。
 # 参数化 SQL 里统一用 ? 占位，users 走 id、其余走 user_id（调用处传 user_id 即可）。
@@ -200,7 +301,7 @@ def delete_user_rows(conn: sqlite3.Connection, user_id: int) -> None:
 
 
 def purge_user_storage(user_id: int) -> None:
-    """清掉该用户遗留的磁盘数据（对话行、知识库/向量目录、题库目录、节点 MD 目录）。
+    """清掉该用户遗留的磁盘数据（对话行、知识库/向量目录、题库目录、节点 MD 目录、头像文件）。
 
     必须排在事务提交之后调用：这些写入与文件删除**无法参与事务回滚**，顺序反了
     会出现「连接回滚了、文件却已删掉」的半残状态。
@@ -235,6 +336,15 @@ def purge_user_storage(user_id: int) -> None:
     )
     for path in roots:
         shutil.rmtree(path, ignore_errors=True)
+
+    # 用户头像（主系统 `core/profile/avatar_store.py` = data/profiles/avatars/{uid}.png）：
+    # 是**单文件**，不能塞进上面的 roots —— rmtree 对文件无效，会静默什么都不做，
+    # 结果就是删号后头像永久残留。目录名要与 avatar_store.AVATAR_DIRNAME 保持一致。
+    avatar = Path(settings.profiles_dir) / "avatars" / f"{user_id}.png"
+    try:
+        avatar.unlink()
+    except OSError:
+        pass  # 本来就没设置过头像 / 目录不存在，不算失败
 
 
 def init_db() -> None:

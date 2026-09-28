@@ -4,12 +4,16 @@
 `test_section_generator.py`（生成管线）里锁；这里**只锁 API 契约**：
 
 - `GET  /knowledge/node/{id}`        响应新增 `has_sections` + 小节**元数据**列表
-  （`{id,title,kind,status,updated_at}`，**不含正文**）；**兼容铁律**：老节点（无
+  （`{id,title,kind,status,sources,updated_at}`，**不含正文**）；**兼容铁律**：老节点（无
   manifest）→ `has_sections=false`、`sections=[]`，`content` 仍返回单文件全文；
 - `GET  /knowledge/node/{id}/section/{sid}`  单节正文 `{id,title,kind,status,content}`；
   节点或小节不存在 → 404；
 - `POST /knowledge/node/{id}/sections/generate`  直接透传 `SectionGenerator.generate`
   的返回 dict；缺省/空体 `force=false`；节点不存在 → 404；
+- `POST /knowledge/node/{id}/section/{sid}/quiz`  按小节出题：起后台任务并带 `section_id`；
+  节点/小节不存在 → 404；已在出题 → 409；
+- `GET  /knowledge/source/{doc_id}/nodes`  资料→节点反查（图谱高亮数据源）：`subjects`
+  按节点出现顺序去重；账本里的孤儿 node_id 跳过；无账本 → 空列表（不是错误）；
 - `DELETE /knowledge/node/{id}/section/{sid}`  `{"deleted": bool}`；不存在 → 404；
 - `GET  /knowledge/node/{id}/quizzes`  侧边栏试题链接：题目按 `knowledge_point =
   图谱节点 id` 取自题库、`section_id` 从 manifest 的 `quizzes` 路由回填（未挂号 →
@@ -32,10 +36,11 @@ from app.core.auth import get_current_user
 
 USER_ID = 5
 
-# 小节元数据带一堆**不该外泄**的字段（file/brief/content）→ 投影后只留契约里的 5 个键
+# 小节元数据带一堆**不该外泄**的字段（file/brief/content）→ 投影后只留契约里的 6 个键
 _SECTION_S01 = {
     "id": "s01", "title": "定义与几何意义", "kind": "definition", "status": "filled",
     "updated_at": "2026-01-01T00:00:00",
+    "sources": [{"doc_id": 7, "doc_name": "高等数学.md", "section": "第9章", "chunk_id": None}],
     "file": "s01_定义与几何意义.md", "brief": "一句话说明", "content": "不该出现在列表里",
 }
 _SECTION_S02 = {
@@ -49,13 +54,15 @@ _SECTION_BODIES = {("new_node", "s01"): "# 定义\n\n二重积分的定义……
 class _FakeKG:
     """只实现端点用到的读/删方法；`nodes_dir` 是真目录，单文件读取路径保持真实。"""
 
-    def __init__(self, user_id, *, nodes_dir, nodes, sections, bodies, manifests=None):
+    def __init__(self, user_id, *, nodes_dir, nodes, sections, bodies, manifests=None,
+                 doc_marks=None):
         self.user_id = user_id
         self.nodes_dir = nodes_dir
         self._nodes = nodes
         self._sections = sections
         self._bodies = bodies
         self._manifests = manifests or {}   # node_id -> manifest（含 quizzes 路由）
+        self._doc_marks = doc_marks or {}   # doc_id -> [{node_id, ...}]（资料→节点账本）
         self.deleted_calls = []          # 记录 delete_section 调用，供断言
 
     # ── 既有读接口 ──
@@ -93,6 +100,9 @@ class _FakeKG:
         self._sections[node_id] = [
             s for s in self._sections.get(node_id, []) if s["id"] != section_id]
         return True
+
+    def list_doc_marks(self, doc_id, status=None):
+        return self._doc_marks.get(doc_id, [])
 
 
 @pytest.fixture
@@ -193,7 +203,11 @@ def test_sectioned_node_metadata_no_body(api):
     assert body["has_sections"] is True
     assert [s["id"] for s in body["sections"]] == ["s01", "s02"]
     for s in body["sections"]:
-        assert set(s.keys()) == {"id", "title", "kind", "status", "updated_at"}
+        # sources 是新增的溯源键：无来源的小节投影成 []（老 manifest 无此键也一样）
+        assert set(s.keys()) == {"id", "title", "kind", "status", "sources", "updated_at"}
+    assert body["sections"][0]["sources"] == [
+        {"doc_id": 7, "doc_name": "高等数学.md", "section": "第9章", "chunk_id": None}]
+    assert body["sections"][1]["sources"] == []
     assert body["sections"][0]["title"] == "定义与几何意义"
     assert body["sections"][1]["status"] == "failed"
     assert body["content"] == "", "小节化节点没有概述主文件（D1），content 应为空"
@@ -252,6 +266,72 @@ def test_generate_missing_node_404(api, gen_calls):
 
     assert r.status_code == 404
     assert gen_calls == {}, "节点不存在时不应触发生成"
+
+
+# ── GET 按资料反查节点（右键文件 → 在图谱中显示）───────────────
+
+def test_nodes_by_source_groups_subjects_and_skips_orphans(api):
+    """资料 → 节点：按出现顺序去重学科；账本里的孤儿 node_id 静默跳过"""
+    kg = api["kg"]
+    kg._nodes["old_node"]["tags"] = ["考研数学"]        # 造一个跨学科场景
+    kg._doc_marks[42] = [{"node_id": "new_node"}, {"node_id": "old_node"},
+                         {"node_id": "ghost"}]          # ghost 不在 nodes 里
+
+    body = api["client"].get("/api/v1/knowledge/source/42/nodes").json()
+
+    assert body["doc_id"] == 42
+    assert [n["id"] for n in body["nodes"]] == ["new_node", "old_node"]
+    assert body["subjects"] == ["高等数学", "考研数学"]
+    assert body["nodes"][0] == {"id": "new_node", "name": "二重积分", "subject": "高等数学"}
+
+
+def test_nodes_by_source_empty_when_no_marks(api):
+    """没建过图 / 手动建的节点 → 空列表（不是错误，前端据此提示"还没有关联知识点"）"""
+    body = api["client"].get("/api/v1/knowledge/source/999/nodes").json()
+
+    assert body == {"doc_id": 999, "subjects": [], "nodes": []}
+
+
+# ── POST 按小节出题 ──────────────────────────────────────────
+
+def test_section_quiz_triggers_background(api, monkeypatch):
+    """按小节出题：校验通过 → 起后台任务（带 section_id），返回 200"""
+    from app.core.quiz import chat_quiz
+    calls = []
+    monkeypatch.setattr(
+        chat_quiz, "start_background_generation",
+        lambda uid, *, node_id, section_id="": calls.append((uid, node_id, section_id)) or True)
+
+    r = api["client"].post("/api/v1/knowledge/node/new_node/section/s01/quiz")
+
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok", "node_id": "new_node", "section_id": "s01"}
+    assert calls == [(USER_ID, "new_node", "s01")]
+
+
+def test_section_quiz_404_for_missing_node_or_section(api, monkeypatch):
+    """节点不存在 / 小节不存在 → 404，且**不起**后台任务"""
+    from app.core.quiz import chat_quiz
+    calls = []
+    monkeypatch.setattr(
+        chat_quiz, "start_background_generation",
+        lambda uid, *, node_id, section_id="": calls.append((uid, node_id, section_id)) or True)
+
+    assert api["client"].post(
+        "/api/v1/knowledge/node/nope/section/s01/quiz").status_code == 404
+    assert api["client"].post(
+        "/api/v1/knowledge/node/new_node/section/s99/quiz").status_code == 404
+    assert calls == []
+
+
+def test_section_quiz_409_when_already_generating(api, monkeypatch):
+    """同用户已有出题任务在跑 → 409（复用 chat_quiz 的 per-user 去重位）"""
+    from app.core.quiz import chat_quiz
+    monkeypatch.setattr(chat_quiz, "start_background_generation",
+                        lambda uid, *, node_id, section_id="": False)
+
+    assert api["client"].post(
+        "/api/v1/knowledge/node/new_node/section/s01/quiz").status_code == 409
 
 
 # ── DELETE 单节 ─────────────────────────────────────────────
@@ -320,7 +400,8 @@ def test_real_section_read_delete_roundtrip(real_api):
     detail = real_api["client"].get("/api/v1/knowledge/node/legacy").json()
     assert detail["has_sections"] is True
     assert [s["id"] for s in detail["sections"]] == [sid]
-    assert set(detail["sections"][0]) == {"id", "title", "kind", "status", "updated_at"}
+    assert set(detail["sections"][0]) == {"id", "title", "kind", "status", "sources",
+                                          "updated_at"}
 
     sec = real_api["client"].get(
         f"/api/v1/knowledge/node/legacy/section/{sid}").json()

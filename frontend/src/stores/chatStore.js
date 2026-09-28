@@ -486,16 +486,6 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 更新节点掌握度
-   * @param {string} nodeId
-   * @param {number} mastery 0-100
-   */
-  async function updateMastery(nodeId, mastery) {
-    await apiClient.put(`/api/v1/knowledge/node/${encodeURIComponent(nodeId)}/mastery`, { mastery })
-    await refreshGraph(true)
-  }
-
-  /**
    * 删除节点及其所有关联边
    * @param {string} nodeId
    */
@@ -1025,7 +1015,6 @@ export const useChatStore = defineStore('chat', () => {
     createNode,
     updateNodeInfo,
     updateNodeContent,
-    updateMastery,
     deleteNode,
     createEdge,
     updateEdge,

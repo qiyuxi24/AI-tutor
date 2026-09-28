@@ -25,6 +25,10 @@
           <el-icon><Document /></el-icon>
           <span>审计日志</span>
         </el-menu-item>
+        <el-menu-item index="/usage">
+          <el-icon><DataLine /></el-icon>
+          <span>用量与缓存命中</span>
+        </el-menu-item>
       </el-menu>
       
       <div class="sidebar-footer">
@@ -77,7 +81,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Monitor, User, UserFilled, Document, Setting } from '@element-plus/icons-vue'
+import { Monitor, User, UserFilled, Document, Setting, DataLine } from '@element-plus/icons-vue'
 import api, { errorMessage } from '../api'
 
 const router = useRouter()

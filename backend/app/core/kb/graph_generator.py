@@ -468,7 +468,7 @@ def _render_outline(books: list[dict], units_by_book: dict) -> str:
 
 
 def _gather_concept_sources(name: str, units: list[dict],
-                            limit: int = GRAPH_CONCEPT_SOURCE_CHARS) -> tuple[str, list[dict]]:
+                            limit: int = GRAPH_CONCEPT_SOURCE_CHARS) -> tuple[str, list[dict], list[dict]]:
     """
     按概念名在生成单元里定位其相关原文，汇总为阶段 ② 单概念成文的输入。
 
@@ -478,33 +478,39 @@ def _gather_concept_sources(name: str, units: list[dict],
         name:  概念名（用于定位原文）
         units: 全部文件的生成单元（须含 book_node_id / book_name）
     返回:
-        (汇总文本, 来源条目)；来源条目元素为 {doc_id, doc_name, section, chunk_id}
-        （与 `kg.add_sources` 的 entries 一致）。定位不到时返回 ("", [])。
+        (汇总文本, 来源条目, 材料列表)：
+        - 来源条目元素为 {doc_id, doc_name, section, chunk_id}（与 `kg.add_sources` 的 entries 一致）；
+        - 材料列表 = 来源条目 + `text`（该条裁剪后的正文）——**逐来源保留文本边界**，
+          供 `section_generator` 按小节筛出"这一节实际用了哪几条"，从而落小节级 sources。
+        定位不到时返回 ("", [], [])。
     """
     key = (name or "").strip()
     if not key or not units:
-        return "", []
+        return "", [], []
     hits = [u for u in units if key in (u.get("text") or "")]
     if not hits:
         # 退化：概念名被换词表述时，用其 2-gram 兜底命中（宁多勿漏；下一阶段仍会按名判重）
         grams = {key[i:i + 2] for i in range(len(key) - 1)}
         hits = [u for u in units if any(g in (u.get("text") or "") for g in grams)] if grams else []
     if not hits:
-        return "", []
+        return "", [], []
     hits.sort(key=lambda u: (u.get("text") or "").count(key), reverse=True)
     parts: list[str] = []
     entries: list[dict] = []
+    materials: list[dict] = []
     total = 0
     for unit in hits:
         if total >= limit:
             break
         body = (unit.get("text") or "")[: limit - total]
+        entry = {"doc_id": unit.get("book_node_id"),
+                 "doc_name": unit.get("book_name", ""),
+                 "section": unit.get("title", ""), "chunk_id": None}
         parts.append(body)
-        entries.append({"doc_id": unit.get("book_node_id"),
-                        "doc_name": unit.get("book_name", ""),
-                        "section": unit.get("title", ""), "chunk_id": None})
+        entries.append(entry)
+        materials.append({**entry, "text": body})
         total += len(body)
-    return "\n\n".join(parts), entries
+    return "\n\n".join(parts), entries, materials
 
 
 # ── 骨架来源定位（断点续填用）──────────────────────────────────────
@@ -1163,7 +1169,8 @@ class GraphGenerator:
         all_units = all_units or []
         boards = [b for b in (result.get("boards") or []) if isinstance(b, dict)]
         nodes: list[dict] = []
-        gathered: dict[str, tuple[str, list[dict]]] = {}   # 概念 id → (汇总原文, 来源条目)
+        # 概念 id → (汇总原文, 来源条目, 材料列表)
+        gathered: dict[str, tuple[str, list[dict], list[dict]]] = {}
         for b in boards:
             for c in (b.get("concepts") or []):
                 if not isinstance(c, dict):
@@ -1179,7 +1186,7 @@ class GraphGenerator:
                       for c in nodes}
         # 逐概念来源定位：主来源单元的首条决定 source_ref（断点续填按它重读原书）
         source_ref_by_id = {nid: _make_source_ref(entries[0]["doc_id"], entries[0]["section"])
-                            for nid, (_, entries) in gathered.items() if entries}
+                            for nid, (_, entries, _m) in gathered.items() if entries}
 
         write = await self._write_skeleton(
             kg, subject, {"nodes": nodes, "edges": result.get("edges") or []},
@@ -1189,7 +1196,7 @@ class GraphGenerator:
         pending_ids = set(write.get("pending_node_ids") or [])
 
         # 来源记录（GQ-18）：概念 → 骨架节点（用实际落点 id）
-        for nid, (_, entries) in gathered.items():
+        for nid, (_, entries, _m) in gathered.items():
             real_id = id_by_name.get(name_by_id.get(nid, ""))
             if real_id:
                 self._record_sources(kg, real_id, entries)
@@ -1202,11 +1209,11 @@ class GraphGenerator:
             real_id = id_by_name.get(cname)
             if real_id not in pending_ids:
                 continue
-            text, entries = gathered.get(nid, ("", []))
+            text, entries, materials = gathered.get(nid, ("", [], []))
             pending_concepts.append({
                 "node_id": real_id, "name": cname,
                 "summary": str(c.get("summary") or ""), "text": text,
-                "entries": entries,
+                "entries": entries, "materials": materials,
                 "section": entries[0]["section"] if entries else "",
                 "primary_book_id": entries[0]["doc_id"] if entries else None,
             })
@@ -1224,10 +1231,11 @@ class GraphGenerator:
             if not node:
                 continue   # 模型编造 / 不属于本用户 → 丢弃（不瞎标）
             hit_node_ids.append(hid)
-            text, entries = _gather_concept_sources(node.get("name", ""), all_units)
+            text, entries, materials = _gather_concept_sources(node.get("name", ""), all_units)
             hit_fills.append({
                 "node_id": hid, "name": node.get("name", ""),
                 "summary": node.get("summary", ""), "text": text, "entries": entries,
+                "materials": materials,
                 "section": entries[0]["section"] if entries else "",
                 "primary_book_id": entries[0]["doc_id"] if entries else None,
             })
@@ -1240,7 +1248,8 @@ class GraphGenerator:
     async def _fill_concept(self, kg, subject: str, section: str, source_text: str,
                             brief: dict,
                             sources: list[dict] | None = None,
-                            mode: str = "replace", doc_name: str = "") -> dict:
+                            mode: str = "replace", doc_name: str = "",
+                            materials: list[dict] | None = None) -> dict:
         """
         阶段 ② 的统一出口：把这个概念的内容写出来（返回契约固定为
         `{filled, rejected_shallow, failed_fills}`）。
@@ -1256,16 +1265,20 @@ class GraphGenerator:
             sources:  该概念的来源条目（写正文后并入节点，GQ-18）
             mode:     "replace"（**新增**概念）/ "append"（**命中**现有节点的增补）
             doc_name: mode="append" 时标注补充来源的资料名
+            materials: 来源条目 + 各自正文（`_gather_concept_sources` 的第三返回值）——
+                      小节化路径用它落**小节级 sources**；缺省时由 SectionGenerator 自取
         返回: {"filled": [名字...], "rejected_shallow": [名字...], "failed_fills": n}
         """
         nid = str(brief.get("id") or "").strip()
         if mode == "append" and not self._has_sections(kg, nid):
             return await self._fill_legacy(kg, subject, section, source_text, brief,
                                            sources, doc_name)
-        return await self._fill_sections(kg, brief, source_text, sources, mode, doc_name)
+        return await self._fill_sections(kg, brief, source_text, sources, mode, doc_name,
+                                         materials)
 
     async def _fill_sections(self, kg, brief: dict, source_text: str,
-                             sources: list[dict] | None, mode: str, doc_name: str) -> dict:
+                             sources: list[dict] | None, mode: str, doc_name: str,
+                             materials: list[dict] | None = None) -> dict:
         """
         **小节化成文**（新数据结构的正文形态）：概念 → 规划内聚小节 → 逐节独立成 MD。
 
@@ -1281,6 +1294,7 @@ class GraphGenerator:
         name = str(brief.get("name") or "") or nid
         stats = await SectionGenerator(self.user_id).generate(
             kg, nid,
+            materials=materials or None,
             source_text=source_text or None,
             append=(mode == "append"),      # 命中已小节化节点 → 追加新小节，不覆盖既有节
             title_suffix=(f"（《{doc_name}》补充）" if mode == "append" and doc_name else ""))
@@ -1651,9 +1665,10 @@ class GraphGenerator:
             node = kg.get_node(nid)
             if not node:
                 continue
-            text, entries = _gather_concept_sources(node.get("name", ""), units)
+            text, entries, materials = _gather_concept_sources(node.get("name", ""), units)
             items.append({"node_id": nid, "name": node.get("name", ""),
                           "summary": node.get("summary", ""), "text": text, "entries": entries,
+                          "materials": materials,
                           "section": entries[0]["section"] if entries else ""})
         return items
 
@@ -1678,7 +1693,7 @@ class GraphGenerator:
                 kg, subject, item.get("section", ""), item.get("text", ""),
                 {"id": item["node_id"], "name": item.get("name", ""),
                  "summary": item.get("summary", "")},
-                sources=item.get("entries"),
+                sources=item.get("entries"), materials=item.get("materials"),
                 mode="replace" if is_skeleton else "append", doc_name=book["name"])
             aggregate["filled_nodes"].extend(fill["filled"])
             aggregate["rejected_shallow"].extend(fill["rejected_shallow"])

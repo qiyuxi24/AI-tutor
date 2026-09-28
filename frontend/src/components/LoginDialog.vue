@@ -153,17 +153,18 @@ async function handleSubmit() {
 .form-group input {
   height: 40px;
   padding: 0 12px;
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
   color: var(--color-text-primary);
-  font-size: 14px;
+  font-size: var(--font-size-base);
   outline: none;
-  transition: border-color 0.2s ease;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .form-group input:focus {
-  border-color: var(--color-blue-light);
+  border-color: var(--color-border-focus);
+  box-shadow: 0 0 0 2px var(--color-primary-ring);
 }
 
 .form-group input::placeholder {
@@ -174,17 +175,17 @@ async function handleSubmit() {
   padding: 10px 12px;
   background: var(--color-red-light);
   border: 1px solid var(--color-red);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--color-red);
   font-size: 13px;
 }
 
 .submit-btn {
   height: 42px;
-  background: var(--color-blue-light);
-  color: var(--color-bg-secondary);
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
@@ -192,7 +193,7 @@ async function handleSubmit() {
 }
 
 .submit-btn:hover:not(:disabled) {
-  background: var(--color-blue);
+  background: var(--color-primary-dark);
 }
 
 .submit-btn:disabled {
@@ -208,7 +209,7 @@ async function handleSubmit() {
 }
 
 .switch-mode a {
-  color: var(--color-blue-light);
+  color: var(--color-primary);
   text-decoration: none;
   font-weight: 500;
 }

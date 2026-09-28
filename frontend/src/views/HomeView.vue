@@ -19,6 +19,10 @@ import { useChatStore, BACKEND_RELOADED_EVENT } from '../stores/chatStore'
 import { useAuthStore } from '../stores/authStore'
 import { formatError, clientError } from '../utils/errorCodes.js'
 import { notifyError, notifyInfo } from '../utils/feedback'
+import { ballPrefs, loadBallPrefs } from '../utils/floatingBall.js'
+import { loadAvatar } from '../utils/avatar.js'
+import FloatingBall from '../components/FloatingBall.vue'
+import { fetchSourceNodes } from '../api/kb.js'
 import ActivityBar from '../components/ActivityBar.vue'
 import ConversationSidebar from '../components/ConversationSidebar.vue'
 import ChatArea from '../components/ChatArea.vue'
@@ -144,6 +148,10 @@ onMounted(async () => {
   if (!ok) showLoginDialog.value = true
   // init() 内部依次：fetchSubjects() → ensureSubjectSelected() → fetchGraph() → connectSSE()
   store.init()
+  // 悬浮球开关（真值源 = 服务端账号偏好，跟账号走）→ 写入共享状态，供 FloatingBall 使用
+  loadBallPrefs()
+  // 用户头像（真值源 = 服务端的头像图片）→ 写入共享状态，供 ActivityBar / MessageBubble 使用
+  loadAvatar()
   // 后端重载 → 局部刷新（开发态，见 handleBackendReloaded）
   if (import.meta.env.DEV) {
     window.addEventListener(BACKEND_RELOADED_EVENT, handleBackendReloaded)
@@ -224,19 +232,6 @@ async function handleNodeDetailSave({ nodeId, content, onResult }) {
 }
 
 /**
- * NodeDetail 掌握度滑块：通过 Store.updateMastery() 执行。
- */
-async function handleNodeDetailMastery({ nodeId, mastery, onResult }) {
-  try {
-    await store.updateMastery(nodeId, mastery)
-    if (onResult) onResult(null)
-  } catch (e) {
-    const msg = formatError(e, { action: '更新掌握度' })
-    if (onResult) onResult(msg)
-  }
-}
-
-/**
  * 刷新图谱 + 同步更新节点详情弹窗（如果打开着）
  */
 async function refreshGraph() {
@@ -297,6 +292,58 @@ async function handleGraphAction({ action, payload }) {
     notifyError(formatError(e, { action: `图谱操作: ${action}` }))
   }
 }
+
+// ════════════════════════════════════════════════════════════════
+//  「在图谱中显示」：知识库右键文件 → 高亮"用了这份资料"的节点
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * sourceHighlight = { docId, docName, nodeIds, subject, total }；null = 未高亮。
+ * `docId` 同时传给 NodeDetail —— 打开节点时它按 doc_id 本地高亮该文件的小节与题目
+ * （`sections[].sources` / `quizzes[].source_docs` 都在详情响应里，零额外请求）。
+ */
+const sourceHighlight = ref(null)
+const sourceNodes = computed(() => sourceHighlight.value?.nodeIds || [])
+
+/**
+ * 反查该资料影响的节点 → 切图谱视图 → 切到命中最多的学科 → 高亮 + 聚焦第一个命中节点。
+ * 为什么要选学科：图谱一次只渲染一个学科，而一份资料可能横跨多个（见设计文档的学科切片）。
+ */
+async function handleShowInGraph({ docId, docName }) {
+  try {
+    const { data } = await fetchSourceNodes(docId)
+    const nodes = data?.nodes || []
+    if (!nodes.length) {
+      notifyInfo(`「${docName}」还没有关联的知识点（只有用它建过图才会有）`)
+      return
+    }
+
+    const count = {}
+    for (const n of nodes) if (n.subject) count[n.subject] = (count[n.subject] || 0) + 1
+    const subject = Object.keys(count).sort((a, b) => count[b] - count[a])[0] || ''
+    const ids = nodes.filter(n => !subject || n.subject === subject).map(n => n.id)
+    sourceHighlight.value = { docId, docName, nodeIds: ids, subject, total: nodes.length }
+
+    if (viewMode.value !== 'graph') viewMode.value = 'graph'
+    if (subject && subject !== store.currentSubject) {
+      await store.setSubject(subject)
+      await new Promise(r => setTimeout(r, 450))   // 等新学科的力导向图渲染完（同 switchSubjectAndFocus）
+    }
+    forceGraphRef.value?.focusNode(ids[0])
+    notifyInfo(ids.length < nodes.length
+      ? `「${docName}」涉及 ${nodes.length} 个知识点，已切到「${subject}」并高亮其中 ${ids.length} 个`
+      : `已高亮「${docName}」关联的 ${ids.length} 个知识点`)
+  } catch (e) {
+    notifyError(formatError(e, { action: '在图谱中显示' }))
+  }
+}
+
+// 用户手动切到别的学科 → 高亮节点不在画布上了，清掉（程序自己切到 subject 的那次不触发）
+watch(() => store.currentSubject, (s) => {
+  if (sourceHighlight.value && s && s !== sourceHighlight.value.subject) {
+    sourceHighlight.value = null
+  }
+})
 
 /**
  * 搜索选中节点 → 切换到图谱视图并聚焦该节点
@@ -473,10 +520,26 @@ const slideTransition = {
             :error="store.graphError"
             :next-node-id="store.nextToLearn?.node_id || ''"
             :path-board-open="showPathBoard"
+            :source-nodes="sourceNodes"
             @node-dblclick="handleNodeDblClick"
             @toggle-path-board="togglePathBoard"
             @graph-action="handleGraphAction"
           />
+
+          <!-- 「在图谱中显示」时的来源高亮提示条（可手动取消） -->
+          <div v-if="sourceHighlight" class="source-hl-chip">
+            <span class="source-hl-text">
+              来源高亮：{{ sourceHighlight.docName }}
+              · {{ sourceHighlight.nodeIds.length }} 个知识点
+            </span>
+            <button type="button" class="source-hl-close" title="取消高亮"
+                    @click="sourceHighlight = null">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2.5" stroke-linecap="round">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
 
           <!-- 右侧知识库栏（统一 SidePanel）：宽度经 --kb-w 驱动画布缩放控件让位 -->
           <SidePanel
@@ -490,7 +553,7 @@ const slideTransition = {
             v-model:collapsed="kbCollapsed"
             resizable-height
           >
-            <KbPanel :key="viewEpoch" />
+            <KbPanel :key="viewEpoch" @show-in-graph="handleShowInGraph" />
           </SidePanel>
 
           <!-- 右侧：学习任务栏（分层看板；点图例里的「学习路径」开关）
@@ -545,10 +608,10 @@ const slideTransition = {
     <NodeDetail
       :nodeInfo="nodeDetailModal"
       :visible="nodeDetailVisible"
+      :source-doc-id="sourceHighlight?.docId || null"
       @close="closeNodeDetail"
       @refresh="refreshGraph"
       @save-content="handleNodeDetailSave"
-      @update-mastery="handleNodeDetailMastery"
       @navigate-to-node="handleNodeDetailNavigate"
       @open-quiz="handleOpenQuiz"
     />
@@ -673,6 +736,26 @@ const slideTransition = {
 .graph-nav .graph-subject-bar {
   flex: 1 1 auto;
 }
+
+/* 来源高亮提示条：浮在画布顶部居中 —— 只让开右栏宽度（左栏宽度是侧栏内部状态，拿不到变量） */
+.source-hl-chip {
+  position: absolute; z-index: 5;
+  left: 50%; top: 16px;
+  transform: translateX(calc(-50% - var(--kb-w, 0px) / 2));
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px 6px 12px; border-radius: 16px;
+  background: var(--color-bg-secondary); border: 1px solid var(--color-accent-light);
+  color: var(--color-text-secondary); font-size: 12px;
+  box-shadow: var(--shadow-popup);
+  max-width: min(420px, 60vw);
+}
+.source-hl-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-hl-close {
+  flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0; border: none; border-radius: 50%;
+  background: transparent; color: var(--color-text-muted); cursor: pointer;
+}
+.source-hl-close:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
 
 /* 画布右下角的缩放控件同样要给右栏让位（它原来贴 right:16px）；
    rightReserve 把知识库栏与学习任务栏一起算进去（两边互斥）。 */

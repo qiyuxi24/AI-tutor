@@ -39,7 +39,7 @@
 - **四份 SSOT**：① 存储结构/检索通路/改造清单 = `docs/知识图谱/知识图谱_数据结构与检索通路_评审与改良方案.md`（KG-D1~D15；**表定义真值仍是 `knowledge_graph.py::_create_tables`**）；② 设计说明/业界对比/准确率口径 = `知识图谱_数据结构设计说明与业界对比.md`；③ 生成质量 = 根 `TODO_Graph_Quality.md`（GQ-1…GQ-14）；④ 角色契约 = `知识图谱_参照系契约.md` v4。裁决链：运行时行为 > 契约 > AGENTS.md > 其他文档。
 - **KG-D 进度（2026-09-23）**：已落地 D1（subject 列）、D2（tags 不写难度档）、D3（`node_aliases` 判重）、D4（`mastery_events`，唯一写入点 = `update_node_info`）、D5（检索关键词兜底 + chunk_index 全局递增）、D6（edges 时间戳 + 唯一索引）+ `nodes.updated_at`。**刻意未做**：`weight`（无写入方）、`relation` 触发器、无向归一化（存量无反向重复）。**待拍板**：D7 层级粒度（用户已定"真实章节点 + 物化 path 两者都做"）。
 - 生成质量：节点过浅已修；重名重复已修 —— 判重唯一实现 `find_node_by_name`，`create_node_with_content` 命中即并轨并**返回实际落点 ID**；体检/合并 = `scripts/inspect_graph_quality.py`（`--user N`、`--fix-dupes [--apply]`）。
-- 掌握度四档 `mastery_bucket()`（WEAK 30 / MASTERED 70）；**唯一主信号 = 出题判分**（`grade_answer` +20）；出题跨调用去重（`avoid_questions`）；触发类提示词必须写"不要做什么"。
+- 掌握度四档 `mastery_bucket()`（WEAK 30 / MASTERED 70）；**唯一主信号 = 出题判分**（`grade_answer` +20）；出题跨调用去重（`avoid_questions`）；触发类提示词必须写"不要做什么"。**手动入口已删（2026-09-28）**：NodeDetail 滑块 / `PUT /knowledge/node/{id}/mastery` / `chatStore.updateMastery` 全部移除，勿重加。
 
 ## RAG
 - 四层：图谱 rag(`core/rag/`) + 上传 kb(`core/kb/`) + `hybrid_search/` + 对话注入 `rag_pipeline/`（`RagSource` 协议 + 规则 router；**gather 必须 `return_exceptions=True`**；单源 8s 超时静默返空）。

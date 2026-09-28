@@ -16,6 +16,7 @@ import {
   saveProfileData,
   deleteProfileNote,
 } from '../api/index.js'
+import { confirmAction } from '../utils/feedback'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -172,7 +173,7 @@ function saveCurrent() {
 
 /** 删除观察笔记 */
 async function removeNote(noteId) {
-  if (!confirm('确定删除这条 AI 观察笔记吗？')) return
+  if (!(await confirmAction('确定删除这条 AI 观察笔记吗？此操作不可撤销。'))) return
   saving.value = true
   error.value = ''
   try {

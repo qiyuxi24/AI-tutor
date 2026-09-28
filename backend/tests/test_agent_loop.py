@@ -48,13 +48,16 @@ def _resp(msg, prompt_tokens=120) -> SimpleNamespace:
 
 
 def _install_fake_chat(monkeypatch, responses: list, received: list):
-    """把 agent_loop._chat_once 换成按序返回 responses 的 fake，记录每次请求的 messages 与 tools。"""
+    """把 agent_loop._chat_once 换成按序返回 responses 的 fake，
+    记录每次请求的 messages / tools / tool_choice（供收尾缓存前缀断言）。"""
     queue = list(responses)
 
-    async def fake_chat(api_messages, *, temperature, tools=None, max_tokens=2000):
+    async def fake_chat(api_messages, *, temperature, tools=None,
+                        tool_choice=None, max_tokens=2000):
         received.append({
             "messages": copy.deepcopy(api_messages),
             "tools": copy.deepcopy(tools),
+            "tool_choice": tool_choice,
         })
         return queue.pop(0)
 
@@ -150,7 +153,7 @@ def test_second_tool_calls_not_dropped(monkeypatch):
 
 
 def test_max_rounds_force_finish(monkeypatch):
-    """达 max_rounds 仍请求工具 → 不再执行新工具，注入停止提示 + 空 tools 强制文本收尾。"""
+    """达 max_rounds 仍请求工具 → 不再执行新工具，注入停止提示 + tool_choice="none" 强制文本收尾。"""
     received = []
     _install_fake_chat(monkeypatch, [
         _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q1"}, tc_id="c1")])),
@@ -165,8 +168,10 @@ def test_max_rounds_force_finish(monkeypatch):
     assert result.total_llm_calls == 3
     # 第 1 轮（round 0 < max_rounds）执行了工具；第 2 轮（round 1 == max_rounds）不执行
     assert len(result.rounds) == 1
-    # 强制收尾那次请求不带 tools，且追加停止调用指令（以 user 消息规避多 system 风险）
-    assert received[2]["tools"] is None
+    # 强制收尾那次请求**保留 tools**（保住缓存前缀，见上下文工程 §3.4）+ tool_choice="none"
+    # （语义上仍不调工具），且追加停止调用指令（以 user 消息规避多 system 风险）
+    assert received[2]["tools"] == received[0]["tools"]      # 与轮内 tools 逐字节一致
+    assert received[2]["tool_choice"] == "none"
     assert received[2]["messages"][-1]["role"] == "user"
     assert "停止调用工具" in received[2]["messages"][-1]["content"]
 
@@ -272,14 +277,20 @@ def test_natural_finish_empty_content_fallback(monkeypatch):
 
 
 def test_force_finish_llm_error_fallback(monkeypatch):
-    """达上限强制收尾时 LLM 调用也失败 → 退化固定文案，不抛异常。"""
+    """达上限强制收尾时 LLM 调用也失败 → 退化固定文案，不抛异常。
+
+    收尾会先试 `tool_choice="none"`，被拒后降级为不带 tools 再试一次；两次都抛异常时
+    仍退化固定文案。llm_calls 按真实调用次数计（轮内 1 + 收尾尝试 2 = 3），不为好看只加 1。
+    """
     responses = [
         _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q1"}, tc_id="c1")])),
-        None,  # 第二次（强制收尾请求）抛异常
+        None,  # 收尾第 1 次（带 tool_choice="none"）抛异常
+        None,  # 收尾降级重试（不带 tools）也抛异常
     ]
     queue = list(responses)
 
-    async def fake_chat(api_messages, *, temperature, tools=None, max_tokens=2000):
+    async def fake_chat(api_messages, *, temperature, tools=None,
+                        tool_choice=None, max_tokens=2000):
         item = queue.pop(0)
         if item is None:
             raise RuntimeError("[E-LLM-001] 模拟超时")
@@ -291,7 +302,7 @@ def test_force_finish_llm_error_fallback(monkeypatch):
     result = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}], kg=object(), max_rounds=0))
 
     assert "已达上限" in result.text
-    assert result.total_llm_calls == 2
+    assert result.total_llm_calls == 3
 
 
 # ─── 消息发射中间件（app/core/agent/events.py）───
@@ -353,9 +364,11 @@ def test_loop_events_flow_through_emitter(monkeypatch):
 def test_old_tool_results_cleared_across_rounds(monkeypatch):
     """接线守卫：清理必须真的在 loop 里被调用（历史上曾把它落在永远匹配不到的 guard 里）。
 
+    清理改为**越预算线才触发**，故这里把阈值调小以走到清理路径：
     第 3 个工具批次起，最早批次的 tool 正文应在**下一次请求**里已被占位符替换，
     而 tool_call_id / assistant tool_calls 保持配对（否则服务端 400）。
     """
+    monkeypatch.setattr(agent_loop, "AGENT_CLEAR_TOOL_RESULTS_TOKENS", 1)  # 小阈值 → 每轮越线
     received = []
     big = "检索到的知识片段正文。" * 200
     _install_fake_chat(monkeypatch, [
@@ -444,10 +457,11 @@ def test_tool_call_budget_stops_early(monkeypatch):
     assert calls == ["rag_search"]              # 只放行 1 次
     assert result.stop_reason == "call_budget"
     assert result.text == "够了，我先回答到这里。"
-    # 收尾那次请求不带 tools（模型无法再请求工具）
+    # 收尾那次请求保留 tools + tool_choice="none"（模型无法再请求工具，但缓存前缀不破）
     assert len(received) == 2
     last = received[-1]
-    assert last["tools"] is None
+    assert last["tools"] == received[0]["tools"]
+    assert last["tool_choice"] == "none"
     assert last["messages"][-1]["role"] == "user"
     assert "停止调用工具" in last["messages"][-1]["content"]
 

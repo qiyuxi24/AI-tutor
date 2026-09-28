@@ -24,6 +24,7 @@
 
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { confirmAction } from '../utils/feedback'
 import { useChatStore } from '../stores/chatStore'
 import { useContextMenu } from '../utils/contextMenu'
 import ContextMenu from './ContextMenu.vue'
@@ -89,16 +90,11 @@ async function handleRename() {
 async function handleDelete() {
   const s = menuSubject.value
   if (!s) return
-  try {
-    await ElMessageBox.confirm(
-      `确定删除学科「${s.subject}」的整个知识图谱吗？该学科 ${s.node_count} 个知识点及其关系、`
-        + '掌握度记录将被永久删除。知识库中的教材原文不受影响。',
-      '删除学科图谱',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-    )
-  } catch {
-    return   // 取消
-  }
+  const ok = await confirmAction(
+    `确定删除学科「${s.subject}」的整个知识图谱吗？该学科 ${s.node_count} 个知识点及其关系、`
+      + '掌握度记录将被永久删除。知识库中的教材原文不受影响。'
+  )
+  if (!ok) return   // 取消
   try {
     const r = await store.deleteSubjectGraph(s.subject)
     ElMessage.success(`已删除「${s.subject}」：${r.deleted_nodes} 个知识点`)
