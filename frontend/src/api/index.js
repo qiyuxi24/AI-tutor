@@ -156,6 +156,10 @@ export const sendMessageStream = (messages, callbacks = {}, currentNode = '', kb
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let fullReply = ''
+      // 冗余兜底：后端在 [DONE] 前会再带一份最终文本。
+      // agent loop 的最终文本是「收尾一次性单帧」下发的（非逐 token），
+      // 那一帧若在事件排空窗口丢失，前端会整条消息都拿不到内容。
+      let finalReply = ''
       let buffer = ''
 
       while (true) {
@@ -172,6 +176,11 @@ export const sendMessageStream = (messages, callbacks = {}, currentNode = '', kb
           if (!line.startsWith('data: ')) continue
           const data = line.slice(6).trim()
           if (data === '[DONE]') {
+            // 一帧 token 都没收到 → 用冗余帧兜底（否则 onDone 收到空串会当成空回答）
+            if (!fullReply && finalReply) {
+              fullReply = finalReply
+              onToken?.(finalReply)
+            }
             onDone?.(fullReply)
             return
           }
@@ -199,6 +208,12 @@ export const sendMessageStream = (messages, callbacks = {}, currentNode = '', kb
             else if (parsed.type === 'agent_done') {
               onAgentDone?.(parsed)
             }
+            else if (parsed.type === 'final') {
+              // 冗余最终文本（后端在 [DONE] 前补发）：先存下，仅在"一帧 token 都没收到"
+              // 时兜底渲染，见下方 [DONE] 处理。
+              // （原 `graph_updated` 忽略分支已在重构中移除，未匹配的事件类型本来就自然落空。）
+              finalReply = parsed.text || ''
+            }
             else if (parsed.error) {
               onError?.(parsed.error)
               return
@@ -210,6 +225,10 @@ export const sendMessageStream = (messages, callbacks = {}, currentNode = '', kb
       }
 
       // 流结束但没有 [DONE] 信号
+      if (!fullReply && finalReply) {
+        fullReply = finalReply
+        onToken?.(finalReply)
+      }
       onDone?.(fullReply)
     })
     .catch((err) => {

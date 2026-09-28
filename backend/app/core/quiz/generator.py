@@ -128,7 +128,13 @@ async def _search_materials(user_id: int, subject: str,
 
     node_id 指定文件/文件夹 → 限定该范围；None → 检索全部上传文档。
     返回片段 content 列表。
+
+    top_k <= 0 显式关闭检索（对话内出题走这条：依据必须只有图谱节点正文，
+    见 `chat_quiz.CHAT_QUIZ_TOP_K` 的注释）—— 早返回而不依赖 kb_manager
+    对 top_k=0 的处理语义。
     """
+    if top_k <= 0:
+        return []
     try:
         node_ids = None
         if node_id is not None:

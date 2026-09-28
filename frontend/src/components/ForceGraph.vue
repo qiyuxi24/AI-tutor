@@ -6,7 +6,7 @@
  * 本组件只负责：
  *   1. 把 store 的可见图与高亮态喂给内核；
  *   2. 右键菜单 → 编辑弹窗 / 展开合并 / 建边删边 的交互编排；
- *   3. 覆盖层：加载 / 错误 / 空态、缩放控件、图例 + 学习路径开关、更新提示。
+ *   3. 覆盖层：加载 / 错误 / 空态、缩放控件、图例 + 学习任务栏入口、更新提示。
  *
  * 设计风格：Obsidian 极简 —— 纯色节点、细线边、无光晕/渐变/装饰。
  *
@@ -33,12 +33,10 @@ const props = defineProps({
   autoRefresh: { type: Boolean, default: false },
   refreshInterval: { type: Number, default: 30000 },
   // ── 科技树联动（学习进度） ──
-  // 按学习顺序排列的节点（拓扑路径），用于"显示学习路径"高亮
-  learningPath: { type: Array, default: () => [] },
   // 下一步推荐节点 id（薄弱点脉冲标记）
   nextNodeId: { type: String, default: '' },
-  // 外部强制显示学习路径（仪表盘联动用）
-  showPath: { type: Boolean, default: false },
+  // 右侧「学习任务栏」是否打开（仅用于底部按钮的高亮态，图本身不参与路径表达）
+  pathBoardOpen: { type: Boolean, default: false },
 })
 
 /* ================================================================
@@ -48,6 +46,7 @@ const emit = defineEmits([
   'node-click',
   'node-dblclick',
   'graph-action',
+  'toggle-path-board',
 ])
 
 /* ================================================================
@@ -75,10 +74,6 @@ const dialogVisible = ref(false)
 const dialogMode = ref('create-node')
 const dialogData = ref({})
 
-// ── 科技树联动 ──
-// 本地"显示学习路径"开关；最终生效值 = 本地开关 OR 外部 props.showPath
-const pathVisible = ref(false)
-const pathVisibleFinal = computed(() => pathVisible.value || props.showPath)
 // 力导向参数（设置页可调；模块级单例，改参数即时生效，见 utils/graphForces.js）
 const { forces } = useGraphForces()
 
@@ -87,13 +82,9 @@ const { forces } = useGraphForces()
    ================================================================ */
 let engine = null
 
-/** 喂给内核的高亮态（学习路径开关 / 路径数据 / 推荐节点） */
+/** 喂给内核的高亮态（下一步推荐节点的脉冲环） */
 function highlightState() {
-  return {
-    pathVisible: pathVisibleFinal.value,
-    learningPath: props.learningPath,
-    nextNodeId: props.nextNodeId,
-  }
+  return { nextNodeId: props.nextNodeId }
 }
 
 onMounted(() => {
@@ -132,9 +123,7 @@ watch(() => [props.nodes, props.edges], () => {
   engine?.update(props.nodes, props.edges)
 }, { deep: true })
 
-// ── 科技树联动：路径开关 / 路径数据 / 推荐节点变化时增量刷新样式（不重建布局） ──
-watch(pathVisibleFinal, syncHighlight)
-watch(() => props.learningPath, syncHighlight)
+// ── 科技树联动：推荐节点变化时增量刷新样式（不重建布局） ──
 watch(() => props.nextNodeId, syncHighlight)
 function syncHighlight() {
   engine?.setHighlight(highlightState())
@@ -353,9 +342,9 @@ defineExpose({ focusNode })
       <span class="legend-divider"></span>
       <button
         class="path-toggle"
-        :class="{ active: pathVisibleFinal }"
-        :title="pathVisibleFinal ? '隐藏学习路径' : '显示学习路径（该走的路）'"
-        @click="pathVisible = !pathVisible"
+        :class="{ active: pathBoardOpen }"
+        :title="pathBoardOpen ? '收起学习任务栏' : '打开学习任务栏（分层列出知识点与前置）'"
+        @click="emit('toggle-path-board')"
       >
         <span class="path-toggle-dot"></span>学习路径
       </button>

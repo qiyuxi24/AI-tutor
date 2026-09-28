@@ -14,7 +14,7 @@
  * 主题切换 / 用户菜单已下沉到 ActivityBar 组件内部。
  */
 
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useChatStore, BACKEND_RELOADED_EVENT } from '../stores/chatStore'
 import { useAuthStore } from '../stores/authStore'
 import { formatError, clientError } from '../utils/errorCodes.js'
@@ -26,6 +26,7 @@ import ConversationSidebar from '../components/ConversationSidebar.vue'
 import ChatArea from '../components/ChatArea.vue'
 import ForceGraph from '../components/ForceGraph.vue'
 import GraphSubjectBar from '../components/GraphSubjectBar.vue'
+import PathBoard from '../components/PathBoard.vue'
 import NodeDetail from '../components/NodeDetail.vue'
 import UserProfile from '../components/UserProfile.vue'
 import GraphSearch from '../components/GraphSearch.vue'
@@ -52,6 +53,9 @@ const graphNavWidth = ref(240)
 const kbCollapsed = ref(false)
 const kbWidth = ref(320)
 
+// 学习任务栏宽度：必须与下方 .graph-path-board 的 width 一致（画布缩放控件按它让位）
+const PATH_BOARD_WIDTH = 360
+
 // ─── 开发态：后端代码改动 → 自动局部刷新 ───
 // 后端 uvicorn --reload 重启会掐断 SSE（见 chatStore.connectSSE），重连成功即"已重载"；
 // 此时把 epoch +1 让子视图重挂 → 各自的 onMounted 重新拉数据（这就是"局部刷新"）。
@@ -72,6 +76,53 @@ const showLoginDialog = ref(false)
 const graphSearchRef = ref(null)
 const forceGraphRef = ref(null)
 const onboardingRef = ref(null)
+
+// ─── 右侧「学习任务栏」───
+// 路径不画在图上（图上一淡出就丢上下文），改成右侧弹出的分层看板。
+const showPathBoard = ref(false)
+
+/**
+ * 任务栏与知识库栏争同一条右边缘 → 开任务栏时收起知识库（反之展开知识库时
+ * 关任务栏，见下方 watch）。两边都能搌开、又都不遮对方，比堆叠更好预测。
+ */
+function togglePathBoard() {
+  showPathBoard.value = !showPathBoard.value
+  if (showPathBoard.value) kbCollapsed.value = true
+}
+
+// 用户手动展开知识库 → 让位（否则两张卡片在同一位置重叠）
+watch(kbCollapsed, (collapsed) => {
+  if (!collapsed) showPathBoard.value = false
+})
+
+/**
+ * 画布要向右让出多少：知识库栏（或任务栏）占用的那一条。
+ * 两边互斥，所以取当前实际占位的那一个；都收起则为 0。
+ */
+const rightReserve = computed(() => {
+  if (!kbCollapsed.value) return kbWidth.value
+  return showPathBoard.value ? PATH_BOARD_WIDTH : 0
+})
+
+/**
+ * 任务栏数据只在面板打开时拉、且打开着的时候切学科/板块要跟着重算
+ * （否则表里是上一个学科的知识点，和画布对不上）。
+ */
+watch(
+  () => [showPathBoard.value, store.currentSubject, store.currentBoard],
+  ([open]) => { if (open) store.fetchPathBoard() },
+  { immediate: true }
+)
+
+/** 任务栏「在图谱中定位」：把画布视角移到该节点（引擎自带平滑聚焦） */
+function handlePathBoardFocus(nodeId) {
+  forceGraphRef.value?.focusNode(nodeId)
+}
+
+/** 任务栏「修改掌握度」：复用节点详情弹窗（掌握度滑块在那儿，不做第二套入口） */
+async function handlePathBoardEdit(nodeId) {
+  await handleNodeDblClick(nodeId)
+}
 
 // ─── 节点详情弹窗 ───
 const nodeDetailModal = ref(null)
@@ -199,6 +250,8 @@ async function refreshGraph() {
       nodeDetailModal.value = await store.fetchNodeDetail(nodeDetailModal.value.id)
     } catch { /* ignore */ }
   }
+  // 任务栏打开时一并重算：改完掌握度要立刻看到解锁状态与追溯结果变化
+  if (showPathBoard.value) store.fetchPathBoard()
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -395,7 +448,7 @@ const slideTransition = {
           v-if="viewMode === 'graph'"
           class="graph-layout"
           data-view="graph"
-          :style="{ '--kb-w': kbCollapsed ? '0px' : kbWidth + 'px' }"
+          :style="{ '--kb-w': rightReserve + 'px' }"
         >
           <!-- 左侧导航：搜索 + 学科列表，一次只渲染一个学科（避免图谱无限生长）。
                整张卡片的外观/折叠/拖宽/拖高都由 SidePanel 统一提供，收起时搜索栏一起收起。 -->
@@ -425,9 +478,10 @@ const slideTransition = {
             :edges="store.displayEdges"
             :loading="!store.graphLoaded"
             :error="store.graphError"
-            :learning-path="store.learningPath"
             :next-node-id="store.nextToLearn?.node_id || ''"
+            :path-board-open="showPathBoard"
             @node-dblclick="handleNodeDblClick"
+            @toggle-path-board="togglePathBoard"
             @graph-action="handleGraphAction"
           />
 
@@ -445,6 +499,24 @@ const slideTransition = {
           >
             <KbPanel :key="viewEpoch" />
           </SidePanel>
+
+          <!-- 右侧：学习任务栏（分层看板；点图例里的「学习路径」开关）
+               与知识库栏互斥（见 togglePathBoard） -->
+          <Transition name="view-fade">
+            <PathBoard
+              v-if="showPathBoard"
+              class="graph-path-board"
+              :items="store.pathBoard.items"
+              :recommended="store.pathBoard.recommended"
+              :stats="store.pathBoard.stats"
+              :loading="store.pathBoardLoading"
+              :subject="store.pathBoard.subject || ''"
+              :board="store.pathBoard.board || ''"
+              @close="showPathBoard = false"
+              @focus-node="handlePathBoardFocus"
+              @edit-node="handlePathBoardEdit"
+            />
+          </Transition>
         </div>
       </Transition>
 
@@ -564,6 +636,18 @@ const slideTransition = {
   z-index: 20;
 }
 
+/* ── 图谱右侧「学习任务栏」（分层看板）──
+   与 .graph-kb 同一条右边缘、同一套定位口径（top/right 12px + 最多留 12px 边界），
+   但两者**互斥**（见 togglePathBoard）：同时开会在同一位置重叠。 */
+.graph-path-board {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  max-height: calc(100% - 24px);
+  width: 360px;
+  z-index: 21;
+}
+
 /* 左栏卡片里有搜索下拉（绝对定位，会超出卡片边界），卡片与内容都要放开裁切；
    收起时的隐藏靠 SidePanel 的透明度，不依赖裁切。 */
 .graph-nav :deep(.sp-body),
@@ -597,7 +681,8 @@ const slideTransition = {
   flex: 1 1 auto;
 }
 
-/* 画布右下角的缩放控件同样要给右栏让位（它原来贴 right:16px） */
+/* 画布右下角的缩放控件同样要给右栏让位（它原来贴 right:16px）；
+   rightReserve 把知识库栏与学习任务栏一起算进去（两边互斥）。 */
 .graph-layout :deep(.zoom-controls) {
   right: calc(32px + var(--kb-w, 0px));
   transition: right 0.28s cubic-bezier(0.4, 0, 0.2, 1);

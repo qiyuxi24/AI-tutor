@@ -138,7 +138,7 @@ function graphFingerprint(nodes, links) {
  * @param {Object}   p
  * @param {Element}  p.container 图谱容器（引擎只往它里面 append 一个 svg）
  * @param {Object}   p.forces    力场参数（缺省用 FORCE_DEFAULTS）
- * @param {Object}   p.highlight 初始高亮态 {pathVisible, learningPath, nextNodeId}
+ * @param {Object}   p.highlight 初始高亮态 {nextNodeId}
  * @param {Object}   p.handlers  交互回调（全部可选）
  *        - onNodeClick(id)                  单击普通知识点
  *        - onNodeDblClick(id)               双击普通知识点
@@ -151,7 +151,7 @@ function graphFingerprint(nodes, links) {
 export function createForceGraphEngine({ container, forces, highlight, handlers = {} } = {}) {
   /* ── 实例状态（全部不进入 Vue 响应式）── */
   let forceParams = { ...FORCE_DEFAULTS, ...(forces || {}) }
-  let hl = { pathVisible: false, learningPath: [], nextNodeId: '', ...(highlight || {}) }
+  let hl = { nextNodeId: '', ...(highlight || {}) }
 
   let simulation = null
   let svgSelection = null
@@ -179,35 +179,9 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
   let lastFingerprint = ''
   let destroyed = false
 
-  /* ---------- 高亮态（学习路径 / 推荐节点） ---------- */
-
-  /** props.learningPath 支持两种形态：字符串 id 数组 或 节点对象数组
-   *  isPathEdge 要求边的 source→target 与路径顺序一致（前置在前）才高亮 */
-  function getPathOrder(id) {
-    const lp = hl.learningPath || []
-    for (let i = 0; i < lp.length; i++) {
-      const item = lp[i]
-      if (item === id || (item && item.id === id)) return i
-    }
-    return -1
-  }
-
-  function isPathNode(id) {
-    return getPathOrder(id) >= 0
-  }
-
-  function isPathEdge(edge) {
-    const s = endpointKey(edge.source)
-    const t = endpointKey(edge.target)
-    const si = getPathOrder(s)
-    const ti = getPathOrder(t)
-    // 与路径方向一致（前置 → 后置）的边才属于"该走的路"
-    return si >= 0 && ti >= 0 && si < ti
-  }
-
-  function linkIsPath(l) {
-    return hl.pathVisible && isPathEdge(l)
-  }
+  /* ---------- 高亮态（下一步推荐节点） ----------
+     学习路径已从图上撤出、改到右侧「学习任务栏」（PathBoard.vue）：图上淡出+
+     起点环看不到前后文，反而不如一张分层的表。这里只留"下一步学什么"的脉冲环。 */
 
   /** 边默认样式（供初始渲染与 hover 恢复共用）
    *  - 归属边（锚点 → 子节点）：细虚线，表达"归属"而非关系；
@@ -215,45 +189,21 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
   function isBelongLink(l) { return l.kind === 'belong' }
 
   function linkDefaultColor(l) {
-    if (isBelongLink(l)) return 'var(--color-border)'
-    return linkIsPath(l) ? 'var(--color-accent)' : 'var(--color-graph-edge)'
+    return isBelongLink(l) ? 'var(--color-border)' : 'var(--color-graph-edge)'
   }
 
   function linkDefaultWidth(l) {
     if (isBelongLink(l)) return 1
     if (l.kind === 'agg') return Math.min(4, 1.2 + Math.log2(l.count || 1) * 0.9)
-    return linkIsPath(l) ? 2.6 : 1.2
+    return 1.2
   }
 
   function linkDefaultOpacity(l) {
-    if (isBelongLink(l)) return 0.55
-    return linkIsPath(l) ? 0.9 : 0.4
+    return isBelongLink(l) ? 0.55 : 0.4
   }
 
   function nodeBodyStroke(d) {
-    if (hl.pathVisible && isPathNode(d.id)) return 'var(--color-accent)'
     return nodeFill(d.mastery)
-  }
-
-  function nodeBodyStrokeWidth(d) {
-    return hl.pathVisible && isPathNode(d.id) ? 2.6 : 1
-  }
-
-  function nodeBodyStrokeOpacity(d) {
-    return hl.pathVisible && isPathNode(d.id) ? 0.95 : 0.3
-  }
-
-  /** 按当前路径状态统一刷新边与节点样式（初始渲染 / 开关切换 / hover 恢复均走这里） */
-  function applyPathHighlight() {
-    if (!nodeSelection || !linkSelection) return
-    linkSelection
-      .attr('stroke', linkDefaultColor)
-      .attr('stroke-width', linkDefaultWidth)
-      .attr('stroke-opacity', linkDefaultOpacity)
-    nodeSelection.select('.node-body')
-      .attr('stroke', nodeBodyStroke)
-      .attr('stroke-width', nodeBodyStrokeWidth)
-      .attr('stroke-opacity', nodeBodyStrokeOpacity)
   }
 
   /** 推荐节点脉冲环 */
@@ -597,8 +547,8 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
     nodeSelection.select('.node-body')
       .attr('fill', (d) => nodeFill(d.mastery))
       .attr('stroke', nodeBodyStroke)
-      .attr('stroke-width', nodeBodyStrokeWidth)
-      .attr('stroke-opacity', nodeBodyStrokeOpacity)
+      .attr('stroke-width', 1)
+      .attr('stroke-opacity', 0.3)
     // 生长/更新：只对半径与透明度过渡（tick 不写这两个属性，不会与过渡打架）
     nodeSelection.select('.node-body')
       .transition().duration(320)
@@ -618,6 +568,7 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
 
     nodeSelection.select('.node-label')
       .attr('dx', (d) => nodeRadius(d) + 8)
+      .style('opacity', 1)
       .text((d) => d.name)
 
     // 别名：下方的悬停/点击/拖拽逻辑继续用 node 指代当前节点集
@@ -665,7 +616,7 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
           return connected ? nodeOpacity(n.mastery) : 0.12
         })
       node.select('.node-label').transition().duration(150)
-        .attr('opacity', (n) => {
+        .style('opacity', (n) => {
           if (n.id === d.id) return 1
           const connected = links.some((l) =>
             (l.source.id === d.id && l.target.id === n.id) ||
@@ -680,8 +631,8 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
         .transition().duration(200)
         .attr('r', nodeRadius(d))
         .attr('stroke', nodeBodyStroke(d))
-        .attr('stroke-width', nodeBodyStrokeWidth(d))
-        .attr('stroke-opacity', nodeBodyStrokeOpacity(d))
+        .attr('stroke-width', 1)
+        .attr('stroke-opacity', 0.3)
 
       d3.select(this).select('.node-label')
         .transition().duration(200)
@@ -690,9 +641,9 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
       node.select('.node-body').transition().duration(200)
         .attr('opacity', (n) => nodeOpacity(n.mastery))
       node.select('.node-label').transition().duration(200)
-        .attr('opacity', 1)
+        .style('opacity', 1)
 
-      // hover 结束后恢复"学习路径"高亮（若已开启），避免被 hover 效果覆盖
+      // hover 结束后恢复边样式（避免被 hover 效果覆盖）
       linkSelection.transition().duration(200)
         .attr('stroke', linkDefaultColor)
         .attr('stroke-width', linkDefaultWidth)
@@ -788,10 +739,9 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
     }
   }
 
-  /** 合并高亮态（学习路径开关 / 路径数据 / 推荐节点）并立即刷新样式 */
+  /** 合并高亮态（下一步推荐节点）并立即刷新样式 */
   function setHighlight(patch) {
     hl = { ...hl, ...patch }
-    applyPathHighlight()
     applyPulse()
   }
 

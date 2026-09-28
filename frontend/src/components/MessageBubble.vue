@@ -7,7 +7,7 @@ const props = defineProps({
   knowledgeNodes: { type: Array, default: () => [] },
 })
 
-const emit = defineEmits(['navigate-to-node'])
+const emit = defineEmits(['navigate-to-node', 'retry'])
 
 const isUser = computed(() => props.message.role === 'user')
 const isStreaming = computed(() => !isUser.value && !props.message.content
@@ -177,6 +177,11 @@ watch(renderedContent, () => {
         </div>
         <!-- 流式内容渲染 -->
         <div v-else-if="message.content" class="markdown-body" v-html="renderedContent"></div>
+
+        <!-- 失败兜底（后端文本未送达等）：给明确提示 + 一键重试，绝不静默消失 -->
+        <div v-if="message.failed" class="failed-actions">
+          <button class="retry-btn" @click="emit('retry')">↻ 重试</button>
+        </div>
       </template>
     </div>
   </div>
@@ -317,6 +322,24 @@ watch(renderedContent, () => {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ─── 失败兜底：重试按钮 ─── */
+.failed-actions {
+  margin-top: 8px;
+}
+
+.retry-btn {
+  padding: 4px 12px;
+  border: 1px solid var(--color-accent-light);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-accent);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.retry-btn:hover { background: var(--color-accent-light); }
 
 /* ─── 思考折叠面板 ─── */
 .thinking-panel {

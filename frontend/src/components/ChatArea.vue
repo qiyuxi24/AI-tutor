@@ -57,6 +57,7 @@ const greetingMessages = [
           :message="msg"
           :knowledge-nodes="store.knowledgeNodes"
           @navigate-to-node="(nodeId) => emit('navigate-to-node', nodeId)"
+          @retry="store.retryLast()"
         />
       </template>
 

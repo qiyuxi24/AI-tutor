@@ -38,9 +38,13 @@ from app.core.quiz.quiz_store import quiz_manager
 
 logger = logging.getLogger("ai-tutor")
 
-# 对话内出题参数（刻意保守：只出 1 道、少检索几段，把 40s 延迟压到最小）
+# 对话内出题参数（刻意保守：只出 1 道、不检索，把 40s 延迟压到最小）
 CHAT_QUIZ_COUNT = 1
-CHAT_QUIZ_TOP_K = 3
+# ⚠️ 必须是 0：出题依据只允许用「当前节点的正文」。
+# 曾经是 3（额外从知识库检索 3 段拼进依据），实测后果是**题目漂到节点之外**：
+# 学生刚学「二叉树性质1」，却被考「满二叉树的结点数」，而对话上下文里从没提过。
+# 根因：依据 = 节点正文 + KB 片段 时，模型分不清"这次该考哪个"，只能按资料自由发挥。
+CHAT_QUIZ_TOP_K = 0
 # 只出客观题：规则判分（0 token、瞬时、可复核）。简答题要调 LLM 判分且需要长文本作答，
 # 不适合"对话里顺手答一句"的场景。
 CHAT_QUIZ_TYPES = ["single", "multiple", "judge", "fill"]
