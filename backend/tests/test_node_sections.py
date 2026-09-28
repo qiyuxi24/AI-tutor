@@ -240,6 +240,40 @@ def test_manifest_written_as_readable_utf8_json(kg):
     assert leftovers == []
 
 
+# ── 小节级溯源（sources 随条目走）────────────────────────────
+
+def test_create_section_records_sources(kg):
+    """sources 随条目落 manifest，经 L0 规范化：**不带正文**、补 extracted_at"""
+    _seed_node(kg)
+    src = [{"doc_id": 7, "doc_name": "数据结构.md",
+            "section": "第1章 栈", "chunk_id": None, "text": "不该落盘的正文"}]
+
+    kg.create_section("n1", "定义", sources=src)
+
+    got = kg.list_sections("n1")[0]["sources"]
+    assert len(got) == 1
+    assert {k: got[0][k] for k in ("doc_id", "doc_name", "section", "chunk_id")} == {
+        "doc_id": 7, "doc_name": "数据结构.md", "section": "第1章 栈", "chunk_id": None}
+    assert "text" not in got[0], "材料正文不得进 manifest（路由层不塞正文）"
+    assert got[0]["extracted_at"], "规范化会补首次见到的时间"
+
+
+def test_create_section_drops_invalid_sources(kg):
+    """非法来源条目（doc_id 不可转 int）静默丢弃，不炸建节"""
+    _seed_node(kg)
+    kg.create_section("n1", "定义", sources=[{"doc_name": "缺 doc_id"}, "不是字典"])
+
+    assert kg.list_sections("n1")[0]["sources"] == []
+
+
+def test_create_section_defaults_to_empty_sources(kg):
+    """不传 sources → 空列表（老调用方/老 manifest 读取侧统一按空处理）"""
+    _seed_node(kg)
+    kg.create_section("n1", "定义")
+
+    assert kg.list_sections("n1")[0]["sources"] == []
+
+
 # ── 文件名安全化 ───────────────────────────────────────────────
 
 def test_section_filename_sanitizes_unsafe_chars():

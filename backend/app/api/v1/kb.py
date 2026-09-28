@@ -7,6 +7,7 @@
   POST   /kb/upload                  - 上传文件（解析 + 向量化）
   DELETE /kb/node/{node_id}          - 删除文件/文件夹（递归）
   GET    /kb/node/{node_id}/text     - 读取文件节点正文（预览用，超长截断）
+  GET    /kb/node/{node_id}/raw      - 读取文件节点原件（预览用，inline）
   GET    /kb/search                  - 在目录范围内语义检索
   POST   /kb/context                 - 收集目录范围内的文件节点（进上下文用）
   GET    /kb/stats                   - 索引统计
@@ -16,7 +17,11 @@
 - 知识库与知识图谱 RAG 完全分离
 """
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Body
+import mimetypes
+from urllib.parse import quote
+from fastapi import (APIRouter, Depends, HTTPException, Query, UploadFile, File,
+                     Body)
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from app.core.auth import get_current_user
@@ -136,6 +141,39 @@ async def get_node_text(node_id: int, user_id: int = Depends(get_current_user)):
         "total_chars": total,
         "truncated": total > KB_PREVIEW_MAX_CHARS,
     }
+
+
+@router.get("/kb/node/{node_id}/raw")
+async def get_node_raw(node_id: int, user_id: int = Depends(get_current_user)):
+    """
+    读取文件节点的**原件**（上传时的原始字节），供前端「真预览」用。
+
+    与 `/text` 的分工：`/text` 给解析后的正文（任何入库格式都有，但会截断、且已丢版式）；
+    本端点给原封不动的字节（只有上传过的文件有）。前端按扩展名二选一 ——
+    PDF / Word / Excel / 图片走本端点，其余走 `/text`。
+
+    历史文件（2026-09-28 之前上传）没存原件 → 404，前端据此静默回退文本预览；
+    这不是错误，故 detail 里点明原因。
+    inline 而非 attachment：预览场景不让浏览器直接弹下载。文件名走 RFC 5987 百分号编码
+    —— 中文名直接进 header 会 latin-1 编码失败。
+    """
+    node = kb_manager.get_node(user_id, node_id)
+    if node is None or node.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if node.get("type") != "file":
+        raise HTTPException(status_code=400, detail="该节点是文件夹，请选择一个文件")
+
+    path = kb_manager.get_raw_path(user_id, node_id)
+    if path is None:
+        raise HTTPException(status_code=404,
+                            detail="该文件没有原始文件（历史数据），请查看正文")
+
+    name = node.get("name") or path.name
+    return FileResponse(
+        path,
+        media_type=mimetypes.guess_type(name)[0] or "application/octet-stream",
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(name, safe='')}"},
+    )
 
 
 @router.get("/kb/search")

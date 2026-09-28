@@ -85,12 +85,15 @@ def test_gather_concept_sources_hits_and_falls_back():
         {"title": "第2章", "text": "队列是 FIFO。", "book_node_id": 7, "book_name": "b.md"},
     ]
 
-    text, entries = gg._gather_concept_sources("栈", units)
+    text, entries, materials = gg._gather_concept_sources("栈", units)
 
     assert "LIFO" in text and "队列" not in text, "只汇总命中该概念的单元"
     assert entries[0] == {"doc_id": 7, "doc_name": "b.md",
                           "section": "第1章", "chunk_id": None}
-    assert gg._gather_concept_sources("树", units) == ("", [])
+    # 材料 = 来源条目 + 各自正文（逐节筛来源靠它保留的文本边界）
+    assert materials[0]["text"] == "栈是一种 LIFO 结构。栈的操作。"
+    assert materials[0]["doc_id"] == 7 and materials[0]["section"] == "第1章"
+    assert gg._gather_concept_sources("树", units) == ("", [], [])
 
 
 # ── GQ-16 粒度政策 / §5.0.1 内容政策：提示词断言 ──────────────────
@@ -312,7 +315,7 @@ def test_generate_processes_each_doc_in_order(monkeypatch):
                                       "text": "", "entries": [], "section": ""}]}
 
     async def _fake_fill(kg, subject, section, source_text, brief,
-                         sources=None, mode="replace", doc_name=""):
+                         sources=None, mode="replace", doc_name="", materials=None):
         order.append("fill:" + brief["id"])
         return {"filled": [brief["name"]], "rejected_shallow": [], "failed_fills": 0}
 

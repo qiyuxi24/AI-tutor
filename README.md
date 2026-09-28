@@ -240,7 +240,7 @@ npm run dev
 - [开发参考手册 AGENTS.md](AGENTS.md) — 架构契约、模块职责与新增工具/端点的接入点
 - [RAG 去耦合与目录检索调研](docs/RAG/RAG_去耦合与目录检索调研.md) ｜ [RAG 召回与重排优化调研](docs/RAG/RAG_召回与重排优化调研.md) ｜ [Agentic RAG 调研](docs/RAG/RAG_参考资料与学习路线.md)
 - [Agent Loop 重构设计](docs/AgentLoop/AgentLoop_重构设计讨论.md) ｜ [Agent Loop 业界调研](docs/AgentLoop/AgentLoop_业界调研与学习路线.md)
-- [知识图谱参照系契约](docs/知识图谱/知识图谱_参照系契约.md) ｜ [知识图谱模块结构调研](docs/知识图谱/知识图谱_模块结构与封装调研.md)
+- [知识图谱参照系契约](docs/知识图谱/知识图谱_参照系契约.md)
 - [AI 出题逻辑调研](docs/教学模块/QUIZ_出题逻辑调研.md) ｜ [资源采集设计讨论](docs/教育资料采集/教育资料采集模块_设计讨论.md)
 - [Docker 学习路径与工程化部署](docs/运维部署/Docker_学习路径与工程化部署.md) ｜ [生产上线与日常运营指南](docs/运维部署/运维_生产上线与日常运营指南.md) ｜ [标杆项目对标分析](docs/调研对标/标杆项目对标分析.md)
 

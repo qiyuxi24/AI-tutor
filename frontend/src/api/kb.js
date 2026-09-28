@@ -36,6 +36,17 @@ export const deleteKbNode = (nodeId) =>
 export const getKbNodeText = (nodeId) =>
   apiClient.get(`/api/v1/kb/node/${nodeId}/text`)
 
+/**
+ * 读取文件节点上传时的**原件字节**（真预览：PDF / Word / Excel / 图片用它渲染）
+ * resp: Blob（responseType 指定，字符串直链拿不到 Authorization 头）
+ * 历史文件（2026-09-28 前上传）没存原件 → 404，调用方回退 getKbNodeText 的正文预览
+ */
+export const getKbNodeRaw = (nodeId) =>
+  apiClient.get(`/api/v1/kb/node/${nodeId}/raw`, {
+    responseType: 'blob',
+    // 扫描版 PDF 几十 MB，默认 300s 够用；这里不额外放大
+  })
+
 /** 在目录范围内语义检索 */
 export const searchKb = (q, nodeId = null, topK = 5) => {
   const params = { q, top_k: topK }
@@ -68,8 +79,26 @@ export const deleteNodeSection = (nodeId, sectionId) =>
 
 /**
  * 列出节点下的试题（懒加载：打开节点详情时才请求，不随图谱列表批量拉）
- * resp: { node_id, quizzes: [{ id, type, question, difficulty, knowledge_point, section_id, created_at }] }
+ * resp: { node_id, quizzes: [{ id, type, question, difficulty, knowledge_point,
+ *         section_id, source_docs, created_at }] }
+ * `source_docs` = 题目来源文件 `[{doc_id, doc_name}]`；`section_id` 非空即挂在该小节下。
  * 节点不存在 → 404；题库读取异常 → quizzes: []
  */
 export const fetchNodeQuizzes = (nodeId) =>
   apiClient.get(`/api/v1/knowledge/node/${nodeId}/quizzes`)
+
+/**
+ * 针对某个小节出一道题（后台生成，约 40s 后推 quiz_ready；题目自动挂到该节）
+ * resp: { status, node_id, section_id }；节点/小节不存在 → 404；已在出题 → 409
+ */
+export const generateSectionQuiz = (nodeId, sectionId) =>
+  apiClient.post(`/api/v1/knowledge/node/${nodeId}/section/${sectionId}/quiz`)
+
+/**
+ * 反查「这份资料影响了哪些图谱节点」（右键文件 → 在图谱中显示）
+ * docId = KB 的 file 节点 id（与来源条目里的 doc_id 同一个命名空间）
+ * resp: { doc_id, subjects: [...], nodes: [{id, name, subject}] }
+ * 没建过图的文件 → nodes: []（正常，不是错误）
+ */
+export const fetchSourceNodes = (docId) =>
+  apiClient.get(`/api/v1/knowledge/source/${docId}/nodes`)

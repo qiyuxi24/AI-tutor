@@ -22,23 +22,24 @@
 import { ref, computed, watch } from 'vue'
 import { renderMarkdown } from '../utils/markdown.js'
 // ★ 保存操作由父组件通过 Store 处理；此处只读小节正文/试题列表与触发生成（走 kb.js 封装，不裸调 apiClient）
-import { fetchNodeSection, fetchNodeQuizzes } from '../api/kb.js'
+import { fetchNodeSection, fetchNodeQuizzes, generateSectionQuiz } from '../api/kb.js'
 import { formatError } from '../utils/errorCodes.js'
 import { useDetailPrefs } from '../utils/detailPrefs.js'
 
 const props = defineProps({
   nodeInfo: { type: Object, default: null },
   visible: { type: Boolean, default: false },
+  // 来源高亮：当前在图谱里高亮的资料 doc_id（来自知识库右键「在图谱中显示」）。
+  // 非空时，属于这份资料的小节与题目会加醒目样式，并自动打开第一个命中小节。
+  sourceDocId: { type: [Number, String], default: null },
 })
 
-const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node', 'update-mastery', 'open-quiz'])
+const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node', 'open-quiz'])
 
 const mode = ref('view')        // 'view' | 'edit'
 const editContent = ref('')
 const saving = ref(false)
 const saveError = ref('')
-const masterySlider = ref(0)
-const masterySaving = ref(false)
 
 /* 节点小节化：仅 nodeInfo.has_sections === true 时启用（老节点行为完全不变） */
 const hasSections = computed(() => props.nodeInfo?.has_sections === true)
@@ -85,6 +86,32 @@ function sectionTitle(id) {
   return s ? s.title : id
 }
 
+/* 小节级溯源：当前选中节带了 sources 就在正文上方标出「来源：资料·章节」
+   （条目形状来自 manifest，见 KnowledgeGraph.create_section；老 manifest 无此键 → 空） */
+const activeSources = computed(() => {
+  const s = sections.value.find(x => x.id === activeSectionId.value)
+  return s?.sources || []
+})
+
+/* 「在图谱中显示」的来源高亮：属于该高亮资料的小节/题目加醒目样式。
+   doc_id 比对统一字符串化（后端两处分别来自 JSON 与 SQL，类型不保证一致）。 */
+const highlightDocId = computed(() => {
+  const id = props.sourceDocId
+  return id === null || id === undefined || id === '' ? '' : String(id)
+})
+function sectionHasSource(s) {
+  return !!highlightDocId.value
+    && (s.sources || []).some(x => String(x.doc_id) === highlightDocId.value)
+}
+function quizHasSource(q) {
+  return !!highlightDocId.value
+    && (q.source_docs || []).some(d => String(d.doc_id) === highlightDocId.value)
+}
+function sourceLabel(s) {
+  const name = s.doc_name || '未知资料'
+  return s.section ? `${name} · ${s.section}` : name
+}
+
 /**
  * 懒加载该节点的试题：打开节点详情时请求一次。
  * 副作用：更新 quizzes / quizzesLoading / quizzesError。失败不清屏，仅就地在分组内提示。
@@ -100,6 +127,32 @@ async function loadQuizzes() {
     quizzesError.value = formatError(e, { action: '加载试题' })
   } finally {
     quizzesLoading.value = false
+  }
+}
+
+/** 题目来源文件（侧边栏一行展示；无来源 → 空串不占位） */
+function quizDocLabel(q) {
+  return (q.source_docs || []).map(d => d.doc_name || `#${d.doc_id}`).join('、')
+}
+
+/* 按小节出题：后台生成（~40s），题目会挂到该节。按钮在任务期间禁用防连点。
+   40s 后自动刷一次试题列表 —— quiz_ready 事件把题目送进对话，这里只补侧边栏。 */
+const sectionQuiz = ref('')          // 正在出题的小节 id（空 = 空闲）
+const sectionQuizError = ref('')
+
+async function quizFromSection(s) {
+  if (sectionQuiz.value) return
+  sectionQuizError.value = ''
+  sectionQuiz.value = s.id
+  try {
+    await generateSectionQuiz(props.nodeInfo.id, s.id)
+    setTimeout(() => {
+      sectionQuiz.value = ''
+      if (props.visible) loadQuizzes()
+    }, 45000)
+  } catch (e) {
+    sectionQuiz.value = ''
+    sectionQuizError.value = formatError(e, { action: '本节出题' })
   }
 }
 
@@ -179,7 +232,6 @@ watch(() => props.nodeInfo, (val) => {
     mode.value = 'view'
     editContent.value = val.content || ''
     saveError.value = ''
-    masterySlider.value = val.mastery || 0
     // 小节模式：重置本地状态；有则默认载入第一节（懒加载，正文另行请求）
     // 老节点落在「正文」项上（侧边栏恒在，只是只有一项）
     activeSectionId.value = val.has_sections ? '' : LEGACY_DOC.id
@@ -189,9 +241,20 @@ watch(() => props.nodeInfo, (val) => {
     quizzes.value = []
     quizzesError.value = ''
     quizzesLoading.value = false
+    sectionQuiz.value = ''
+    sectionQuizError.value = ''
     loadQuizzes()
-    if (val.has_sections && val.sections?.length) selectSection(val.sections[0].id)
+    // 来源高亮时优先打开**第一个属于该资料**的小节（否则默认第一节）
+    const hit = (val.sections || []).find(s => sectionHasSource(s))
+    if (hit) selectSection(hit.id)
+    else if (val.has_sections && val.sections?.length) selectSection(val.sections[0].id)
   }
+})
+
+// 弹窗开着时在图谱里换了一份高亮资料 → 直接跳到该资料的第一个小节
+watch(() => props.sourceDocId, () => {
+  const hit = (props.nodeInfo?.sections || []).find(s => sectionHasSource(s))
+  if (hit) selectSection(hit.id)
 })
 
 function displayName(id) {
@@ -231,31 +294,7 @@ async function handleSave() {
   })
 }
 
-/* 掌握程度映射 */
-function masteryLabel(m) {
-  if (m == null || m === 0) return '未掌握'
-  if (m <= 25) return '入门'
-  if (m <= 50) return '熟悉'
-  if (m <= 75) return '熟练'
-  return '精通'
-}
-function masteryBarWidth(m) {
-  return Math.min(100, Math.max(0, m || 0)) + '%'
-}
-
-async function handleMasteryChange() {
-  masterySaving.value = true
-  emit('update-mastery', {
-    nodeId: props.nodeInfo.id,
-    mastery: masterySlider.value,
-    onResult: (error) => {
-      masterySaving.value = false
-      if (!error) {
-        emit('refresh')
-      }
-    },
-  })
-}
+/* 掌握程度不再由节点详情手动调整：主信号是出题判分（grade_answer） */
 </script>
 
 <template>
@@ -302,29 +341,6 @@ async function handleMasteryChange() {
           </div>
         </div>
 
-        <!-- 掌握程度条 + 滑块调整 -->
-        <div class="mastery-section">
-          <div class="mastery-label">
-            <span>掌握程度</span>
-            <span class="mastery-value">{{ masteryLabel(masterySlider) }}{{ masterySaving ? ' (保存中...)' : '' }}</span>
-          </div>
-          <div class="mastery-bar-bg">
-            <div class="mastery-bar-fill" :style="{ width: masteryBarWidth(masterySlider) }"></div>
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="1"
-            :value="masterySlider"
-            @input="masterySlider = Number($event.target.value)"
-            @change="handleMasteryChange"
-            class="mastery-slider"
-            :disabled="masterySaving"
-            title="拖动调整掌握程度"
-          />
-        </div>
-
         <!-- 编辑模式：Markdown 源码 + 实时预览（分屏） -->
         <div v-if="mode === 'edit'" class="edit-area">
           <textarea
@@ -355,19 +371,36 @@ async function handleMasteryChange() {
             </button>
             <div class="section-sidebar-body">
               <ul class="section-list">
-                <li v-for="s in docList" :key="s.id">
+                <li v-for="s in docList" :key="s.id" class="section-row">
                   <button
                     type="button"
                     class="section-item"
-                    :class="{ active: s.id === activeSectionId, 'is-failed': s.status === 'failed', 'is-pending': s.status === 'pending' }"
+                    :class="{ active: s.id === activeSectionId, 'is-failed': s.status === 'failed',
+                              'is-pending': s.status === 'pending', 'is-source-hit': sectionHasSource(s) }"
                     :title="s.title"
                     @click="selectDoc(s)"
                   >
                     <span class="section-kind-icon" v-html="kindIconSvg(s.kind)"></span>
                     <span class="section-title">{{ s.title }}</span>
                   </button>
+                  <!-- 按小节出题（老节点的「正文」项没有小节 id，不显示） -->
+                  <button
+                    v-if="hasSections && s.id !== LEGACY_DOC.id"
+                    type="button"
+                    class="section-quiz-btn"
+                    :disabled="!!sectionQuiz"
+                    :title="sectionQuiz === s.id ? '出题中，约 40 秒' : '针对本节出一道题'"
+                    @click.stop="quizFromSection(s)"
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <circle cx="12" cy="12" r="10"/>
+                      <path d="M12 8v8"/><path d="M8 12h8"/>
+                    </svg>
+                  </button>
                 </li>
               </ul>
+              <p v-if="sectionQuizError" class="save-error section-gen-error">{{ sectionQuizError }}</p>
 
               <!-- 试题分组（同一侧边栏，小节列表下方）：懒加载，点击跳查出题页 -->
               <div class="quiz-group">
@@ -380,6 +413,7 @@ async function handleMasteryChange() {
                       <button
                         type="button"
                         class="quiz-item"
+                        :class="{ 'is-source-hit': quizHasSource(q) }"
                         :title="q.question"
                         @click="openQuiz(q)"
                       >
@@ -388,6 +422,7 @@ async function handleMasteryChange() {
                           <span class="quiz-text">{{ truncateText(q.question) }}</span>
                         </span>
                         <span v-if="q.section_id" class="quiz-node-mark">属 {{ sectionTitle(q.section_id) }}</span>
+                        <span v-if="quizDocLabel(q)" class="quiz-doc-mark">来源：{{ quizDocLabel(q) }}</span>
                       </button>
                     </li>
                   </ul>
@@ -401,6 +436,12 @@ async function handleMasteryChange() {
           </aside>
           <div class="section-content">
             <template v-if="hasSections">
+              <!-- 小节级溯源：本节的资料来源（无来源不占位） -->
+              <p v-if="activeSources.length" class="section-sources">
+                来源：
+                <span v-for="(s, i) in activeSources" :key="i">{{ sourceLabel(s) }}<span
+                  v-if="i < activeSources.length - 1">、</span></span>
+              </p>
               <p v-if="sectionLoading" class="section-hint">加载中…</p>
               <p v-else-if="sectionError" class="save-error section-content-error">{{ sectionError }}</p>
               <div v-else class="markdown-body section-md" v-html="sectionHtml"></div>
@@ -492,31 +533,6 @@ async function handleMasteryChange() {
 .close-btn { border: none; background: transparent; color: var(--color-text-muted); padding: 6px; }
 .close-btn:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
 
-/* 掌握程度条 */
-.mastery-section { padding: 12px 24px; background: var(--color-bg-surface); flex-shrink: 0; }
-.mastery-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--color-text-secondary); margin-bottom: 5px; }
-.mastery-value { color: var(--color-green); font-weight: 600; }
-.mastery-bar-bg { height: 6px; background: var(--color-border); border-radius: 3px; overflow: hidden; }
-.mastery-bar-fill { height: 100%; background: linear-gradient(90deg, var(--color-green-light), var(--color-green)); border-radius: 3px; transition: width 0.3s ease; }
-
-.mastery-slider {
-  width: 100%; margin-top: 8px; height: 4px;
-  -webkit-appearance: none; appearance: none;
-  background: var(--color-border); border-radius: 2px; outline: none; cursor: pointer;
-}
-.mastery-slider::-webkit-slider-thumb {
-  -webkit-appearance: none; appearance: none;
-  width: 14px; height: 14px; border-radius: 50%;
-  background: var(--color-green); cursor: pointer; border: 2px solid var(--color-bg-primary);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-}
-.mastery-slider::-moz-range-thumb {
-  width: 14px; height: 14px; border-radius: 50%;
-  background: var(--color-green); cursor: pointer; border: 2px solid var(--color-bg-primary);
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-}
-.mastery-slider:disabled { opacity: 0.5; cursor: not-allowed; }
-
 /* 可伸缩侧栏：收起后只剩顶部一个箭头按钮 */
 .sidebar-toggle {
   display: flex; align-items: center; justify-content: center;
@@ -589,10 +605,23 @@ async function handleMasteryChange() {
   color: var(--color-text-secondary); font-size: 13px; text-align: left; cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
+/* 小节行 = 小节按钮 + 「针对本节出题」按钮（行内 flex，按钮不挤走标题） */
+.section-row { display: flex; align-items: center; gap: 2px; }
+.section-row .section-item { flex: 1; min-width: 0; }
+.section-quiz-btn {
+  flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px;
+  background: transparent; color: var(--color-text-muted); cursor: pointer;
+  opacity: 0.55; transition: all 0.15s;
+}
+.section-quiz-btn:hover:not(:disabled) { background: var(--color-bg-hover); color: var(--color-accent); opacity: 1; }
+.section-quiz-btn:disabled { cursor: not-allowed; opacity: 0.3; }
 .section-item:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
 .section-item.active { background: var(--color-accent-light); color: var(--color-accent); font-weight: 600; }
 .section-item.is-failed { color: var(--color-red); }        /* 生成失败：警示色 */
 .section-item.is-pending { color: var(--color-text-muted); } /* 待生成：次要色 */
+/* 来源高亮（「在图谱中显示」命中的资料）—— 放在 .active 之后，两者同时命中时以它为准 */
+.section-item.is-source-hit { background: var(--color-green-light); color: var(--color-green); font-weight: 600; }
 .section-kind-icon { flex-shrink: 0; display: inline-flex; }
 .section-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 试题分组（同侧边栏，小节列表下方） */
@@ -607,6 +636,7 @@ async function handleMasteryChange() {
   transition: background 0.15s, color 0.15s;
 }
 .quiz-item:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
+.quiz-item.is-source-hit { background: var(--color-green-light); }
 .quiz-item-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .quiz-type-badge {
   flex-shrink: 0; padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 600;
@@ -614,6 +644,7 @@ async function handleMasteryChange() {
 }
 .quiz-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .quiz-node-mark { font-size: 10px; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quiz-doc-mark { font-size: 10px; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .quiz-empty { display: flex; flex-direction: column; gap: 6px; padding: 4px 2px; font-size: 12px; color: var(--color-text-muted); }
 .quiz-goto-btn {
   align-self: flex-start; padding: 4px 10px; border: 1px solid var(--color-border);
@@ -624,6 +655,13 @@ async function handleMasteryChange() {
 
 .section-content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .section-md { flex: 1; }
+/* 小节级溯源：正文上方一行浅色来源标注 */
+.section-sources {
+  margin: 0; padding: 8px 24px; flex-shrink: 0;
+  font-size: 12px; color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .section-hint { padding: 16px 24px; margin: 0; font-size: 13px; color: var(--color-text-muted); }
 .section-content-error { padding: 16px 24px; margin: 0; font-size: 13px; }
 @media (max-width: 560px) { .section-sidebar { width: 140px; min-width: 140px; } }

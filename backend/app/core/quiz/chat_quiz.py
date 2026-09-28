@@ -62,20 +62,27 @@ CHAT_QUIZ_TIMEOUT_SECS = 120
 #  出题（后台）
 # ══════════════════════════════════════════════════════════════════
 
-def _node_materials(kg: KnowledgeGraph, node: dict, node_id: str) -> list[str]:
+def _node_materials(kg: KnowledgeGraph, node: dict, node_id: str,
+                    section_id: str = "") -> list[str]:
     """
     把图谱节点正文转成出题依据片段。
 
     这是"根据刚刚学习的知识出题"的关键：出题模块原本只检索**知识库**（上传的教材），
     但对话里学生很可能根本没上传教材 —— 知识来自 AI 在对话中建的图谱节点。
     所以把节点正文作为第一依据注入（见 generate_quiz 的 seed_materials 参数）。
+
+    `section_id` 非空 = **按小节出题**：只喂该节正文（更聚焦），读不到再退回整节点预览。
     """
     name = node.get("name") or node_id
     parts = [f"【知识点：{name}】"]
     content = ""
     try:
-        content = (kg.get_node_content_preview(node_id, max_lines=200,
-                                               max_chars=3000) or "").strip()
+        if section_id:
+            read = getattr(kg, "read_section", None)     # 老替身/老库没有该能力 → 走整节点
+            content = (read(node_id, section_id) or "").strip() if callable(read) else ""
+        if not content:
+            content = (kg.get_node_content_preview(node_id, max_lines=200,
+                                                   max_chars=3000) or "").strip()
     except Exception as e:  # 内容读取失败不致命，退到 summary
         logger.warning(f"读取节点正文失败（{node_id}）: {e}")
     if content:
@@ -83,6 +90,62 @@ def _node_materials(kg: KnowledgeGraph, node: dict, node_id: str) -> list[str]:
     elif node.get("summary"):
         parts.append(str(node["summary"]))
     return ["\n".join(parts)]
+
+
+def _source_docs(entries: list[dict]) -> list[dict]:
+    """来源条目 → 题目来源**文件**清单（按 doc_id 去重，只留展示需要的两个键）。"""
+    out: list[dict] = []
+    seen: set = set()
+    for e in entries or []:
+        did = e.get("doc_id")
+        if did is None or did in seen:
+            continue
+        seen.add(did)
+        out.append({"doc_id": did, "doc_name": e.get("doc_name", "")})
+    return out
+
+
+def _source_docs_for(kg: KnowledgeGraph, node_id: str, section_id: str) -> list[dict]:
+    """
+    这道题的依据来自哪些**文件**：按小节出题取该节 `sources`，否则取节点 `sources`。
+
+    读不到（老节点无溯源 / 能力缺失）→ `[]`；来源只是展示信息，缺了不影响出题。
+    """
+    entries: list[dict] = []
+    if section_id:
+        try:
+            for s in kg.list_sections(node_id):
+                if s.get("id") == section_id:
+                    entries = s.get("sources") or []
+                    break
+        except Exception as e:                            # noqa: BLE001 —— 降级：不抛
+            logger.debug(f"读取小节 {node_id}/{section_id} 来源失败（忽略）：{e}")
+    if not entries:
+        try:
+            entries = kg.get_sources(node_id) or []
+        except Exception as e:                            # noqa: BLE001
+            logger.debug(f"读取节点 {node_id} 溯源失败（忽略）：{e}")
+    return _source_docs(entries)
+
+
+def _mount_quiz_ref(kg: KnowledgeGraph, node_id: str, quiz_id, section_id: str) -> None:
+    """
+    把题目挂到小节（`manifest.quizzes` 路由，供节点详情侧边栏显示「属 ⟨小节⟩」）。
+
+    只在**按小节出题**时挂：节点级出题挂上去只会让 manifest 无上限膨胀
+    （`clear_sections` 保留节点级引用，累积永不回收），而侧边栏本就能按
+    `knowledge_point` 列出该节点的全部题目，不需要这层冗余路由。
+    缺能力 / 写入失败 → 静默跳过：路由只是附加信息，不能毁掉出题。
+    """
+    if not section_id:
+        return
+    fn = getattr(kg, "add_quiz_ref", None)
+    if not callable(fn):
+        return
+    try:
+        fn(node_id, str(quiz_id), section_id=section_id)
+    except Exception as e:                                # noqa: BLE001 —— 降级语义：不抛
+        logger.debug(f"挂载试题引用失败（忽略）：{e}")
 
 
 def _public_question(qid: int, q: dict) -> dict:
@@ -102,9 +165,13 @@ def _public_question(qid: int, q: dict) -> dict:
 
 
 async def generate_and_publish(user_id: int, *, node_id: str,
+                               section_id: str = "",
                                count: int = CHAT_QUIZ_COUNT) -> None:
     """
     后台出题 → 入库 → 推 QUIZ_READY 事件。全程不抛异常（失败也推 ok=False）。
+
+    `section_id` 非空 = **按小节出题**（只喂该节正文、题目挂到该节、来源记该节 sources）；
+    空 = 节点级出题（对话内常态）。
 
     并发去重由 start_background_generation / _run_guarded 负责（本函数不碰 _INFLIGHT，
     这样它既能被后台任务调用、也能被测试/脚本直接调用）。
@@ -122,7 +189,7 @@ async def generate_and_publish(user_id: int, *, node_id: str,
         subject = node.get("name") or node_id
         # 节点难度字段已下线（2026-09-27），自动出题统一走中等档
         difficulty = "medium"
-        seed = _node_materials(kg, node, node_id)
+        seed = _node_materials(kg, node, node_id, section_id)
 
         store = quiz_manager._get_store(user_id)
         # 跨调用去重：该节点已考过的题干。判分已是掌握度主信号（答对 +20），
@@ -158,17 +225,24 @@ async def generate_and_publish(user_id: int, *, node_id: str,
         for q in questions:
             q["knowledge_point"] = node_id
 
+        # 题目来源**文件**：按小节出题取该节 sources，否则取节点 sources（可能为空）
+        source_docs = _source_docs_for(kg, node_id, section_id)
         ids = store.save_questions(questions, subject=subject,
-                                   difficulty=difficulty, source="chat")
+                                   difficulty=difficulty, source="chat",
+                                   source_docs=source_docs)
+        for qid in ids:
+            _mount_quiz_ref(kg, node_id, qid, section_id)
 
         publish(QUIZ_READY, {
             "ok": True,
             "node_id": node_id,
+            "section_id": section_id,
             "subject": subject,
             "questions": [_public_question(i, q) for i, q in zip(ids, questions)],
         }, user_id=user_id)
         logger.info(f"对话内出题完成：user={user_id} node={node_id} "
-                    f"题目数={len(ids)}（依据片段 {result['materials_used']} 个）")
+                    f"section={section_id or '-'} 题目数={len(ids)}"
+                    f"（依据片段 {result['materials_used']} 个，来源文件 {len(source_docs)} 份）")
 
     except Exception as e:
         logger.error(f"对话内出题失败（user={user_id} node={node_id}）: {e}")
@@ -179,7 +253,8 @@ async def generate_and_publish(user_id: int, *, node_id: str,
         kg.close()
 
 
-async def _run_guarded(user_id: int, node_id: str, count: int) -> None:
+async def _run_guarded(user_id: int, node_id: str, count: int,
+                       section_id: str = "") -> None:
     """
     后台子任务外壳：**无论成败/超时都必须回报主对话**（否则学生永远等不到题目）。
 
@@ -189,11 +264,13 @@ async def _run_guarded(user_id: int, node_id: str, count: int) -> None:
     started = time.monotonic()
     # 后台子任务也走调试日志（scope="bg"）：成败与耗时日后能按 user_id 回看
     rlog = RunLogger(user_id=user_id)
-    rlog.log("bg", "quiz_bg_start", "后台出题任务启动", node_id=node_id, count=count)
+    rlog.log("bg", "quiz_bg_start", "后台出题任务启动", node_id=node_id,
+             section_id=section_id, count=count)
     ok, reason = True, ""
     try:
         await asyncio.wait_for(
-            generate_and_publish(user_id, node_id=node_id, count=count),
+            generate_and_publish(user_id, node_id=node_id, section_id=section_id,
+                                 count=count),
             timeout=CHAT_QUIZ_TIMEOUT_SECS,
         )
     except asyncio.TimeoutError:
@@ -215,9 +292,10 @@ async def _run_guarded(user_id: int, node_id: str, count: int) -> None:
 
 
 def start_background_generation(user_id: int, *, node_id: str,
+                                section_id: str = "",
                                 count: int = CHAT_QUIZ_COUNT) -> bool:
     """
-    起一个后台出题任务（工具 handler 调用）。
+    起一个后台出题任务（工具 handler / 小节出题端点调用）。
 
     返回 False 表示该用户已有出题任务在跑（不要重复触发）。
 
@@ -230,5 +308,5 @@ def start_background_generation(user_id: int, *, node_id: str,
     if _INFLIGHT.get(user_id):
         return False
     _INFLIGHT[user_id] = True
-    asyncio.create_task(_run_guarded(user_id, node_id, count))
+    asyncio.create_task(_run_guarded(user_id, node_id, count, section_id))
     return True

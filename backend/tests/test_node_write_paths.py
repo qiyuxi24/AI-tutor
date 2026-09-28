@@ -4,7 +4,7 @@
 
 背景：原先「写一个节点 MD」有 4 套内联模板散在 knowledge_writer / kb/graph_generator /
 api/v1/knowledge.py（create_node、decompose），改一处忘一处
-（见 `docs/知识图谱/知识图谱_模块结构与封装调研.md` §3.3 / §7 第二步）。
+（见 `docs/归档/知识图谱/知识图谱_模块结构与封装调研.md` §3.3 / §7 第二步）。
 
 两条防线：
 1. 行为 —— 模板只剩一份（来源标注降级成参数）、ID 冲突不留孤儿 MD、同名并轨不重复建节点；

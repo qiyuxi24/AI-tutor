@@ -255,3 +255,50 @@ def test_list_by_knowledge_point_empty_or_unknown(tmp_path):
     assert store.list_by_knowledge_point("") == []
     assert store.list_by_knowledge_point("不存在") == []
     store.close()
+
+
+# ── 题目来源文件（source_docs，2026-09-28）─────────────────────────
+
+def test_source_docs_round_trip(tmp_path):
+    """题目来源文件随题存、随题取（默认空列表，不炸老调用方）"""
+    store = QuizStore(tmp_path)
+    docs = [{"doc_id": 7, "doc_name": "数据结构.md"}]
+
+    qid = store.save_questions([_make_question()], subject="数据结构",
+                               source_docs=docs)[0]
+
+    assert store.get_question(qid)["source_docs"] == docs
+    # 不传 → 空列表
+    qid2 = store.save_questions([_make_question(id="q2")])[0]
+    assert store.get_question(qid2)["source_docs"] == []
+    store.close()
+
+
+def test_legacy_db_gets_source_docs_column(tmp_path):
+    """老库补列：`CREATE TABLE IF NOT EXISTS` 不给老表加字段，必须就地 ALTER。
+
+    回归口径同 `records` 的 token_estimate（AGENTS.md §1「加列 = 写进补列清单」）。
+    """
+    import sqlite3
+    db = tmp_path / "quiz.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("""
+        CREATE TABLE questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, node_id INTEGER,
+            subject TEXT DEFAULT '', type TEXT NOT NULL, question TEXT NOT NULL,
+            options_json TEXT NOT NULL DEFAULT '[]', answer_json TEXT NOT NULL DEFAULT '[]',
+            points INTEGER DEFAULT 10, difficulty TEXT DEFAULT 'medium',
+            analysis TEXT DEFAULT '', comment_prompt TEXT DEFAULT '',
+            knowledge_point TEXT DEFAULT '', source TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+    store = QuizStore(tmp_path)          # 打开即补列
+
+    qid = store.save_questions([_make_question()], subject="数据结构",
+                               source_docs=[{"doc_id": 3, "doc_name": "书.md"}])[0]
+    assert store.get_question(qid)["source_docs"] == [{"doc_id": 3, "doc_name": "书.md"}]
+    store.close()

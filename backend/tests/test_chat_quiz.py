@@ -128,7 +128,7 @@ def test_quiz_generate_schedules_background_and_returns_immediately(monkeypatch)
     """工具立即返回（不等待出题），并真的起了后台任务。"""
     started = []
 
-    async def fake_generate(user_id, *, node_id, count=1):
+    async def fake_generate(user_id, *, node_id, section_id="", count=1):
         started.append((user_id, node_id))
 
     monkeypatch.setattr(chat_quiz, "generate_and_publish", fake_generate)
@@ -163,7 +163,7 @@ def test_background_task_reports_timeout_and_releases_slot(monkeypatch):
     """后台子任务超时必须回报主对话（推 ok=False）并释放占位 —— 否则该用户永远出不了题。"""
     published = []
 
-    async def _hang(user_id, *, node_id, count=1):
+    async def _hang(user_id, *, node_id, section_id="", count=1):
         await asyncio.sleep(10)
 
     monkeypatch.setattr(chat_quiz, "generate_and_publish", _hang)
@@ -181,7 +181,7 @@ def test_background_task_reports_timeout_and_releases_slot(monkeypatch):
 
 def test_quiz_generate_dedupes_concurrent_trigger(monkeypatch):
     """已有出题任务在跑时，第二次触发被拒（模型可能连调两次）。"""
-    async def fake_generate(user_id, *, node_id, count=1):
+    async def fake_generate(user_id, *, node_id, section_id="", count=1):
         await asyncio.sleep(1)
 
     monkeypatch.setattr(chat_quiz, "generate_and_publish", fake_generate)
@@ -275,6 +275,120 @@ def test_generate_and_publish_pushes_questions_without_answers(
     assert q["question"].startswith("编号 53")
     assert q["id"] > 0                      # 已入库，带题库 id
     assert "answer" not in q and "analysis" not in q   # 不泄漏答案
+
+
+def _one_question():
+    return {
+        "id": "q1", "type": "single", "question": "编号 53 的双亲编号是多少？",
+        "options": [{"label": "25", "value": "A"}, {"label": "26", "value": "B"},
+                    {"label": "27", "value": "C"}, {"label": "52", "value": "D"}],
+        "answer": ["B"], "analysis": "⌊53/2⌋ = 26", "points": 10,
+    }
+
+
+def _patch_generator(monkeypatch, seen: dict):
+    """假出题器：记录 seed_materials（断言"喂了什么"）并返回一道题。"""
+    async def fake_generate_quiz(**kwargs):
+        seen["seed"] = kwargs.get("seed_materials")
+        return {"questions": [_one_question()], "rejected": 0, "materials_used": 1}
+
+    import app.core.quiz.generator as gen_mod
+    monkeypatch.setattr(gen_mod, "generate_quiz", fake_generate_quiz)
+
+
+def _patch_publish(monkeypatch):
+    published = []
+    monkeypatch.setattr(chat_quiz, "publish",
+                        lambda etype, data=None, user_id=None: published.append(
+                            (etype, data, user_id)))
+    return published
+
+
+def test_section_quiz_uses_section_text_sources_and_mounts_ref(tmp_path, monkeypatch):
+    """按小节出题：喂**该节**正文、题目带该节来源文件、并挂到该节（add_quiz_ref 生产调用）"""
+    mgr = _patch_store(monkeypatch, tmp_path)
+    published = _patch_publish(monkeypatch)
+    seen: dict = {}
+    _patch_generator(monkeypatch, seen)
+
+    mounted = []
+
+    class _FakeKgSection:
+        def __init__(self, user_id):
+            self.user_id = user_id
+
+        def get_node(self, node_id):
+            return {"id": node_id, "name": "二叉树的性质", "summary": "摘要兜底"}
+
+        def get_node_content_preview(self, node_id, **kw):
+            return "整节点预览（按小节出题不该用它）"
+
+        def read_section(self, node_id, section_id):
+            return "若 i=1 则无双亲；若 2i<=n 则左孩子为 2i。"
+
+        def list_sections(self, node_id):
+            return [{"id": "s01", "title": "编号性质", "sources": [
+                {"doc_id": 9, "doc_name": "数据结构.md", "section": "第6章 树",
+                 "chunk_id": None}]}]
+
+        def add_quiz_ref(self, node_id, quiz_id, section_id=""):
+            mounted.append((node_id, quiz_id, section_id))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(chat_quiz, "KnowledgeGraph", _FakeKgSection)
+
+    _run(chat_quiz.generate_and_publish(7, node_id="bt", section_id="s01"))
+
+    assert "若 i=1 则无双亲" in seen["seed"][0], "按小节出题只喂该节正文"
+    assert "整节点预览" not in seen["seed"][0]
+    _type, data, _uid = published[0]
+    assert data["ok"] is True and data["section_id"] == "s01"
+    qid = data["questions"][0]["id"]
+    assert mounted == [("bt", str(qid), "s01")], "题目应挂到该小节"
+    assert mgr._get_store(7).get_question(qid)["source_docs"] == [
+        {"doc_id": 9, "doc_name": "数据结构.md"}]
+
+
+def test_node_level_quiz_uses_node_sources_without_mounting(tmp_path, monkeypatch):
+    """节点级出题（对话内常态）：来源取节点 sources；**不挂**小节引用（manifest 不膨胀）"""
+    mgr = _patch_store(monkeypatch, tmp_path)
+    published = _patch_publish(monkeypatch)
+    seen: dict = {}
+    _patch_generator(monkeypatch, seen)
+
+    mounted = []
+
+    class _FakeKgNode:
+        def __init__(self, user_id):
+            self.user_id = user_id
+
+        def get_node(self, node_id):
+            return {"id": node_id, "name": "二叉树的性质", "summary": "摘要"}
+
+        def get_node_content_preview(self, node_id, **kw):
+            return "若 i=1 则无双亲。"
+
+        def get_sources(self, node_id):
+            return [{"doc_id": 5, "doc_name": "教材甲.md", "section": "第6章"},
+                    {"doc_id": 5, "doc_name": "教材甲.md", "section": "第7章"},   # 同文件去重
+                    {"doc_id": 6, "doc_name": "教材乙.md", "section": "第1章"}]
+
+        def add_quiz_ref(self, node_id, quiz_id, section_id=""):
+            mounted.append((node_id, quiz_id, section_id))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(chat_quiz, "KnowledgeGraph", _FakeKgNode)
+
+    _run(chat_quiz.generate_and_publish(7, node_id="bt"))
+
+    qid = published[0][1]["questions"][0]["id"]
+    assert mgr._get_store(7).get_question(qid)["source_docs"] == [
+        {"doc_id": 5, "doc_name": "教材甲.md"}, {"doc_id": 6, "doc_name": "教材乙.md"}]
+    assert mounted == [], "节点级出题不写 manifest 路由"
 
 
 def test_generate_and_publish_reports_failure(tmp_path, monkeypatch):

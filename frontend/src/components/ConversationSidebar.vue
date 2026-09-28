@@ -6,7 +6,9 @@
  * 由父组件（HomeView）控制折叠，本组件不持业务状态。
  */
 
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { nextTick, ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import { confirmAction } from '../utils/feedback'
 import { useChatStore } from '../stores/chatStore'
 import { useContextMenu } from '../utils/contextMenu'
 import ContextMenu from './ContextMenu.vue'
@@ -32,44 +34,48 @@ function handleSwitch(id) {
   store.switchConversation(id)
 }
 
+// 内联重命名：编辑中的对话 id + 草稿标题（同一时刻只允许一条在编辑）
+const editingId = ref(null)
+const editingTitle = ref('')
+const editInput = ref(null)
+
+/** input 的模板 ref（函数式，避免在 v-for 里收成数组）。 */
+function setEditInput(el) {
+  editInput.value = el
+}
+
 /**
- * 重命名对话。标题本就在「localStorage 为主 + 后端全量同步」的契约里，改完 persist()
- * 会自动把新标题同步过去，不需要额外请求。
+ * 进入内联编辑（右键菜单「重命名对话」入口）。标题本就在「localStorage 为主 + 后端全量
+ * 同步」的契约里，改完 persist() 会自动把新标题同步过去，不需要额外请求。
  */
-async function handleRename() {
-  const conv = menuConv.value
-  if (!conv) return
-  let value
-  try {
-    ({ value } = await ElMessageBox.prompt('请输入新的对话标题', '重命名对话', {
-      inputValue: conv.title,
-      confirmButtonText: '保存',
-      cancelButtonText: '取消',
-    }))
-  } catch {
-    return   // 取消
-  }
-  const title = (value || '').trim()
-  if (!title) {
-    ElMessage.warning('标题不能为空')
-    return
-  }
-  store.renameConversation(conv.id, title)
+async function startRename(conv) {
+  editingId.value = conv.id
+  editingTitle.value = conv.title
+  await nextTick()
+  editInput.value?.focus()
+  editInput.value?.select()
+}
+
+/** 提交编辑：空标题视为放弃，保持原标题。 */
+function commitRename() {
+  const id = editingId.value
+  if (!id) return
+  const title = editingTitle.value.trim()
+  editingId.value = null
+  if (title) store.renameConversation(id, title)
+}
+
+/** 放弃编辑（Esc）。 */
+function cancelRename() {
+  editingId.value = null
 }
 
 /** 删除对话（二次确认）。删的是当前对话时，store 会自动补一个新对话，不会停在空视图。 */
 async function handleDelete() {
   const conv = menuConv.value
   if (!conv) return
-  try {
-    await ElMessageBox.confirm(`确定删除对话「${conv.title}」吗？`, '删除对话', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-    })
-  } catch {
-    return   // 取消
-  }
+  const ok = await confirmAction(`确定删除对话「${conv.title}」吗？此操作不可撤销。`)
+  if (!ok) return   // 取消
   store.deleteConversation(conv.id)
   ElMessage.success('已删除')
 }
@@ -112,7 +118,17 @@ async function handleDelete() {
           <svg class="chat-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
           </svg>
-          <span class="item-title">{{ conv.title }}</span>
+          <input
+            v-if="editingId === conv.id"
+            :ref="setEditInput"
+            v-model="editingTitle"
+            class="rename-input"
+            @click.stop
+            @keydown.enter.prevent="commitRename"
+            @keydown.esc.prevent="cancelRename"
+            @blur="commitRename"
+          />
+          <span v-else class="item-title">{{ conv.title }}</span>
         </div>
       </template>
       <div v-if="!store.hasConversations" class="empty-hint">暂无历史对话</div>
@@ -121,7 +137,7 @@ async function handleDelete() {
     <!-- 右键菜单：容器与图谱侧栏共用 -->
     <ContextMenu :visible="menuVisible" :x="menuX" :y="menuY" @close="closeMenu">
       <template #default="{ close }">
-        <div class="menu-item" @click="close(); handleRename()">
+        <div class="menu-item" @click="close(); startRename(menuConv)">
           <span class="menu-icon">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -246,6 +262,21 @@ async function handleDelete() {
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 1.3;
+}
+
+/* 内联重命名输入框：就地替换标题，不弹窗 */
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.3;
+  padding: 2px 6px;
+  border: 1px solid var(--color-accent);
+  border-radius: 4px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  outline: none;
 }
 
 .empty-hint {

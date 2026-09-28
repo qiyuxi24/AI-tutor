@@ -53,6 +53,7 @@ from app.core.agent.events import (
 )
 from app.core.agent.store import save_run as _save_run
 from app.core.agent_tools import KG_TOOLS, execute_kg_tool_async, tool_timeout_secs
+from app.core.config import settings
 from app.core.llm.clients import MODEL_NAME
 from app.core.llm.fallback import chat_create as _chat_create
 from app.core.llm.thinking import LLM_EXTRA_BODY as _LLM_EXTRA_BODY, strip_think_tags as _strip_think_tags
@@ -70,6 +71,14 @@ AGENT_MAX_ROUNDS = 5          # 最多工具执行轮数
 AGENT_TOOL_TIMEOUT_SECS = 60  # 单工具执行超时（本地 KG 操作瞬时，兜底未来慢工具）
 AGENT_TEMPERATURE = 0.3       # 循环内统一低温：工具判定与教育文本都要确定性
 AGENT_MAX_TOKENS = 2000       # 单次 LLM 输出上限（实调与发送前预估同一口径）
+
+# ─── P0-① Tool Result Clearing 触发阈值（tokens，2026-09-28）───
+# 默认取 settings.llm_ctx_budget（48K）：**仅当 ctx.messages 估算超过它才清理一次**。
+# 为什么不默认清理：清理 = 改写已发过的历史中段 = 把"整轮追加"的缓存前缀链剪断，
+# 代价是其后的全部前缀按全价（4.20 元/M）重算（命中价只要 0.84 元/M）。见
+# docs/上下文工程/上下文工程_Prompt缓存命中率_调研与优化方案.md §1.5 / §3.5。做成模块级
+# 常量便于测试注入小阈值来触发清理路径。
+AGENT_CLEAR_TOOL_RESULTS_TOKENS = settings.llm_ctx_budget
 
 # ─── 工具调用安全边界：规则全部在 `loop_guard.py`（2026-09-19 拆出本模块）───
 # 这里 import 进来是为了保留"默认值写在 loop.py"的历史调用面；改默认值去 loop_guard.py
@@ -137,9 +146,13 @@ def _estimate_send(api_messages: list[dict], *, user_id: int | None,
 
 
 async def _chat_once(api_messages: list[dict], *, temperature: float,
-                     tools: list | None = None, max_tokens: int = AGENT_MAX_TOKENS):
+                     tools: list | None = None, tool_choice: str | None = None,
+                     max_tokens: int = AGENT_MAX_TOKENS):
     """单次 LLM 调用封装（瞬时重试 + 错误码映射 + 主模型静默降级到备用服务）。
-    测试通过 patch 本函数注入假响应。"""
+
+    tool_choice 透传给 chat_create：强制收尾用 "none"（保留 tools 块以维持缓存前缀，
+    语义上仍保证"只出文本、不调工具"）。测试通过 patch 本函数注入假响应。
+    """
     kwargs = {
         "messages": api_messages,
         "temperature": temperature,
@@ -148,6 +161,8 @@ async def _chat_once(api_messages: list[dict], *, temperature: float,
     }
     if tools:
         kwargs["tools"] = tools
+    if tool_choice is not None:
+        kwargs["tool_choice"] = tool_choice
     return await _chat_create(**kwargs)
 
 
@@ -265,14 +280,31 @@ async def _finish_without_tools(ctx: AgentContext, *, temperature: float,
                                 token_estimate: dict | None, stop_reason: str,
                                 guard: LoopGuard, rlog: RunLogger,
                                 emitter: AgentEventEmitter) -> AgentRunResult:
-    """收尾共通段：以空 tools 再问一次 LLM 要最终文本；失败则退化为固定文案。"""
+    """收尾共通段：再问一次 LLM 要最终文本；失败则退化为固定文案。
+
+    **保留 `tools=KG_TOOLS` + `tool_choice="none"`**（而非像旧版那样丢掉 tools）：
+    MiniMax 缓存顺序是「工具定义 → 系统提示词 → 历史对话」，丢掉 tools = 第 0 个 token
+    就不同 = 该次调用必 0 命中（上下文工程 §3.4）；`tool_choice="none"` 语义上仍强制
+    "只出文本、不调工具"，与旧行为等价。网关不支持该参数（典型 400）时**降级**为不带
+    tools 的旧行为并记 warning。llm_calls 按**真实发生的 `_chat_once` 次数**递增
+    （降级重试就是 2 次，不为好看只加 1）。
+    """
+    resp, attempts = None, 0
     try:
-        resp = await _chat_once(ctx.messages, temperature=temperature)  # 不带 tools
+        attempts += 1
+        resp = await _chat_once(ctx.messages, temperature=temperature,
+                                tools=KG_TOOLS, tool_choice="none")
     except Exception as e:
-        rlog.log("loop", "force_finish_failed", "强制收尾 LLM 调用失败，退化为固定文案",
+        rlog.log("loop", "finish_tool_choice_unsupported",
+                 "网关拒绝 tool_choice=none，降级为不带 tools 的旧收尾行为",
                  level="WARNING", error=str(e), stop_reason=stop_reason)
-        resp = None
-    llm_calls += 1
+        try:
+            attempts += 1
+            resp = await _chat_once(ctx.messages, temperature=temperature)  # 降级：不带 tools
+        except Exception as e2:
+            rlog.log("loop", "force_finish_failed", "强制收尾 LLM 调用失败，退化为固定文案",
+                     level="WARNING", error=str(e2), stop_reason=stop_reason)
+    llm_calls += attempts
     usage = extract_usage(resp) if resp is not None else TokenUsage()
     context_tokens += usage.prompt_tokens
     token_usage = token_usage or TokenUsage()
@@ -375,12 +407,21 @@ async def _loop_core(
                 guard=guard, rlog=rlog, emitter=emitter,
             )
 
-        # S8：较早工具批次的正文换占位符（幂等；保留最近 K 批 = 当前推理链，工具可重放）
-        cleared = ctx.clear_old_tool_results()
-        if cleared:
+        # S8 Tool Result Clearing（P0-①，2026-09-28）：**默认不清理** —— 把较早工具结果
+        # 正文换占位符 = 改写已发过的历史中段 = 把"整轮追加"的缓存前缀链剪断，代价是其后的
+        # 全部前缀按全价（4.20 元/M）重算（命中价只要 0.84 元/M）。**仅当估算越过预算线时才
+        # 清理一次**（幂等；保留最近 K 批 = 当前推理链，工具可重放）。
+        ctx_tokens = count_messages_tokens(ctx.messages, model=MODEL_NAME)
+        if ctx_tokens > AGENT_CLEAR_TOOL_RESULTS_TOKENS:
+            cleared = ctx.clear_old_tool_results()
             rlog.log("context", "tool_results_cleared",
-                     f"{cleared} 条较早工具结果换占位符",
+                     f"越预算线触发清理：{cleared} 条较早工具结果换占位符",
+                     ctx_tokens=ctx_tokens, threshold=AGENT_CLEAR_TOOL_RESULTS_TOKENS,
                      cleared=cleared, keep_batches=TOOL_RESULTS_KEEP_BATCHES)
+        else:
+            rlog.log("context", "tool_results_kept",
+                     "未越预算线，保留历史原文以维持缓存前缀链（改写中段 = 剪链）",
+                     ctx_tokens=ctx_tokens, threshold=AGENT_CLEAR_TOOL_RESULTS_TOKENS)
         round_start = time.monotonic()
         resp = await _chat_once(ctx.messages, temperature=temperature, tools=KG_TOOLS)
         llm_ms = int((time.monotonic() - round_start) * 1000)

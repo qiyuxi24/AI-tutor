@@ -138,7 +138,8 @@ function graphFingerprint(nodes, links) {
  * @param {Object}   p
  * @param {Element}  p.container 图谱容器（引擎只往它里面 append 一个 svg）
  * @param {Object}   p.forces    力场参数（缺省用 FORCE_DEFAULTS）
- * @param {Object}   p.highlight 初始高亮态 {nextNodeId}
+ * @param {Object}   p.highlight 初始高亮态 {nextNodeId, sourceNodes}
+ *        - sourceNodes：来源命中的节点 id 数组（知识库右键「在图谱中显示」），非空即加醒目描边
  * @param {Object}   p.handlers  交互回调（全部可选）
  *        - onNodeClick(id)                  单击普通知识点
  *        - onNodeDblClick(id)               双击普通知识点
@@ -202,10 +203,24 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
     return isBelongLink(l) ? 0.55 : 0.4
   }
 
+  /** 来源命中（知识库右键「在图谱中显示」）：非空即加绿色醒目描边 */
+  function isSourceNode(id) {
+    return (hl.sourceNodes || []).includes(id)
+  }
+
   function nodeBodyStroke(d) {
+    if (isSourceNode(d.id)) return 'var(--color-green)'
     return nodeFill(d.mastery)
   }
 
+  /** 来源命中的节点加粗描边（非来源节点维持默认样式 1 / 0.3） */
+  function nodeBodyStrokeWidth(d) {
+    return isSourceNode(d.id) ? 3.2 : 1
+  }
+
+  function nodeBodyStrokeOpacity(d) {
+    return isSourceNode(d.id) ? 1 : 0.3
+  }
   /** 推荐节点脉冲环 */
   function applyPulse() {
     if (!svgSelection) return
@@ -547,8 +562,8 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
     nodeSelection.select('.node-body')
       .attr('fill', (d) => nodeFill(d.mastery))
       .attr('stroke', nodeBodyStroke)
-      .attr('stroke-width', 1)
-      .attr('stroke-opacity', 0.3)
+      .attr('stroke-width', nodeBodyStrokeWidth)
+      .attr('stroke-opacity', nodeBodyStrokeOpacity)
     // 生长/更新：只对半径与透明度过渡（tick 不写这两个属性，不会与过渡打架）
     nodeSelection.select('.node-body')
       .transition().duration(320)
@@ -631,8 +646,8 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
         .transition().duration(200)
         .attr('r', nodeRadius(d))
         .attr('stroke', nodeBodyStroke(d))
-        .attr('stroke-width', 1)
-        .attr('stroke-opacity', 0.3)
+        .attr('stroke-width', nodeBodyStrokeWidth(d))
+        .attr('stroke-opacity', nodeBodyStrokeOpacity(d))
 
       d3.select(this).select('.node-label')
         .transition().duration(200)
@@ -802,8 +817,8 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
       .attr('stroke-opacity', 1)
       .transition().duration(400)
       .attr('r', nodeRadius(node))
-      .attr('stroke-width', 1)
-      .attr('stroke-opacity', 0.3)
+      .attr('stroke-width', nodeBodyStrokeWidth(node))
+      .attr('stroke-opacity', nodeBodyStrokeOpacity(node))
   }
 
   /* ---------- 连线模式 ---------- */

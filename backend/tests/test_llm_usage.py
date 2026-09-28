@@ -93,3 +93,35 @@ def test_agent_loop_actually_records_usage(tmp_path, monkeypatch):
     assert row["dim"] == "agent_loop"
     assert row["prompt_tokens"] == 120
     assert row["completion_tokens"] == 8
+
+
+def test_cache_hit_rate_comes_from_recorded_cached_tokens(tmp_path):
+    """缓存命中率 = 命中输入 ÷ 输入总数，分子必须原样来自供应商响应的 cached_tokens。
+
+    这是 prompt 缓存优化（前缀顺序）的**唯一验收口径**（见
+    docs/上下文工程/上下文工程_Prompt缓存命中率_调研与优化方案.md §5.1 C-1）——
+    一旦有人把它换成本地估算，命中率就失去成本含义。
+    """
+    llm_usage.record("agent_loop", "MiniMax-M3",
+                     TokenUsage(prompt_tokens=1000, cached_tokens=150,
+                                completion_tokens=50),
+                     user_id=1, db_dir=tmp_path)
+    llm_usage.record("quiz_generate", "MiniMax-M3",
+                     TokenUsage(prompt_tokens=1000, cached_tokens=950),
+                     user_id=1, db_dir=tmp_path)
+
+    summary = llm_usage.summary(since_hours=1, db_dir=tmp_path)
+    assert summary["total"]["cached_tokens"] == 1100
+    assert summary["total"]["cache_hit_rate"] == 0.55          # 1100 / 2000
+
+    rows = {g["dim"]: g for g in summary["groups"]}
+    assert rows["agent_loop"]["cache_hit_rate"] == 0.15
+    assert rows["quiz_generate"]["cache_hit_rate"] == 0.95
+
+
+def test_cache_hit_rate_is_zero_without_prompt_tokens(tmp_path):
+    """只出 token 无输入（或老库 cached_tokens 缺失）时命中率为 0，不得除零。"""
+    llm_usage.record("agent_loop", "m", TokenUsage(completion_tokens=5), db_dir=tmp_path)
+    out = llm_usage.summary(since_hours=1, db_dir=tmp_path)
+    assert out["total"]["cache_hit_rate"] == 0.0
+    assert out["groups"][0]["cache_hit_rate"] == 0.0

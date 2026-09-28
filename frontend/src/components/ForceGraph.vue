@@ -17,7 +17,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import ContextMenu from './ContextMenu.vue'
 import EditDialog from './EditDialog.vue'
-import { notifyError } from '../utils/feedback'
+import { notifyError, confirmAction } from '../utils/feedback'
 import { useGraphForces } from '../utils/graphForces'
 import { useContextMenu } from '../utils/contextMenu'
 import { createForceGraphEngine } from '../utils/forceGraphEngine'
@@ -37,6 +37,8 @@ const props = defineProps({
   nextNodeId: { type: String, default: '' },
   // 右侧「学习任务栏」是否打开（仅用于底部按钮的高亮态，图本身不参与路径表达）
   pathBoardOpen: { type: Boolean, default: false },
+  // 来源高亮：命中的节点 id 数组（知识库右键「在图谱中显示」用），非空即加醒目描边
+  sourceNodes: { type: Array, default: () => [] },
 })
 
 /* ================================================================
@@ -82,9 +84,12 @@ const { forces } = useGraphForces()
    ================================================================ */
 let engine = null
 
-/** 喂给内核的高亮态（下一步推荐节点的脉冲环） */
+/** 喂给内核的高亮态（推荐节点脉冲环 / 来源命中节点描边） */
 function highlightState() {
-  return { nextNodeId: props.nextNodeId }
+  return {
+    nextNodeId: props.nextNodeId,
+    sourceNodes: props.sourceNodes,
+  }
 }
 
 onMounted(() => {
@@ -125,6 +130,7 @@ watch(() => [props.nodes, props.edges], () => {
 
 // ── 科技树联动：推荐节点变化时增量刷新样式（不重建布局） ──
 watch(() => props.nextNodeId, syncHighlight)
+watch(() => props.sourceNodes, syncHighlight)
 function syncHighlight() {
   engine?.setHighlight(highlightState())
 }
@@ -209,13 +215,15 @@ async function handleDrawTarget(fromId, toId) {
 /* ================================================================
    删除操作
    ================================================================ */
-function handleDeleteNode(nodeId) {
-  if (!confirm(`确定删除节点「${nodeId}」及其所有关联边吗？此操作不可撤销。`)) return
+async function handleDeleteNode(nodeId) {
+  const ok = await confirmAction(`确定删除节点「${nodeId}」及其所有关联边吗？此操作不可撤销。`)
+  if (!ok) return
   emit('graph-action', { action: 'delete-node', payload: { nodeId } })
 }
 
-function handleDeleteEdge(edgeData) {
-  if (!confirm('确定删除这条边吗？')) return
+async function handleDeleteEdge(edgeData) {
+  const ok = await confirmAction('确定删除这条边吗？此操作不可撤销。')
+  if (!ok) return
   emit('graph-action', { action: 'delete-edge', payload: { edgeId: edgeData.edge.edgeId } })
 }
 

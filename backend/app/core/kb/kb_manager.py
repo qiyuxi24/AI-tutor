@@ -305,7 +305,9 @@ class KbManager:
         # 成因是前端上传超时（120s）掐断请求，CancelledError 绕过 except Exception）。
         # 用 BaseException 才能连 CancelledError（客户端断连）一起兜住；回滚是同步 sqlite
         # 写、无 await，取消场景下也能执行完，随后原样重抛。
+        # 原件落盘同批纳入回滚：只删 DB 不留孤儿字节。
         try:
+            self._save_raw(user_id, node_id, ext, content)
             await self._index_document(user_id, node_id, text, vectorize=vectorize)
         except BaseException:
             try:
@@ -390,18 +392,53 @@ class KbManager:
         return await self._index_document(user_id, node_id, text, vectorize=vectorize)
 
     # ────────────────────────────────────────────
+    #  原件（预览 / 下载用）
+    # ────────────────────────────────────────────
+
+    def _raw_path(self, user_id: int, node_id: int, ext: str) -> Path:
+        """原件落点：`data/kb/{uid}/files/{node_id}{ext}`。
+
+        路径由 (uid, node_id, ext) 完全推导，所以**不加表也不加列** —— ext 就是
+        `documents.file_type`（解析时取的是 `Path(filename).suffix.lower()`，天然无路径穿越）。
+        删号由 `backend-admin::purge_user_storage` 整删 `data/kb/{uid}` 覆盖，不用额外接。
+        """
+        return self.data_dir / str(user_id) / "files" / f"{node_id}{ext}"
+
+    def _save_raw(self, user_id: int, node_id: int, ext: str, content: bytes) -> None:
+        path = self._raw_path(user_id, node_id, ext)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    def get_raw_path(self, user_id: int, node_id: int) -> Optional[Path]:
+        """
+        取某文件节点的原件路径（供预览端点）；无原件返回 None。
+
+        无原件是正常情形而非错误：本次改动（2026-09-28）之前上传的历史文件只有解析文本。
+        调用方据此回退到文本预览。
+        """
+        doc = self._get_store(user_id).get_document(node_id)
+        ext = (doc or {}).get("file_type") or ""
+        if not ext:
+            return None
+        path = self._raw_path(user_id, node_id, ext)
+        return path if path.is_file() else None
+
+    # ────────────────────────────────────────────
     #  删除
     # ────────────────────────────────────────────
 
     def delete_node(self, user_id: int, node_id: int) -> dict:
         """
-        删除节点（文件夹递归删子节点）。同时清理向量与稀疏索引。
+        删除节点（文件夹递归删子节点）。同时清理向量、稀疏索引与原件。
 
         返回: {"deleted_nodes": [...], "deleted_chunks": n}
         """
         store = self._get_store(user_id)
-        # 删除前先收集该节点下所有文件节点 ID（删除后节点记录已不存在，无法再查类型）
+        # 删除前先收集该节点下所有文件节点 ID（删除后节点记录已不存在，无法再查类型），
+        # 原件路径同样必须在删库前推导（ext 来自 documents.file_type）
         file_node_ids = store.collect_descendant_files(user_id, node_id)
+        raw_files = [(nid, (store.get_document(nid) or {}).get("file_type") or "")
+                     for nid in file_node_ids]
 
         deleted_nodes = store.delete_node_recursive(user_id, node_id)
 
@@ -409,6 +446,9 @@ class KbManager:
         vec_store = self._get_vec_store(user_id)
         deleted_chunks = vec_store.delete_docs_chunks(user_id, file_node_ids)
         self._get_sparse(user_id).delete_chunks(file_node_ids)
+        for nid, ext in raw_files:
+            if ext:
+                self._raw_path(user_id, nid, ext).unlink(missing_ok=True)
         return {"deleted_nodes": deleted_nodes, "deleted_chunks": deleted_chunks}
 
     # ────────────────────────────────────────────

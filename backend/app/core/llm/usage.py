@@ -109,12 +109,25 @@ def record(kind: str, model: str, usage, *,
         logger.warning(f"llm_usage 记账失败（已忽略）: {e}")
 
 
+def _hit_rate(cached_tokens: int, prompt_tokens: int) -> float:
+    """缓存命中率 = 命中输入 token ÷ 输入 token 总数（无输入时为 0，不除零）。
+
+    分子是**供应商响应里的真值**（`usage.prompt_tokens_details.cached_tokens`，
+    见 token_counter.extract_usage），不是本地 token 估算 —— 所以这个比值可以直接
+    当作成本口径用（命中价 ≈ 输入价的 1/5，见 MiniMax Prompt 缓存计费）。
+    """
+    return round(cached_tokens / prompt_tokens, 4) if prompt_tokens else 0.0
+
+
 def summary(*, since_hours: float = 168, group_by: str = "kind",
             user_id: int | None = None, db_dir: Path | None = None) -> dict:
     """聚合一段时间内的用量（默认近 7 天、按功能分组），按消耗从大到小排。
 
     group_by 取 kind / model / day / user，**白名单外一律退回 kind**。
     user_id 非空则只看该用户（目前只有 agent loop 的记账带 user_id）。
+
+    `total` 与每个分组都带 `cached_tokens` 与 `cache_hit_rate`（命中输入 ÷ 总输入）——
+    这是 prompt 缓存优化（前缀顺序）唯一的验收口径，别只在 groups 里看，总量更重要。
     """
     dim = _GROUPS.get(group_by, "kind")
     where, params = ["ts >= ?"], [time.time() - since_hours * 3600.0]
@@ -135,16 +148,22 @@ def summary(*, since_hours: float = 168, group_by: str = "kind",
         groups = [dict(r) for r in conn.execute(sql, params).fetchall()]
     finally:
         conn.close()
+    for g in groups:
+        g["cache_hit_rate"] = _hit_rate(g["cached_tokens"], g["prompt_tokens"])
+    total = {
+        "calls": sum(g["calls"] for g in groups),
+        "prompt_tokens": sum(g["prompt_tokens"] for g in groups),
+        "completion_tokens": sum(g["completion_tokens"] for g in groups),
+        "total_tokens": sum(
+            g["prompt_tokens"] + g["completion_tokens"] for g in groups),
+        "cached_tokens": sum(g["cached_tokens"] for g in groups),
+        "reasoning_tokens": sum(g["reasoning_tokens"] for g in groups),
+    }
+    total["cache_hit_rate"] = _hit_rate(total["cached_tokens"], total["prompt_tokens"])
     return {
         "since_hours": since_hours,
         "group_by": group_by if group_by in _GROUPS else "kind",
-        "total": {
-            "calls": sum(g["calls"] for g in groups),
-            "prompt_tokens": sum(g["prompt_tokens"] for g in groups),
-            "completion_tokens": sum(g["completion_tokens"] for g in groups),
-            "total_tokens": sum(
-                g["prompt_tokens"] + g["completion_tokens"] for g in groups),
-        },
+        "total": total,
         "groups": groups,
     }
 
