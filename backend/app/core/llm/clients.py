@@ -25,9 +25,9 @@ MODEL_NAME = settings.model_name
 
 # 备用服务客户端（模型回退链用，见 fallback.py）：FALLBACK_* 三件套齐全才创建
 fallback_client = None
-if settings.fallback_model_name and settings.fallback_base_url:
+if settings.fallback_model_name and settings.fallback_llm_base_url:
     fallback_client = AsyncOpenAI(
         api_key=settings.fallback_llm_api_key or settings.dashscope_api_key,
-        base_url=settings.fallback_base_url,
+        base_url=settings.fallback_llm_base_url,
         timeout=settings.llm_timeout,
     )

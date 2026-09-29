@@ -1,0 +1,284 @@
+/* ═══════════════════════════════════════
+   设置页样式（容器 + 各设置面板共用）
+
+   为什么要全局：设置页已拆成「容器（tab 导航）+ 多个面板子组件」，
+   面板里的 .sc-row / .usage-radio / .sc-btn 等类必须跨组件生效 ——
+   scoped 样式进不了子组件。面板**专有**样式（Markdown 预览、头像、模型卡片）
+   仍留在各自组件的 <style scoped> 里。
+
+   类名沿用拆分前的既有命名，避免大范围改模板。
+   ═══════════════════════════════════════ */
+
+.settings-layout {
+  display: flex;
+  width: 100%;
+  height: 100%;
+}
+
+/* 左侧设置导航（tab 列表） */
+.settings-nav {
+  width: 200px;
+  min-width: 200px;
+  height: 100%;
+  background: var(--color-bg-primary);
+  border-right: 1px solid var(--color-border);
+  padding: 16px 12px;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.sn-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  padding: 4px 10px 12px;
+  letter-spacing: 0.3px;
+}
+
+.sn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sn-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  text-decoration: none;
+}
+
+.sn-item:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.sn-item.active {
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+  font-weight: 500;
+}
+
+/* 右侧内容区 */
+.settings-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px 40px;
+  background: var(--color-bg-primary);
+}
+
+.settings-content::-webkit-scrollbar { width: 5px; }
+.settings-content::-webkit-scrollbar-thumb {
+  background: var(--color-border-light);
+  border-radius: 3px;
+}
+
+.sc-section {
+  max-width: 640px;
+  margin-bottom: 28px;
+}
+
+.sc-section h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 14px;
+}
+
+.sc-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  margin-bottom: 10px;
+}
+
+.sc-row-info {
+  min-width: 0;
+}
+
+.sc-row-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.sc-row-desc {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin-top: 3px;
+}
+
+.theme-toggle-group {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.theme-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.theme-option.active {
+  background: var(--color-accent-light);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  font-weight: 500;
+}
+
+.theme-option:hover:not(.active) {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.sc-btn {
+  flex-shrink: 0;
+  padding: 7px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.sc-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.sc-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 强调 / 危险两个修饰：账号面板与模型面板都要用 */
+.sc-btn.primary {
+  background: var(--color-accent-light);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+.sc-btn.danger:hover {
+  color: var(--color-danger, #e5534b);
+  border-color: var(--color-danger, #e5534b);
+}
+
+.usage-hint {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin: -6px 0 14px;
+}
+
+.usage-radio {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.usage-radio:hover:not(.active) {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+.usage-radio.active {
+  background: var(--color-accent-light);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  font-weight: 500;
+}
+.usage-radio:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.usage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-border-light);
+}
+.usage-dot.on {
+  background: var(--color-accent);
+}
+
+/* ── 滑杆卡片：知识图谱力场与节点详情两面板共用 ── */
+.force-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 18px;
+  align-items: start;
+}
+
+.force-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+}
+
+.force-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--color-text-primary);
+  margin-bottom: 4px;
+}
+
+.force-value {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-tertiary);
+}
+
+.force-slider {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.force-hint {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 3px;
+}
+
+.force-reset {
+  align-self: flex-start;
+}
+
+.force-preview-box {
+  height: 280px;
+}

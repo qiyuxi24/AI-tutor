@@ -65,6 +65,7 @@ async def call_llm(system_prompt: str, messages: list,
     for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
         attempt_tokens = max_tokens if attempt == 0 else max(max_tokens, _EMPTY_RETRY_TOKENS)
         response = await chat_create(
+            user_id=user_id,
             messages=api_messages,
             temperature=0.7,
             max_tokens=attempt_tokens,

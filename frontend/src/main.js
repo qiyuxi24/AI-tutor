@@ -14,6 +14,8 @@ import './style.css'
 // 通用组件类（卡片 / 按钮 / 输入 / 侧边栏 / 标签 / 弹窗 / 空状态）
 // Token 定义在 style.css，本文件只是用 Token 拼出的类，必须在 style.css 之后引入
 import './styles/components.css'
+// 设置页样式（容器 + 各设置面板共用）：面板是子组件，样式必须全局生效
+import './styles/settings.css'
 import App from './App.vue'
 
 // 全局指令：点击外部关闭

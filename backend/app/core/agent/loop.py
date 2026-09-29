@@ -147,11 +147,13 @@ def _estimate_send(api_messages: list[dict], *, user_id: int | None,
 
 async def _chat_once(api_messages: list[dict], *, temperature: float,
                      tools: list | None = None, tool_choice: str | None = None,
-                     max_tokens: int = AGENT_MAX_TOKENS):
-    """单次 LLM 调用封装（瞬时重试 + 错误码映射 + 主模型静默降级到备用服务）。
+                     max_tokens: int = AGENT_MAX_TOKENS,
+                     user_id: int | None = None):
+    """单次 LLM 调用封装（瞬时重试 + 错误码映射 + 模型静默降级到备用）。
 
     tool_choice 透传给 chat_create：强制收尾用 "none"（保留 tools 块以维持缓存前缀，
     语义上仍保证"只出文本、不调工具"）。测试通过 patch 本函数注入假响应。
+    user_id 透传给 chat_create：走该用户的自有模型链（未配置则回落 .env 系统默认档）。
     """
     kwargs = {
         "messages": api_messages,
@@ -163,7 +165,7 @@ async def _chat_once(api_messages: list[dict], *, temperature: float,
         kwargs["tools"] = tools
     if tool_choice is not None:
         kwargs["tool_choice"] = tool_choice
-    return await _chat_create(**kwargs)
+    return await _chat_create(user_id=user_id, **kwargs)
 
 
 def _resp_model(resp) -> str:
@@ -293,14 +295,16 @@ async def _finish_without_tools(ctx: AgentContext, *, temperature: float,
     try:
         attempts += 1
         resp = await _chat_once(ctx.messages, temperature=temperature,
-                                tools=KG_TOOLS, tool_choice="none")
+                                tools=KG_TOOLS, tool_choice="none",
+                                user_id=getattr(emitter, "user_id", None))
     except Exception as e:
         rlog.log("loop", "finish_tool_choice_unsupported",
                  "网关拒绝 tool_choice=none，降级为不带 tools 的旧收尾行为",
                  level="WARNING", error=str(e), stop_reason=stop_reason)
         try:
             attempts += 1
-            resp = await _chat_once(ctx.messages, temperature=temperature)  # 降级：不带 tools
+            resp = await _chat_once(ctx.messages, temperature=temperature,   # 降级：不带 tools
+                                    user_id=getattr(emitter, "user_id", None))
         except Exception as e2:
             rlog.log("loop", "force_finish_failed", "强制收尾 LLM 调用失败，退化为固定文案",
                      level="WARNING", error=str(e2), stop_reason=stop_reason)
@@ -423,7 +427,8 @@ async def _loop_core(
                      "未越预算线，保留历史原文以维持缓存前缀链（改写中段 = 剪链）",
                      ctx_tokens=ctx_tokens, threshold=AGENT_CLEAR_TOOL_RESULTS_TOKENS)
         round_start = time.monotonic()
-        resp = await _chat_once(ctx.messages, temperature=temperature, tools=KG_TOOLS)
+        resp = await _chat_once(ctx.messages, temperature=temperature, tools=KG_TOOLS,
+                                user_id=user_id)
         llm_ms = int((time.monotonic() - round_start) * 1000)
         llm_calls += 1
         usage = extract_usage(resp)
