@@ -49,27 +49,36 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  // ─── 带传输加密的登录/注册请求（密码 RSA 加密后提交） ───
-  async function _postWithEncryptedPassword(url, username, password) {
-    const encrypted = await encryptPassword(password)
+  // ─── 带传输加密的请求（密码 RSA 加密后提交） ───
+  /**
+   * @param {string} url
+   * @param {(refresh: boolean) => Promise<object>} buildBody 每次重试都重新加密（密文不可复用）
+   */
+  async function _postEncrypted(url, buildBody) {
     try {
-      return await apiClient.post(url, { username, password: encrypted })
+      return await apiClient.post(url, await buildBody(false))
     } catch (err) {
       // 服务端密钥可能已轮换（如容器重建）：刷新公钥重试一次
       const detail = String(err.response?.data?.detail || '')
       if (err.response?.status === 400 && detail.includes('E-AUTH-007')) {
-        const retryEncrypted = await encryptPassword(password, { refresh: true })
-        return await apiClient.post(url, { username, password: retryEncrypted })
+        return await apiClient.post(url, await buildBody(true))
       }
       throw err
     }
   }
 
+  /** 构造 {username, password} 请求体（password 为 RSA 密文） */
+  const _credentialBody = (username, password) => async (refresh) => ({
+    username,
+    password: await encryptPassword(password, { refresh }),
+  })
+
   // ─── 注册 ───
   async function register(username, password) {
     loginError.value = ''
     try {
-      const { data } = await _postWithEncryptedPassword('/api/v1/auth/register', username, password)
+      const { data } = await _postEncrypted(
+        '/api/v1/auth/register', _credentialBody(username, password))
       setToken(data.token)
       setUser(data.user)
       return true
@@ -83,13 +92,28 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(username, password) {
     loginError.value = ''
     try {
-      const { data } = await _postWithEncryptedPassword('/api/v1/auth/login', username, password)
+      const { data } = await _postEncrypted(
+        '/api/v1/auth/login', _credentialBody(username, password))
       setToken(data.token)
       setUser(data.user)
       return true
     } catch (err) {
       loginError.value = formatError(err, { action: '登录失败' })
       return false
+    }
+  }
+
+  // ─── 修改密码（原密码 + 新密码，均 RSA 加密）───
+  // 不用 loginError：那个是给登录弹窗显示的；这里由调用方拿 message 自己提示。
+  async function changePassword(oldPassword, newPassword) {
+    try {
+      await _postEncrypted('/api/v1/auth/change-password', async (refresh) => ({
+        old_password: await encryptPassword(oldPassword, { refresh }),
+        new_password: await encryptPassword(newPassword, { refresh }),
+      }))
+      return { ok: true, message: '' }
+    } catch (err) {
+      return { ok: false, message: formatError(err, { action: '修改密码失败' }) }
     }
   }
 
@@ -137,6 +161,7 @@ export const useAuthStore = defineStore('auth', () => {
     username,
     register,
     login,
+    changePassword,
     logout,
     checkAuth,
     ensureSession,

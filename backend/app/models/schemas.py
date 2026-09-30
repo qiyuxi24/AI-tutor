@@ -115,6 +115,11 @@ class ProfilePreferences(BaseModel):
     teaching_style_like: str = ""       # 喜欢的教学方式
     teaching_style_avoid: str = ""      # 需要避免的方式
     usage_mode: Literal["personal", "commercial"] = "personal"  # 版权使用模式（采集合规，personal=个人/commercial=商用）
+    # 悬浮球偏好（开关 / 默认展开 / 尺寸 / 角位 / 边距）。形状与校验的唯一来源 =
+    # frontend/src/utils/floatingBall.js::normalizeBallPrefs，这里只做透传。
+    # ⚠️ 必须显式声明：Pydantic v2 默认 extra='ignore'，少一行就会把该字段**静默丢掉**
+    # （前端是乐观更新，看不出失败 → 表现为"设置里开了悬浮球，刷新就没了"）。
+    floating_ball: Optional[dict] = None
 
 
 class ProfileNote(BaseModel):

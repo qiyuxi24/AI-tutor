@@ -15,6 +15,7 @@ from app.api.v1.kb import router as kb_router
 from app.api.v1.quiz import router as quiz_router
 from app.api.v1.collector import router as collector_router
 from app.api.v1.agent_runs import router as agent_runs_router
+from app.api.v1.llm_models import router as llm_models_router
 from app.core.config import settings
 from app.core.error_codes import ErrorCode, log_error
 from app.core.logging_setup import setup_logging
@@ -142,6 +143,7 @@ app.include_router(kb_router, prefix="/api/v1")
 app.include_router(quiz_router, prefix="/api/v1")
 app.include_router(collector_router, prefix="/api/v1")
 app.include_router(agent_runs_router, prefix="/api/v1")
+app.include_router(llm_models_router, prefix="/api/v1")
 
 
 # ════════════════════════════════════════════

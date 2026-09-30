@@ -19,7 +19,7 @@
 | 跑测试 | cwd=项目根：`backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"` |
 | 真实 API 测试 | 加 `-m llm_api`（真实付费 key，需 pytest-asyncio，单独跑） |
 | 配置真值 | 根目录 `.env`（唯一，`core/config.py` 读 `parents[3]/.env`） |
-| LLM/嵌入配置 | 对话：`LLM_API_KEY` + `LLM_BASE_URL` + `MODEL_NAME`（默认 **MiniMax-M3**）；嵌入：`DASHSCOPE_API_KEY` + `EMBED_BASE_URL`（固定阿里 text-embedding-v4） |
+| LLM/嵌入配置 | 对话：**每用户**（设置页「模型」自配，存 `backend/data/llm/{uid}/models.json`，Key 明文只在服务端）→ 主→备自动降级；未配置则回落根 `.env` 的 `LLM_API_KEY` + `LLM_BASE_URL` + `MODEL_NAME`（默认 **MiniMax-M3**）= **系统默认档**。嵌入固定：`DASHSCOPE_API_KEY` + `EMBED_BASE_URL`（阿里 text-embedding-v4，**不随用户模型切换**——换嵌入要重建索引） |
 
 ## 1. 硬约束（违反必出事）
 
@@ -89,7 +89,8 @@
 | **Agent 内核逐模块职责 / 时序 / 改码坑** | `backend/app/core/agent/README.md` |
 | **工具系统（注册表 / 分发 / 不变量）改码指南** | `backend/app/core/agent_tools/README.md` |
 | **加/改一个工具（一工具一文件、三条硬约定、检查清单）** | `backend/app/core/agent_tools/tools/README.md` |
-| **LLM 原语包（客户端 / 思考 / 回退 / 嵌入 / JSON 提取）** | `backend/app/core/llm/README.md` |
+| **LLM 原语包（客户端 / 思考 / 回退 / 嵌入 / JSON 提取 / 每用户模型）** | `backend/app/core/llm/README.md` |
+| **用户自配模型（存储 / 状态机 / 降级档位 / 端点）** | 代码 = `backend/app/core/llm/user_models.py`（存储 + 状态机）+ `api/v1/llm_models.py`（端点）；候选链接入点 = `llm/fallback.py::chat_create(user_id=…)`；测试 = `tests/test_user_models.py` / `test_user_model_routing.py` / `test_llm_models_api.py` |
 | **MCP 模块（server 本体 + 宿主接线 / 搜索后端降级链）** | `backend/app/mcp_servers/README.md` |
 | 模块级最新契约 | 对应模块 `*.py` 的 **docstring**（代码优先于文档） |
 | Agent Loop 设计决策 / 业界调研 | `docs/AgentLoop/AgentLoop_重构设计讨论.md`、`docs/AgentLoop/AgentLoop_业界调研与学习路线.md` |

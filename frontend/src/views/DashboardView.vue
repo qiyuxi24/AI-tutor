@@ -69,7 +69,6 @@ watch(
     <header class="dash-header">
       <div class="dash-title-wrap">
         <h2 class="dash-title">学习进度</h2>
-        <span class="dash-subtitle">数据实时来自知识图谱 · 点击卡片直达图谱</span>
       </div>
       <div class="dash-tools">
         <select v-model="subjectFilter" class="dash-subject-select" title="筛选学科">

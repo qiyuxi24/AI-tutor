@@ -15,6 +15,7 @@ import { ref } from 'vue'
 import { useTheme } from '../utils/theme'
 import { useAuthStore } from '../stores/authStore'
 import { avatarState } from '../utils/avatar.js'
+import { BRAND_ICON } from '../utils/brandAssets.js'
 
 defineProps({
   activeView: { type: String, default: 'chat' },
@@ -50,7 +51,7 @@ function handleUserMenu(action) {
   <aside class="activity-bar">
     <!-- 顶部品牌：像素小星（public/brand-star.svg，自带配色） -->
     <div class="ab-logo" title="TutorAgent">
-      <img class="ab-logo-img" src="/brand-star.svg" alt="TutorAgent" />
+      <img class="ab-logo-img" :src="BRAND_ICON" alt="TutorAgent" />
     </div>
 
     <!-- 中部导航区 -->

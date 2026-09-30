@@ -7,13 +7,26 @@
 - 请求侧错误(400) → 不降级直接抛（换模型也没用）
 """
 import asyncio
+import inspect
+import re
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from openai import APIStatusError
 
+from app.core.config import Settings
+from app.core.llm import clients as llm_clients
 from app.core.llm import fallback as llm_client
+
+
+def test_clients_only_reads_existing_settings_fields():
+    """clients.py 引用的 settings 字段必须真实存在（曾误写 fallback_base_url：
+    该行被 `fallback_model_name` 的短路保护掩盖，一旦配上 FALLBACK_MODEL_NAME
+    就会 AttributeError → 整个应用导入即崩）。"""
+    src = inspect.getsource(llm_clients)
+    for field_name in set(re.findall(r"settings\.([a-z_]+)", src)):
+        assert hasattr(Settings, field_name), f"Settings 不存在字段 {field_name}"
 
 
 def _api_err(status: int) -> APIStatusError:
