@@ -149,7 +149,9 @@ def test_no_tools_falls_back_when_gateway_rejects_tool_choice(monkeypatch):
     calls = {"n": 0}
 
     async def fake_chat(api_messages, *, temperature, tools=None,
-                        tool_choice=None, max_tokens=2000):
+                        tool_choice=None, max_tokens=2000, user_id=None):
+        # ⚠️ `user_id` 必须留在签名里：合并 origin/main 后 `_chat_once` 会带
+        # `user_id=user_id`（用户级模型链），少了它 → TypeError 被当成"网关拒绝" → 降级路径假绿。
         calls["n"] += 1
         received.append({"tools": tools, "tool_choice": tool_choice})
         if calls["n"] == 1:

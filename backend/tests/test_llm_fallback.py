@@ -6,9 +6,9 @@
 - 未配置备用（单候选）→ 主模型失败照旧抛 RuntimeError（旧行为不变）
 - 请求侧错误(400) → 不降级直接抛（换模型也没用）
 """
+import ast
 import asyncio
 import inspect
-import re
 from types import SimpleNamespace
 
 import httpx
@@ -21,11 +21,21 @@ from app.core.llm import fallback as llm_client
 
 
 def test_clients_only_reads_existing_settings_fields():
-    """clients.py 引用的 settings 字段必须真实存在（曾误写 fallback_base_url：
+    """clients.py **代码里**引用的 settings 字段必须真实存在（曾误写 fallback_base_url：
     该行被 `fallback_model_name` 的短路保护掩盖，一旦配上 FALLBACK_MODEL_NAME
-    就会 AttributeError → 整个应用导入即崩）。"""
-    src = inspect.getsource(llm_clients)
-    for field_name in set(re.findall(r"settings\.([a-z_]+)", src)):
+    就会 AttributeError → 整个应用导入即崩）。
+
+    ⚠️ 必须用 AST 只看**代码**（2026-09-30 合并 origin/main 后修正）：
+    旧版用正则扫整份源码，会把**注释里**提到的历史错名 `settings.fallback_base_url`
+    也算成"引用" → 注释解释这个坑、测试却因此变红（两边各自都对，合起来冲突）。
+    注释不是引用，不该参与断言。
+    """
+    tree = ast.parse(inspect.getsource(llm_clients))
+    used = {node.attr for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name) and node.value.id == "settings"}
+    assert used, "一个 settings.* 引用都没扫到 —— AST 抽取逻辑坏了，先修测试"
+    for field_name in sorted(used):
         assert hasattr(Settings, field_name), f"Settings 不存在字段 {field_name}"
 
 
