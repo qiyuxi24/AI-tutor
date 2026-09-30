@@ -13,38 +13,51 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ChatArea from './ChatArea.vue'
-import { ballPrefs, ballPrefsMeta } from '../utils/floatingBall.js'
+import { ballPrefs, ballPrefsMeta, BALL_SIZE_PRESETS } from '../utils/floatingBall.js'
+import { BRAND_ICON } from '../utils/brandAssets.js'
 
 const props = defineProps({
   /** 是否允许显示（父级传入：非对话页 且 用户已开启） */
   visible: { type: Boolean, default: false },
 })
 
-const BALL_SIZE = 48
-const EDGE = 16
-const SNAP = 16
-const POS_KEY = 'tutorBallPos'
-const WIN_POS_KEY = 'tutorBallWinPos'
-const WIN_SIZE_KEY = 'tutorBallWinSize'
+/* ── 几何常量（px）：这里改就够，组件别处不再出现裸数字 ── */
+const BALL_SIZE = 48      // 球的直径（CSS 不再写死，由 ballStyle 下发）
+const EDGE = 16           // 球 / 小窗距视口边缘的边距
+const SNAP = 16           // 松手时离边缘 < SNAP 就吸附过去
+const GAP = 12            // 小窗与球之间的间距
+const CLICK_SLOP = 4      // 位移 < CLICK_SLOP 视为点击，否则算拖拽
 
-/** 三档小窗尺寸 [宽, 高]，与设置页的选项一一对应（手动缩放过则以手动为准） */
-const SIZES = {
-  compact: [340, 480],
-  medium: [380, 560],
-  large: [480, 680],
-}
-
-/** 手动缩放的范围；与视口取小，保证不会大到溢出屏幕 */
+/** 手动缩放的范围；视口更小则以视口为准。ABS_* = 视口比 MIN_* 还小时的兜底 */
 const MIN_W = 320
 const MIN_H = 420
 const MAX_W = 560
 const MAX_H = 760
+const ABS_MIN_W = 240
+const ABS_MIN_H = 260
+
+const POS_KEY = 'tutorBallPos'
+const WIN_POS_KEY = 'tutorBallWinPos'
+const WIN_SIZE_KEY = 'tutorBallWinSize'
 
 /** 8 个缩放方向：4 边 + 4 角（n/s/e/w 与组合） */
 const RESIZE_DIRS = ['n', 's', 'e', 'w', 'nw', 'ne', 'sw', 'se']
 
 const open = ref(false)
-const pos = ref(readPos() || defaultPos())
+
+/**
+ * 球位置：本机手动拖过就以本机为准，否则跟随设置页的角位 / 边距预设。
+ * 预设来自服务端偏好，**到达时间晚于本组件挂载**（HomeView 是异步 loadBallPrefs），
+ * 所以下面要 watch 一次重新落位 —— 只在初始化时算一次会让预设角位失效。
+ */
+const manualPos = readPos()
+const hasManualPos = ref(!!manualPos)
+const pos = ref(manualPos || defaultPos())
+
+watch(
+  () => ballPrefs.corner,
+  () => { if (!hasManualPos.value) pos.value = defaultPos() }
+)
 
 /**
  * 小窗的手动位置：
@@ -59,8 +72,8 @@ const winSize = ref(readWinSize())
 
 /** 当前允许的尺寸范围（跟着视口收缩，避免小屏上放不下） */
 function sizeBounds() {
-  const maxW = Math.max(240, Math.min(MAX_W, window.innerWidth - EDGE * 2))
-  const maxH = Math.max(260, Math.min(MAX_H, window.innerHeight - EDGE * 2))
+  const maxW = Math.max(ABS_MIN_W, Math.min(MAX_W, window.innerWidth - EDGE * 2))
+  const maxH = Math.max(ABS_MIN_H, Math.min(MAX_H, window.innerHeight - EDGE * 2))
   return { minW: Math.min(MIN_W, maxW), minH: Math.min(MIN_H, maxH), maxW, maxH }
 }
 
@@ -75,11 +88,16 @@ function clampSize(s) {
 /** 当前小窗尺寸：手动缩放优先，否则用设置页的档位 */
 const size = computed(() => {
   if (winSize.value) return clampSize(winSize.value)
-  const [w, h] = SIZES[ballPrefs.size] || SIZES.medium
+  const [w, h] = BALL_SIZE_PRESETS[ballPrefs.size] || BALL_SIZE_PRESETS.medium
   return clampSize({ w, h })
 })
 
-const ballStyle = computed(() => ({ left: `${pos.value.x}px`, top: `${pos.value.y}px` }))
+const ballStyle = computed(() => ({
+  left: `${pos.value.x}px`,
+  top: `${pos.value.y}px`,
+  width: `${BALL_SIZE}px`,
+  height: `${BALL_SIZE}px`,
+}))
 
 /** 小窗贴着球展开：球在右半屏就右对齐，在下半屏就向上弹 */
 function attachPos() {
@@ -87,7 +105,7 @@ function attachPos() {
   const onRight = pos.value.x + BALL_SIZE / 2 > window.innerWidth / 2
   const onBottom = pos.value.y + BALL_SIZE / 2 > window.innerHeight / 2
   const x = onRight ? pos.value.x + BALL_SIZE - w : pos.value.x
-  const y = onBottom ? pos.value.y - h - 12 : pos.value.y + BALL_SIZE + 12
+  const y = onBottom ? pos.value.y - h - GAP : pos.value.y + BALL_SIZE + GAP
   return clampWin({ x, y })
 }
 
@@ -118,8 +136,9 @@ function clamp(p) {
   return { x: Math.min(Math.max(EDGE, p.x), maxX), y: Math.min(Math.max(EDGE, p.y), maxY) }
 }
 
+/** 按设置页的角位 / 边距算预设位置（右下或左下角） */
 function defaultPos() {
-  const off = ballPrefs.offset || { x: 24, y: 24 }
+  const off = ballPrefs.offset
   const onLeft = ballPrefs.corner === 'bottom-left'
   return clamp({
     x: onLeft ? off.x : window.innerWidth - BALL_SIZE - off.x,
@@ -136,9 +155,11 @@ function readPos() {
   }
 }
 
+/** 存本机球位；未手动摆过（跟随预设）时清掉，避免老位置把新预设盖住 */
 function savePos() {
   try {
-    localStorage.setItem(POS_KEY, JSON.stringify(pos.value))
+    if (hasManualPos.value) localStorage.setItem(POS_KEY, JSON.stringify(pos.value))
+    else localStorage.removeItem(POS_KEY)
   } catch {
     /* 隐私模式下写不进去，忽略 */
   }
@@ -199,7 +220,7 @@ function onPointerMove(e) {
   if (!drag) return
   const dx = e.clientX - drag.px
   const dy = e.clientY - drag.py
-  if (!moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return
+  if (!moved && Math.abs(dx) < CLICK_SLOP && Math.abs(dy) < CLICK_SLOP) return
   moved = true
   pos.value = clamp({ x: drag.x + dx, y: drag.y + dy })
 }
@@ -208,13 +229,16 @@ function onPointerUp() {
   if (!drag) return
   drag = null
   if (!moved) return
-  const right = window.innerWidth - (pos.value.x + BALL_SIZE)
-  const bottom = window.innerHeight - (pos.value.y + BALL_SIZE)
+  // 松手吸附最近边。pos 已被 clamp 到 EDGE，比较时得先减掉 EDGE，
+  // 否则"离边 < SNAP"永远不成立 —— 旧实现就是拿钳制后的值直接比，吸附从没生效过。
+  const snapX = window.innerWidth - BALL_SIZE - EDGE
+  const snapY = window.innerHeight - BALL_SIZE - EDGE
   const next = { ...pos.value }
-  if (pos.value.x < SNAP) next.x = EDGE
-  if (right < SNAP) next.x = window.innerWidth - BALL_SIZE - EDGE
-  if (pos.value.y < SNAP) next.y = EDGE
-  if (bottom < SNAP) next.y = window.innerHeight - BALL_SIZE - EDGE
+  if (pos.value.x - EDGE < SNAP) next.x = EDGE
+  else if (snapX - pos.value.x < SNAP) next.x = snapX
+  if (pos.value.y - EDGE < SNAP) next.y = EDGE
+  else if (snapY - pos.value.y < SNAP) next.y = snapY
+  hasManualPos.value = true   // 摆过就以本机为准，不再跟随设置页的角位预设
   pos.value = next
   savePos()
   // 球动过 → 小窗回到"贴着球展开"（否则球走了、小窗还孤零零挂在原地）
@@ -345,8 +369,11 @@ watch(
       saveWinSize()
     }
     if (ballPrefsMeta.changed.includes('corner')) {
+      // 回到"跟随预设"。这里的 pos 重算不能省：上面的 corner watch 建得更早、
+      // 会先于本 watch 执行，那时 hasManualPos 还是 true，它不会落位。
+      hasManualPos.value = false
       pos.value = defaultPos()
-      savePos()
+      savePos()                    // 顺手清掉本机存的老位置
       winPos.value = null
       saveWinPos()
     }
@@ -354,7 +381,8 @@ watch(
 )
 
 function onResize() {
-  pos.value = clamp(pos.value)
+  // 跟随预设的球按新视口重算；手动摆过的只做可见性钳制
+  pos.value = hasManualPos.value ? clamp(pos.value) : defaultPos()
   // 视口变了：手动摆过的小窗重新钳进可见范围；手动缩放的尺寸也要跟着收
   if (winPos.value) winPos.value = clampWin(winPos.value)
   if (winSize.value) winSize.value = clampSize(winSize.value)
@@ -448,9 +476,9 @@ onBeforeUnmount(() => {
         @click="onBallClick"
         @contextmenu.prevent
       >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 0 2h-1.08A7 7 0 0 1 14 21v1h-4v-1a7 7 0 0 1-5.92-5H3a1 1 0 0 1 0-2h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2z" />
-        </svg>
+        <!-- 品牌图标：与 favicon / 活动栏 logo / 对话 AI 头像共用同一份 public/brand-star.svg，
+             这里不再内联写死图形（原来是个机器人头，跟其它三处对不上） -->
+        <img class="ball-icon" :src="BRAND_ICON" alt="" aria-hidden="true" />
       </button>
     </div>
   </Teleport>
@@ -469,8 +497,7 @@ onBeforeUnmount(() => {
 .ball {
   position: absolute;
   pointer-events: auto;
-  width: 48px;
-  height: 48px;
+  /* 宽高由 ballStyle 下发（BALL_SIZE 是唯一来源，别在这里再写死一份） */
   padding: 0;
   border: none;
   border-radius: 50%;
@@ -495,10 +522,11 @@ onBeforeUnmount(() => {
   outline: 2px solid var(--color-accent);
   outline-offset: 3px;
 }
-.ball svg {
-  width: 26px;
-  height: 26px;
+/* 品牌像素星：viewBox 14x13，等比 26 * 13/14 ≈ 24（与对话 AI 头像同口径） */
+.ball-icon {
   display: block;
+  width: 26px;
+  height: 24px;
 }
 @media (prefers-reduced-motion: reduce) {
   .ball {

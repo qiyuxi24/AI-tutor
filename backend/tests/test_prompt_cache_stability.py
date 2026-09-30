@@ -43,7 +43,7 @@ def _install(monkeypatch, responses: list, received: list, *, tool_result: str):
     queue = list(responses)
 
     async def fake_chat(api_messages, *, temperature, tools=None,
-                        tool_choice=None, max_tokens=2000):
+                        tool_choice=None, max_tokens=2000, user_id=None):
         received.append({
             "messages": copy.deepcopy(api_messages),
             "tools": copy.deepcopy(tools),
@@ -166,7 +166,7 @@ def test_force_finish_downgrades_when_tool_choice_rejected(monkeypatch):
     ]
 
     async def fake_chat(api_messages, *, temperature, tools=None,
-                        tool_choice=None, max_tokens=2000):
+                        tool_choice=None, max_tokens=2000, user_id=None):
         received.append({"tools": tools, "tool_choice": tool_choice})
         if tool_choice == "none":       # 模拟网关不支持该参数
             raise RuntimeError("[E-LLM-400] tool_choice not supported")

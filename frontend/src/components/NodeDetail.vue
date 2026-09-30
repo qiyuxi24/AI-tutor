@@ -435,7 +435,9 @@ async function handleSave() {
 
         <!-- 阅读模式：左侧栏（有 manifest → 小节列表；老节点 → 单项「正文」）+ 右侧正文 -->
         <div v-else-if="mode === 'view'" class="sections-layout">
-          <aside class="section-sidebar" :class="{ collapsed: sidebarCollapsed }">
+          <!-- 侧栏外观走设计系统（styles/components.css 的 .sidebar / .sidebar-body /
+               .sidebar-nav / .sidebar-item），本组件只补宽度、折叠与状态色 -->
+          <aside class="sidebar section-sidebar" :class="{ collapsed: sidebarCollapsed }">
             <!-- 可伸缩：收起后只剩这一条窄边与按钮 -->
             <button
               type="button"
@@ -449,13 +451,13 @@ async function handleSave() {
                 <polyline v-else points="15 18 9 12 15 6"/>
               </svg>
             </button>
-            <div class="section-sidebar-body">
-              <ul class="section-list">
+            <div class="sidebar-body section-sidebar-body">
+              <ul class="sidebar-nav section-list">
                 <li v-for="s in docList" :key="s.id" class="section-row">
                   <button
                     type="button"
-                    class="section-item"
-                    :class="{ active: s.id === activeSectionId, 'is-failed': s.status === 'failed',
+                    class="sidebar-item section-item"
+                    :class="{ 'is-active': s.id === activeSectionId, 'is-failed': s.status === 'failed',
                               'is-pending': s.status === 'pending', 'is-source-hit': sectionHasSource(s) }"
                     :title="s.title"
                     @click="selectDoc(s)"
@@ -491,7 +493,7 @@ async function handleSave() {
 
               <!-- 试题分组（同一侧边栏，小节列表下方）：懒加载，点击跳查出题页 -->
               <div class="quiz-group">
-                <div class="quiz-group-head">试题</div>
+                <div class="sidebar-group-title quiz-group-head">试题</div>
                 <p v-if="quizzesLoading" class="section-hint quiz-group-hint">加载中…</p>
                 <p v-else-if="quizzesError" class="save-error section-gen-error">{{ quizzesError }}</p>
                 <template v-else>
@@ -499,7 +501,7 @@ async function handleSave() {
                     <li v-for="q in quizzes" :key="q.id">
                       <button
                         type="button"
-                        class="quiz-item"
+                        class="sidebar-item quiz-item"
                         :class="{ 'is-source-hit': quizHasSource(q) }"
                         :title="q.question"
                         @click="openQuiz(q)"
@@ -712,27 +714,20 @@ async function handleSave() {
 .markdown-body :deep(ul), .markdown-body :deep(ol) { padding-left: 20px; margin: 8px 0; }
 .empty-content { color: var(--color-text-muted); font-style: italic; text-align: center; padding: 40px 0; }
 
-/* 小节模式：左列表 / 右正文（沿用面板风格与既有配色变量） */
+/* 小节模式：左列表 / 右正文。
+   侧栏的壳 / 滚动区 / 列表 / 列表项外观全部来自设计系统（styles/components.css 的
+   .sidebar / .sidebar-body / .sidebar-nav / .sidebar-item），这里只留本弹窗特有的
+   宽度、折叠与状态色 —— 别再抄一份背景色/内边距/圆角。 */
 .sections-layout { flex: 1; min-height: 0; display: flex; }
-.section-sidebar {
-  width: 190px; min-width: 190px; flex-shrink: 0;
-  display: flex; flex-direction: column;
-  border-right: 1px solid var(--color-border); background: var(--color-bg-surface);
-}
+.section-sidebar { width: 190px; min-width: 190px; flex-shrink: 0; }
 .section-gen-error { margin: 8px 0 0; font-size: 12px; }
-.section-sidebar-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
-.section-list {
-  list-style: none; margin: 0; padding: 8px;
-  display: flex; flex-direction: column; gap: 2px;
-}
-.section-item {
-  display: flex; align-items: center; gap: 8px; width: 100%;
-  padding: 8px 10px; border: none; border-radius: 8px; background: transparent;
-  color: var(--color-text-secondary); font-size: 13px; text-align: left; cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
+/* .sidebar-body 已给弹性/滚动/内边距，这里补纵向排列（试题分组要接在小节列表下方） */
+.section-sidebar-body { display: flex; flex-direction: column; }
+/* .sidebar-nav 已给纵向列表与间距；ul 自身样式要清掉（含内边距，避免与外层叠成双份） */
+.section-list { list-style: none; margin: 0; padding: 0; }
 /* 小节行 = 小节按钮 + 「针对本节出题」按钮（行内 flex，按钮不挤走标题） */
 .section-row { display: flex; align-items: center; gap: 2px; }
+/* 外观来自 .sidebar-item，这里只让按钮在小节行里占满剩余宽度 */
 .section-row .section-item { flex: 1; min-width: 0; }
 .section-quiz-btn {
   flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
@@ -742,26 +737,26 @@ async function handleSave() {
 }
 .section-quiz-btn:hover:not(:disabled) { background: var(--color-bg-hover); color: var(--color-accent); opacity: 1; }
 .section-quiz-btn:disabled { cursor: not-allowed; opacity: 0.3; }
-.section-item:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
-.section-item.active { background: var(--color-accent-light); color: var(--color-accent); font-weight: 600; }
+/* 状态色覆盖 .sidebar-item 的默认/激活外观（hover 与 is-active 由设计系统提供） */
 .section-item.is-failed { color: var(--color-red); }        /* 生成失败：警示色 */
 .section-item.is-pending { color: var(--color-text-muted); } /* 待生成：次要色 */
-/* 来源高亮（「在图谱中显示」命中的资料）—— 放在 .active 之后，两者同时命中时以它为准 */
+/* 来源高亮（「在图谱中显示」命中的资料）—— 放在 .is-active 之后，两者同时命中时以它为准 */
 .section-item.is-source-hit { background: var(--color-green-light); color: var(--color-green); font-weight: 600; }
 .section-kind-icon { flex-shrink: 0; display: inline-flex; }
 .section-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 试题分组（同侧边栏，小节列表下方） */
 .quiz-group { border-top: 1px solid var(--color-border); padding: 8px; }
-.quiz-group-head { font-size: 12px; font-weight: 600; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 6px; padding: 0 2px; }
 .quiz-group-hint { padding: 2px; margin: 0; font-size: 12px; }
 .quiz-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+/* 紧凑变体：外观（内边距 / 圆角 / hover）沿用 .sidebar-item，只把密度压小 ——
+   一行要放题型徽标 + 题干 + 来源，按 .sidebar-item 的 14px 字号会挤掉题干 */
 .quiz-item {
-  display: flex; flex-direction: column; gap: 3px; width: 100%;
-  padding: 7px 8px; border: none; border-radius: 8px; background: transparent;
-  color: var(--color-text-secondary); font-size: 12px; text-align: left; cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-sm);
 }
-.quiz-item:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
 .quiz-item.is-source-hit { background: var(--color-green-light); }
 .quiz-item-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .quiz-type-badge {

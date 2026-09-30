@@ -333,6 +333,9 @@ def purge_user_storage(user_id: int) -> None:
         # 题库（`core/quiz/quiz_store.py::_QUIZ_DIR` = backend/data/quiz/<uid>）：
         # 与 kb/rag 同数据根，删号必须一并清 —— 漏了会残留该用户的题目与判分记录。
         _user_dir("quiz", user_id),
+        # 用户自配模型（`core/llm/user_models.py` = backend/data/llm/<uid>/models.json）：
+        # 含明文 API Key，删号必须一并清 —— 漏了就是凭据永久残留。
+        _user_dir("llm", user_id),
     )
     for path in roots:
         shutil.rmtree(path, ignore_errors=True)

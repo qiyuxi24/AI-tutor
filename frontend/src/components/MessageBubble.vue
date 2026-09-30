@@ -3,6 +3,7 @@ import { computed, ref, watch, nextTick } from 'vue'
 import { renderMarkdown } from '../utils/markdown.js'
 import { avatarState } from '../utils/avatar.js'
 import QuizCard from './QuizCard.vue'
+import { BRAND_ICON } from '../utils/brandAssets.js'
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -115,7 +116,7 @@ watch(renderedContent, () => {
     <!-- 头像：AI 侧用站点品牌像素星（public/brand-star.svg）；用户侧优先用上传的照片，
          没有则回落到人形 SVG（原先这里是 👤 emoji，与"项目禁 emoji"的约定冲突） -->
     <div class="avatar" :class="{ 'user-avatar': isUser, 'ai-avatar': !isUser }">
-      <img v-if="!isUser" class="avatar-img" src="/brand-star.svg" alt="AI" />
+      <img v-if="!isUser" class="avatar-img" :src="BRAND_ICON" alt="AI" />
       <img v-else-if="avatarState.url" class="avatar-photo" :src="avatarState.url" alt="我的头像" />
       <svg v-else class="avatar-person" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />

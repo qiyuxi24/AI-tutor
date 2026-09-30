@@ -23,9 +23,10 @@ from app.core.llm.json_extract import extract_json
 from app.core.llm.messages import build_api_messages
 from app.core.llm.retry import map_api_error, with_retry
 from app.core.llm.thinking import LLM_EXTRA_BODY, strip_think_tags
+from app.core.llm.user_models import ModelStore
 
 __all__ = [
-    "MODEL_NAME", "client", "embed_client", "fallback_client",
+    "MODEL_NAME", "client", "embed_client", "fallback_client", "ModelStore",
     "EMBEDDING_MODEL", "EMBED_BATCH_SIZE", "MAX_EMBED_CHARS", "embed_texts",
     "LLM_EXTRA_BODY", "strip_think_tags",
     "build_api_messages", "chat_create", "call_llm", "extract_json",

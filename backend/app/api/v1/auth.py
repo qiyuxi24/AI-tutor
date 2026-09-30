@@ -1,8 +1,11 @@
 """
 认证相关 API 路由
-- POST /api/v1/auth/register  用户注册
-- POST /api/v1/auth/login     用户登录
-- GET  /api/v1/auth/me        获取当前用户信息
+- POST /api/v1/auth/register         用户注册
+- POST /api/v1/auth/login            用户登录
+- POST /api/v1/auth/change-password  修改密码（需原密码；原密码错误返回 400 而非 401）
+- GET  /api/v1/auth/me               获取当前用户信息
+
+所有密码字段均为 RSA-OAEP 密文（见 core/transport_crypto.py），明文不上行。
 """
 import sqlite3
 from fastapi import APIRouter, Depends, HTTPException, status, Request
@@ -66,6 +69,12 @@ class UserInfo(BaseModel):
     user_id: int
     username: str
     role: str = "user"
+
+
+class ChangePasswordRequest(BaseModel):
+    """修改密码请求体（两个字段都是 RSA-OAEP 密文，明文长度校验在解密后进行）"""
+    old_password: str
+    new_password: str
 
 
 # ---------- 数据库辅助函数 ----------
@@ -207,6 +216,46 @@ async def login(req: LoginRequest, request: Request):
             "token": access_token,
             "user": {"id": user["id"], "username": user["username"], "role": acct["role"] if acct else "user"},
         }
+    finally:
+        conn.close()
+
+
+@router.post("/auth/change-password")
+async def change_password(
+    req: ChangePasswordRequest,
+    user_id: int = Depends(get_current_user),
+):
+    """
+    修改当前用户密码（需提供原密码，两个密码均为 RSA 密文）。
+
+    ⚠️ 原密码错误刻意返回 **400 而非 401**：前端 axios 拦截器把 401 一律当作
+    "会话过期" → 清 token 并静默登录体验账户，用户输错一次原密码就会被换号。
+    前端 `AUTH_ENDPOINTS` 白名单同样豁免本端点，双保险。
+
+    不撤销已签发的 token：JWT 无状态，改密码后当前会话继续有效
+    （要强制下线需引入 token 版本号，当前不值得）。
+    """
+    old_plain = _decrypt_req_password(req.old_password)
+    new_plain = _decrypt_req_password(req.new_password)
+
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            "SELECT password_hash FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if not row:
+            detail = log_error(ErrorCode.AUTH_USER_NOT_FOUND, context={"user_id": user_id})
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+        if not verify_password(old_plain, row["password_hash"]):
+            detail = log_error(ErrorCode.AUTH_OLD_PASSWORD_WRONG, context={"user_id": user_id})
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (get_password_hash(new_plain), user_id),
+        )
+        conn.commit()
+        return {"message": "密码已修改"}
     finally:
         conn.close()
 

@@ -18,7 +18,8 @@
 | `messages.py` | 消息组装 | `build_api_messages` | `system_prompt` + 历史 → OpenAI 消息格式（dict / Pydantic 双形兼容） |
 | `thinking.py` | MiniMax-M3 适配 | `extra_body(thinking)` `strip_think_tags` `LLM_EXTRA_BODY` | 思考拆分到 `reasoning_content`、思考开关、响应兜底剥离 |
 | `retry.py` | 请求健壮性 | `with_retry` `is_retryable` `map_api_error` | 指数退避 + 抖动重试；异常 → 错误码 `RuntimeError` |
-| `fallback.py` | 主备回退 | `chat_create` `LLM_CANDIDATES` | **对话调用唯一出口**：主模型失败静默切备用 |
+| `fallback.py` | 主备回退 | `chat_create` `LLM_CANDIDATES` | **对话调用唯一出口**：候选链顺序尝试，失败静默切下一个 |
+| `user_models.py` | 每用户模型 | `ModelStore` | 用户自配对话模型（存储 + 状态机 + 候选链）；对外只回 Key 掩码 |
 | `call.py` | 一次性调用 | `call_llm` | 不带工具的纯文本/JSON：出题 / 判分 / 图谱分析 |
 | `embed.py` | 嵌入（**检索侧**） | `embed_texts` `EMBEDDING_MODEL` `EMBED_BATCH_SIZE` `MAX_EMBED_CHARS` | **检索侧嵌入唯一出口**（kb 向量化 / 图谱 RAG）；语义去重侧 `kb/embedder.py::ApiEmbedder` 共用同名常量与失败语义 |
 | `json_extract.py` | 结构化抽取 | `extract_json` | **JSON 提取唯一出口**：三策略定位 + 引号兜底修复 |
@@ -49,10 +50,14 @@ kb.embedder.ApiEmbedder ─→ 同步 OpenAI（同一模型；语义去重专用
 
 ## 3. 三份「唯一出口」契约
 
-### 3.1 `chat_create(**kwargs)` —— 对话唯一出口
+### 3.1 `chat_create(user_id=..., **kwargs)` —— 对话唯一出口
 
-- **不要传 `model`**：函数按 `LLM_CANDIDATES`（主 → 备用）逐档注入 `model` 并各自做瞬时重试。
-- 备用未配置时 `LLM_CANDIDATES` 只有主模型，行为与单模型完全一致。
+- **不要传 `model`**：函数按候选链逐档注入 `model` 并各自做瞬时重试。
+- **传 `user_id`**（两条真路径都会透传）：优先用**该用户自有模型链**
+  （`user_models.ModelStore.candidates()`：当前使用 → 其余可用），
+  该用户没配任何模型时回落 `LLM_CANDIDATES`（.env **系统默认档**），行为与旧版一致。
+- 实际生效的那一档回写到 `models.json` 的 `effective_id` —— 设置页「当前生效档位」
+  读它，主模型降级到备用时用户能看见。
 - 全部档失败 → 抛 `map_api_error` 分类后的 `RuntimeError`（**调用方不必再映射**）。
 - **不触发回退的错误**：`400` / `404` / `422` 等"请求本身错了"（换模型也没用），
   以及非 401/402/403/429/5xx 的 `APIStatusError`。回退条件见 `should_fallback`。

@@ -50,7 +50,9 @@ apiClient.interceptors.request.use((config) => {
 // 登录/注册接口的 401 是"账号密码错"，不是"会话过期"。
 // 必须豁免：否则弹窗里输错密码会触发 handleUnauthorized → ensureSession → 再登录
 // → 再 401 → 无限递归。（/auth/me 不豁免，它 401 就是 token 真的失效了）
-const AUTH_ENDPOINTS = ['/auth/login', '/auth/register']
+// change-password 也豁免：后端旧密码错误返回 400，但万一返回 401（或 token 恰好过期），
+// 静默重登会把用户**换成体验账户**，改密码就改到别人账号上了。
+const AUTH_ENDPOINTS = ['/auth/login', '/auth/register', '/auth/change-password']
 
 // ═══ 响应拦截器：401 时清除 token 并静默重登 ═══
 apiClient.interceptors.response.use(
@@ -113,6 +115,30 @@ export const uploadAvatarFile = (file) => {
 
 /** 恢复默认头像 */
 export const deleteAvatar = () => apiClient.delete('/api/v1/profile/avatar')
+
+// ═══ 用户模型管理（每用户自有对话模型）═══
+// Key 只在新建/改 Key 时上行一次，之后后端一律只回掩码（api_key_masked）。
+
+/** 取模型列表 + 当前使用 / 当前生效档位 + 系统默认档 */
+export const listLlmModels = () => apiClient.get('/api/v1/llm/models')
+
+/** 新建模型 */
+export const createLlmModel = (payload) => apiClient.post('/api/v1/llm/models', payload)
+
+/** 改接入参数（会退回"未验证"）/ 停用恢复 */
+export const updateLlmModel = (modelId, payload) =>
+  apiClient.patch(`/api/v1/llm/models/${modelId}`, payload)
+
+/** 删除模型 */
+export const deleteLlmModel = (modelId) => apiClient.delete(`/api/v1/llm/models/${modelId}`)
+
+/** 连通性测试：后端真打一次最小请求，最长等 20s */
+export const testLlmModel = (modelId) =>
+  apiClient.post(`/api/v1/llm/models/${modelId}/test`, null, { timeout: 30000 })
+
+/** 设为当前使用的模型 */
+export const activateLlmModel = (modelId) =>
+  apiClient.post(`/api/v1/llm/models/${modelId}/activate`)
 
 /**
  * 流式发送对话消息（两阶段分离）

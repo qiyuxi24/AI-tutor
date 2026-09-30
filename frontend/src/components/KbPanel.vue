@@ -37,7 +37,6 @@
         {{ generating ? '生成中...' : '一键生成图谱' }}
       </el-button>
     </div>
-    <p class="kb-gen-hint">勾选下方文件（或文件夹）作为来源，AI 分析内容后生成该学科的知识图谱。</p>
 
     <!-- 目录树：勾选 = 生成来源；右键 = 单个文件的操作 -->
     <div class="kb-tree-wrap" v-if="tree.length">

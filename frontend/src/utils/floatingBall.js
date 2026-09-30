@@ -14,22 +14,35 @@
 import { reactive } from 'vue'
 import { getProfile, saveProfileData } from '../api/index.js'
 
+/**
+ * 小窗三档尺寸预设 [宽, 高]（px）。**唯一来源**：设置页的档位选项与 FloatingBall 的小窗尺寸
+ * 都读它，别在组件里再抄一份（抄了就会"档位加了、小窗没变"）。
+ */
+export const BALL_SIZE_PRESETS = {
+  compact: [340, 480],
+  medium: [380, 560],
+  large: [480, 680],
+}
+
+/** 可选值白名单（归一校验 + 设置页选项共用，避免三处各写一份） */
+export const BALL_SIZES = Object.keys(BALL_SIZE_PRESETS)
+export const BALL_CORNERS = ['bottom-right', 'bottom-left']
+
 /** 默认偏好。enabled 默认 false：用户要在设置里主动打开（D6 的第 ② 个动作） */
 export const BALL_DEFAULTS = {
   enabled: false,
   default_open: false,
-  theme: 'auto',                 // auto | light | dark
-  size: 'medium',                // compact | medium | large
-  corner: 'bottom-right',        // bottom-right | bottom-left
-  offset: { x: 24, y: 24 },
-  hotkey: 'Alt+J',
+  size: 'medium',                // 取自 BALL_SIZES
+  corner: 'bottom-right',        // 取自 BALL_CORNERS
+  offset: { x: 24, y: 24 },      // 距所贴那个角的内边距
 }
 
 /**
  * 全应用共享的悬浮球偏好（响应式）。
- * 设置页改 → 主视图里的球立刻响应；主视图挂载时读一次即可。
+ * offset 单独展开一层：否则 ballPrefs.offset 与 BALL_DEFAULTS.offset 是同一个对象，
+ * 谁改了球位就把默认值一起改坏了。
  */
-export const ballPrefs = reactive({ ...BALL_DEFAULTS })
+export const ballPrefs = reactive({ ...BALL_DEFAULTS, offset: { ...BALL_DEFAULTS.offset } })
 
 /**
  * 最近一次**显式保存**改了哪些字段。
@@ -38,10 +51,6 @@ export const ballPrefs = reactive({ ...BALL_DEFAULTS })
  */
 export const ballPrefsMeta = reactive({ revision: 0, changed: [] })
 
-const SIZES = ['compact', 'medium', 'large']
-const CORNERS = ['bottom-right', 'bottom-left']
-const THEMES = ['auto', 'light', 'dark']
-
 /** 把服务端（可能是旧版/脏数据）的偏好归一成完整对象，非法值一律回默认 */
 export function normalizeBallPrefs(raw) {
   const r = raw && typeof raw === 'object' ? raw : {}
@@ -49,14 +58,12 @@ export function normalizeBallPrefs(raw) {
   return {
     enabled: !!r.enabled,
     default_open: !!r.default_open,
-    theme: THEMES.includes(r.theme) ? r.theme : BALL_DEFAULTS.theme,
-    size: SIZES.includes(r.size) ? r.size : BALL_DEFAULTS.size,
-    corner: CORNERS.includes(r.corner) ? r.corner : BALL_DEFAULTS.corner,
+    size: BALL_SIZES.includes(r.size) ? r.size : BALL_DEFAULTS.size,
+    corner: BALL_CORNERS.includes(r.corner) ? r.corner : BALL_DEFAULTS.corner,
     offset: {
       x: Number.isFinite(off.x) ? off.x : BALL_DEFAULTS.offset.x,
       y: Number.isFinite(off.y) ? off.y : BALL_DEFAULTS.offset.y,
     },
-    hotkey: typeof r.hotkey === 'string' ? r.hotkey : BALL_DEFAULTS.hotkey,
   }
 }
 
@@ -66,7 +73,7 @@ export async function loadBallPrefs() {
     const { data } = await getProfile()
     Object.assign(ballPrefs, normalizeBallPrefs(data?.data?.preferences?.floating_ball))
   } catch {
-    Object.assign(ballPrefs, BALL_DEFAULTS)
+    Object.assign(ballPrefs, normalizeBallPrefs(null))
   }
   return { ...ballPrefs }
 }
