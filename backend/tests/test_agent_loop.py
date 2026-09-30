@@ -102,6 +102,72 @@ def test_natural_finish_without_tools(monkeypatch):
     assert len(received) == 1
 
 
+# ─── no_tools（学习模式开场轮：本轮禁工具）──────────────────────
+# 2026-09-30：提示词里写"本轮禁止调用任何工具"实测无效（模型开场轮直接 quiz_generate），
+# 改成协议层硬保证（tool_choice="none" + 丢弃网关不守规吐出的 tool_calls）。
+
+def test_no_tools_uses_tool_choice_none_and_keeps_tools_block(monkeypatch):
+    """`no_tools=True` → tool_choice="none"，但**保留 tools 块**（维持缓存前缀）。"""
+    received = []
+    _install_fake_chat(monkeypatch, [_resp(_msg(content="开场说明…"))], received)
+    _install_fake_execute(monkeypatch)
+
+    result = asyncio.run(run_agent_loop(
+        "sys", [{"role": "user", "content": "开始学习 X"}], kg=None, no_tools=True))
+
+    assert result.text == "开场说明…"
+    assert received[0]["tool_choice"] == "none"
+    assert received[0]["tools"]          # tools 块仍在（缓存友好）
+
+
+def test_no_tools_drops_tool_calls_returned_by_gateway(monkeypatch):
+    """网关不守规、禁了还吐 tool_calls → 直接丢弃，不执行任何工具。"""
+    received = []
+    _install_fake_chat(monkeypatch, [
+        _resp(_msg(content="我先把这一章的清单过一遍……",
+                   tool_calls=[_tc("quiz_generate", {"node_id": "n1"})])),
+    ], received)
+    executed = []
+
+    def _fn(tc, kg):
+        executed.append(tc.function.name)
+        return "不该被执行"
+
+    _install_fake_execute(monkeypatch, _fn)
+
+    result = asyncio.run(run_agent_loop(
+        "sys", [{"role": "user", "content": "开始学习 X"}], kg=None, no_tools=True))
+
+    assert executed == []                 # 工具一次都没跑
+    assert "清单" in result.text
+    assert result.rounds == []            # 没有工具轮
+
+
+def test_no_tools_falls_back_when_gateway_rejects_tool_choice(monkeypatch):
+    """网关拒绝 tool_choice=none（典型 400）→ 降级为不带 tools 的调用，不把开场轮搞成报错。"""
+    received = []
+    calls = {"n": 0}
+
+    async def fake_chat(api_messages, *, temperature, tools=None,
+                        tool_choice=None, max_tokens=2000):
+        calls["n"] += 1
+        received.append({"tools": tools, "tool_choice": tool_choice})
+        if calls["n"] == 1:
+            raise ValueError("400 tool_choice not supported")
+        return _resp(_msg(content="开场说明（降级路径）"))
+
+    monkeypatch.setattr(agent_loop, "_chat_once", fake_chat)
+    _install_fake_execute(monkeypatch)
+
+    result = asyncio.run(run_agent_loop(
+        "sys", [{"role": "user", "content": "开始学习 X"}], kg=None, no_tools=True))
+
+    assert "降级路径" in result.text
+    assert received[0]["tool_choice"] == "none"
+    assert received[1]["tools"] is None and received[1]["tool_choice"] is None
+    assert len(received) == 2                    # 第一次 tool_choice 失败 + 一次降级重试
+
+
 def test_single_tool_round_protocol_order(monkeypatch):
     """一轮工具：先回填 assistant(含 tool_calls)，再 tool 一一对应，最后文本。"""
     received = []

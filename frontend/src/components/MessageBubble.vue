@@ -2,13 +2,14 @@
 import { computed, ref, watch, nextTick } from 'vue'
 import { renderMarkdown } from '../utils/markdown.js'
 import { avatarState } from '../utils/avatar.js'
+import QuizCard from './QuizCard.vue'
 
 const props = defineProps({
   message: { type: Object, required: true },
   knowledgeNodes: { type: Array, default: () => [] },
 })
 
-const emit = defineEmits(['navigate-to-node', 'retry'])
+const emit = defineEmits(['navigate-to-node', 'retry', 'submit-quiz'])
 
 const isUser = computed(() => props.message.role === 'user')
 const isStreaming = computed(() => !isUser.value && !props.message.content
@@ -162,6 +163,14 @@ watch(renderedContent, () => {
         </div>
         <!-- 流式内容渲染 -->
         <div v-else-if="message.content" class="markdown-body" v-html="renderedContent"></div>
+
+        <!-- 题目小卡片（结构化作答：点选项 → 提交 → 后端确定性判分）
+             题目数据由 SSE 的 quiz_ready 事件挂在消息上（chatStore.handleQuizReady）。 -->
+        <QuizCard
+          v-if="message.quiz?.length"
+          :questions="message.quiz"
+          @submit="(p) => emit('submit-quiz', p)"
+        />
 
         <!-- 失败兜底（后端文本未送达等）：给明确提示 + 一键重试，绝不静默消失 -->
         <div v-if="message.failed" class="failed-actions">

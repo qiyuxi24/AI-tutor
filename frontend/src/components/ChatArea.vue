@@ -58,6 +58,7 @@ const greetingMessages = [
           :knowledge-nodes="store.knowledgeNodes"
           @navigate-to-node="(nodeId) => emit('navigate-to-node', nodeId)"
           @retry="store.retryLast()"
+          @submit-quiz="(p) => store.send(p.answer)"
         />
       </template>
 

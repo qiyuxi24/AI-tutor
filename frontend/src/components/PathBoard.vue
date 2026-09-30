@@ -27,7 +27,7 @@ const props = defineProps({
   board: { type: String, default: '' },
 })
 
-const emit = defineEmits(['close', 'focus-node', 'edit-node'])
+const emit = defineEmits(['close', 'focus-node', 'edit-node', 'learn-node'])
 
 /**
  * 四档状态显示口径 —— 与后端 `graph_middleware.mastery_bucket` 的取值一一对应
@@ -83,6 +83,56 @@ function chainText(trace) {
   return (trace?.chain || []).map(nameOf).join(' → ')
 }
 
+/**
+ * 第 1 层的提示文案。
+ *
+ * 层号 0 里现在可能混着两种节点：**真起点**（什么前置都没有），以及
+ * **只有相关概念的节点**（后端把它们并入相关节点的同层，所以也可能落在这里）。
+ * 一律写"可以从这里起步"会把后一种说错 —— 它们不是起点，只是和别的知识点相关。
+ */
+function layer0Tip(lv) {
+  const withRelated = lv.items.filter((it) => (it.related || []).length).length
+  if (!withRelated) return '没有前置，可以从这里起步'
+  return `含 ${withRelated} 个「与其它知识点相关」的节点，不是起点`
+}
+
+// ══════════ 一键生成学习任务（纯规则、不落库）══════════
+// 候选判据与后端 `graph_middleware.path_board` 的 recommended **完全一致**：
+//   ① 未掌握（status !== mastered）  ② 没有未掌握的直接前置（blocked_by 为空 = 已解锁）
+// 唯一差别：后端 recommended 截断到 5 个（那是给「推荐学习顺序」当快捷入口用的），
+// 这里用户要的是「当前切片里能做、还没做完的全部」，所以不截断。
+// 零 LLM、零请求、秒出 —— 点一下只是把 props.items 过滤 + 排序成 id 列表，所以没有 loading 态。
+// 不落库：组件内 ref 存 id，关面板/刷新即失（也没有"勾选完成"的本地状态）。
+// 「完成」的唯一可信来源是知识点的掌握度本身 —— 所以任务项的状态徽标实时取自图谱，
+// 不另存一份待办状态（两份状态必然不一致）。
+const generated = ref(false)
+const taskIds = ref([])
+
+const candidates = computed(() => props.items
+  .filter((it) => it.status !== 'mastered' && !(it.blocked_by || []).length)
+  .sort((a, b) => (a.level - b.level)
+    || (a.mastery - b.mastery)
+    || String(a.id).localeCompare(String(b.id))))
+
+const taskItems = computed(() => taskIds.value.map((id) => byId.value[id]).filter(Boolean))
+const taskDoneCount = computed(() => taskItems.value.filter((it) => it.status === 'mastered').length)
+
+function generateTasks() {
+  taskIds.value = candidates.value.map((it) => it.id)
+  generated.value = true
+}
+
+function clearTasks() {
+  taskIds.value = []
+  generated.value = false
+}
+
+// 切片（学科 / 板块）一变，已生成的任务就是上一个切片的 → 自动按新切片重排一次
+// （"重新生成"的语义保留：用户点了清空后就不再自动生成）
+watch(() => [props.subject, props.board], () => {
+  if (generated.value) generateTasks()
+})
+
 // 图谱切换学科/板块后，选中项可能已不在表里 → 收起详情，避免指向不存在的节点
 watch(() => props.items, () => {
   if (selectedId.value && !byId.value[selectedId.value]) selectedId.value = ''
@@ -135,8 +185,60 @@ watch(() => props.items, () => {
           </button>
         </div>
 
-        <!-- ── 推荐学习顺序 ── -->
-        <section v-if="recommended.length" class="pb-block">
+        <!-- ── 一键生成学习任务（按钮区）── -->
+        <div class="pb-tools">
+          <template v-if="!generated">
+            <button class="pb-gen" :disabled="!candidates.length" @click="generateTasks">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5z" />
+              </svg>
+              一键生成学习任务
+              <span v-if="candidates.length" class="pb-gen-n">{{ candidates.length }}</span>
+            </button>
+            <span v-if="!candidates.length" class="pb-tools-hint">没有「已解锁且未掌握」的知识点</span>
+          </template>
+          <template v-else>
+            <span class="pb-tools-info">
+              共 {{ taskItems.length }} 项<template v-if="taskDoneCount"> · 已完成 {{ taskDoneCount }}</template>
+            </span>
+            <button class="pb-tool" @click="generateTasks">重新生成</button>
+            <button class="pb-tool" @click="clearTasks">清空</button>
+          </template>
+        </div>
+
+        <!-- ── 学习任务清单（一键生成后出现）── -->
+        <section v-if="generated" class="pb-block">
+          <h3 class="pb-h3">学习任务清单<span class="pb-count">{{ taskItems.length }}</span></h3>
+          <p class="pb-note">
+            按「层号 → 掌握度」排序，从上往下学即可；点一条可展开它的前置与解锁。
+            完成情况看知识点掌握度（≥ 70 自动标为已完成）。
+          </p>
+          <p v-if="!taskItems.length" class="pb-note">当前切片里没有「已解锁且未掌握」的知识点。</p>
+          <div v-else class="pb-tasks">
+            <button
+              v-for="(it, i) in taskItems"
+              :key="it.id"
+              class="task"
+              :class="[statusOf(it.id).cls, { first: i === 0, done: it.status === 'mastered', on: selectedId === it.id }]"
+              @click="toggle(it.id)"
+            >
+              <span class="task-seq">{{ i + 1 }}</span>
+              <span class="task-main">
+                <span class="task-name">{{ it.name }}</span>
+                <span class="task-meta">
+                  第 {{ it.level + 1 }} 层 · {{ statusOf(it.id).text }}<template v-if="it.hint"> · {{ it.hint }}</template>
+                </span>
+              </span>
+              <span v-if="it.status === 'mastered'" class="task-done">已完成</span>
+            </button>
+          </div>
+        </section>
+
+        <!-- ── 推荐学习顺序 ──
+             与任务清单**互斥展示**（!generated 时才出现）：两者是同一批知识点
+             （「已解锁且未掌握」），差别只是后端版截断 5 个、任务清单不截断。
+             同一个面板里把同批名字列两遍只会徒增噪音，所以生成后由清单接管。 -->
+        <section v-if="recommended.length && !generated" class="pb-block">
           <h3 class="pb-h3">推荐学习顺序</h3>
           <p class="pb-note">已解锁（前置都掌握了）且还没学会的知识点，按层号排。</p>
           <div class="pb-recs">
@@ -150,7 +252,7 @@ watch(() => props.items, () => {
         <section v-for="lv in levels" :key="lv.level" class="pb-block">
           <h3 class="pb-h3">
             第 {{ lv.level + 1 }} 层
-            <span v-if="lv.level === 0" class="pb-h3-tip">没有前置，可以从这里起步</span>
+            <span v-if="lv.level === 0" class="pb-h3-tip">{{ layer0Tip(lv) }}</span>
             <span class="pb-count">{{ lv.items.length }}</span>
           </h3>
 
@@ -178,6 +280,18 @@ watch(() => props.items, () => {
                       :title="`${p.name}（${statusOf(p.id).text}）`"
                     ></i>
                   </template>
+                  <!-- 只有相关概念（无前置）：拆开写清楚"和谁相关、哪种关系"，
+                       不能写成"起点"—— 那正是本次要修的错误读法 -->
+                  <template v-else-if="(it.related || []).length">
+                    相关
+                    <span
+                      v-for="r in (it.related || []).slice(0, 2)"
+                      :key="r.id"
+                      class="rel-chip"
+                      :title="`${r.name}（${r.relation_label}）`"
+                    >{{ r.name }}</span>
+                    <span v-if="it.related.length > 2" class="rel-more">+{{ it.related.length - 2 }}</span>
+                  </template>
                   <template v-else>无前置 · 起点</template>
                 </span>
               </button>
@@ -190,8 +304,25 @@ watch(() => props.items, () => {
                   <template v-if="selected.summary"> · {{ selected.summary }}</template>
                 </p>
 
+                <!-- 相关概念（非前置关系）：单独列出来，与"开它解锁"分开 ——
+                     前者只说明"摆在一起看"，不决定学习顺序 -->
+                <template v-if="(selected.related || []).length">
+                  <h4 class="kd-h4">相关概念（{{ selected.related.length }}）</h4>
+                  <ul class="kd-list">
+                    <li v-for="r in selected.related" :key="r.id" :class="statusOf(r.id).cls">
+                      <span>{{ r.name }}<span class="kd-rel-label"> · {{ r.relation_label }}</span></span>
+                      <span class="kd-s">{{ statusOf(r.id).text }}</span>
+                    </li>
+                  </ul>
+                </template>
+
                 <h4 class="kd-h4">直接前置（{{ selected.prerequisites.length }}）</h4>
-                <p v-if="!selected.prerequisites.length" class="kd-empty">没有前置 —— 它就是起点。</p>
+                <p v-if="!selected.prerequisites.length" class="kd-empty">
+                  <template v-if="(selected.related || []).length">
+                    没有前置 —— 它与上面列出的概念相关，但<b>不是</b>学习起点。
+                  </template>
+                  <template v-else>没有前置 —— 它就是起点。</template>
+                </p>
                 <ul v-else class="kd-list">
                   <li v-for="p in selected.prerequisites" :key="p.id" :class="statusOf(p.id).cls">
                     <span>{{ p.name }}</span>
@@ -216,8 +347,9 @@ watch(() => props.items, () => {
                 </div>
 
                 <div class="kd-acts">
+                  <button class="kd-act pri" @click="emit('learn-node', selected.id)">去学习</button>
                   <button class="kd-act" @click="emit('focus-node', selected.id)">在图谱中定位</button>
-                  <button class="kd-act pri" @click="emit('edit-node', selected.id)">修改掌握度</button>
+                  <button class="kd-act" @click="emit('edit-node', selected.id)">修改掌握度</button>
                 </div>
               </div>
             </template>
@@ -373,6 +505,103 @@ watch(() => props.items, () => {
   color: var(--color-text-primary);
 }
 
+/* ── 一键生成任务（工具条）── */
+.pb-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.pb-gen {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 6px 11px;
+  border-radius: 7px;
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent-light);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.pb-gen:hover:not(:disabled) { background: var(--color-bg-hover); }
+.pb-gen:disabled { opacity: 0.5; cursor: not-allowed; }
+.pb-gen-n {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 20px;
+  background: var(--color-accent);
+  color: var(--color-text-inverse);
+}
+.pb-tools-hint { font-size: 10.5px; color: var(--color-text-muted); }
+.pb-tools-info { margin-right: auto; font-size: 11px; color: var(--color-text-secondary); }
+.pb-tool {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.pb-tool:hover { border-color: var(--color-border-light); color: var(--color-text-primary); }
+
+/* ── 学习任务清单 ── */
+.pb-tasks { display: flex; flex-direction: column; gap: 5px; }
+.task {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  padding: 7px 9px;
+  border: 1px solid var(--color-border-subtle);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.task:hover { border-color: var(--color-border-light); }
+.task.on { border-color: var(--color-accent); background: var(--color-bg-hover); }
+.task-seq {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+}
+.task.first .task-seq { background: var(--color-accent); color: var(--color-text-inverse); }
+.task-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.task-name { font-size: 12.5px; font-weight: 500; line-height: 1.4; }
+.task-meta { font-size: 10.5px; line-height: 1.5; color: var(--color-text-tertiary); }
+.task-done {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 20px;
+  background: var(--color-green);
+  color: var(--color-text-inverse);
+}
+/* 四档状态：左侧色条，与分层卡片同一套口径 */
+.task.st-mastered { border-left-color: var(--color-green); }
+.task.st-mastered .task-name { text-decoration: line-through; color: var(--color-text-tertiary); }
+.task.st-learning { border-left-color: var(--color-yellow); }
+.task.st-weak { border-left-color: var(--color-red); }
+.task.st-unstarted { border-left-color: var(--color-border-light); }
+
 /* ── 卡片 ── */
 .pb-cards { display: flex; flex-direction: column; gap: 5px; }
 .kp {
@@ -416,6 +645,23 @@ watch(() => props.items, () => {
   color: var(--color-text-muted);
 }
 .pip { width: 7px; height: 7px; border-radius: 2px; display: inline-block; background: var(--color-graph-node); }
+
+/* 相关概念 chip：与「前置」的 pip 明确区分开（前置决定顺序，相关只决定摆在哪） */
+.rel-chip {
+  max-width: 92px;
+  padding: 0 5px;
+  border-radius: 20px;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rel-more { font-size: 10px; color: var(--color-text-muted); }
+.kd-rel-label { color: var(--color-text-muted); font-size: 10.5px; }
 
 /* 四档状态：左侧色条 + 徽标底色（与图谱节点四色同源） */
 .kp.st-mastered { border-left-color: var(--color-green); background: var(--color-green-light); }

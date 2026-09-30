@@ -24,10 +24,15 @@ embed_client = AsyncOpenAI(
 MODEL_NAME = settings.model_name
 
 # 备用服务客户端（模型回退链用，见 fallback.py）：FALLBACK_* 三件套齐全才创建
+# ⚠️ 字段名必须用 config.Settings 的**实际**名字 `fallback_llm_base_url` / `fallback_llm_api_key`。
+#    这里原先写成 `settings.fallback_base_url`（不存在的属性）—— 条件是 `and` 短路，
+#    FALLBACK_MODEL_NAME 为空时侥幸不报错；一旦真去配置备用（三件套填齐），
+#    本模块**导入期**就会 AttributeError，后端直接起不来 → 备用通道永远配不上。
+#    2026-09-29 定位「建图全挂但无降级」时发现。
 fallback_client = None
-if settings.fallback_model_name and settings.fallback_base_url:
+if settings.fallback_model_name and settings.fallback_llm_base_url:
     fallback_client = AsyncOpenAI(
         api_key=settings.fallback_llm_api_key or settings.dashscope_api_key,
-        base_url=settings.fallback_base_url,
+        base_url=settings.fallback_llm_base_url,
         timeout=settings.llm_timeout,
     )

@@ -22,7 +22,7 @@
 import { ref, computed, watch } from 'vue'
 import { renderMarkdown } from '../utils/markdown.js'
 // ★ 保存操作由父组件通过 Store 处理；此处只读小节正文/试题列表与触发生成（走 kb.js 封装，不裸调 apiClient）
-import { fetchNodeSection, fetchNodeQuizzes, generateSectionQuiz } from '../api/kb.js'
+import { fetchNodeSection, fetchNodeQuizzes, generateSectionQuiz, updateSectionLearn } from '../api/kb.js'
 import { formatError } from '../utils/errorCodes.js'
 import { useDetailPrefs } from '../utils/detailPrefs.js'
 
@@ -34,7 +34,7 @@ const props = defineProps({
   sourceDocId: { type: [Number, String], default: null },
 })
 
-const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node', 'open-quiz'])
+const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node', 'open-quiz', 'go-learn'])
 
 const mode = ref('view')        // 'view' | 'edit'
 const editContent = ref('')
@@ -92,6 +92,72 @@ const activeSources = computed(() => {
   const s = sections.value.find(x => x.id === activeSectionId.value)
   return s?.sources || []
 })
+
+/* ── 小节学习状态（已懂 / 不懂 / 已读完 / 出题通过）──
+   数据源：`nodeInfo.sections[].learn`（后端 manifest 的 learn 子对象）。
+   `mark_by` 记“谁标的”：user = 学生自己点的，ai = AI 讲完自动记的（工具 mark_section_understood）。
+   本地**乐观更新**：点一下立刻改 UI，不整页重拉；父组件重拉后自动以服务端为准。 */
+const DEFAULT_LEARN = { mark: 'unknown', read: false, passed: false, attempts: 0, mark_by: '' }
+const localLearn = ref({})        // section_id → learn（本次会话内的乐观值）
+const learnBusy = ref('')
+const learnError = ref('')
+
+watch(() => props.nodeInfo, () => { localLearn.value = {}; learnError.value = '' })
+
+/** 某小节的学习状态（服务端值 ← 本地乐观值覆盖） */
+function learnOf(s) {
+  return { ...DEFAULT_LEARN, ...(s.learn || {}), ...(localLearn.value[s.id] || {}) }
+}
+
+const activeLearn = computed(() => {
+  const s = sections.value.find(x => x.id === activeSectionId.value)
+  return s ? learnOf(s) : DEFAULT_LEARN
+})
+
+/** 已通过 / 总节数（本地统计 → 标记后立即变） */
+const learnProgress = computed(() => {
+  const list = sections.value
+  if (!list.length) return null
+  return { total: list.length, passed: list.filter(s => learnOf(s).passed).length }
+})
+
+/** 小节列表上的状态小标签（空文本 = 未标记，不占位）
+    「已懂」「不懂」都要区分**谁标的**：AI 讲完自动记的与你自己点的是两回事 */
+function learnTag(s) {
+  const st = learnOf(s)
+  if (st.passed) return { text: '通过', cls: 'lp-passed', title: '已通过出题验证' }
+  if (st.mark === 'understood') {
+    return st.mark_by === 'ai'
+      ? { text: '已懂', cls: 'lp-understood lp-ai', title: 'AI 讲完后自动记为「已懂」—— 还要出题答对才算通过' }
+      : { text: '已懂', cls: 'lp-understood', title: '你标记了「已懂」，进对话时会先出题验证' }
+  }
+  if (st.mark === 'confused') {
+    return st.mark_by === 'ai'
+      ? { text: '不懂', cls: 'lp-confused lp-ai', title: '连续两次没答对，已自动标为「不懂」，接下来按不懂讲' }
+      : { text: '不懂', cls: 'lp-confused', title: '你标记了「不懂」，进对话时从这里开始讲' }
+  }
+  if (st.read) return { text: '已读', cls: 'lp-read', title: '你标记了「我已读完」' }
+  return { text: '', cls: 'lp-none', title: '未标记' }
+}
+
+/** 标记小节状态（已懂 / 不懂 / 已读完）；全部通过时通知父组件刷图谱 */
+async function markLearn(sectionId, patch) {
+  if (!sectionId || sectionId === LEGACY_DOC.id || learnBusy.value) return
+  learnBusy.value = sectionId
+  learnError.value = ''
+  try {
+    const { data } = await updateSectionLearn(props.nodeInfo.id, sectionId, patch)
+    localLearn.value = { ...localLearn.value, [sectionId]: data.learn || {} }
+    // 掌握度被后端改了（全部小节通过 → 置 100）：通知父组件刷新详情与图谱
+    if (data.mastery !== undefined && data.mastery !== props.nodeInfo.mastery) {
+      emit('refresh')
+    }
+  } catch (e) {
+    learnError.value = formatError(e)
+  } finally {
+    learnBusy.value = ''
+  }
+}
 
 /* 「在图谱中显示」的来源高亮：属于该高亮资料的小节/题目加醒目样式。
    doc_id 比对统一字符串化（后端两处分别来自 JSON 与 SQL，类型不保证一致）。 */
@@ -305,6 +371,20 @@ async function handleSave() {
         <div class="modal-header">
           <h2 class="modal-title">{{ nodeInfo.name }}</h2>
           <div class="modal-actions">
+            <!-- 去学习：切到对话视图，后端按小节教学（见 chat_service._build_learn_block） -->
+            <button
+              v-if="mode === 'view'"
+              class="action-btn learn-btn"
+              title="去学习：AI 按小节带你过这个知识点"
+              @click="emit('go-learn', nodeInfo.id)"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
+                <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+              </svg>
+              去学习
+            </button>
             <!-- 阅读/编辑切换（小节模式无单一正文可编辑 → 隐藏入口） -->
             <button
               v-if="mode === 'view' && !hasSections"
@@ -382,6 +462,13 @@ async function handleSave() {
                   >
                     <span class="section-kind-icon" v-html="kindIconSvg(s.kind)"></span>
                     <span class="section-title">{{ s.title }}</span>
+                    <!-- 学习状态：通过 > 已懂 > 不懂 > 已读（未标记不占位） -->
+                    <span
+                      v-if="hasSections && s.id !== LEGACY_DOC.id && learnTag(s).text"
+                      class="section-learn-tag"
+                      :class="learnTag(s).cls"
+                      :title="learnTag(s).title"
+                    >{{ learnTag(s).text }}</span>
                   </button>
                   <!-- 按小节出题（老节点的「正文」项没有小节 id，不显示） -->
                   <button
@@ -436,6 +523,45 @@ async function handleSave() {
           </aside>
           <div class="section-content">
             <template v-if="hasSections">
+              <!-- 学习状态操作条：用户自己标记“这一节我懂不懂 / 读完了没”。
+                   这里是**用户**的入口；AI 讲完一节也会自动记「已懂」（mark_by='ai'，虚线描边区分）。
+                   已懂 ≠ 通过 —— 进对话后会先出题验证（后端口径，见 section_learn）。 -->
+              <div v-if="activeSectionId && activeSectionId !== LEGACY_DOC.id" class="section-learn-bar">
+                <span class="slb-label">这一节：</span>
+                <button
+                  type="button" class="slb-btn"
+                  :class="{ on: activeLearn.mark === 'understood' }"
+                  :disabled="learnBusy === activeSectionId"
+                  title="标记为已懂 —— 进对话时会先出一题验证，答对方算通过"
+                  @click="markLearn(activeSectionId, { mark: 'understood' })"
+                >已懂</button>
+                <button
+                  type="button" class="slb-btn"
+                  :class="{ on: activeLearn.mark === 'confused' }"
+                  :disabled="learnBusy === activeSectionId"
+                  title="标记为不懂 —— 去学习时按顺序从这类小节开始讲"
+                  @click="markLearn(activeSectionId, { mark: 'confused' })"
+                >不懂</button>
+                <label class="slb-read">
+                  <input
+                    type="checkbox"
+                    :checked="activeLearn.read"
+                    :disabled="learnBusy === activeSectionId"
+                    @change="markLearn(activeSectionId, { read: $event.target.checked })"
+                  >
+                  我已读完
+                </label>
+                <span v-if="activeLearn.passed" class="slb-passed">✓ 已通过出题验证</span>
+                <span
+                  v-else-if="activeLearn.mark === 'understood' && activeLearn.mark_by === 'ai'"
+                  class="slb-ai-mark"
+                  title="AI 讲完后自动记为「已懂」—— 还要出题答对才算通过"
+                >AI 讲完已记为「已懂」，待出题验证</span>
+                <span v-if="learnProgress" class="slb-progress">
+                  已通过 {{ learnProgress.passed }}/{{ learnProgress.total }} 节
+                </span>
+              </div>
+              <p v-if="learnError" class="save-error section-gen-error">{{ learnError }}</p>
               <!-- 小节级溯源：本节的资料来源（无来源不占位） -->
               <p v-if="activeSources.length" class="section-sources">
                 来源：
@@ -686,4 +812,73 @@ async function handleSave() {
 .modal-enter-active, .modal-leave-active { transition: opacity 0.2s ease; }
 .modal-enter-from, .modal-leave-to { opacity: 0; }
 .modal-enter-from .modal-panel, .modal-leave-to .modal-panel { transform: scale(0.95); }
+/* ── 小节学习状态（用户标记：已懂 / 不懂 / 已读完）── */
+.section-learn-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 9px;
+  margin-bottom: 8px;
+  border: 1px solid var(--color-border-default, #ddd);
+  border-radius: 6px;
+  background: var(--color-bg-tertiary, rgba(127, 127, 127, 0.06));
+  font-size: 12px;
+}
+.slb-label { color: var(--color-text-tertiary); }
+.slb-btn {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border-default, #ddd);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.slb-btn:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-text-primary); }
+.slb-btn.on {
+  border-color: var(--color-accent);
+  background: var(--color-accent-light, rgba(99, 102, 241, 0.12));
+  color: var(--color-text-primary);
+}
+.slb-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.slb-read {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.slb-read input { margin: 0; cursor: pointer; }
+.slb-passed { color: var(--color-green, #22a06b); font-weight: 600; }
+.slb-ai-mark { color: var(--color-text-tertiary); }
+.slb-progress {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.section-learn-tag {
+  flex-shrink: 0;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 9px;
+  font-size: 10px;
+  line-height: 15px;
+}
+.lp-passed { background: var(--color-green-light, rgba(34, 160, 107, 0.15)); color: var(--color-green, #22a06b); }
+.lp-understood { background: var(--color-accent-light, rgba(99, 102, 241, 0.12)); color: var(--color-text-secondary); }
+.lp-confused { background: var(--color-red-light, rgba(224, 86, 86, 0.15)); color: var(--color-red, #e05656); }
+.lp-read { background: var(--color-bg-hover, rgba(127, 127, 127, 0.12)); color: var(--color-text-tertiary); }
+/* AI 讲完自动记的「已懂 / 不懂」：同色系加一圈细描边，与“学生自己标的”区分开
+   （用 inset box-shadow 而不是 border，避免影响布局尺寸） */
+.lp-ai { box-shadow: inset 0 0 0 1px currentColor; }
+
+/* 顶部栏「去学习」：用主色，与工具类按钮（编辑/关闭）区分开 */
+.learn-btn {
+  border-color: var(--color-accent);
+  background: var(--color-accent-light, rgba(99, 102, 241, 0.1));
+  color: var(--color-text-primary);
+}
 </style>

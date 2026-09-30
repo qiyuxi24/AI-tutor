@@ -95,6 +95,20 @@ export const generateSectionQuiz = (nodeId, sectionId) =>
   apiClient.post(`/api/v1/knowledge/node/${nodeId}/section/${sectionId}/quiz`)
 
 /**
+ * 标记小节的**学习状态**（已懂 / 不懂 / 已读完 / 出题通过）—— **用户**手动标记的唯一入口
+ * payload: { mark?: 'unknown'|'understood'|'confused', read?: bool, passed?: bool }
+ *   · understood（已懂）**不直接算通过**：“去学习”进对话时会先出题验证，答对才算 passed；
+ *   · confused（不懂）：“去学习”按顺序从这类小节开始讲；
+ *   · read：用户手动勾选“我已读完”（不做自动推断，只看用户的勾）。
+ * 后端会把本次标记的来源写成 `learn.mark_by='user'`（AI 讲完自动记的是 'ai'，走工具
+ * `mark_section_understood`，不经过本接口）—— 前端据此区分提示语。
+ * resp: { section_id, learn, mastery, progress }；节点/小节不存在 → 404，mark 非法 → 400
+ * 注意：全部小节 passed 时后端会把节点掌握度**直接置 100**，前端要刷图谱。
+ */
+export const updateSectionLearn = (nodeId, sectionId, payload) =>
+  apiClient.put(`/api/v1/knowledge/node/${nodeId}/section/${sectionId}/learn`, payload)
+
+/**
  * 反查「这份资料影响了哪些图谱节点」（右键文件 → 在图谱中显示）
  * docId = KB 的 file 节点 id（与来源条目里的 doc_id 同一个命名空间）
  * resp: { doc_id, subjects: [...], nodes: [{id, name, subject}] }

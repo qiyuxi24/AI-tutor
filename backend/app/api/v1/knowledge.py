@@ -18,6 +18,7 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
   GET    /knowledge/node/{node_id}/section/{section_id}       - 读取单个小节正文
   POST   /knowledge/node/{node_id}/sections/generate          - 触发节点小节化生成管线
   POST   /knowledge/node/{node_id}/section/{section_id}/quiz  - 针对某小节出题（后台）
+  PUT    /knowledge/node/{node_id}/section/{section_id}/learn - 标记小节学习状态（已懂/不懂/已读/通过）
   DELETE /knowledge/node/{node_id}/section/{section_id}       - 删除单个小节
   GET    /knowledge/node/{node_id}/quizzes                    - 获取节点试题链接（侧边栏，含小节路由与来源）
   GET    /knowledge/source/{doc_id}/nodes                     - 反查某资料影响了哪些节点（图谱高亮用）
@@ -49,7 +50,10 @@ from fastapi import APIRouter, HTTPException, Depends, Body, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from app.core.kg_taxonomy import assign_taxonomy
-from app.core.knowledge_graph import KnowledgeGraph
+from app.core.knowledge_graph import (
+    KnowledgeGraph, LEARN_MARK_BY_USER, LEARN_MARKS, MASTERY_ALL_SECTIONS_PASSED,
+    read_learn_state,
+)
 from app.core.prerequisite import (
     DEFAULT_MAX_PARENTS, DEFAULT_THRESHOLD, apply_candidates, infer_prerequisites,
 )
@@ -90,6 +94,19 @@ class GenerateSectionsRequest(BaseModel):
     整个请求体可选 —— 缺省 / 空体等价 `force=false`（不覆盖已存在的小节）。
     """
     force: bool = Field(default=False, description="true = 覆盖已生成的小节重新生成")
+
+
+class SectionLearnRequest(BaseModel):
+    """小节学习状态的局部更新（`PUT /knowledge/node/{node_id}/section/{sid}/learn`）。
+
+    三个字段都可选，`None` = 不改该字段：
+      · mark：`understood` 已懂 / `confused` 不懂 / `unknown` 取消标记；
+      · read：用户是否已读完这一节（手动勾选）；
+      · passed：出题验证是否通过（一般由判分自动写，此处留给人工纠错）。
+    """
+    mark: str | None = Field(default=None, description="unknown | understood | confused")
+    read: bool | None = Field(default=None, description="用户是否已读完本节")
+    passed: bool | None = Field(default=None, description="出题验证是否通过")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -331,6 +348,7 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
                 content = f.read()
 
         # 小节元数据（不含正文）；老节点无 manifest → has_sections=False、sections=[]
+        # learn：小节级学习状态（已懂/不懂/已读/通过）—— 与上面的生成 status 是两回事
         has_sections = kg.has_sections(node_id)
         sections = [
             {
@@ -341,6 +359,7 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
                 # 小节级溯源：本节的资料来源（`[{doc_id, doc_name, section, chunk_id}]`）
                 "sources": s.get("sources") or [],
                 "updated_at": s.get("updated_at", ""),
+                "learn": read_learn_state(s),
             }
             for s in (kg.list_sections(node_id) if has_sections else [])
         ]
@@ -365,6 +384,7 @@ async def get_node_detail(node_id: str, user_id: int = Depends(get_current_user)
             "content": content,
             "has_sections": has_sections,
             "sections": sections,
+            "learn_progress": kg.section_learn_progress(node_id),
             "tags": node.get("tags", []),
             "prerequisites": prerequisites,
             "related_nodes": related_ids,
@@ -499,6 +519,59 @@ async def generate_section_quiz(node_id: str, section_id: str,
     if not start_background_generation(user_id, node_id=node_id, section_id=section_id):
         raise HTTPException(status_code=409, detail="已有一道题在生成中，请稍后再试")
     return {"status": "ok", "node_id": node_id, "section_id": section_id}
+
+
+@router.put("/knowledge/node/{node_id}/section/{section_id}/learn")
+async def update_section_learn(node_id: str, section_id: str,
+                               req: SectionLearnRequest,
+                               user_id: int = Depends(get_current_user)):
+    """标记某小节的**学习状态**（已懂 / 不懂 / 已读完 / 出题通过）。
+
+    三层含义严格分开（见 `KnowledgeGraph` 里 LEARN_MARK_* 的注释）：
+      · `mark=understood`（已懂）：**不直接算通过** —— 「去学习」时会先出题验证，答对方算 passed；
+      · `mark=confused`（不懂）：「去学习」时按顺序从这类小节开始讲；
+      · `read`：用户手动勾选"我已读完"；
+      · `passed`：出题验证通过（一般由判分自动写）。
+
+    本端点 = **用户**标记的入口，故写入的 `mark_by="user"`（区别于 AI 讲完自动记的 `"ai"`，
+    见工具 `mark_section_understood`）—— 前端据此区分提示语“你标记了已懂” / “AI 讲完自动记”。
+
+    **全部小节 passed → 节点掌握度置 100**（用户口径：全通过 = 这个知识点真掌握了）。
+    该判定只在本请求把 `passed` 置为 true 时触发，且只在真正全通过时改掌握度。
+
+    返回：`{"section_id", "learn", "mastery", "progress"}`；
+    节点/小节不存在 → 404；`mark` 非法 → 400。
+    """
+    if req.mark is not None and req.mark not in LEARN_MARKS:
+        raise HTTPException(status_code=400, detail=f"非法的小节学习标记：{req.mark}")
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        if kg.get_node(node_id) is None:
+            raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
+        try:
+            learn = kg.set_section_learn(
+                node_id, section_id, mark=req.mark, read=req.read, passed=req.passed,
+                mark_by=LEARN_MARK_BY_USER if req.mark is not None else None)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+        progress = kg.section_learn_progress(node_id)
+        mastery = int(kg.get_node(node_id).get("mastery") or 0)
+        if req.passed and progress["all_passed"] and mastery < MASTERY_ALL_SECTIONS_PASSED:
+            # caller="human"：这步是**用户行为**的结果（他答对了这一节的题），不是 AI 自作主张
+            # —— 用 "ai" 会被 `_guard_human_content` 拦下（AI 无权改人类创建的节点），
+            # 而且语义上也不对：用户当然有权更新自己节点的掌握度。
+            kg.update_node_info(
+                node_id, {"mastery": MASTERY_ALL_SECTIONS_PASSED}, caller="human",
+                mastery_reason="section_all_passed",
+                mastery_evidence=f"node:{node_id}",
+            )
+            mastery = MASTERY_ALL_SECTIONS_PASSED
+            publish("graph_updated")     # 图谱节点颜色 / 学习看板跟着变
+        return {"section_id": section_id, "learn": learn,
+                "mastery": mastery, "progress": progress}
+    finally:
+        kg.close()
 
 
 @router.delete("/knowledge/node/{node_id}/section/{section_id}")

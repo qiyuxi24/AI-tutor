@@ -262,12 +262,19 @@ export const useChatStore = defineStore('chat', () => {
     }
     pathBoardLoading.value = true
     try {
-      const params = { subject: currentSubject.value }
-      if (currentBoard.value) params.board = currentBoard.value
-      const { data } = await apiClient.get('/api/v1/knowledge/path-board', { params })
+      // 只按学科切片。**不要**在这里引用 currentBoard：store 里根本没有这个状态
+      // （前端目前没有板块选择器），引用它会在请求发出前就抛 ReferenceError —— 而下面的
+      // catch 会把它当成“拉取失败”静默降级 —— 表现为任务栏永远是空态。
+      // 2026-09-29 实测：/knowledge/path-board 本身 200、返回 9 条，store 却始终是 EMPTY_PATH_BOARD。
+      // 后端的 board 参数继续保留，将来加了板块选择器再把这里补上。
+      const { data } = await apiClient.get('/api/v1/knowledge/path-board', {
+        params: { subject: currentSubject.value },
+      })
       pathBoard.value = data || EMPTY_PATH_BOARD
-    } catch {
-      // 拉取失败不影响图谱使用：静默降级为空表（面板自己显示空态）
+    } catch (e) {
+      // 拉取失败不影响图谱使用：降级为空表（面板自己显示空态），但要留痕 ——
+      // 静默吞错会让这种“永远空态”极难定位。
+      console.warn('[path-board] 拉取失败，任务栏降级为空表', e)
       pathBoard.value = EMPTY_PATH_BOARD
     } finally {
       pathBoardLoading.value = false
@@ -664,14 +671,23 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 对话内出题完成（后台异步，约 40s 后到达）→ 往当前对话追加一条题目消息。
+   * 对话内出题完成（后台异步，约 40s 后到达）→ 往**对应知识点的学习对话**追加一条题目消息。
    *
    * 为什么走这条常驻连接而不是对话 SSE：出题是后台任务，对话的流式响应早已结束，
    * 40 秒后才有结果，只能由 /knowledge/events 这条长连接送达（见后端 quiz_ready 事件）。
+   *
+   * ⚠️ **归属校验（2026-09-30 修）**：原实现直接塞进"当前打开的那个对话"。但出题要 ~40s，
+   * 用户完全可能在这 40s 内又点了另一个知识点的「去学习」—— 于是 A 的题卡会出现在 B 的对话里
+   * （现场：点「最小代价生成树」却收到一张写着「图的存储结构」的题卡，看起来像"题目出错了"）。
+   * 现在按 `nodeId` 找它所属的那段学习对话，找不到就不塞（题仍在题库/节点侧边栏里）。
    */
   function handleQuizReady(data) {
-    const conv = currentConversation.value
-    if (!conv) return
+    const conv = _quizTargetConversation(data)
+    if (!conv) {
+      console.warn(`[quiz_ready] 找不到属于知识点 ${data.node_id || '(未知)'} 的学习对话，`
+                   + '已忽略这条推送（题目仍可在节点详情侧边栏看到）')
+      return
+    }
     if (!data.ok) {
       // 不能让 AI 说的"稍等片刻"变成永远没有下文，失败也要给个交代
       renderAssistant(conv, {
@@ -689,19 +705,59 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
-  /** 把推送来的题目渲染成 markdown（P0 先用纯文本，P1 再换可点卡片） */
-  function formatQuizMessage(data) {
-    const lines = [`**来，检验一下刚才学的「${data.subject || '这个知识点'}」**`, '']
-    for (const q of data.questions || []) {
-      lines.push(q.question)
-      if (q.options?.length) {
-        lines.push('')
-        for (const o of q.options) lines.push(`- **${o.value}.** ${o.label}`)
-      }
-      lines.push('')
+  /**
+   * 这道题该落到哪段对话：①按 `nodeId` 找学习对话；②退到当前对话（仅在节点对得上或事件没带节点时）。
+   * 返回 null = 不该显示（没人认领）。
+   */
+  function _quizTargetConversation(data) {
+    const qNode = data.node_id || ''
+    if (qNode) {
+      const own = conversations.value.find(c => c.nodeId === qNode)
+      if (own) return own
     }
-    lines.push('> 直接回复你的答案就行（比如 `A`），我来判分。')
-    return lines.join('\n')
+    // 没有带节点的事件（老后端）/ 找不到对应对话 → 只在当前对话"正学的就是它"时才收
+    if (!qNode || qNode === currentNode.value) return currentConversation.value || null
+    return null
+  }
+
+  /**
+   * 出题消息的**引导语**。题目本身交给 `QuizCard` 卡片渲染
+   * （点选项 → 提交，不再让学生手打 "B"），所以这里**不**列题干与选项 ——
+   * 否则同一道题会在气泡里出现两遍（文本一遍 + 卡片一遍）。
+   *
+   * 标题带上**小节名**：一个知识点有多节、每节都可能出题，只写节点名的话连续几张卡
+   * 分不清是哪一节的（2026-09-30 用户反馈"怎么一直在出题"时的困惑点之一）。
+   */
+  function formatQuizMessage(data) {
+    const n = (data.questions || []).length
+    const where = [data.subject || '这个知识点', data.section_title]
+      .filter(Boolean).join(' · ')
+    return [
+      `**来，检验一下刚才学的「${where}」**`,
+      '',
+      `下面 ${n} 道题直接在卡片里作答：选好后点「提交」，我来判分。`,
+    ].join('\n')
+  }
+
+  /**
+   * 「去学习」：以某个知识点为教学内容开一轮学习 —— 新建对话 + 记下当前知识点 + 发首条消息。
+   *
+   * 为什么要发一条消息（而不是只设状态）：后端的小节级教学上下文（【学习模式】段落）
+   * 是**组装 system prompt 时**按 `current_node` 现算的（见 chat_service._build_learn_block），
+   * 不发请求就不会生成；发一条"开始学习"正好触发它，AI 据此从对应小节开讲。
+   */
+  async function startLearning(nodeId, name = '') {
+    if (!nodeId) return
+    newConversation()
+    currentNode.value = nodeId      // 放在 newConversation 之后：防止被它重置
+    // 给这段对话打上"正在学哪个知识点"的标记：出题是后台任务（~40s），回来时得靠它
+    // 把题卡投回**正确的**对话（见 handleQuizReady / _quizTargetConversation）
+    const conv = currentConversation.value
+    if (conv) {
+      conv.nodeId = nodeId
+      persist()
+    }
+    await send(`开始学习「${name || nodeId}」`)
   }
 
   /** 断开 SSE 并取消重连定时器 */
@@ -982,6 +1038,7 @@ export const useChatStore = defineStore('chat', () => {
     setKbContext,
     send,
     retryLast,
+    startLearning,
     // 图谱数据
     knowledgeNodes,
     knowledgeEdges,

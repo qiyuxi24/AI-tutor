@@ -120,6 +120,71 @@ def test_quiz_tools_registered():
             assert "timeout_secs" not in t["function"]
 
 
+def test_quiz_generate_guidance_requires_consent():
+    """引导词必须写清：**出题前先问、学生答应才出，学习模式也没有例外**。
+
+    2026-09-30 用户口径（模型对"该不该出题"判断极不稳，真机两轮事故）——把决策权交回学生：
+    先问、按回答行动；服务端还会硬拦（见下面的 handler 测试）。文本断言即可（纯提示词契约）。
+    """
+    guidance = quiz_generate.GUIDANCE
+    assert "须先问" in guidance
+    assert "学习模式" in guidance and "没有例外" in guidance
+    assert "每一次出题都要重新拿到同意" in guidance
+    assert "2~3 个来回" in guidance          # 节奏约束仍要写明（按小节时不适用）
+
+
+# ══════════════════════════════════════════════════════════════════
+#  出题同意硬拦（2026-09-30）
+#  `kg.quiz_consent` 由 `chat_service._stash_quiz_consent` 挂上；属性缺失 = 没有会话
+#  上下文（脚本/测试/接口直调）→ 放行（fail-open），所以老测试不受影响。
+# ══════════════════════════════════════════════════════════════════
+
+def _consent_kg(consent, said, monkeypatch):
+    """带同意信息的假 kg + "后台任务有没有被起"的探针。"""
+    started = []
+
+    async def fake_generate(user_id, *, node_id, section_id="", count=1):
+        started.append(node_id)
+
+    monkeypatch.setattr(chat_quiz, "generate_and_publish", fake_generate)
+    chat_quiz._INFLIGHT.clear()
+    kg = _FakeKg({"bt": {"id": "bt", "name": "二叉树"}})
+    kg.quiz_consent = consent
+    kg.student_input = said
+    return kg, started
+
+
+def test_quiz_generate_blocked_when_no_consent(monkeypatch):
+    """学生没明确同意 → 拒掉，并让模型先问一句（不起后台任务）。"""
+    kg, started = _consent_kg("", "为什么栈是后进先出？", monkeypatch)
+
+    out = _run(quiz_generate.handler({"node_id": "bt"}, kg))
+
+    assert "没有明确同意出题" in out
+    assert "要不要出一道题检验一下" in out
+    assert started == []
+
+
+def test_quiz_generate_blocked_when_student_said_no(monkeypatch):
+    """学生说"先讲"→ 拒掉，并指回讲解（这是"按他的回答行动"的另一半）。"""
+    kg, started = _consent_kg("no", "先讲讲吧", monkeypatch)
+
+    out = _run(quiz_generate.handler({"node_id": "bt"}, kg))
+
+    assert "不要出题" in out and "讲清楚" in out
+    assert started == []
+
+
+def test_quiz_generate_allowed_when_student_agreed(monkeypatch):
+    """学生明确同意（"考考我"）→ 正常排期。"""
+    kg, started = _consent_kg("yes", "考考我", monkeypatch)
+
+    out = _run(quiz_generate.handler({"node_id": "bt"}, kg))
+
+    assert "后台出题" in out
+    assert started == ["bt"]
+
+
 # ══════════════════════════════════════════════════════════════════
 #  quiz_generate 工具
 # ══════════════════════════════════════════════════════════════════

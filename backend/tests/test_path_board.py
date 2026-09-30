@@ -58,6 +58,11 @@ def _prereq(frm, to, subject="数据结构", board=""):
             "relation": "prerequisite", "subject": subject, "board": board}
 
 
+def _related(frm, to, relation="related", subject="数据结构", board=""):
+    return {"id": f"{frm}~{to}", "from_node": frm, "to_node": to,
+            "relation": relation, "subject": subject, "board": board}
+
+
 def _by_id(got):
     return {it["id"]: it for it in got["items"]}
 
@@ -102,6 +107,106 @@ def test_items_sorted_by_level_then_id():
     got = path_board(kg, subject="数据结构")
 
     assert [it["id"] for it in got["items"]] == ["a", "z", "m"]
+
+
+# ── 只有相关概念的节点（并入相关节点同层）──────────────────
+
+def test_related_only_node_shares_level_with_its_related():
+    """只有 related 边的节点并入相关节点的同层，并注明与谁相关（不再冒充第 1 层起点）。"""
+    kg = FakeKG(
+        nodes=[_node("a"), _node("b"), _node("x")],
+        edges=[_prereq("a", "b"), _related("b", "x")],
+    )
+    got = path_board(kg, subject="数据结构")
+    items = _by_id(got)
+
+    assert items["b"]["level"] == 1
+    assert items["x"]["level"] == 1                       # 与 b 同层
+    assert [it["id"] for it in got["items"]] == ["a", "b", "x"]
+    assert [r["id"] for r in items["x"]["related"]] == ["b"]
+    assert items["x"]["related"][0]["relation_label"] == "相关概念"
+    assert items["x"]["hint"].startswith("相关：")
+    assert items["a"]["related"] == []
+
+
+def test_related_only_node_takes_max_level_of_neighbours():
+    """相关节点跨层时取**最大**层号：宁可晚出现，不把节点提到相关节点之前。"""
+    kg = FakeKG(
+        nodes=[_node("a"), _node("b"), _node("c"), _node("x")],
+        edges=[_prereq("a", "b"), _prereq("b", "c"),
+               _related("a", "x"), _related("c", "x")],
+    )
+    got = path_board(kg, subject="数据结构")
+    items = _by_id(got)
+
+    assert items["c"]["level"] == 2
+    assert items["x"]["level"] == 2                       # a=0 / c=2 → 取 2
+    assert [r["id"] for r in items["x"]["related"]] == ["a", "c"]
+
+
+def test_related_edges_do_not_change_prereq_levels():
+    """相关关系只决定"摆在哪"，不参与分层 —— 有前置的节点层号不受影响。"""
+    kg = FakeKG(
+        nodes=[_node("a"), _node("b"), _node("x")],
+        edges=[_prereq("a", "b"), _related("b", "x"), _related("a", "x")],
+    )
+    got = path_board(kg, subject="数据结构")
+    items = _by_id(got)
+
+    assert items["a"]["level"] == 0
+    assert items["b"]["level"] == 1
+    assert items["x"]["level"] == 1
+
+
+def test_related_only_node_uses_lifted_neighbour_level():
+    """related-only 邻居也要参与取最大 —— 旧实现把它们排除在锚点之外（实测反例）。
+
+    2026-09-29 学科「树和二叉树」：「递归转循环（直线型问题）」在第 1 层，相关节点分布
+    在第 1/2/3 层，按取最大本该到第 3 层却没上去。这里用最小结构复现：
+    `lo` 与 `stack`（第 1 层，有前置依据）/ `lin`（related-only）/ `conv`（related-only）
+    都相关 —— 旧实现只看到 stack 的 0 → 停在 0 层。
+
+    取值方向是"取最大"，所以连带效果是一串互相相关的节点最终**对齐到团内最高层**
+    （`lin` 也会被 `lo` 拉上去）—— 这正是"把相关概念摆在一起"想要的效果。
+    """
+    kg = FakeKG(
+        nodes=[_node(n) for n in ("a", "b", "c", "stack", "lin", "conv", "lo")],
+        edges=[
+            _prereq("a", "b"), _prereq("b", "c"),          # a=0 / b=1 / c=2
+            _prereq("a", "stack"),                         # stack 有前置 → 锚在 1 层
+            _related("b", "lin"),                          # lin 先由 b 定到 1
+            _related("c", "conv"),                         # conv 由 c 定到 2
+            _related("stack", "lo"), _related("lin", "lo"), _related("conv", "lo"),
+        ],
+    )
+    got = path_board(kg, subject="数据结构")
+    items = _by_id(got)
+
+    assert items["stack"]["level"] == 1, "有前置依据的节点不被相关关系改动"
+    assert items["conv"]["level"] == 2
+    assert items["lo"]["level"] == 2, "应取所有相关邻居的最大层（含 related-only 的）"
+    assert items["lin"]["level"] == 2, "相关团对齐到团内最高层"
+
+
+def test_mutually_related_orphans_converge():
+    """两个互为相关、都没前置的节点：不动点迭代必须收敛（不得死循环）。"""
+    kg = FakeKG(nodes=[_node("p"), _node("q")], edges=[_related("p", "q")])
+    got = path_board(kg, subject="数据结构")
+    items = _by_id(got)
+
+    assert items["p"]["level"] == 0
+    assert items["q"]["level"] == 0
+    assert [r["id"] for r in items["p"]["related"]] == ["q"]
+
+
+def test_isolated_node_keeps_first_level():
+    """完全孤立的节点（什么边都没有）没有依据可推，仍留在第 1 层。"""
+    kg = FakeKG(nodes=[_node("a"), _node("z")], edges=[])
+    got = path_board(kg, subject="数据结构")
+    items = _by_id(got)
+
+    assert items["z"]["level"] == 0
+    assert items["z"]["related"] == []
 
 
 # ── 前置与解锁 ──────────────────────────────────────────

@@ -357,11 +357,32 @@ if (-not (Test-Path $venvPath)) {
 }
 
 # 检查前端依赖
-$nodeModulesPath = Join-Path $projectRoot "frontend\node_modules"
-if (-not (Test-Path $nodeModulesPath)) {
-    Write-Host "[WARN] 未找到 node_modules，正在安装前端依赖..." -ForegroundColor Yellow
+# 只判「目录是否存在」不够 —— 被中断或被半拷贝的 node_modules 会留下空壳目录，脚本以为装好了就
+# 跳过安装，随后 npx vite 在本地找不到可执行文件 → 联网下载 vite 并弹交互提示（"Need to install
+# the following packages: vite@x.y.z / Ok to proceed? (y)"），无人应答时表现为「5174 一直起不来」。
+# 2026-09-29 真机踩到：frontend-admin\node_modules 里只有 @vue 一个目录，运维前端 5174 无监听。
+# 同理，package.json/package-lock.json 被改（新增依赖）后不重装，就会出现
+# 「Failed to resolve import "exceljs"」（Vue 组件里动态 import 的包在 node_modules 里不存在）。
+# 所以改为看三件事：安装戳存在、本地 vite 可执行存在、lock 不比安装戳新。
+function Test-FrontendDepsInstalled {
+    param([string]$Dir)
+    $nm = Join-Path $Dir "node_modules"
+    $stamp = Join-Path $nm ".package-lock.json"      # npm 每次安装成功都会刷新这个文件
+    if (-not (Test-Path $stamp)) { return $false }
+    if (-not (Test-Path (Join-Path $nm ".bin\vite.cmd"))) { return $false }
+    $lock = Join-Path $Dir "package-lock.json"
+    if (Test-Path $lock) {
+        # 容差 5 秒：npm 收尾时写的根 lock 可能比安装戳稍晚
+        return -not ((Get-Item $lock).LastWriteTimeUtc -gt (Get-Item $stamp).LastWriteTimeUtc.AddSeconds(5))
+    }
+    $pkg = Join-Path $Dir "package.json"
+    return -not ((Get-Item $pkg).LastWriteTimeUtc -gt (Get-Item $stamp).LastWriteTimeUtc.AddSeconds(5))
+}
+
+if (-not (Test-FrontendDepsInstalled (Join-Path $projectRoot "frontend"))) {
+    Write-Host "[WARN] 前端依赖缺失或与 package-lock.json 不同步，正在安装（新增依赖后首次启动会慢一点）..." -ForegroundColor Yellow
     Push-Location (Join-Path $projectRoot "frontend")
-    npm install
+    npm.cmd install
     Pop-Location
     Write-Host "[OK] 前端依赖安装完成" -ForegroundColor Green
 }
@@ -429,8 +450,13 @@ New-Item -ItemType Directory -Force -Path (Split-Path $backendLog -Parent) | Out
 # 另加 --reload-dir data/prompts：提示词模板不在 app/ 下，漏了它改 .j2 不会重载
 # （进程内模板缓存不失效 → 改了看不到效果，容易被误判成"模型没按提示词走"）。
 # 绝对路径：uvicorn 的监视目录相对 CWD 解析，写成相对路径会随启动方式漂移。
+# !! 路径含空格时**必须自带引号**：Start-Process 的 -ArgumentList 是「数组元素按空格拼成一条
+#    命令行」，它不会替我们加引号。本项目路径含空格（`AI-tutor_ - 副本`），不加引号就变成
+#    `--reload-dir C:\...\AI-tutor_ - 副本\...\data\prompts` → uvicorn 收到两个参数 →
+#    「Error: Got unexpected extra arguments (- 副本\...\data\prompts)」→ 进程秒退，
+#    而脚本只会报「后端启动超时」（真因在 logs\uvicorn-dev.log）。2026-09-28 踩过一次。
 $promptsDir = Join-Path $projectRoot "data\prompts"
-$backendProcess = Start-Process -FilePath $venvPython -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--reload", "--reload-dir", "app", "--reload-dir", $promptsDir, "--no-use-colors" -PassThru -WindowStyle Hidden -WorkingDirectory $backendDir -RedirectStandardError $backendLog
+$backendProcess = Start-Process -FilePath $venvPython -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--reload", "--reload-dir", "app", "--reload-dir", "`"$promptsDir`"", "--no-use-colors" -PassThru -WindowStyle Hidden -WorkingDirectory $backendDir -RedirectStandardError $backendLog
 
 Write-Host "[后端] PID: $($backendProcess.Id)" -ForegroundColor Green
 
@@ -463,13 +489,15 @@ $frontendDir = Join-Path $projectRoot "frontend"
 Write-Host "----------------------------------------" -ForegroundColor Cyan
 Write-Host "[前端] 启动 Vite 开发服务器 (端口 5173)..." -ForegroundColor Yellow
 
-# 找到 npx 的完整路径（避免直接调用 cmd 内置命令）
-$npmPath = (Get-Command npm -ErrorAction Stop).Source
-$npxPath = Join-Path (Split-Path $npmPath -Parent) "npx.cmd"
-if (-not (Test-Path $npxPath)) {
-    $npxPath = Join-Path (Split-Path $npmPath -Parent) "npx"
+# 直接用 node_modules\.bin\vite.cmd，不用 npx：npx 一旦在本地找不到 vite 就会联网下载并弹
+# 「Ok to proceed? (y)」交互提示，脚本（无人应答）会卡在那里；用 .cmd shim 还有一个好处是不受
+# PowerShell 执行策略限制（被拦的是 npm.ps1）。缺 vite 时给出明确报错而不是静默下载。
+$frontendViteCmd = Join-Path $frontendDir "node_modules\.bin\vite.cmd"
+if (-not (Test-Path $frontendViteCmd)) {
+    Write-Host "[ERROR] [前端] 找不到 $frontendViteCmd，请先在 frontend\ 目录执行 npm install" -ForegroundColor Red
+    exit 1
 }
-$frontendProcess = Start-Process -FilePath $npxPath -ArgumentList "vite", "--host" -PassThru -NoNewWindow -WorkingDirectory $frontendDir
+$frontendProcess = Start-Process -FilePath $frontendViteCmd -ArgumentList "--host" -PassThru -NoNewWindow -WorkingDirectory $frontendDir
 
 Write-Host "[前端] PID: $($frontendProcess.Id)" -ForegroundColor Green
 
@@ -540,16 +568,21 @@ $adminFrontendDir = Join-Path $projectRoot "frontend-admin"
 Write-Host "----------------------------------------" -ForegroundColor Cyan
 Write-Host "[运维前端] 启动 Vite 开发服务器 (端口 5174)..." -ForegroundColor Yellow
 
-# 安装运维前端依赖
-if (-not (Test-Path (Join-Path $adminFrontendDir "node_modules"))) {
-    Write-Host "[运维前端] 安装依赖..." -ForegroundColor Yellow
+# 安装运维前端依赖（判据同前端：空壳 node_modules / lock 变更都要重装）
+if (-not (Test-FrontendDepsInstalled $adminFrontendDir)) {
+    Write-Host "[运维前端] 依赖缺失或与 package-lock.json 不同步，安装依赖..." -ForegroundColor Yellow
     Push-Location $adminFrontendDir
-    npm install
+    npm.cmd install
     Pop-Location
     Write-Host "[运维前端] 依赖安装完成" -ForegroundColor Green
 }
 
-$adminFrontendProcess = Start-Process -FilePath $npxPath -ArgumentList "vite", "--host", "--port", "5174" -PassThru -NoNewWindow -WorkingDirectory $adminFrontendDir
+$adminViteCmd = Join-Path $adminFrontendDir "node_modules\.bin\vite.cmd"
+if (-not (Test-Path $adminViteCmd)) {
+    Write-Host "[ERROR] [运维前端] 找不到 $adminViteCmd，请先在 frontend-admin\ 目录执行 npm install" -ForegroundColor Red
+    exit 1
+}
+$adminFrontendProcess = Start-Process -FilePath $adminViteCmd -ArgumentList "--host", "--port", "5174" -PassThru -NoNewWindow -WorkingDirectory $adminFrontendDir
 
 Write-Host "[运维前端] PID: $($adminFrontendProcess.Id)" -ForegroundColor Green
 

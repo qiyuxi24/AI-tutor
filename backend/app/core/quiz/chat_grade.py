@@ -54,6 +54,64 @@ DEFAULT_SOURCE = "chat"
 # 答对一道题的确定性掌握度增益（"答对就直接更新进度"）
 MASTERY_CORRECT_GAIN = 20
 
+# 小节题答错几次后把「已懂」降级为「不懂」（用户口径：先讲解 + 再出一题，第二次仍错才降级）
+SECTION_RETRY_BEFORE_DOWNGRADE = 1
+
+
+def apply_section_after_answer(kg: KnowledgeGraph, *, node_id: str, section_id: str,
+                               correct: bool, evidence: str = "") -> dict:
+    """
+    按**小节**判定答题结果（题目带 `section_id` 时走这里，不再用节点级 +20 的口径）。
+
+    用户口径（2026-09-29）：
+      · 答对 → 该小节 `passed=True`；**全部小节通过 → 节点掌握度直接置 100**；
+      · 答错 → 第一次**不降级**（`action=retry`，调用方立刻再出该节一题）；
+                第二次仍错 → 把小节标成「不懂」（`action=downgrade`），转入教学。
+
+    返回 `{applied, action: passed|retry|downgrade|none, note}`；
+    `note` 是给模型看的自然语言（可空）。
+
+    为什么掌握度回写用 `caller="human"`：这是**用户答题**的结果，不是 AI 自作主张；
+    用 `"ai"` 会被 `_guard_human_content` 拦下（AI 无权改人类创建的节点）。
+    """
+    from app.core.knowledge_graph import (      # 延迟导入：保持本模块运行时不依赖图谱
+        LEARN_MARK_BY_AI, LEARN_MARK_CONFUSED, MASTERY_ALL_SECTIONS_PASSED,
+    )
+    try:
+        state = kg.get_section_learn(node_id, section_id)
+    except Exception as e:                      # 小节被删 / manifest 损坏 → 不拦判分
+        logger.warning(f"读小节学习状态失败（{node_id}/{section_id}）: {e}")
+        return {"applied": False, "action": "none", "note": ""}
+
+    if correct:
+        kg.set_section_learn(node_id, section_id, passed=True)
+        progress = kg.section_learn_progress(node_id)
+        note = f"本节已通过（{progress['passed']}/{progress['total']} 节）"
+        if progress["all_passed"]:
+            node = kg.get_node(node_id) or {}
+            if int(node.get("mastery") or 0) < MASTERY_ALL_SECTIONS_PASSED:
+                kg.update_node_info(
+                    node_id, {"mastery": MASTERY_ALL_SECTIONS_PASSED}, caller="human",
+                    mastery_reason="section_all_passed", mastery_evidence=evidence)
+                note += f"；该知识点全部小节已通过 → 掌握度置 {MASTERY_ALL_SECTIONS_PASSED}"
+            note += "。这个知识点拿下了，可以往下一个推进。"
+        return {"applied": True, "action": "passed", "note": note, "progress": progress}
+
+    attempts = int(state.get("attempts") or 0)
+    kg.set_section_learn(node_id, section_id, bump_attempts=True)
+    if attempts < SECTION_RETRY_BEFORE_DOWNGRADE:
+        # ⚠️ 这里**不再自动重出题**（2026-09-30 用户口径：出题前必须先问学生）——
+        # 旧版在判分那一刻就排期并写"系统已自动再推一道本节题"，学生没点过头就被考；
+        # 现在改成"先讲错点 + 问一句要不要再来一道"，他答应后（下一轮）才出。
+        return {"applied": True, "action": "retry",
+                "note": ("这一节第一次没答对：**先讲清错在哪**（本次不降级）；"
+                         "然后**问一句**「要不要再来一道同类的练练？」，"
+                         "他答应了下一轮再出题 —— **不要直接出**。")}
+    kg.set_section_learn(node_id, section_id, mark=LEARN_MARK_CONFUSED,
+                         mark_by=LEARN_MARK_BY_AI)
+    return {"applied": True, "action": "downgrade",
+            "note": "这一节连续两次没答对：已把它的标记改成「不懂」，接下来就按不懂来讲。"}
+
 
 def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
                                correct: bool, evidence: str = "") -> str:
@@ -81,7 +139,11 @@ def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
         return f"「{name}」掌握度已是满值 100，无需再提升。"
     new = min(100, current + MASTERY_CORRECT_GAIN)
     try:
-        kg.update_node_info(node_id, {"mastery": new}, caller="ai",
+        # caller="human"：这是**用户答题**的结果，不是 AI 自作主张。
+        # 原先写 "ai" 会被 `_guard_human_content` 拦下（AI 无权改人类创建的节点）→
+        # 用户手动建的知识点**永远无法通过答题提分**（静默写不进去，只留一条 warning）。
+        # 2026-09-29 补测试时暴露。
+        kg.update_node_info(node_id, {"mastery": new}, caller="human",
                             mastery_reason="quiz_correct", mastery_evidence=evidence)
     except Exception as e:
         # 人类创建的节点 AI 无权改（PermissionError）——判分照常返回，只是不改进度
@@ -137,10 +199,17 @@ async def grade_pending(user_answer: str, *, kg=None, store=None,
     store = _resolve_store(store, user_id=user_id, kg=kg)
     q = store.get_pending_question(source=source)
     if not q:
+        # ⚠️ 这段文案会被模型当"下一步指令"照做。旧版写的是"如果还没出过题，
+        # 先调用 quiz_generate 出一道" —— 在"学生重复提交同一题 / 这轮不是作答"的场景里
+        # 它把模型直接推向**再出一道**，真机因此陷入
+        # "答错 → 出题 → 再答错 → 又出题"的死循环（2026-09-30 01:21:25 日志铁证）。
+        # 触发类文案必须写清"**不要**做什么" —— 本项目反复验证过的一条铁律。
         return {
             "ok": False,
-            "message": ("当前没有等待作答的题目。请确认学生是否在回答你出的题；"
-                        "如果还没出过题，先调用 quiz_generate 出一道。"),
+            "message": ("当前没有等待作答的题目（学生重复提交了同一题，或这一轮不是在作答）。"
+                        "⛔ **不要**因为这轮没题可判就再出一道新题 —— 先按学生的真实意图回应："
+                        "重复提交就告诉他这题已经判过了、接着说上一题的结果；"
+                        "确实想再练一道，也要先把上一题的错点讲清楚。"),
         }
 
     result = await grade_question(QuizGradeRequest(
@@ -158,12 +227,26 @@ async def grade_pending(user_answer: str, *, kg=None, store=None,
 
     # 题目关联的知识点（source="chat" 时 = 图谱节点 id）→ 回写进度
     # 没传 kg 就跳过 —— 纯判分场景不该动图谱
+    # 带 section_id 的题（按小节出的题 / 「去学习」教学里出的题）走**小节口径**：
+    # 答对只将本节置为通过，不再给节点加 20 分（用户口径：全部小节通过才置 100）
     node_id = q.get("knowledge_point") or ""
+    section_id = q.get("section_id") or ""
     mastery_note = ""
+    section_note = ""
+    next_action = ""
     if kg is not None:
-        mastery_note = apply_mastery_after_answer(
-            kg, node_id, bool(result["correct"]), evidence=f"question:{q['id']}",
-        )
+        if section_id:
+            sec = apply_section_after_answer(
+                kg, node_id=node_id, section_id=section_id,
+                correct=bool(result["correct"]), evidence=f"question:{q['id']}",
+            )
+            section_note = sec.get("note", "")
+            next_action = sec.get("action", "")
+            mastery_note = section_note
+        else:
+            mastery_note = apply_mastery_after_answer(
+                kg, node_id, bool(result["correct"]), evidence=f"question:{q['id']}",
+            )
 
     return {
         "ok": True,
@@ -177,6 +260,9 @@ async def grade_pending(user_answer: str, *, kg=None, store=None,
         "comment": result["comment"],
         "analysis": q.get("analysis", ""),
         "knowledge_point": node_id,
+        "section_id": section_id,
+        "section_note": section_note,
+        "next_action": next_action,
         "mastery_note": mastery_note,
     }
 
@@ -196,15 +282,34 @@ async def grade_pending_answer(kg, user_answer: str, *, store=None,
 
 
 def _format_grade_for_model(r: dict) -> str:
-    """把 `grade_pending()` 的结构化结果转成给模型看的文案（工具与自动判分共用）。"""
+    """
+    把 `grade_pending()` 的结构化结果转成给模型看的文案（工具与自动判分共用）。
+
+    为什么结论必须**单独成行、放在第一行**（2026-09-30 真机，别合并回长句）：
+        学生那道题答案键 B、选了 C，系统判 0/10，注进去的是
+        "判分结果：答错（0/10 分）。…" —— 而模型回的是
+        "**Bingo，答对了！**这一节就这么过了"，随后按"已通过"跳去讲下一节。
+        （学生干等下一节的题等不到，见开发日志补七。）
+        思考型模型对"长句 + 结论后置"很容易读串，所以：结论提第一行 + 加粗 + 明写"不得改写"。
+    """
+    verdict = "答对" if r["correct"] else "答错"
     lines = [
-        f"判分结果：{'答对' if r['correct'] else '答错'}"
-        f"（{r['score']}/{r['max_score']} 分）。{r['comment']}",
+        f"⛔ 判分结论：**{verdict}**（{r['score']}/{r['max_score']} 分）。"
+        "这是系统判分，**不得改写** —— 答错就不能说「答对了」「这一节过了」。",
         f"题目：{r['question']}",
+        f"学生作答：{r.get('user_answer', '')}",
     ]
+    if r.get("comment"):
+        lines.append(f"评语：{r['comment']}")
     if r["analysis"]:
         lines.append(f"参考答案/解析：{r['analysis']}")
-    if r["mastery_note"]:
+    if r.get("section_note"):
+        lines.append(r["section_note"])
+    if r.get("next_action") == "downgrade":
+        # 连续两次答错 → 已降级为「不懂」：这是最容易被模型"强行宣布通过"的场景
+        lines.append("⛔ 本节连续两次答错，已降级为「不懂」：**不要**宣布「这一节过了 / 通过」，"
+                     "接下来按「不懂」把这一节讲一遍。")
+    if r["mastery_note"] and r["mastery_note"] != r.get("section_note"):
         lines.append(r["mastery_note"])
     lines.append(
         "接下来：答对 → 简短肯定 + 点出关键要点，然后自然推进到下一步；"
@@ -233,12 +338,13 @@ async def auto_grade_pending(kg, user_answer: str, *, store=None,
         r = await grade_pending(user_answer, kg=kg, store=store, source=source)
         if not r.get("ok"):
             return ""
-        return (
-            "【系统自动判分】学生这一轮的输入已按「作答」机械判分（无需你再调 grade_answer）：\n"
-            f"{_format_grade_for_model(r)}\n"
-            "⚠️ 例外：如果学生这轮其实不是在作答，而是在提新问题 / 换话题，"
-            "请忽略上面的判分结果，按学生的真实意图回应。"
-        )
+        lines = [
+            "【系统自动判分】学生这一轮的输入已按「作答」机械判分（无需你再调 grade_answer）：",
+            _format_grade_for_model(r),
+        ]
+        lines.append("⚠️ 例外：如果学生这轮其实不是在作答，而是在提新问题 / 换话题，"
+                     "请忽略上面的判分结果，按学生的真实意图回应。")
+        return "\n".join(lines)
     except Exception as e:
         # 判分是增强项，任何异常都不能阻断对话
         logger.warning(f"自动判分失败（不阻断对话）: {e}")
