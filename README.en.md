@@ -4,63 +4,89 @@
 
 [简体中文](README.md) ｜ **English**
 
-> An AI study companion for university students: not just Q&A, but an active learning system with **a map** (knowledge graph), **a path** (learning planning), **memory** (learner profile) and **feedback** (AI quizzes + progress dashboard).
+<p align="center">
+  An AI study companion for university students, connecting conversation, knowledge structure, and learning feedback.
+</p>
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2563eb?style=flat-square" alt="License: MIT"></a>
+  <a href="backend/requirements.txt"><img src="https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10+"></a>
+  <a href="frontend/package.json"><img src="https://img.shields.io/badge/Vue-3-42b883?style=flat-square&amp;logo=vuedotjs&amp;logoColor=white" alt="Vue 3"></a>
+  <a href="backend/requirements.txt"><img src="https://img.shields.io/badge/FastAPI-SSE-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white" alt="FastAPI with SSE"></a>
+</p>
+
+<p align="center">
+  <a href="#overview">Overview</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#documentation">Docs &amp; support</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
 
 ---
 
-## What is this
+<a id="overview"></a>
 
-TutorAgent combines a conversational AI tutor with a knowledge graph and a personal learner profile, so the AI moves from "you ask, it answers" to active tutoring: it remembers what you have learned, sees the whole knowledge landscape, plans what to learn next, and automatically turns conversations into structured notes.
+## Overview
 
-It targets three pain points of self-directed learning:
+TutorAgent connects **conversational tutoring, a knowledge graph, learner profiles, and learning paths**. Start with a question, add textbooks to your knowledge base, build structured notes as you learn, and check your understanding through quizzes.
 
-- **Fragmented, aimless learning** — the structure is invisible, so the pieces never connect → visualized knowledge graph + topologically sorted learning paths
-- **No feedback after studying** — you cannot see your mastery or where the gaps are → mastery modeling + AI quizzes + progress dashboard
-- **Note-taking is painful** — writing notes while learning is chaotic → conversations become notes; graph nodes and the learner profile accumulate automatically
+| Self-study challenge | How TutorAgent helps |
+| :--- | :--- |
+| Disconnected topics and unclear prerequisites | Visualize knowledge relationships and follow learning paths based on prerequisites |
+| Understanding an explanation without knowing whether you can solve a problem | Use AI quizzes and grading to update mastery and inspect weak areas in the dashboard |
+| Conversations and notes scattered across tools | Save learning content in graph nodes and learner profiles for future tutoring |
 
-Unlike general chat tools (ChatGPT / Kimi) that forget everything once the conversation ends, knowledge managers (Notion / Obsidian) that store but never teach, and MOOC platforms that give everyone the same page, TutorAgent fuses **conversation, knowledge graph, learner profile and path recommendation** into one system — an active learning partner, not a passive Q&A tool.
+**A typical session:** choose a subject or topic → learn through conversation → take a quiz → review your graph and progress → continue to the next step.
 
----
+<a id="architecture"></a>
 
 ## Architecture
 
-### Layered view
+**The Agent Loop runs the conversation**: the model calls tools as needed and then produces an answer. Reasoning, tool progress, and answer text reach the frontend through SSE (server-sent events).
 
-```
-┌────────────────────── Frontend: Vue 3 SPA ─────────────────────────────┐
-│  Chat │ Knowledge graph │ Dashboard │ Quiz │ KB │ Collector            │
-│        Element Plus + D3 force-directed skill tree + Markdown / LaTeX  │
-└───────────────────▲──────────────────────┬────────────────────────────┘
-       SSE streaming text / events     REST queries (graph / quiz / KB / profile)
-┌───────────────────┴──────────────────────▼───────── FastAPI backend ───┐
-│  api/v1: auth chat conversations knowledge profile rag kb quiz collector│
-│  chat_service: stream text first → background Agent Loop (true multi-  │
-│    round LLM ↔ tool orchestration)                                     │
-│    · Chat / Agent model: MiniMax-M3 (OpenAI-compatible + function call)│
-│    · Toolset = graph CRUD & paths, profile notes, rag_search (graph|KB)│
-│  Domain subsystems                                                     │
-│    knowledge_graph / graph_middleware (subject→board slicing) /        │
-│    graph_analyzer                                                      │
-│    rag_pipeline (RagSource protocol, parallel multi-source fusion)     │
-│    hybrid_search (vector + Whoosh BM25 + RRF) + kb/parsers + graph_gen │
-│    quiz generation │ collector │ user profile │ conversations          │
-│  Cross-cutting: event_bus │ error_codes │ rate_limiter │ llm/ │ config │
-└────────┬──────────────────────────┬────────────────────────┬───────────┘
-   SQLite (graph / chat / quiz / collector)  Node Markdown  Learner profile JSON
+```mermaid
+flowchart TB
+    UI["Learning interface · Vue 3"] -->|Chat request| API["FastAPI · chat_service"]
+    API --> LOOP["Agent Loop · Multi-round orchestration"]
+    LOOP <--> MODEL["Chat model · OpenAI-compatible API"]
+    LOOP <--> TOOLS["Tool registry · Graph / RAG / Quiz / MCP"]
+    TOOLS --> DATA[("Learning data · SQLite / Markdown / JSON")]
+    LOOP --> RUNS[("Run records · agent_runs")]
+    LOOP --> EVENTS["EventBus · Per-user event queues"]
+    EVENTS -.->|SSE · Reasoning / Tools / Answer| UI
+
+    classDef interface fill:#eff6ff,stroke:#2563eb,color:#172554
+    classDef agent fill:#f0fdf4,stroke:#16a34a,color:#14532d
+    classDef storage fill:#faf5ff,stroke:#9333ea,color:#581c87
+    class UI,API,EVENTS interface
+    class LOOP,MODEL,TOOLS agent
+    class DATA,RUNS storage
 ```
 
-### Two core loops
+| Feedback loop | Data flow |
+| :--- | :--- |
+| **Learning and feedback** | Tutoring → background quiz generation → answers and grading → mastery updates → learning path adjustments |
+| **Resources and retrieval** | Upload or collect resources → parse and chunk → vector and BM25 indexes → hybrid retrieval → source citations in conversation |
+| **Execution and replay** | Generate a `run_id` → display live events → persist evidence → retrieve and review a run by ID |
 
-1. **Learning loop (the more you use it, the better it knows you)**: conversation → the Agent Loop calls graph/profile tools → node mastery and the learner profile update → dashboard and learning path recompute → the next conversation uses all of it for weak-point guidance and recommendations.
-2. **Knowledge loop (feed material in, then query it)**: upload textbooks (PDF/Word/PPT/images/text) or collect web pages with Collector → parsers route by type with automatic fallback for optional dependencies → chunking + vectorization and BM25 dual index → hybrid retrieval (wide recall → RRF fusion → provenance + parent expansion) → answered in conversation by the `rag_search` tool with citations.
+<details>
+<summary>Plain-text architecture and developer entry points</summary>
 
-### What happens in one conversation
+```text
+Vue 3 frontend
+  | REST / SSE
+FastAPI -> chat_service -> Agent Loop <-> Chat model
+                              | Tool calls
+                     Graph / Profile / RAG / Quiz / MCP
+                              | Persistence
+                     SQLite / Markdown / JSON
+```
 
-User message → pure-rule routing (greetings / very short input skip RAG) → learner context injection + on-demand retrieval → **streaming the answer body first** (no perceived latency) → background `agent_loop.run_agent_loop` decides which tools to call (create/update graph nodes, update the profile, query the knowledge base) → graph and dashboard refresh automatically via SSE events, with no manual page reload.
+Entry points: [chat orchestration](backend/app/services/chat_service.py), [Agent Loop](backend/app/core/agent/loop.py), and [tool registry](backend/app/core/agent_tools/registry.py). See [AGENTS.md](AGENTS.md) for internal contracts and coupling constraints.
 
----
+</details>
 
 ## Core features
 
@@ -77,181 +103,261 @@ User message → pure-rule routing (greetings / very short input skip RAG) → l
 | **Agentic RAG** | `rag_search` tool: the LLM retrieves from graph / KB on demand and cites sources | ✅ |
 | **Textbook → graph** | graph_generator builds graph nodes from subject textbooks with semantic deduplication | ✅ |
 | **AI quiz generation** | Questions generated from textbook KB retrieval (single/multi choice, true-false, fill-in, short answer); rule-based or LLM grading | ✅ |
-| **Collector** | Discovers and ingests subject material from Wikipedia/Wikibooks etc. (resumable + dual copyright modes) | ✅ |
+| **Web search & Collector** | MCP web search / webpage extraction + Collector discovers and ingests subject material from Wikipedia/Wikibooks etc. (resumable + dual copyright modes) | ✅ |
 | **Run records & evidence replay** | Every run is persisted to `agent_runs` (full thinking, complete tool arguments and results, final answer); events carry `run_id` for source-level review | ✅ |
 | **Model fallback chain** | Silent failover to the backup service on quota exhaustion / auth failure / persistent errors — tutoring sessions never break | ✅ |
-| **Dual copyright modes** | Personal mode (fair use) / commercial mode (L0 open licences only), filtered at the retrieval layer (L2) | ✅ |
+| **User isolation & dual copyright modes** | JWT authentication with per-user data isolation; personal mode (fair use) / commercial mode (L0 open licences only), filtered at the retrieval layer (L2) | ✅ |
 
 ## Tech stack
 
-| Layer | Technology | Notes |
-|------|------|------|
-| **Frontend** | Vue 3 + Vite + Pinia + Element Plus + D3.js | SPA, force-directed skill tree, Markdown/LaTeX rendering |
-| **Backend** | Python FastAPI + Uvicorn + Jinja2 | REST + SSE streaming, unified error codes |
-| **AI chat** | MiniMax-M3 (OpenAI-compatible, function calling) | Main model is swappable to Alibaba qwen (see Configuration); retries with exponential backoff + jitter |
-| **Embeddings** | Alibaba text-embedding-v4 (fixed, independent of the chat model) | Vector index / RAG recall |
-| **Retrieval** | SQLite vector store + Whoosh BM25 + RRF fusion | `backend/app/core/hybrid_search/` |
-| **Parsing** | PyMuPDF / python-docx / python-pptx / RapidOCR | Registry + strategy pattern, optional-dependency fallback |
-| **Storage** | SQLite (graph / chat / quiz / collector) + node Markdown + profile JSON | Zero configuration, isolated per user |
-| **Auth** | JWT (python-jose) + bcrypt | Register / login / token authentication |
-| **Deployment** | Docker single container (Nginx:80 + Uvicorn:8000) + docker-compose | healthcheck + data volumes + SSE reverse proxy |
+| Layer | Technology | Purpose |
+| :--- | :--- | :--- |
+| Frontend | Vue 3 · Vite 8 · Pinia · Element Plus · D3 | Conversation, graph, and dashboard; Markdown / LaTeX rendering |
+| Backend | FastAPI · Uvicorn · Jinja2 | REST API, SSE events, and prompt templates |
+| Conversation and tools | OpenAI-compatible API · MCP | Template preset: `MiniMax-M3`; configurable model, endpoint, and key |
+| Embeddings and retrieval | text-embedding-v4 · Whoosh BM25 · RRF | Independent embedding service and hybrid retrieval |
+| Document parsing | PyMuPDF · python-docx · python-pptx · RapidOCR | Format-specific parsing and OCR |
+| Storage and authentication | SQLite · Markdown · JSON · JWT · bcrypt | Local persistence, authentication, and user isolation |
+| Deployment | Docker Compose · Nginx | Single-container deployment, SSE proxying, and data volumes |
 
----
+<a id="quick-start"></a>
 
 ## Quick start
 
-### Prerequisites
+### 1. Prepare your environment
 
-- Python 3.10+ (3.11 / 3.13 recommended for development)
-- Node.js 18+
+| Dependency | Requirement |
+| :--- | :--- |
+| Python | 3.10+; repository CI uses 3.13 |
+| Node.js | `^20.19.0` or `>=22.12.0`, matching Vite in the frontend lockfile |
+| Model services | Chat model API key; an Alibaba Cloud Bailian key for embeddings and knowledge-base retrieval |
+| Database | SQLite; no separate database server required |
 
-### One-command install & start (Windows PowerShell)
+Download the repository and enter its root directory. To contribute, fork first and clone your own fork.
+
+```bash
+git clone https://github.com/qiyuxi24/AI-tutor.git
+cd AI-tutor
+```
+
+### 2. Install and configure (Windows PowerShell)
+
+The installer creates the virtual environment and installs backend and frontend dependencies. It also creates the root `.env` from the template if the file does not exist.
 
 ```powershell
-# 1. Install dependencies (backend venv + frontend node_modules)
 .\install.ps1
+notepad .env
+```
 
-# 2. Configure the environment (the root .env is the single source of truth, shared by local and Docker)
-copy .env.example .env
-notepad .env        # fill in LLM_API_KEY (MiniMax) / DASHSCOPE_API_KEY / SECRET_KEY
+Set `LLM_API_KEY`, `DASHSCOPE_API_KEY`, and `SECRET_KEY` in `.env`. The chat model, endpoint, and key must belong to the same service; see [configuration](#configuration). Generate a random signing key with the following command, then paste the output into `SECRET_KEY`:
 
-# 3. Start (auto: container if Docker is available, otherwise local dev mode)
+```powershell
+.\backend\venv\Scripts\python.exe -c "import secrets; print(secrets.token_hex(32))"
+```
+
+> [!IMPORTANT]
+> Keep configuration in the root `.env` and use the project virtual environment for the backend. When starting Uvicorn manually, explicitly set `--workers 1`; per-user event queues require a single process.
+
+### 3. Start and explore (auto: container if Docker is available, otherwise local dev mode)
+
+```powershell
 .\start.ps1
 #    .\start.ps1 -Local          force local dev mode (hot reload + admin panel 8001/5174)
 #    .\start.ps1 -Docker -Force  force container mode and rebuild (-Port 8081 to change port)
 ```
 
-Then open http://localhost:5173 (an admin account is created on first start; **for production always set `DEFAULT_ADMIN_PASSWORD` in the root `.env`** — never expose the default `admin/admin123`, see the configuration table below).
+| Entry point | Address and expected result |
+| :--- | :--- |
+| Learning interface | [localhost:5173](http://localhost:5173) |
+| API documentation | [localhost:8000/docs](http://localhost:8000/docs), with request and response schemas |
+| Health check | [localhost:8000/api/health](http://localhost:8000/api/health), returning `{"status":"ok"}` |
 
-### Docker deployment (Linux server)
+Register an account on first use. To create `admin` at startup, set `DEFAULT_ADMIN_PASSWORD` first; leaving it empty does not create an administrator automatically.
 
-```bash
-# After configuring DASHSCOPE_API_KEY / SECRET_KEY in the root .env:
-docker compose up -d --build
-# Visit http://<server-ip>:8080
+After signing in, choose a topic and ask “Help me map the prerequisites for this topic” to explore conversation and graph updates.
+
+<details>
+<summary>Manual development: Windows PowerShell</summary>
+
+Run these commands from the repository root. If the virtual environment and dependencies already exist, proceed directly to starting the services.
+
+```powershell
+python -m venv backend/venv
+.\backend\venv\Scripts\python.exe -m pip install -r backend/requirements.txt
+npm --prefix frontend ci
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env
 ```
 
-> Data is persisted by mounting `data/{knowledge,conversations,profiles}` + `backend/data`; `.dockerignore` excludes `.env` so container environment variables are never overwritten.
+Backend terminal:
 
-### Manual development
-
-```bash
-# Backend (reads the root .env automatically — do not create a second .env under backend/)
+```powershell
 cd backend
-python -m venv venv && venv\Scripts\activate   # Windows; Linux/macOS: source venv/bin/activate
-pip install -r requirements.txt
-copy ..\.env.example ..\.env                     # Linux/macOS: cp ../.env.example ../.env
-uvicorn app.main:app --reload --port 8000
-
-# Frontend (open another terminal)
-cd frontend
-npm install
-npm run dev
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload --reload-dir app --port 8000 --workers 1
 ```
 
-### Service endpoints
+Frontend terminal, opened at the repository root:
 
-| Service | URL |
-|------|------|
-| Frontend | http://localhost:5173 |
-| Backend API / Swagger | http://localhost:8000 / /docs |
-| Health check | http://localhost:8000/api/health |
+```powershell
+npm --prefix frontend run dev
+```
 
----
+</details>
 
-## Configuration (root `.env`, template: `.env.example`)
+<details>
+<summary>Manual development: Linux / macOS</summary>
 
-| Variable | Required | Description |
-|------|------|------|
-| `LLM_API_KEY` | ✅* | Key for the main chat/Agent model (MiniMax China site by default); leave empty to fall back to `DASHSCOPE_API_KEY` and run Alibaba qwen |
-| `LLM_BASE_URL` | ❌ | Defaults to `https://api.minimaxi.com/v1`; switch to the DashScope compatible endpoint when using qwen |
-| `MODEL_NAME` | ❌ | Defaults to `MiniMax-M3` (1M context / multimodal); alternatives `MiniMax-M2.7` / `M2.5` / `qwen-plus` |
-| `DASHSCOPE_API_KEY` | ✅ | Alibaba Cloud Bailian key: **required for text-embedding-v4** (independent of the chat model) |
-| `EMBED_BASE_URL` | ❌ | Embedding endpoint, defaults to Alibaba Bailian; usually no change needed |
-| `FALLBACK_LLM_API_KEY` | ❌ | Key of the backup chat service (model fallback chain): on quota exhaustion / auth failure / persistent errors the request is retried on the backup **silently**, so tutoring continues |
-| `FALLBACK_LLM_BASE_URL` | ❌ | OpenAI-compatible endpoint of the backup service (takes effect only together with `FALLBACK_MODEL_NAME`) |
-| `FALLBACK_MODEL_NAME` | ❌ | Backup model name (use an independent key from a **different vendor** for real redundancy; empty = single-model legacy behaviour) |
-| `LLM_TIMEOUT` | ❌ | Request timeout, default 120 s |
-| `SECRET_KEY` | ✅ | JWT signing key; startup is refused if missing |
-| `CORS_ALLOW_ORIGINS` | ❌ | Comma-separated allowlist, localhost:5173 by default |
-| `DEFAULT_ADMIN_PASSWORD` | ❌ | When set, an `admin` account is created on first start |
+Run these commands from the repository root. After creating `.env`, fill in the configuration above with your editor.
 
----
+```bash
+python3 -m venv backend/venv
+backend/venv/bin/python -m pip install -r backend/requirements.txt
+npm --prefix frontend ci
+test -f .env || cp .env.example .env
+```
+
+Backend terminal:
+
+```bash
+cd backend
+venv/bin/python -m uvicorn app.main:app --reload --reload-dir app --port 8000 --workers 1
+```
+
+Frontend terminal, opened at the repository root:
+
+```bash
+npm --prefix frontend run dev
+```
+
+</details>
+
+<details>
+<summary>Docker Compose deployment</summary>
+
+Configure the model service, `DASHSCOPE_API_KEY`, and `SECRET_KEY` in the root `.env`, then run:
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+Open [localhost:8080](http://localhost:8080) locally, or the server address for a remote deployment. Set `PORT` to change the exposed port. Compose mounts graph, conversation, profile, and `backend/data` directories; prompt templates ship with the image. See the [operations guide](docs/运维部署/运维_生产上线与日常运营指南.md) for deployment, backups, and troubleshooting.
+
+</details>
+
+<a id="configuration"></a>
+
+## Configuration
+
+Template: [.env.example](.env.example) · Loader: [config.py](backend/app/core/config.py). The table distinguishes template presets from code defaults; these files define the complete set of options.
+
+| Variable | Required? | Description |
+| :--- | :--- | :--- |
+| `LLM_API_KEY` | For conversation | Chat service key; if empty, uses `DASHSCOPE_API_KEY`, with a matching endpoint and model required |
+| `LLM_BASE_URL` | Match the model | Template preset: `https://api.minimaxi.com/v1`; when this variable is unset, code defaults to the Bailian-compatible endpoint |
+| `MODEL_NAME` | Match the endpoint | Template preset: `MiniMax-M3`; when this variable is unset, code defaults to `qwen-plus` |
+| `DASHSCOPE_API_KEY` | Embeddings / Docker | Alibaba Cloud Bailian key for the fixed `text-embedding-v4` model |
+| `SECRET_KEY` | Yes | JWT signing key; the service refuses to start without it |
+| `DEFAULT_ADMIN_PASSWORD` | Optional | Password for initial `admin` creation; an empty value skips creation and does not change existing passwords |
+
+<details>
+<summary>Advanced configuration: fallback, retrieval, context budget, and deployment</summary>
+
+| Variable | Required? | Description |
+| :--- | :--- | :--- |
+| `EMBED_BASE_URL` | Optional | Defaults to `https://dashscope.aliyuncs.com/compatible-mode/v1`, independent of the chat model |
+| `FALLBACK_LLM_API_KEY` | Optional | Backup service key; uses `DASHSCOPE_API_KEY` if empty |
+| `FALLBACK_LLM_BASE_URL` / `FALLBACK_MODEL_NAME` | Optional | Configure both with an available key to enable the backup service |
+| `WEB_SEARCH_ENABLED` | Optional | Defaults to `true`; set to `false` to disable MCP web search |
+| `SEARXNG_URL` | Optional | Self-hosted SearXNG URL; uses ddgs when unset |
+| `LLM_CTX_BUDGET` | Optional | Conversation request budget; defaults to `32000` tokens |
+| `GRAPH_INJECT_MAX_CHARS` | Optional | Graph context character limit; defaults to `12000`, with `0` meaning unlimited |
+| `LLM_TIMEOUT` | Optional | Model request timeout; defaults to `120` seconds |
+| `CORS_ALLOW_ORIGINS` / `PORT` | Optional | Allowed cross-origin sources and Docker host port; the latter defaults to `8080` |
+
+</details>
+
+> [!NOTE]
+> When switching chat services, update `LLM_API_KEY`, `LLM_BASE_URL`, and `MODEL_NAME` together. Embeddings are configured separately; clearing the chat key alone does not switch the endpoint.
 
 ## Project structure
 
-```
-├── frontend/                 # Vue 3 frontend
-│   └── src/
-│       ├── views/            # Home (chat) / Knowledge (graph) / Dashboard / Quiz / Collector / Settings / Login
-│       ├── components/       # ForceGraph (skill tree) / ChatArea / NodeDetail / ActivityBar ...
-│       ├── stores/           # Pinia: authStore / chatStore
-│       ├── api/              # axios + SSE wrappers
-│       └── utils/            # feedback / errorCodes / theme
-│
-├── backend/                  # FastAPI backend
-│   └── app/
-│       ├── api/v1/           # auth/chat/conversations/knowledge/profile/rag/kb/quiz/collector
-│       ├── services/         # chat_service (streaming + background Agent Loop orchestration)
-│       └── core/
-│           ├── agent_loop.py            # Agent multi-round loop (LLM ↔ tools)
-│           ├── agent_run_store.py       # Run records (single source of truth, evidence-level JSON)
-│           ├── agent_tools.py           # Tool registry (KG_TOOLS and the dispatcher are generated)
-│           ├── knowledge_graph.py / graph_middleware.py / graph_analyzer.py
-│           ├── rag_pipeline/            # RagSource protocol + routing + multi-source fusion
-│           ├── hybrid_search/           # Vector + Whoosh BM25 + RRF / weighted fusion
-│           ├── kb/                      # Tree knowledge base + parsers + graph_generator
-│           ├── rag/  quiz/  collector/  # Graph RAG / AI quizzes / material collection
-│           ├── profile/                 # Learner profile (schema / store / render / facade)
-│           ├── llm/                     # LLM primitives: clients / embed / messages / retry / fallback / call
-│           └── event_bus.py / error_codes.py / rate_limiter.py /
-│               config.py / prompt_loader.py / token_counter.py
-│
-├── data/                     # Runtime data (never committed, isolated per user)
-│   ├── knowledge/            # Graph db + node Markdown
-│   ├── conversations/ profiles/ prompts/
-│   └── collector/
-├── Dockerfile / docker-compose.yml / nginx.conf / entrypoint.sh   # Production deployment
-├── install.ps1 / start.ps1   # Windows one-command install/start
-├── README.md / README.en.md  # Chinese master document + English mirror (switch at the top)
-├── CONTRIBUTING.md           # Contribution guide: environment, test commands, commit rules
-├── AGENTS.md                 # Architecture contract index (for AI coding agents and developers)
-└── docs/                     # Research, design documents and the README writing spec
+```text
+AI-tutor/
+├── frontend/src/             # Vue views, components, Pinia, and SSE client
+├── backend/
+│   ├── app/api/v1/           # HTTP routes
+│   ├── app/services/         # Chat orchestration
+│   ├── app/core/             # Agent, graph, profile, RAG, quizzes, and collection
+│   ├── app/mcp_servers/      # MCP servers
+│   ├── tests/                # Unit and integration tests
+│   └── scripts/              # Diagnostics, smoke tests, and evaluation
+├── data/prompts/             # Version-controlled Jinja2 prompt templates
+├── docs/                     # Design, research, and operations documentation
+├── .github/workflows/        # GitHub Actions
+├── .env.example              # Configuration template
+├── docker-compose.yml        # Container orchestration
+├── CONTRIBUTING.md           # Development, validation, and PR conventions
+└── AGENTS.md                 # Architecture contracts and developer index
 ```
 
-## Quality and testing
+Runtime graph, profile, conversation, and uploaded resource data are stored per user. Commit prompt templates while excluding `.env`, runtime data, and dependency directories.
 
-- **745 offline tests pass** (LLM / embedding network calls are mocked, so no internet is required; 752 tests are collected in total, of which 7 real-API tests are excluded by the `llm_api` marker):
-  chunking / fusion / parent expansion / routing / pipeline exception isolation / sparse index / graph slicing / prerequisite inference / mastery bucketing / the `rag_search` tool / the full upload-and-retrieve path / user isolation / collector registry / commercial-mode filtering / Agent Loop and run records.
-  Reproduce with (cwd = `backend`):
+## Quality and tests
 
-  ```bash
-  backend/venv/Scripts/python.exe -m pytest tests -q -m "not llm_api"   # → 835 passed, 7 deselected
-  ```
+Run the backend offline tests before submitting changes. All PowerShell commands below use the **repository root** as the working directory:
 
-- **Offline evaluation set** (reusing CMRC2018, 256 documents / 1000 queries): `backend/scripts/eval_rag.py`
-  mock baselines: vector R@1 = 0.470 / BM25 0.964 / hybrid(RRF) 0.766 / fuse(weighted α = 0.6) 0.818 (rerun with `--embed api` once the real text-embedding-v4 quota is restored).
-- **Engineering conventions**: YAGNI minimal implementations, prompts externalized as templates (Jinja2), a single configuration source (root `.env`), unified error codes, per-user isolation.
-- **Methodology disclosure**: mocking replaces only the LLM / embedding **network calls**, which keeps CI hermetic and repeatable; chunking, retrieval, graph and Agent Loop logic all run for real. Real-model end-to-end runs (chat / streaming / tool calling) and real-embedding evaluation are executed separately in a deployment with API keys.
+```powershell
+.\backend\venv\Scripts\python.exe -m pip install -r backend/requirements-dev.txt
+.\backend\venv\Scripts\python.exe -m pytest backend/tests -q -m "not llm_api"
+```
 
----
+| Check | Scope and interpretation |
+| :--- | :--- |
+| Backend offline tests | Graph, retrieval, user isolation, and Agent execution; use the current run output for counts and results |
+| [GitHub Actions](.github/workflows/backend-tests.yml) | CI runs the same offline suite on Python 3.13 |
+| Frontend build | Run `npm --prefix frontend run build` from the root |
+| Live model tests | Marked `llm_api`; require valid API keys and the relevant test dependencies, and run separately |
 
-## Documentation index
+Offline tests replace LLM / embedding network calls while exercising real chunking, retrieval, and orchestration logic. They do not establish teaching quality or semantic retrieval performance with real models.
 
-- [Project Wiki](https://github.com/qiyuxi24/AI-tutor/wiki) — module-by-module guide: quick start / architecture / agent kernel / knowledge graph / hybrid retrieval / API reference / FAQ (in Chinese)
-- [README writing spec](docs/工程实践/README_编写规范.md) (v3: facade template / bilingual maintenance / contribution guide, in Chinese) ｜ [Contributing](CONTRIBUTING.en.md) ｜ [中文 README](README.md)
-- [AGENTS.md development handbook](AGENTS.md) — architecture contracts, module responsibilities, and where to plug in new tools/endpoints (in Chinese)
-- [RAG decoupling & directory retrieval research](docs/RAG/RAG_去耦合与目录检索调研.md) ｜ [RAG recall & rerank research](docs/RAG/RAG_召回与重排优化调研.md) ｜ [Agentic RAG research](docs/RAG/RAG_参考资料与学习路线.md) (in Chinese)
-- [Agent Loop redesign](docs/AgentLoop/AgentLoop_重构设计讨论.md) ｜ [Agent Loop industry research](docs/AgentLoop/AgentLoop_业界调研与学习路线.md) (in Chinese)
-- [Knowledge-graph frame-of-reference contract](docs/知识图谱/知识图谱_参照系契约.md) (in Chinese)
-- [AI quiz generation research](docs/教学模块/QUIZ_出题逻辑调研.md) ｜ [Collector design discussion](docs/教育资料采集/教育资料采集模块_设计讨论.md) (in Chinese)
-- [Docker learning path & engineering deployment](docs/运维部署/Docker_学习路径与工程化部署.md) ｜ [Production launch & daily operations guide](docs/运维部署/运维_生产上线与日常运营指南.md) ｜ [Benchmark project comparison](docs/调研对标/标杆项目对标分析.md) (in Chinese)
+<details>
+<summary>Retrieval evaluation and in-chat quiz smoke test</summary>
+
+Run the CMRC2018 retrieval evaluation from the repository root, using deterministic mock embeddings to compare retrieval strategies:
+
+```powershell
+.\backend\venv\Scripts\python.exe backend/scripts/eval_rag.py --embed mock
+```
+
+Use `--embed api` for real embeddings. See [smoke_chat_quiz.py](backend/scripts/smoke_chat_quiz.py) for end-to-end in-chat quiz validation; live service calls consume API quota. Evaluation methodology and technical evidence are described in the [technical report](docs/比赛/国创/国创技术报告.md).
+
+</details>
+
+<a id="documentation"></a>
+
+## Documentation and support
+
+| What you need | Read next |
+| :--- | :--- |
+| Development setup, commit conventions, and contribution workflow | [Contribution guide](CONTRIBUTING.md) |
+| Module responsibilities, tool integration, and architecture contracts | [Developer handbook](AGENTS.md) |
+| API parameters and responses | [FastAPI /docs](http://localhost:8000/docs) after starting the backend |
+| Agent design | [Agent Loop design](docs/AgentLoop/AgentLoop_重构设计讨论.md) |
+| Knowledge base and quizzes | [RAG learning path](docs/RAG/RAG_参考资料与学习路线.md) · [Quiz design](docs/教学模块/QUIZ_出题逻辑调研.md) |
+| Web tools | [MCP web search design](docs/RAG/MCP_网页搜索工具_调研与实施方案.md) |
+| Deployment and operations | [Docker guide](docs/运维部署/Docker_学习路径与工程化部署.md) · [Operations guide](docs/运维部署/运维_生产上线与日常运营指南.md) |
+| Git collaboration and bilingual documentation | [Git workflow](docs/工程实践/Git_多人协作_工作流调研与学习路径.md) · [README conventions](docs/工程实践/README_编写规范.md) |
+| Module-by-module guide | [Project Wiki](https://github.com/qiyuxi24/AI-tutor/wiki) (in Chinese) |
+
+For help, search existing [Issues](https://github.com/qiyuxi24/AI-tutor/issues), then report your OS and runtime versions, reproduction steps, expected results, and logs with secrets removed. The project is maintained by [qiyuxi24](https://github.com/qiyuxi24) and [community contributors](https://github.com/qiyuxi24/AI-tutor/graphs/contributors); see [Pull requests](https://github.com/qiyuxi24/AI-tutor/pulls) for development discussions.
 
 ## Contributing
 
-Issues and pull requests are welcome: bug reports, documentation fixes, bilingual sync, new subject graph data, retrieval evaluation reruns, and more.
-Before you start, read [CONTRIBUTING.en.md](CONTRIBUTING.en.md) (environment setup, test commands, commit rules) — the Chinese contributor guide is [here](CONTRIBUTING.md); before submitting, make sure the `-m "not llm_api"` test suite passes and follow the project's existing layering and YAGNI minimal-implementation conventions. If you change the architecture, commands or quantitative figures, **update both the Chinese and English READMEs**.
+Bug reports, documentation fixes, tests, and feature improvements are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first and follow **Fork → local branch → validate and commit → Push → PR**. Update both README languages whenever structure, commands, or facts change.
 
 ## License
 
-[MIT](LICENSE)
+This project is licensed under the [MIT License](LICENSE).
+
+<p align="right"><a href="#tutoragent">Back to top ↑</a></p>

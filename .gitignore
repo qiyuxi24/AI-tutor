@@ -78,6 +78,15 @@ backend/eval_data/prof_writer/
 .trae/
 # 本机 AI/编辑器配置（settings.json + 备份，非项目产物）
 .arts/
+# 其余本机 AI 工具目录与会话记忆（不入库）
+.codex/
+.claude/
+.cursor/
+.aider*
+.continue/
+.roo/
+.cline/
+.serena/
 
 .playwright-cli/
 # Playwright 页面快照（根目录临时文件）
