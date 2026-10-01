@@ -120,15 +120,61 @@ def test_grade_answer_mastery_permission_error_is_silent():
 
 
 def test_grade_answer_without_pending_question(tmp_path):
-    """没有待作答题目 → 友好文案（并提示先出题）。"""
+    """没有待作答题目 → 友好文案，且**必须劝住模型"别再出一道"**。
+
+    2026-09-30 真机：学生重复提交同一题 → 模型调 grade_answer → 旧文案"如果还没出过题，
+    先调用 quiz_generate 出一道"把模型推向再出题 → "一直出题"的死循环（日志铁证
+    01:21:25 grade_answer 空 → 01:21:27 quiz_generate）。触发类文案必须写清"不要做什么"。
+    """
     out = _run(chat_grade.grade_pending_answer(_FakeKg(), "A", store=_store(tmp_path)))
     assert "没有等待作答的题目" in out
+    assert "⛔" in out and "不要" in out
+    assert "先调用 quiz_generate 出一道" not in out
 
 
 def test_grade_answer_requires_answer_text():
     """空作答不发判分。"""
     out = _run(grade_answer.handler({"user_answer": "  "}, _FakeKg()))
     assert "缺少 user_answer" in out
+
+
+# ══════════════════════════════════════════════════════════════════
+#  给模型看的文案：结论前置 + 禁止改写（2026-09-30 真机回归）
+# ══════════════════════════════════════════════════════════════════
+
+
+def _r(**kw) -> dict:
+    base = {"ok": True, "correct": False, "score": 0, "max_score": 10,
+            "comment": "回答错误", "question": "有向完全图的弧数是无向完全图边数的几倍？",
+            "user_answer": "C", "analysis": "应为 2 倍", "section_note": "",
+            "mastery_note": "", "knowledge_point": "n1", "section_id": "s02",
+            "next_action": ""}
+    base.update(kw)
+    return base
+
+
+def test_format_grade_puts_verdict_first_and_forbids_rewrite():
+    """⛔ 判分结论必须单独占第一行且写明"不得改写"。
+
+    真机 2026-09-30：系统判 0/10 答错，模型却回"**Bingo，答对了！**这一节就这么过了"，
+    随后按"已通过"跳去讲下一节 —— 学生干等下一节的题。旧文案把结论埋在长句里
+    （"判分结果：答错（0/10 分）。<评语>"），思考型模型容易读串。
+    """
+    out = chat_grade._format_grade_for_model(_r())
+    first = out.splitlines()[0]
+    assert first.startswith("⛔") and "答错" in first
+    assert "不得改写" in first
+    # 正确时同样前置
+    right = chat_grade._format_grade_for_model(_r(correct=True, score=10))
+    assert right.splitlines()[0].startswith("⛔") and "答对" in right.splitlines()[0]
+
+
+def test_format_grade_downgrade_forbids_announcing_passed():
+    """连续两次答错（action=downgrade）→ 额外禁止宣布"这一节过了"。"""
+    out = chat_grade._format_grade_for_model(
+        _r(next_action="downgrade", section_note="这一节连续两次没答对：已把它改成「不懂」。"))
+    assert "降级" in out
+    assert "这一节过了" in out and "不要" in out
 
 
 def test_grade_module_does_not_import_quiz_generation():

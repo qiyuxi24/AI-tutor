@@ -75,6 +75,52 @@ def section_filename(section_id: str, title: str) -> str:
     safe = _SECTION_FILENAME_UNSAFE_RE.sub("", title or "").strip()
     return f"{section_id}_{safe}.md" if safe else f"{section_id}.md"
 
+
+# ── 小节「学习状态」（`manifest.sections[].learn`）──
+# 与上面的 SECTION_STATUS_* **严格分开**：那是"内容生成了没有"，这是"用户学到哪了"。
+# 重跑生成会改 status，但绝不能碰用户的学习痕迹（所以另存一个 learn 子对象）。
+#
+#   mark   = 学习标记：unknown 未标记 / understood 已懂 / confused 不懂
+#            · understood **不等于**通过 —— 要出题验证答对才算 passed（用户口径）
+#            · confused 是「去学习」的起始位置（按顺序从第一节能听进去的开始讲）
+#            · 谁标的看 mark_by：学生自己在界面点的（user）/ AI 讲完后自动补的（ai）
+#   mark_by= 标记来源："" 未知（老数据）/ "user" 学生自评 / "ai" AI 讲完自动记
+#            · AI 只写 understood（"讲完了"）与 confused（"两次答错"），不替学生做别的判断
+#   read   = 用户手动勾选"我已读完"（判定方式由用户定：手动勾选，不做自动推断）
+#   passed = 出题验证通过（判分自动写；全部小节 passed → 节点掌握度置 100）
+#   attempts = 本节出题作答次数 —— "答错一次先讲解再出一题，第二次仍错才降级"靠它计数
+LEARN_MARK_UNKNOWN = "unknown"
+LEARN_MARK_UNDERSTOOD = "understood"
+LEARN_MARK_CONFUSED = "confused"
+LEARN_MARKS = (LEARN_MARK_UNKNOWN, LEARN_MARK_UNDERSTOOD, LEARN_MARK_CONFUSED)
+
+# mark 的**来源**（决定前端提示语："你标记了已懂" vs "AI 讲完后自动记的"）
+LEARN_MARK_BY_USER = "user"    # 学生在节点详情里自己点的
+LEARN_MARK_BY_AI = "ai"        # AI 讲完一节后自动记的（工具 mark_section_understood）
+LEARN_MARK_BYS = ("", LEARN_MARK_BY_USER, LEARN_MARK_BY_AI)
+
+# 「全部小节通过」时给节点的掌握度（用户拍的口径：全通过 = 真掌握 = 100）
+MASTERY_ALL_SECTIONS_PASSED = 100
+
+
+def new_learn_state() -> dict:
+    """小节学习状态的默认值。"""
+    return {"mark": LEARN_MARK_UNKNOWN, "read": False, "passed": False,
+            "attempts": 0, "mark_by": "", "updated_at": ""}
+
+
+def read_learn_state(section: dict | None) -> dict:
+    """从 manifest 小节条目里取学习状态；缺字段用默认值补齐。
+
+    **老 manifest 没有 `learn` 键**（本机制上线前生成的节点）→ 全部按默认值读，
+    不需要任何数据迁移：第一次写入时自然落盘。
+    """
+    learn = new_learn_state()
+    for k, v in ((section or {}).get("learn") or {}).items():
+        if k in learn:
+            learn[k] = v
+    return learn
+
 # 同名并轨（去重 L1 档）的判定键 = 归一化后的 name。
 # 归一化只做字符串层处理，不做语义判断（语义去重在 kb/graph_generator.py 的
 # 嵌入粗筛 + LLM 复核）。实测漏合并的写法有两类：字面完全相同（同名重复）与
@@ -1225,6 +1271,8 @@ class KnowledgeGraph:
                 # 复用 L0 的规范化：去未知键（如材料自带的 text）、补 extracted_at、
                 # 丢非法条目 —— 调用方直接甩 materials 进来也不会把 manifest 撑大。
                 "sources": [e for e in (normalize_source_entry(s) for s in (sources or [])) if e],
+                # 学习状态与生成状态分开存（见 LEARN_MARK_* 注释）
+                "learn": new_learn_state(),
                 "created_at": now,
                 "updated_at": now,
             })
@@ -1268,6 +1316,75 @@ class KnowledgeGraph:
             entry["updated_at"] = datetime.now().isoformat()
             self._write_manifest(node_id, manifest)
         self.invalidate_content_cache(node_id)
+
+    def get_section_learn(self, node_id: str, section_id: str) -> dict:
+        """读某小节的学习状态（老 manifest 无该字段 → 默认值，**不写盘**）。
+
+        异常: ValueError: 无 manifest / 该 section_id 不存在
+        """
+        entry = self._find_section(self.read_manifest(node_id), section_id)
+        if entry is None:
+            raise ValueError(f"小节不存在：{node_id}/{section_id}")
+        return read_learn_state(entry)
+
+    def set_section_learn(self, node_id: str, section_id: str, *,
+                          mark: str | None = None, read: bool | None = None,
+                          passed: bool | None = None, mark_by: str | None = None,
+                          bump_attempts: bool = False) -> dict:
+        """局部更新小节学习状态：`None` 的字段不动；`bump_attempts` 给 attempts +1。
+
+        `mark_by` 只在**同时给了 mark** 时才是声明"谁标的"（`user` 学生自评 / `ai` 讲完自动记；
+        标记退回 `unknown` 时来源一并清空）—— 调用方给 mark 就请一并给 mark_by，
+        否则前端只能显示中性的"已懂"，看不出是学生说的还是 AI 记的。
+
+        返回**更新后的完整状态**（调用方直接拿去刷新前端，不用再读一次）。
+
+        异常:
+            ValueError: 无 manifest / 该 section_id 不存在 / mark 或 mark_by 非法
+        """
+        if mark is not None and mark not in LEARN_MARKS:
+            raise ValueError(f"非法的小节学习标记：{mark}")
+        if mark_by is not None and mark_by not in LEARN_MARK_BYS:
+            raise ValueError(f"非法的小节标记来源：{mark_by}")
+        with self._manifest_lock:
+            manifest = self.read_manifest(node_id)
+            entry = self._find_section(manifest, section_id)
+            if entry is None:
+                raise ValueError(f"小节不存在：{node_id}/{section_id}")
+            learn = read_learn_state(entry)
+            if mark is not None:
+                learn["mark"] = mark
+                if mark_by is not None:
+                    learn["mark_by"] = mark_by
+                elif mark == LEARN_MARK_UNKNOWN:
+                    learn["mark_by"] = ""      # 取消标记 → 来源也清掉，别留旧值
+            if read is not None:
+                learn["read"] = bool(read)
+            if passed is not None:
+                learn["passed"] = bool(passed)
+            if bump_attempts:
+                learn["attempts"] = int(learn.get("attempts") or 0) + 1
+            learn["updated_at"] = datetime.now().isoformat()
+            entry["learn"] = learn
+            self._write_manifest(node_id, manifest)
+        return learn
+
+    def section_learn_progress(self, node_id: str) -> dict:
+        """该节点的小节学习进度汇总（进度条 + 「全部通过 → 节点掌握」判定用）。
+
+        返回 `{total, passed, read, mark_unknown, mark_understood, mark_confused, all_passed}`。
+        `all_passed` 只在**有至少一节**时为 True —— 没有小节的节点根本不适用这套机制。
+        """
+        states = [read_learn_state(s) for s in self.list_sections(node_id)]
+        passed = sum(1 for st in states if st["passed"])
+        return {
+            "total": len(states),
+            "passed": passed,
+            "read": sum(1 for st in states if st["read"]),
+            **{f"mark_{m}": sum(1 for st in states if st["mark"] == m)
+               for m in LEARN_MARKS},
+            "all_passed": bool(states) and passed == len(states),
+        }
 
     def delete_section(self, node_id: str, section_id: str) -> bool:
         """删小节：删 manifest 条目 + 删对应 MD 文件。返回是否真删掉。

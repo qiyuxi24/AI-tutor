@@ -128,6 +128,42 @@
 - 证据：`tests/test_node_write_paths.py`（14 例，含建图路径并轨/幂等/学科隔离/去重状态）、
   `tests/test_graph_quality_script.py`（4 例，判重边界 + 合并动作）；全量 `770 passed, 7 deselected`。
 
+### 4.4 小节级学习状态 + 「去学习」教学闭环（2026-09-29 ~ 09-30）
+- 由来：用户要"细到每个 markdown 小节"的进度 —— 自己标「已懂 / 不懂 / 已读完」，每个知识点加
+  「去学习」进对话，AI **按小节**教：已懂的先出题验证，不懂/没看过的按顺序讲，全部小节通过
+  → 节点掌握度置 100。
+- 存储：`manifest.sections[].learn = {mark, read, passed, attempts, mark_by, updated_at}`，与生成状态
+  `status`（pending/filled/failed）**分开放** —— 重跑生成不碰学习痕迹；老 manifest 无该键 →
+  读默认值、不写盘（零迁移）。API `PUT /knowledge/node/{id}/section/{sid}/learn`。
+- 判分闭环：`questions.section_id`（就地补列）→ 题带小节就走**小节口径**（答对 = 该节 passed；
+  全通过 → 节点 100；答错第一次重出同节题、第二次降级为「不懂」），不带则维持旧的节点 +20。
+- 教学上下文：`chat_service._build_learn_block` 把**小节清单 + 状态 + 本轮起点 + 该节正文 +
+  教学规则**注入 system prompt（无小节的老节点 → 空串，提示词零影响）。
+- **2026-09-30 增补（本次）**：
+  1. **开场轮与后续轮是两套提示词**（`_build_learn_block(..., opener=)`，由"会话里还没有 assistant
+     消息"判定）：开场轮**只报菜单**（分类点名 + 走法），不注入起点正文、不给教学/出题规则，
+     报完停下等学生回应；后续轮才给 6 条规则（规则 0 改为"别再重复报清单"）。
+     —— 真机日志证明"把报菜单叠在规则 1 之上"**两次都压不住**（模型第一轮直接调 quiz_generate，
+     最终回复只有 28 字符），必须把竞争的那条规则从开场轮拿走。
+  2. **开场轮"禁工具"是协议层硬保证**：`run_agent_loop(no_tools=True)` → `tool_choice="none"`
+     （保留 tools 块以维持缓存前缀；网关 400 时降级为不带 tools）+ **丢弃**网关不守规仍吐出的
+     `tool_calls`。判定收口在 `chat_service.learn_mode_kind()`，提示词侧与禁工具侧共用。
+     —— **提示词里写"禁止调用任何工具"实测无效**（模型开场轮照样 `quiz_generate`，回复 16 字符）。
+  3. **题卡归属校验**：学习对话打 `nodeId` 标；`quiz_ready`（后台出题 ~40s）按 `node_id`
+     投回**属于它的那段对话**，找不到就不塞 —— 修掉"点最小代价生成树却收到图的存储结构的题卡"。
+  4. **讲完一节自动记「已懂」**：新增工具 `mark_section_understood`（tier=free）——模型讲完一节
+     调它把该节记为 `mark_by="ai"`；**硬触发兜底**：按小节出题时（`quiz_generate._mark_section_taught`）
+     也顺带记「已懂」（真机实测 `mark_section_understood` 4 次采样一次没被调）。
+     「不懂」仍只能由学生自己标、或连续两次答错时系统降级。
+     `mark_by` 同时落地在用户端点（`"user"`）与降级路径（`"ai"`），前端据此区分提示语
+     （AI 记的加虚线描边），**已懂 ≠ 通过**的口径不变。
+  5. 可观测性：`_build_system_prompt` 打一行 INFO（`学习模式/开场轮…知识点=xxx`），
+     分支走对没走对看一眼日志即可。
+- 证据：`tests/test_section_learn.py`（存储层 + API）、`tests/test_section_grade_flow.py`（判分口径）、
+  `tests/test_learn_mode.py`（学习块：开场轮/后续轮两套）、`tests/test_mark_section_tool.py`（新工具）。
+  真机冒烟脚本 `backend/scripts/smoke_learn_mode.py`（提示词类改动只能真跑验证；
+  **注意它会污染所跑账号的题库与事件流**，见开发日志 2026-09-30 补的"踩坑"）。
+
 ## 5. RAG / 知识库
 - 知识库目录树（递归多级 + 上传/删除/检索/上下文选择）
 - 解析器注册表去耦合（text 30+ / pdf / docx / pptx / image-OCR / legacy / 电子书 epub+fb2，可选依赖降级）

@@ -107,11 +107,13 @@ const rightReserve = computed(() => {
 })
 
 /**
- * 任务栏数据只在面板打开时拉、且打开着的时候切学科/板块要跟着重算
+ * 任务栏数据只在面板打开时拉、且打开着的时候切学科要跟着重算
  * （否则表里是上一个学科的知识点，和画布对不上）。
+ * 注：曾多监听一个 `store.currentBoard`，但 store 里没这个状态（前端无板块选择器），
+ * 恒为 undefined 且会让 fetchPathBoard 内部报错 —— 2026-09-29 一并清掉。
  */
 watch(
-  () => [showPathBoard.value, store.currentSubject, store.currentBoard],
+  () => [showPathBoard.value, store.currentSubject],
   ([open]) => { if (open) store.fetchPathBoard() },
   { immediate: true }
 )
@@ -124,6 +126,20 @@ function handlePathBoardFocus(nodeId) {
 /** 任务栏「修改掌握度」：复用节点详情弹窗（掌握度滑块在那儿，不做第二套入口） */
 async function handlePathBoardEdit(nodeId) {
   await handleNodeDblClick(nodeId)
+}
+
+/**
+ * 「去学习」（节点详情 / 任务栏都走这里）：切到对话视图，以该知识点为教学内容开一轮学习。
+ *
+ * 顺序要求：**先切视图再发消息** —— 消息会立刻渲染在当前对话里，
+ * 若还在图谱页，学生只会看到"消息莫名跑到别处去了"。
+ */
+function handleGoLearn(nodeId) {
+  if (!nodeId) return
+  const name = store.knowledgeNodes.find((n) => n.id === nodeId)?.name || ''
+  viewMode.value = 'chat'
+  sidebarCollapsed.value = true
+  store.startLearning(nodeId, name)
 }
 
 // ─── 节点详情弹窗 ───
@@ -452,9 +468,6 @@ const slideTransition = {
 
 <template>
   <div class="app-container">
-    <!-- 站内悬浮球 + 只放对话的小窗：只在非对话页显示（对话页已有完整对话区） -->
-    <FloatingBall :visible="ballPrefs.enabled && viewMode !== 'chat'" />
-
     <!-- ═══ 活动栏 + 内容区域（无顶部栏，全沉浸） ═══ -->
     <ActivityBar
       :active-view="viewMode"
@@ -574,6 +587,7 @@ const slideTransition = {
               @close="showPathBoard = false"
               @focus-node="handlePathBoardFocus"
               @edit-node="handlePathBoardEdit"
+              @learn-node="handleGoLearn"
             />
           </Transition>
         </div>
@@ -617,6 +631,7 @@ const slideTransition = {
       @save-content="handleNodeDetailSave"
       @navigate-to-node="handleNodeDetailNavigate"
       @open-quiz="handleOpenQuiz"
+      @go-learn="handleGoLearn"
     />
 
     <!-- 用户画像面板 -->

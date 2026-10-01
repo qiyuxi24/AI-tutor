@@ -29,13 +29,16 @@ _SECTION_PLAN = ('{"sections":[{"title":"定义","kind":"definition","brief":"�
                  '"summary":""}')
 
 
-def _fake_section_llm(monkeypatch, body: str):
-    """替换 `section_generator.call_llm`（规划固定一节，成文返回 body）；返回收到的 user prompt 列表。"""
+def _fake_section_llm(monkeypatch, body: str, plan: str = _SECTION_PLAN):
+    """替换 `section_generator.call_llm`（规划返回 plan，成文返回 body）；返回收到的 user prompt。
+
+    `plan` 可传不同的标题，用于验证「新侧面照常追加 / 重复侧面被拦下」。
+    """
     prompts: list[str] = []
 
     async def fake_call_llm(system, messages, **kw):
         prompts.append(messages[0]["content"])
-        return _SECTION_PLAN if kw.get("kind") == "kb_section_plan" else body
+        return plan if kw.get("kind") == "kb_section_plan" else body
 
     monkeypatch.setattr(sg, "call_llm", fake_call_llm)
     return prompts
@@ -229,15 +232,18 @@ def test_new_concept_is_filled_as_sections_not_single_md(monkeypatch, kg):
     assert kg.get_node("stack")["content_status"] == "filled", "正文在小节里，节点本身要转已填充"
 
 
-def test_hit_on_sectioned_node_appends_new_section(monkeypatch, kg):
-    """命中**已小节化**节点 → 追加一节（标题带资料名），既有小节与正文**零改动**"""
+def test_hit_on_sectioned_node_appends_genuinely_new_section(monkeypatch, kg):
+    """命中**已小节化**节点 + 模型规划出**新侧面** → 追加一节（标题带资料名），既有小节零改动"""
     gen = gg.GraphGenerator(user_id=1)
     _skeleton(kg, "stack", "栈")
     _fake_section_llm(monkeypatch, "原有讲解。" * 100)
     asyncio.run(gen._fill_nodes(kg, "数据结构", "第2章", "栈是后进先出。", ["stack"]))
     before = [s["title"] for s in kg.list_sections("stack")]
 
-    _fake_section_llm(monkeypatch, "补充讲解。" * 100)
+    # 第二份资料带来的是**新侧面**（不是又把「定义」讲一遍）
+    _fake_section_llm(
+        monkeypatch, "补充讲解。" * 100,
+        plan='{"sections":[{"title":"栈的应用","kind":"method","brief":"用在哪"}],"summary":""}')
     stats = asyncio.run(gen._fill_concept(
         kg, "数据结构", "第9章", "栈的另一种讲法。",
         {"id": "stack", "name": "栈", "summary": "LIFO"},
@@ -245,8 +251,33 @@ def test_hit_on_sectioned_node_appends_new_section(monkeypatch, kg):
 
     titles = [s["title"] for s in kg.list_sections("stack")]
     assert titles[:len(before)] == before, "既有小节不动"
-    assert titles[-1] == "定义（《新教材.md》补充）", "追加的小节标题带来源资料名"
+    assert titles[-1] == "栈的应用（《新教材.md》补充）", "追加的小节标题带来源资料名"
     assert "补充讲解" in kg.read_section("stack", kg.list_sections("stack")[-1]["id"])
+    assert stats == {"filled": ["栈"], "rejected_shallow": [], "failed_fills": 0}
+
+
+def test_hit_on_sectioned_node_does_not_duplicate_same_section(monkeypatch, kg):
+    """命中已小节化节点 + 模型又规划出**同一侧面** → 不再重复追加（2026-09-29 改）。
+
+    原行为：同一侧面换个标题后缀就再追加一节 —— 实测某节点 22 节里有 13 节是这种重复
+    （「二叉树的递归定义（《…》补充）」×3）。现在写入前会被拦下。
+    """
+    gen = gg.GraphGenerator(user_id=1)
+    _skeleton(kg, "stack", "栈")
+    _fake_section_llm(monkeypatch, "原有讲解。" * 100)
+    asyncio.run(gen._fill_nodes(kg, "数据结构", "第2章", "栈是后进先出。", ["stack"]))
+    before = [s["title"] for s in kg.list_sections("stack")]
+    assert before == ["定义"]
+
+    # 第二份资料：假 LLM 仍给出「定义」（与已有小节同一侧面）
+    _fake_section_llm(monkeypatch, "补充讲解。" * 100)
+    stats = asyncio.run(gen._fill_concept(
+        kg, "数据结构", "第9章", "栈的另一种讲法。",
+        {"id": "stack", "name": "栈", "summary": "LIFO"},
+        mode="append", doc_name="新教材.md"))
+
+    assert [s["title"] for s in kg.list_sections("stack")] == before, "重复侧面不得追加"
+    # skipped 被当成"内容已在" —— 不能因为"这次没新增"就把它判成缺内容
     assert stats == {"filled": ["栈"], "rejected_shallow": [], "failed_fills": 0}
 
 

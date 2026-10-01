@@ -92,6 +92,24 @@ def _node_materials(kg: KnowledgeGraph, node: dict, node_id: str,
     return ["\n".join(parts)]
 
 
+def _section_title(kg: KnowledgeGraph, node_id: str, section_id: str) -> str:
+    """取小节标题（供前端题卡显示\"这是哪一节的题\"）。
+
+    为什么需要：一个知识点有多节、每节都可能出题，题卡标题只写节点名的话，
+    学生看到连续几张卡分不清是哪一节的（2026-09-30 用户反馈\"怎么一直在出题\"时的困惑点之一）。
+    读不到（老节点 / 无 manifest / 能力缺失）→ ""，前端会退化成只显示节点名。
+    """
+    if not section_id:
+        return ""
+    try:
+        for s in kg.list_sections(node_id):
+            if s.get("id") == section_id:
+                return str(s.get("title") or "")
+    except Exception as e:      # noqa: BLE001 —— 纯展示信息，缺了不影响出题
+        logger.debug(f"读取小节标题失败（{node_id}/{section_id}，忽略）：{e}")
+    return ""
+
+
 def _source_docs(entries: list[dict]) -> list[dict]:
     """来源条目 → 题目来源**文件**清单（按 doc_id 去重，只留展示需要的两个键）。"""
     out: list[dict] = []
@@ -229,7 +247,8 @@ async def generate_and_publish(user_id: int, *, node_id: str,
         source_docs = _source_docs_for(kg, node_id, section_id)
         ids = store.save_questions(questions, subject=subject,
                                    difficulty=difficulty, source="chat",
-                                   source_docs=source_docs)
+                                   source_docs=source_docs,
+                                   section_id=section_id)
         for qid in ids:
             _mount_quiz_ref(kg, node_id, qid, section_id)
 
@@ -237,6 +256,7 @@ async def generate_and_publish(user_id: int, *, node_id: str,
             "ok": True,
             "node_id": node_id,
             "section_id": section_id,
+            "section_title": _section_title(kg, node_id, section_id),
             "subject": subject,
             "questions": [_public_question(i, q) for i, q in zip(ids, questions)],
         }, user_id=user_id)

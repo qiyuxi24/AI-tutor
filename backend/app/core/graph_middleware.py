@@ -298,6 +298,9 @@ def _layers(node_ids, succs) -> dict[str, int]:
 
     取最长而不是最短：`a→c` 与 `a→b→c` 同时存在时，c 必须排在 b 之后；
     按最短层号会把 c 提到 b 那一层，看板就摆错了。
+
+    只算 prerequisite。非前置关系（related/confusion/extension）的节点由
+    `_lift_related_only_levels` 事后再安置（见那里的说明）。
     """
     dag = _break_cycles(node_ids, succs)
     indeg = {nid: 0 for nid in node_ids}
@@ -316,6 +319,77 @@ def _layers(node_ids, succs) -> dict[str, int]:
             if indeg[nxt] == 0:
                 queue.append(nxt)
     return level
+
+
+# 非前置关系的中文标签（看板上"与哪些节点相关"要人话，而不是 related/confusion 这些标识）
+RELATION_LABELS = {
+    "related": "相关概念",
+    "confusion": "易混淆",
+    "extension": "扩展",
+}
+
+
+def _related_map(edges: list[dict], node_ids: set[str]) -> dict[str, list[tuple[str, str]]]:
+    """非前置关系的**无向**邻接：{节点 id: [(邻居 id, relation), ...]}。
+
+    · related / confusion / extension 这类关系**不构成学习顺序**，所以进不了 `_layers`；
+      但它们表达了"这两个概念是放在一起看的"，用于把节点摆到相关节点的同层。
+    · 无向：`A related B` 与 `B related A` 在看板上语义相同。
+    · 自环、指向切片外的边一律丢掉（与 `_prereq_pairs` 同一口径）。
+    """
+    out: dict[str, list[tuple[str, str]]] = {}
+    for e in edges:
+        relation = e.get("relation") or ""
+        if relation == "prerequisite":
+            continue
+        frm, to = e.get("from_node"), e.get("to_node")
+        if frm not in node_ids or to not in node_ids or frm == to:
+            continue
+        out.setdefault(frm, []).append((to, relation))
+        out.setdefault(to, []).append((frm, relation))
+    return out
+
+
+def _lift_related_only_levels(node_ids, level: dict[str, int],
+                              related_map: dict[str, list[tuple[str, str]]],
+                              prereq_touched: set[str]) -> None:
+    """
+    把「只有相关概念」的节点并入相关节点的同层（就地修改 `level`）。
+
+    痛点：只连 related / confusion 边（没有任何 prerequisite）的节点，在 `_layers` 里
+    与真起点一样是 0 层 —— 看板上会出现两个并排的"第 1 层"，把"概念关系"读成了
+    "学习起点"，学生以为该先学它。
+
+    规则：层号 = 与之相关的节点的**最大**层号。
+      · 取最大而不是最小：宁可晚出现，不把节点提到它相关节点的前面（用户 2026-09-29
+        确认过这个方向：`最小代价生成树` 与第 1 层的 `图的应用概览`、第 2 层的
+        `最短路径问题` 相关 → 落在第 2 层，与后者并排）。
+      · 只碰「没有任何 prerequisite 边」的节点（`prereq_touched` 之外）。
+        有前置的节点层号由前置链决定，相关关系不得干预 —— 否则学习顺序会被打乱。
+      · **所有**相关邻居都要参与取最大，包括本身就是 related-only 的邻居 ——
+        这一点 2026-09-29 修过一次：旧实现只把"有前置依据"的邻居当锚点，
+        导致「递归转循环（直线型问题）」明明与第 3 层的 related-only 节点相关，
+        却一直停在第 1 层（实测反例，见 `test_related_only_node_uses_lifted_neighbour_level`）。
+        相关节点能站到那一层，就说明"该层有它的依据"，跟着它同层是符合"概念相邻"语义的；
+        一串相关概念沿链对齐到最深那一层，也正是"把它们摆在一起"想要的效果。
+      · 这些节点互为相关时彼此依赖，用不动点迭代（最多 N 轮，必然收敛）。
+        每次取 `max(邻居层号, 自己的层号)` → 只增不减 → 单调有界，不会震荡。
+      · 完全孤立的节点（连相关关系也没有）保持原地不动 —— 没有依据可推。
+    """
+    movable = [nid for nid in node_ids
+               if nid not in prereq_touched and related_map.get(nid)]
+    if not movable:
+        return
+    for _ in range(len(movable) + 1):
+        changed = False
+        for nid in movable:
+            neighbours = [n for n, _ in related_map[nid]]
+            target = max(level[n] for n in neighbours + [nid])
+            if target != level[nid]:
+                level[nid] = target
+                changed = True
+        if not changed:
+            break
 
 
 def _trace_back(node_id: str, preds: dict, nodes_by_id: dict) -> Optional[dict]:
@@ -378,6 +452,13 @@ def path_board(kg, subject: Optional[str] = None,
     看板要**全部**知识点都列出来，每个带自己的前置 / 解锁 / 追溯结果 ——
     由此才能表达"哪些是起点（并排在最上面）、哪些还没解锁、卡住的根源在哪"。
 
+    分层口径（2026-09-29 补充）：
+      · 有 prerequisite 的节点 → 层号 = 最长前置链（`_layers`）；
+      · **只有非前置关系**（related / confusion / extension）的节点 → 并入相关节点的**同层**
+        （`_lift_related_only_levels`），并在 `related` 字段里注明与谁相关、是哪种关系；
+        以前它们与真起点一样是 0 层，看板上看起来像"第三个起点"，会被误读成学习顺序；
+      · 完全孤立的节点（什么边都没有）→ 仍是第 1 层：没有依据可推，只能摆在最前。
+
     参数与 `/knowledge/graph` 同一套切片口径（subject / board）。
 
     返回:
@@ -389,8 +470,7 @@ def path_board(kg, subject: Optional[str] = None,
                 unlocks:       [{id, name, mastery, status}],
                 blocked_by:    [node_id, ...],             # 未掌握的直接前置 → 卡片"待解锁"
                 trace: {focus_id, focus_ids, chain, unmastered_count} | None,
-                hint: str,                                 # 一句人话建议
-            }, ...],                                       # 按 (层号, id) 排 → 卡片位置稳定
+                hint: str,                                 # 一句人话建议                "related": [{id, name, mastery, status, relation, relation_label}, ...],            }, ...],                                       # 按 (层号, id) 排 → 卡片位置稳定
             "recommended": [{id, name, mastery, level}, ...],  # 已解锁且未掌握，按层号排
             "stats": {total, mastered, learning, weak, unstarted, locked},
             "subject" / "board": str | None,
@@ -401,12 +481,25 @@ def path_board(kg, subject: Optional[str] = None,
     pairs = _prereq_pairs(sub["edges"], set(nodes_by_id))
     preds, succs = _adjacency(nodes_by_id, pairs)
     level = _layers(set(nodes_by_id), succs)
+    # 「只有相关概念」的节点（无任何 prerequisite，只连 related/confusion/extension）
+    # 并入相关节点的同层 —— 否则它们会与真起点并排在第 1 层，把"概念关系"读成"学习起点"。
+    related_map = _related_map(sub["edges"], set(nodes_by_id))
+    prereq_touched = {nid for pair in pairs for nid in pair}
+    _lift_related_only_levels(list(nodes_by_id), level, related_map, prereq_touched)
 
     def brief(nid: str) -> dict:
         node = nodes_by_id[nid]
         mastery = int(node.get("mastery") or 0)
         return {"id": nid, "name": node.get("name") or nid,
                 "mastery": mastery, "status": mastery_bucket(mastery)}
+
+    def related_of(nid: str) -> list[dict]:
+        """与 nid 有非前置关系的节点（含关系名）：看板要"注明与哪些节点相关"。"""
+        out = [dict(brief(other), relation=rel,
+                    relation_label=RELATION_LABELS.get(rel, rel))
+               for other, rel in related_map.get(nid, [])]
+        out.sort(key=lambda r: (level[r["id"]], r["id"]))
+        return out
 
     items = []
     for nid in nodes_by_id:
@@ -415,6 +508,7 @@ def path_board(kg, subject: Optional[str] = None,
         blocked_by = [p for p in preds[nid]
                       if int(nodes_by_id[p].get("mastery") or 0) < MASTERY_MASTERED]
         trace = None if mastery >= MASTERY_MASTERED else _trace_back(nid, preds, nodes_by_id)
+        related = related_of(nid)
 
         if mastery >= MASTERY_MASTERED:
             hint = ""
@@ -422,6 +516,11 @@ def path_board(kg, subject: Optional[str] = None,
             hint = "先学完：" + "、".join(nodes_by_id[p].get("name") or p for p in blocked_by)
         elif trace and trace["focus_id"] != nid:
             hint = f"最根源的缺口：「{brief(trace['focus_id'])['name']}」"
+        elif nid not in prereq_touched and related:
+            # 无前置也不是别人的前置 → 它不是"该从这里起步"，只是与这几个概念相关
+            # （层号已并入相关节点，这里把"和谁相关"写成人话）
+            hint = "相关：" + "、".join(
+                f"{r['name']}（{r['relation_label']}）" for r in related[:3])
         else:
             hint = "可以直接开始"
 
@@ -437,6 +536,9 @@ def path_board(kg, subject: Optional[str] = None,
             "blocked_by": blocked_by,
             "trace": trace,
             "hint": hint,
+            # 非前置关系（related / confusion / extension）：无前置节点就是靠它被摆到
+            # 相关节点的同层；前端据此注明"与哪些节点相关"
+            "related": related,
         })
 
     # 排序：层号优先，其次 id —— 卡片位置必须稳定（学会一个就乱跳会让人找不到东西）

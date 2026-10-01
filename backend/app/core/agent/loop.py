@@ -371,6 +371,7 @@ async def _loop_core(
     rlog: RunLogger,
     user_id: int | None = None,
     db_dir=None,
+    no_tools: bool = False,
 ) -> AgentRunResult:
     """agent 循环主体：LLM ↔ 工具多轮串联。事件实时推送，证据步骤累积到 steps。"""
     ctx = AgentContext(system_prompt, messages)
@@ -427,8 +428,25 @@ async def _loop_core(
                      "未越预算线，保留历史原文以维持缓存前缀链（改写中段 = 剪链）",
                      ctx_tokens=ctx_tokens, threshold=AGENT_CLEAR_TOOL_RESULTS_TOKENS)
         round_start = time.monotonic()
-        resp = await _chat_once(ctx.messages, temperature=temperature, tools=KG_TOOLS,
-                                user_id=user_id)
+        if no_tools:
+            # 「本轮禁止调用工具」的**协议层硬保证**（2026-09-30，用户反馈驱动）：
+            # 光在提示词里写"禁止调用任何工具"模型照样调（实测：学习模式开场轮第一轮就
+            # 直接 quiz_generate，清单一个字没讲）。这里用 tool_choice="none" 从协议层禁掉，
+            # 并**保留 tools 块**以维持缓存前缀（与 _finish_without_tools 同策略）；
+            # 网关不支持该参数（典型 400）时降级为不带 tools 的调用。
+            try:
+                resp = await _chat_once(ctx.messages, temperature=temperature,
+                                        tools=KG_TOOLS, tool_choice="none",
+                                        user_id=user_id)
+            except Exception as e:      # noqa: BLE001 —— 网关差异，降级而非报错
+                rlog.log("loop", "no_tools_choice_unsupported",
+                         "网关拒绝 tool_choice=none（本轮禁工具），降级为不带 tools",
+                         level="WARNING", error=str(e))
+                resp = await _chat_once(ctx.messages, temperature=temperature,
+                                        user_id=user_id)
+        else:
+            resp = await _chat_once(ctx.messages, temperature=temperature, tools=KG_TOOLS,
+                                    user_id=user_id)
         llm_ms = int((time.monotonic() - round_start) * 1000)
         llm_calls += 1
         usage = extract_usage(resp)
@@ -444,6 +462,16 @@ async def _loop_core(
                  completion_tokens=usage.completion_tokens,
                  tool_calls=len(msg.tool_calls or []),
                  has_text=bool(msg.content))
+
+        # 开场轮禁工具的**兜底**：协议层已用 tool_choice="none"，但网关不守规时仍可能吐
+        # tool_calls —— 直接丢弃，保证"学习模式第一轮只出文本"这条不变量真的成立。
+        if no_tools and msg.tool_calls:
+            rlog.log("loop", "no_tools_calls_dropped",
+                     "本轮禁工具，但模型仍返回 tool_calls → 已丢弃（不执行）",
+                     level="WARNING",
+                     dropped=[getattr(getattr(c, "function", None), "name", "?")
+                              for c in msg.tool_calls])
+            msg.tool_calls = None
 
         # 思考内容 → 实时事件（截断 200 字友好展示）+ 证据 step（全文保留）
         rd = getattr(msg, "reasoning_details", None)
@@ -556,6 +584,7 @@ async def run_agent_loop(
     emitter: AgentEventEmitter | None = None,
     event_queue=None,
     db_dir=None,
+    no_tools: bool = False,
 ) -> AgentRunResult:
     """
     标准 agent 循环：LLM ↔ 工具 多轮串联直到自然终止或达上限。
@@ -581,6 +610,10 @@ async def run_agent_loop(
                        event_bus 的 per-user 队列 —— 对话流必须传，否则常驻的
                        /knowledge/events 长连接会抢走 text_delta（见 events.py 说明）。
         db_dir:        agent_runs 库所在目录（默认 backend/data/agent_runs；测试注入临时目录用）
+        no_tools:      True = **本次 run 禁止调用任何工具**（协议层 tool_choice="none" +
+                       丢弃网关不守规时吐出的 tool_calls）。学习模式的**开场轮**用它：
+                       学生点「去学习」后第一轮只应该是"报菜单"的纯文本，绝不能直接出题
+                       （提示词层写"禁止"实测无效，见 chat_service._build_learn_block）。
 
     返回:
         AgentRunResult(text, rounds=trace, evidence=证据序列, total_llm_calls,
@@ -604,7 +637,7 @@ async def run_agent_loop(
             system_prompt, messages, kg=kg, max_rounds=max_rounds,
             tool_timeout_secs=tool_timeout_secs, temperature=temperature,
             emitter=emitter, steps=steps, guard=guard, rlog=rlog,
-            user_id=user_id, db_dir=db_dir,
+            user_id=user_id, db_dir=db_dir, no_tools=no_tools,
         )
     except Exception as e:
         # 异常运行也落库（status=error + 已收集的证据），再向上抛保持原错误语义

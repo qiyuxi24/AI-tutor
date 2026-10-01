@@ -53,8 +53,48 @@ def test_check_length_minimum_20():
     assert ok
 
 
-def test_check_length_below_20():
+def test_check_length_below_20_without_options():
+    """没选项的题没有信息兜底，仍按 20 字下限把关（旧阈值不变）。"""
     q = _make_q("a" * 19)
+    ok, _ = _check_length(q)
+    assert not ok
+
+
+def test_check_length_allows_short_stem_with_rich_options():
+    """2026-09-30 真机回归：15 字题干 + 4 个实质选项，是正常客观题，不得误杀。
+
+    日志：`出题过滤: 题干过短(15字) | 下列关于图的描述中，正确的是？`
+    """
+    q = _make_q(
+        "下列关于图的描述中，正确的是？",
+        options=[
+            QuestionOption(label="有向图中每条边都有方向", value="A"),
+            QuestionOption(label="图不能有孤立顶点", value="B"),
+            QuestionOption(label="无向图的边数必为偶数", value="C"),
+            QuestionOption(label="图中必存在回路", value="D"),
+        ],
+    )
+    ok, reason = _check_length(q)
+    assert ok, reason
+
+
+def test_check_length_rejects_very_short_stem():
+    """放宽到 12 字，但仍然拦掉明显不成句的题干（含选项也拦）。"""
+    q = _make_q(
+        "下列说法正确的是？",
+        options=[QuestionOption(label="甲", value="A"),
+                 QuestionOption(label="乙", value="B"),
+                 QuestionOption(label="丙", value="C"),
+                 QuestionOption(label="丁", value="D")],
+    )
+    ok, reason = _check_length(q)
+    assert not ok
+    assert "过短" in reason
+
+
+def test_check_length_short_answer_needs_20():
+    """简答题没有选项承载信息 → 保持 20 字下限。"""
+    q = _make_q("请简述图的定义。", type="short_answer")
     ok, _ = _check_length(q)
     assert not ok
 
@@ -101,11 +141,47 @@ def test_check_self_contained_in_options():
 
 def test_check_self_contained_all_patterns():
     patterns = ["如下图", "根据上文", "见下图", "参考上文", "由上图",
-               "图中", "表格中", "上面第1题"]
+                "图中所标注的边", "表格中", "上面第1题", "如图所示"]
     for pat in patterns:
         q = _make_q(f"关于{pat}的描述，请回答下列问题这是足够的长度。")
         ok, _ = _check_self_contained(q)
         assert not ok, f"应过滤'{pat}'"
+
+
+def test_check_self_contained_bare_tuzhong_is_allowed():
+    """2026-09-30 真机回归：图论题自带的"有向图中/无向图中"**不是**外部依赖，不得误杀。
+
+    日志：`出题过滤: 题目依赖外部信息(图中) | 根据参考材料中关于弧集与边集的转换规则，下列说法正确的是？`
+    —— 题干没毛病，是**选项**里的"…图中…"被裸正则命中的。
+    """
+    q = _make_q(
+        "根据参考材料中关于弧集与边集的转换规则，下列说法正确的是？",
+        options=[
+            QuestionOption(label="有向图中每条边都有方向", value="A"),
+            QuestionOption(label="无向图中度数为奇数的顶点个数为偶数", value="B"),
+            QuestionOption(label="弧集与边集可以互换使用", value="C"),
+            QuestionOption(label="简单图中允许出现自环", value="D"),
+        ],
+    )
+    ok, reason = _check_self_contained(q)
+    assert ok, reason
+
+
+def test_check_self_contained_still_rejects_figure_reference():
+    """收窄后仍要拦住真正指图的题（题干或选项里都拦）。"""
+    assert not _check_self_contained(
+        _make_q("图中所标注的层次关系体现了树的哪条性质？"))[0]
+    assert not _check_self_contained(_make_q(
+        "关于图中A点的度数下列说法正确的是什么来着？",
+        options=[QuestionOption(label="选项A", value="A"),
+                 QuestionOption(label="选项B", value="B"),
+                 QuestionOption(label="选项C", value="C"),
+                 QuestionOption(label="选项D", value="D")]))[0]
+    # 选项里指图同样拦
+    assert not _check_self_contained(_make_q(
+        "下列关于图的说法正确的是哪一个选项？",
+        options=[QuestionOption(label="图里标出的那条边是桥", value="A"),
+                 QuestionOption(label="选项B内容", value="B")]))[0]
 
 
 # ─── _deduplicate ───────────────────────────────────────────────
@@ -186,4 +262,36 @@ def test_filter_questions_mixed():
 def test_filter_questions_empty_input():
     passed, rejected = filter_questions([])
     assert len(passed) == 0
+    assert rejected == 0
+
+
+# ─── 2026-09-30 真机回归："图论节点连续 3 道被误杀 → 0 道题" ──────────
+
+def test_filter_questions_graph_node_real_machine_regression():
+    """
+    复刻真机日志里被枪决的 3 道题（节点 graph_definition_and_terminology），
+    断言管道**至少放行 1 道** —— 这是"出题不再全灭"的最小回归网。
+
+    原始日志：
+      01:04:44 出题过滤: 题目依赖外部信息(图中) | 根据参考材料中关于弧集与边集的转换规则，下列说法正确的是？
+      01:05:04 出题过滤: 题干过短(15字)        | 下列关于图的描述中，正确的是？
+      01:05:14 出题过滤: 题干过短(18字)        | 下列关于图的定义的叙述中，错误的是？
+      01:05:14 WARNING 出题数量不足：请求 1 道，实际 0 道（补题 2 轮）
+    """
+    def opts(*labels):
+        return [QuestionOption(label=x, value=v) for x, v in zip(labels, "ABCD")]
+
+    questions = [
+        _make_q("根据参考材料中关于弧集与边集的转换规则，下列说法正确的是？",
+                options=opts("有向图中每条边都有方向", "无向图中度数为奇数的顶点个数为偶数",
+                             "弧集与边集可以互换", "简单图中允许自环"), id="q1"),
+        _make_q("下列关于图的描述中，正确的是？",
+                options=opts("图由顶点集和边集组成", "图中必存在回路",
+                             "孤立顶点不属于图", "无向图的边有方向"), id="q2"),
+        _make_q("下列关于图的定义的叙述中，错误的是？",
+                options=opts("图可以用二元组表示", "边一定是两个顶点的有序对",
+                             "无向边记作无序对", "顶点集不能为空"), id="q3"),
+    ]
+    passed, rejected = filter_questions(questions)
+    assert len(passed) == 3, [q.question for q in passed]
     assert rejected == 0

@@ -31,6 +31,11 @@ class FakeKG:
     def get_sources(self, node_id):
         return self.sources.get(node_id, [])
 
+    def get_nodes_by_subject(self, subject):
+        """同科学科节点（供「跨节点避让」用；2026-09-29 新增）。"""
+        return [n for n in self._nodes.values()
+                if (n.get("subject") or "") == (subject or "")]
+
     @property
     def edges(self):
         return self._edges
@@ -443,13 +448,16 @@ def test_plan_prompt_numbers_materials(monkeypatch):
 
 # ── 提示词铁律关键词断言（D3/D4 的落点，必须有）─────────────────────
 
-def test_plan_prompt_states_the_three_iron_laws():
-    """阶段①提示词必须写明三条铁律：可独立教学 / 禁止为拆而拆 / 模板仅供参考"""
+def test_plan_prompt_states_the_iron_laws():
+    """阶段①提示词必须写明铁律：可独立教学 / 禁止为拆而拆 / 模板仅供参考 / 不与已有小节重复"""
     p = sg.SECTION_PLAN_SYSTEM_PROMPT
     assert "独立" in p, "必须声明小节要「可独立教学」"
     assert "只读这一段" in p, "必须有自足判据"
     assert "并入邻近小节" in p and "禁止为拆而拆" in p, "必须禁止为拆而拆"
     assert "仅供参考" in p and "裁剪" in p, "参考模板必须声明「仅供参考、按实际裁剪」"
+    # 2026-09-29 新增第 4 条：增补时不得与已有小节重复（否则同一侧面被反复追加）
+    assert "已有小节" in p and "重复" in p, "必须禁止与已有小节重复"
+    assert "宁可返回空" in p, "必须明确允许「没有新侧面就返回空」"
     assert "sections" in p and "kind" in p and "summary" in p
 
 
@@ -467,3 +475,245 @@ def test_frozen_constants():
     assert sg.SECTION_PLAN_MAX_TOKENS == 4000
     assert sg.SECTION_WRITE_MAX_TOKENS == 6000
     assert sg.SECTION_MIN_CONTENT_CHARS == 200
+
+
+# ── 增补（append）不重复造节：2026-09-29 ──────────────────────────────
+# 背景：同一份教材的多份资料各自增补同一节点时，原先**不把已有小节告诉规划模型**
+# → 每份都从零重规划一遍同一批侧面，标题加个「（《xx》补充）」就追加上去。
+# 实测「二叉树的定义与性质」22 节里有 13 节是「（《…》补充）」，全是同一侧面。
+
+def _sectioned_kg(monkeypatch, plan_json,
+                  titles=("二叉树的递归定义", "满二叉树与完全二叉树")):
+    """造一个**已小节化**的节点（已有 titles 这几节），返回 (kg, calls)。"""
+    calls = _make_fake_llm(monkeypatch, plan_json, lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+    for t in titles:
+        kg.create_section("double_integral", t, "definition", LONG)
+    return kg, calls
+
+
+def test_norm_title_strips_parens_and_space():
+    """标题归一化：括号里的补充说明与空白都去掉（「存储结构（《x》补充）」≡「存储结构」）。"""
+    assert sg._norm_title("存储结构（《第六章-树和二叉树02-.pptx》补充）") == "存储结构"
+    assert sg._norm_title(" 顺序 存储 ") == "顺序存储"
+    assert sg._norm_title("") == ""
+
+
+def test_drop_duplicate_sections_against_existing():
+    existing = ["二叉树的递归定义", "满二叉树与完全二叉树"]
+    plan = [
+        {"title": "二叉树的递归定义（《第六章02》补充）"},     # 归一化后相同 → 丢
+        {"title": "满二叉树与完全二叉树的区分"},                # 高相似 → 丢
+        {"title": "二叉树的顺序存储与地址计算"},                # 新侧面 → 留
+    ]
+    kept, dropped = sg._drop_duplicate_sections(plan, existing)
+
+    assert [s["title"] for s in kept] == ["二叉树的顺序存储与地址计算"]
+    assert len(dropped) == 2
+
+
+def test_drop_duplicate_sections_within_batch():
+    """同一批规划里自己重复也要拦（模型偶尔会把同一节写两遍）。"""
+    plan = [{"title": "定义"}, {"title": "定义"}, {"title": "特点"}]
+    kept, dropped = sg._drop_duplicate_sections(plan, [])
+
+    assert [s["title"] for s in kept] == ["定义", "特点"]
+    assert len(dropped) == 1
+
+
+def test_plan_prompt_injects_existing_titles(monkeypatch):
+    """规划提示词必须列出已有小节，并要求「没有新侧面就返回空」。"""
+    calls = _make_fake_llm(monkeypatch, '{"sections":[]}', lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+    kg.create_section("double_integral", "已有的一节", "definition", LONG)
+
+    asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", append=True))
+
+    prompt = calls[0]["messages"][0]["content"]
+    assert "已有的一节" in prompt, "已有小节标题必须进提示词"
+    assert "不要再规划一遍" in prompt
+    assert '"sections": []' in prompt
+
+
+def test_append_with_empty_plan_is_skipped_not_error(monkeypatch):
+    """增补时「没有新侧面」是正常结果：skipped，不报错、不动节点。"""
+    kg, _ = _sectioned_kg(monkeypatch, '{"sections":[]}')
+    before = len(kg.list_sections("double_integral"))
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", append=True))
+
+    assert result["status"] == "skipped"
+    assert result["created"] == []
+    assert len(kg.list_sections("double_integral")) == before
+
+
+def test_append_drops_sections_matching_existing(monkeypatch):
+    """模型把已有侧面又规划一遍（只加了标题后缀）→ 全被拦掉，不追加。"""
+    plan = ('{"sections":['
+            '{"title":"二叉树的递归定义（《第六章-树和二叉树02-.pptx》补充）"},'
+            '{"title":"满二叉树与完全二叉树（《第六章-树和二叉树03-.pptx》补充）"}],"summary":""}')
+    kg, _ = _sectioned_kg(monkeypatch, plan)
+    before = len(kg.list_sections("double_integral"))
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", append=True))
+
+    assert result["status"] == "skipped"
+    assert len(kg.list_sections("double_integral")) == before
+
+
+def test_append_keeps_genuinely_new_sections(monkeypatch):
+    """真有新侧面 → 照常追加，且旧小节一个不动。"""
+    plan = '{"sections":[{"title":"线索二叉树的构造算法","kind":"method"}],"summary":""}'
+    kg, _ = _sectioned_kg(monkeypatch, plan)
+    before = [s["title"] for s in kg.list_sections("double_integral")]
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", append=True))
+
+    assert result["status"] == "ok"
+    titles = [s["title"] for s in kg.list_sections("double_integral")]
+    assert titles[:len(before)] == before              # 旧节原样保留
+    assert titles[-1] == "线索二叉树的构造算法"          # 新节追加在末尾
+
+
+def test_first_time_generation_has_no_existing_block(monkeypatch):
+    """首次小节化（非 append）不得注入「已有小节」块 —— 否则会凭空要求模型避让。"""
+    calls = _make_fake_llm(
+        monkeypatch, '{"sections":[{"title":"定义"}],"summary":""}', lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+
+    asyncio.run(sg.SectionGenerator(user_id=1).generate(kg, "double_integral"))
+
+    prompt = calls[0]["messages"][0]["content"]
+    assert "已有" not in prompt
+
+
+# ── 跨节点侵占：本节点的小节吃掉「兄弟独立节点」（2026-09-29）─────────
+# 背景：小节规划只看得到**本节点**的已有小节，看不到**同级还有哪些独立节点**
+# → 模型把已经是独立节点的主题又规划成本节点的一节。
+# 实测（user2，14 个节点）：31 处小节标题命中兄弟节点名 ——
+#   「线性表」里讲「顺序表的基本运算」（「顺序表」是独立节点）、
+#   「链表」里讲「单链表的结点结构与描述」（「单链表」是独立节点）、
+#   「图的基本概念」里有一节就叫「图的同构」（「图的同构」是独立节点）。
+# 治理分两层：① 提示词注入同级节点清单要它避让；② 写盘前高置信拦截（本组测试）。
+
+def test_drop_encroaching_same_name_and_prefix():
+    """同名 / 标题以兄弟节点名开头且只多几字 → 拦；不沾边的 → 留。"""
+    siblings = ["图的同构", "顺序表", "单链表"]
+    plan = [
+        {"title": "图的同构"},                                            # 同名 → 丢
+        {"title": "顺序表的基本运算"},                                     # 前缀 +5 字 → 丢
+        {"title": "单链表的结点结构与描述（《第二章-线性表02.pptx》补充）"},   # 去括号后 +8 字 → 丢
+        {"title": "无向图的连通性"},                                       # 与任何兄弟都不同前缀 → 留
+    ]
+    kept, dropped = sg._drop_encroaching_sections(plan, siblings, self_name="图的连通性")
+
+    assert [s["title"] for s in kept] == ["无向图的连通性"]
+    assert len(dropped) == 3
+    assert all("已作为独立节点存在" in why for _, why in dropped)
+
+
+def test_drop_encroaching_skips_parent_concepts():
+    """兄弟名是本节点名的组成部分 → 视为**父概念**，不拦（否则下位节点无内容可讲）。"""
+    kept, dropped = sg._drop_encroaching_sections(
+        [{"title": "二叉树的顺序存储"}], ["二叉树"], self_name="线索二叉树")
+
+    assert len(kept) == 1 and dropped == []
+
+
+def test_drop_encroaching_keeps_shorter_titles():
+    """标题比兄弟节点名**短**（父概念节点的正常小节）→ 不拦。"""
+    kept, dropped = sg._drop_encroaching_sections(
+        [{"title": "树的定义"}], ["树的定义与基本术语"], self_name="树的基本概念")
+
+    assert len(kept) == 1 and dropped == []
+
+
+def test_drop_encroaching_respects_extra_char_budget_and_min_name_len():
+    """超出字数预算的（交提示词）与过短的节点名（太宽）都不硬拦。"""
+    kept, dropped = sg._drop_encroaching_sections(
+        [{"title": "顺序表的应用：有序表合并"}, {"title": "栈的应用"}],
+        ["顺序表", "栈"], self_name="线性表")
+
+    assert [s["title"] for s in kept] == ["顺序表的应用：有序表合并", "栈的应用"]
+    assert dropped == []
+
+
+def test_sibling_nodes_excludes_self_and_ranks_by_name_overlap():
+    """同级清单：排除自己与跨学科节点，按「与本节点名的亲缘度」降序（截断时先保同族）。"""
+    kg = FakeKG(nodes=[
+        {"id": "bt", "name": "二叉树", "summary": "递归结构", "subject": "数据结构"},
+        {"id": "cbt", "name": "完全二叉树", "summary": "", "subject": "数据结构"},
+        {"id": "stack", "name": "栈", "summary": "", "subject": "数据结构"},
+        {"id": "limit", "name": "极限", "summary": "", "subject": "高等数学"},
+    ])
+    sibs = sg.SectionGenerator._sibling_nodes(kg, "bt", "数据结构")
+
+    assert [s["name"] for s in sibs] == ["完全二叉树", "栈"]
+    assert sibs[0]["summary"] == ""
+
+
+def test_sibling_nodes_without_capability_returns_empty():
+    """kg 没有「按学科查节点」能力（部分测试替身 / 老接口）→ 返回空，不抛。"""
+    class Bare:
+        def get_node(self, node_id):
+            return {"id": node_id, "name": "x"}
+
+    assert sg.SectionGenerator._sibling_nodes(Bare(), "x", "任意学科") == []
+    assert sg.SectionGenerator._sibling_nodes(FakeKG(nodes=[_node()]), "double_integral", "") == []
+
+
+def test_plan_prompt_lists_sibling_nodes_and_forbids_encroaching(monkeypatch):
+    """规划提示词必须列出同级独立知识点，并明确「不要为它单独成节」。"""
+    calls = _make_fake_llm(
+        monkeypatch, '{"sections":[{"title":"定义"}],"summary":""}', lambda prompt: LONG)
+    kg = FakeKG(nodes=[
+        _node(),
+        {"id": "graph_iso", "name": "图的同构", "summary": "判定两个图是否同构",
+         "subject": "高等数学"},
+    ])
+
+    asyncio.run(sg.SectionGenerator(user_id=1).generate(kg, "double_integral"))
+
+    prompt = calls[0]["messages"][0]["content"]
+    assert "图的同构" in prompt, "同级节点名必须进提示词"
+    assert "已经存在" in prompt and "不要在本节点里单独成节" in prompt
+    # 只说不许会让模型**过度保守**（实测直接返回空规划、把节点自己的内容也砍掉）
+    # → 必须同时给出「自己的内容照常写全」的正向要求
+    assert "本节点自己" in prompt and "必须照常写全" in prompt
+    assert "已存在的独立知识点" in sg.SECTION_PLAN_SYSTEM_PROMPT, "系统提示词要有对应铁律"
+
+
+def test_generate_drops_section_named_after_sibling_node(monkeypatch):
+    """端到端：模型把小节规划成兄弟节点名 → 拦掉且**不进阶段②**（省一次 LLM 调用）。"""
+    calls = _make_fake_llm(
+        monkeypatch, '{"sections":[{"title":"图的同构"}],"summary":""}', lambda prompt: LONG)
+    kg = FakeKG(nodes=[
+        _node(),
+        {"id": "graph_iso", "name": "图的同构", "subject": "高等数学"},
+    ])
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(kg, "double_integral"))
+
+    assert result["status"] == "skipped"
+    assert kg.list_sections("double_integral") == []
+    assert len(calls) == 1, "被拦掉的小节不该再跑阶段②成文"
+
+
+def test_generate_keeps_lower_concept_sections(monkeypatch):
+    """下位节点讲父概念的内容照常生成（豁免生效），避免矫枉过正把节点清空。"""
+    plan = '{"sections":[{"title":"二叉树的顺序存储"}],"summary":""}'
+    calls = _make_fake_llm(monkeypatch, plan, lambda prompt: LONG)
+    kg = FakeKG(nodes=[
+        {"id": "threaded_bt", "name": "线索二叉树", "summary": "利用空指针域",
+         "subject": "数据结构"},
+        {"id": "bt", "name": "二叉树", "subject": "数据结构"},
+    ])
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(kg, "threaded_bt"))
+
+    assert result["status"] == "ok"
+    assert [s["title"] for s in kg.list_sections("threaded_bt")] == ["二叉树的顺序存储"]

@@ -28,6 +28,7 @@ from . import (
     download_resource,
     fetch_webpage,
     grade_answer,
+    mark_section_understood,
     quiz_generate,
     rag_search,
     update_mastery,
@@ -54,4 +55,5 @@ NATIVE_SPECS = [
     # 教学检验
     quiz_generate.SPEC,
     grade_answer.SPEC,
+    mark_section_understood.SPEC,
 ]

@@ -95,6 +95,17 @@ class _FakeKG:
     def read_manifest(self, node_id):
         return self._manifests.get(node_id)
 
+    # 小节学习状态（2026-09-29 新增：节点详情带回 learn、独立写入端点用它）——
+    # 本文件只锁小节化的读/删契约，所以这里给最小实现（不参与断言）
+    def section_learn_progress(self, node_id):
+        return {"total": len(self._sections.get(node_id, [])), "passed": 0, "read": 0,
+                "mark_unknown": 0, "mark_understood": 0, "mark_confused": 0,
+                "all_passed": False}
+
+    def set_section_learn(self, node_id, section_id, **kw):
+        return {"mark": kw.get("mark") or "unknown", "read": bool(kw.get("read")),
+                "passed": bool(kw.get("passed")), "attempts": 0, "updated_at": ""}
+
     def delete_section(self, node_id, section_id):
         self.deleted_calls.append((node_id, section_id))
         self._sections[node_id] = [
@@ -204,7 +215,9 @@ def test_sectioned_node_metadata_no_body(api):
     assert [s["id"] for s in body["sections"]] == ["s01", "s02"]
     for s in body["sections"]:
         # sources 是新增的溯源键：无来源的小节投影成 []（老 manifest 无此键也一样）
-        assert set(s.keys()) == {"id", "title", "kind", "status", "sources", "updated_at"}
+        # learn 是小节级**学习状态**（2026-09-29 新增，与 status=生成状态 是两回事）
+        assert set(s.keys()) == {"id", "title", "kind", "status", "sources",
+                                 "updated_at", "learn"}
     assert body["sections"][0]["sources"] == [
         {"doc_id": 7, "doc_name": "高等数学.md", "section": "第9章", "chunk_id": None}]
     assert body["sections"][1]["sources"] == []
@@ -401,7 +414,7 @@ def test_real_section_read_delete_roundtrip(real_api):
     assert detail["has_sections"] is True
     assert [s["id"] for s in detail["sections"]] == [sid]
     assert set(detail["sections"][0]) == {"id", "title", "kind", "status", "sources",
-                                          "updated_at"}
+                                          "updated_at", "learn"}
 
     sec = real_api["client"].get(
         f"/api/v1/knowledge/node/legacy/section/{sid}").json()

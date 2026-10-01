@@ -426,7 +426,10 @@ def test_non_stream_chat_also_passes_private_queue(monkeypatch):
 
     captured = {}
 
-    async def fake_loop(prompt, messages, *, kg=None, user_id=None, event_queue=None, db_dir=None):
+    async def fake_loop(prompt, messages, *, kg=None, user_id=None, event_queue=None,
+                        db_dir=None, no_tools=False):
+        # ⚠️ `no_tools` 必须留在签名里：学习模式开场轮用它禁工具（2026-09-30 加），
+        # 少了这个形参 → `process_message` 传参直接 TypeError，整条断言变成 E-CHAT-002。
         captured["queue"] = event_queue
         captured["user_id"] = user_id
 
