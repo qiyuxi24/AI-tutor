@@ -16,16 +16,16 @@
 | 一键启动 | 根目录：`.\start.ps1`（自动探测：有 Docker 走容器，否则本机开发模式；`-Local` / `-Docker` 强制，`start.cmd` 双击同一入口） |
 | 启动后端 | cwd=`backend`：`venv\Scripts\python.exe -m uvicorn app.main:app --port 8000 --workers 1` |
 | 启动前端 | cwd=`frontend`：`npm run dev`（Vite 5173；`/api` 已代理到 8000，SSE 走 ws） |
-| 跑测试 | cwd=项目根：`backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"` |
+| 跑测试 | cwd=项目根：`backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"`。⚠️ **若报 `PermissionError: …Temp…pytest-of-<user>`**：那是宿主沙箱对 `mkdir(mode=0o700)` 的处理缺陷（pytest 的 basetemp 正好用它，`:158`）→ 用兜底 `backend/venv/Scripts/python.exe .dsh_local/run_pytest.py backend/tests -q -m "not llm_api" -p no:cacheprovider --basetemp=.dsh_local/pytest_tmp`（脚本机制见 `docs/架构/重构实施计划_可执行清单.md` §1.4；会话切「完全权限」后不再需要）。**运维后台套件必须另起一次调用**（两边包名都叫 `app`，合跑必 `ModuleNotFoundError`）：同上换 `backend-admin/tests` 且用 `backend/venv` 的 python（`backend-admin/venv` 未装 pytest） |
 | 真实 API 测试 | 加 `-m llm_api`（真实付费 key，需 pytest-asyncio，单独跑） |
 | 配置真值 | 根目录 `.env`（唯一，`core/config.py` 读 `parents[3]/.env`） |
-| LLM/嵌入配置 | 对话：**每用户**（设置页「模型」自配，存 `backend/data/llm/{uid}/models.json`，Key 明文只在服务端）→ 主→备自动降级；未配置则回落根 `.env` 的 `LLM_API_KEY` + `LLM_BASE_URL` + `MODEL_NAME`（默认 **MiniMax-M3**）= **系统默认档**。嵌入固定：`DASHSCOPE_API_KEY` + `EMBED_BASE_URL`（阿里 text-embedding-v4，**不随用户模型切换**——换嵌入要重建索引） |
+| LLM/嵌入配置 | 对话：**每用户**（设置页「模型」自配，存 `data/llm/{uid}/models.json`（A1b 迁移后单根 = `<repo>/data`；该目录**已在 `.gitignore` 里逐个列出**，否则明文 Key 会被 `git add` 收进历史），Key 明文只在服务端）→ 主→备自动降级；未配置则回落根 `.env` 的 `LLM_API_KEY` + `LLM_BASE_URL` + `MODEL_NAME`（默认 **MiniMax-M3**）= **系统默认档**。嵌入固定：`DASHSCOPE_API_KEY` + `EMBED_BASE_URL`（阿里 text-embedding-v4，**不随用户模型切换**——换嵌入要重建索引） |
 
 ## 1. 硬约束（违反必出事）
 
 - **uvicorn 必须 `--workers 1`**：EventBus 用户队列与进程内定时 GC 依赖单进程，多 worker 各自持有总线 → 事件必丢。
 - **`.env` 只有根目录一份**，不要在 `backend/` 下另建。
-- **`nodes.id` 是全局 TEXT 主键**（非 per-user）；脚本/测试建节点前先 `INSERT OR IGNORE INTO users`。**给 `knowledge.db` 加表**（`node_aliases`/`mastery_events`/`doc_node_marks` 同族）= `knowledge_graph.py::_create_tables` 建表 + `_auto_migrate` 补索引，**并同步三处**：`backend-admin/app/core/db.py::delete_user_rows` 的删号清单（该连接**不开** FK 级联，漏一行就是永久脏数据）、`scripts/inspect_graph_quality.py` 的体检口径、`AGENTS.md §5` 路由。**给 `knowledge.db` 加列**（如 `nodes.sources`、`nodes.subject`）= 写进 `_auto_migrate` 的 `ALTER TABLE` 清单：`CREATE TABLE IF NOT EXISTS` 不给老表加字段（与 `records.py` 那条同理）。
+- **`nodes.id` 是全局 TEXT 主键**（非 per-user）；脚本/测试建节点前先 `INSERT OR IGNORE INTO users`。**给 `knowledge.db` 加表**（`node_aliases`/`mastery_events`/`doc_node_marks` 同族）= `knowledge_graph.py::_create_tables` 建表 + `_auto_migrate` 补索引，**并同步两处**：`scripts/inspect_graph_quality.py` 的体检口径、`AGENTS.md §5` 路由。**删号清单不需要手工同步**（2026-10-09 起由 schema 派生：`backend-admin/app/core/db.py` 遍历 `sqlite_master` + `PRAGMA table_info`，带 `user_id` 列的表一律 `DELETE ... WHERE user_id = ?`，`users` 走 `id`；回归 `backend-admin/tests/test_admin_api.py`）—— 别再写第二份手写清单。**给 `knowledge.db` 加列**（如 `nodes.sources`、`nodes.subject`）= 写进 `_auto_migrate` 的 `ALTER TABLE` 清单：`CREATE TABLE IF NOT EXISTS` 不给老表加字段（与 `records.py` 那条同理）。
 - **用户隔离**：图谱/画像/RAG/记录全按 `user_id` 分区；`KnowledgeGraph(user_id)` 每次新建、用毕 `close()`，别跨协程共享实例。
 - **记录型库（`agent_runs` / `llm_usage` / `agent_debug_logs`）统一走 `core/records.py`**：连接 / 建表 / 补列 / 过期清理的唯一实现，三张表分属两个库（`agent_runs.db`、`debug_log.db`）。**加表 = 写自己的 schema + 调 `records.connect` + 在 `main.py::_prune_once` 的 `_JOBS` 加一行**，别另抄一套连接代码。**加列 = 写进该模块的补列清单**（如 `store._COLUMN_MIGRATIONS`，由 `records.ensure_columns` 就地补）：`CREATE TABLE IF NOT EXISTS` 既不会给老表加字段、也不会自动接线（`token_estimate` 就是这么加的；回归 `test_legacy_db_gets_token_estimate_column`）。
 - **🔴 Jinja2 占位符必须双花括号**（单花括号是字面文本，**不报错**）：`data/prompts/system_prompt_common.j2` 曾把 `{knowledge_graph_summary}` / `{user_profile}` 写错 → AI **完全看不到图谱与画像**，曾被误判为"模型幻觉"，排查成本极高。改模板/加载器后**断言"值被注入"**，而不是"占位符名字出现"；诊断脚本 `backend/scripts/probe_graph_prompt.py`；回归 `backend/tests/test_prompt_loader.py`。
@@ -44,7 +44,8 @@
 - **M3 三段坑**：思考与正文**共享** `max_tokens` 预算 → 批量结构化抽取必须 `thinking=False`，长 JSON 显式调大 max_tokens（否则"空正文 / 硬截断"交替出现）。
 - **加工具 = 1 个新模块 + 1 行注册 + 3 份产物自动生成**：在 `core/agent_tools/tools/` 下**复制任一模块**（一工具一文件），改 `DESCRIPTION` / `PARAMETERS` / `GUIDANCE` / `handler` / `SPEC` 五处，再在 `tools/__init__.py` 的 `NATIVE_SPECS` 加一行；`KG_TOOLS`、执行分发、提示词「工具调用指南」全自动生效，**不要再手写第四份说明**（曾双源漂移：MCP 关闭后提示词仍教模型调不存在的工具）。编写规范/检查清单见 `core/agent_tools/tools/README.md`，一致性由 `backend/tests/test_tools_registry.py` 锁死。**MCP 工具不用改本仓库任何文件**：`core/agent_tools/mcp_host.py::_SERVERS` 加 `(前缀, 模块路径)` 即入注册表。
 - **工具 handler**：同步 `(args, kg) -> str` 或 `async def`；只有当工具内需要 `asyncio.create_task` 起后台任务时才用 async（如 `quiz_generate`）——**不要为了"想 await"改协程再 `asyncio.run`**（AsyncOpenAI 单例跨事件循环会报 "Event loop is closed"）。业务错误回填 `"操作失败: …"`、权限拒绝回填 `"权限不足: …"`（`ValueError`/`PermissionError` 分级在 `dispatch` 统一兜底）。
-- **SSE 事件改动三处同步**：`core/agent/events.py` 发射 → `chat_service._consume_agent_events`（**白名单 if/elif，无 else，不加就静默丢弃**）→ `frontend/src/api/index.js` 回调分发；运行类事件**必带 run_id**。**请求内事件（thinking/text_delta/tool_*/agent_*）只能走 `run_agent_loop(event_queue=...)` 的请求私有队列，禁止经 `event_bus.publish`** —— per-user 队列是对话流与常驻长连接 `/knowledge/events` 的**共享队列**，两个消费者会互相抢事件（2026-09-26 故障：长连接抢走 text_delta → 前端空流 → 表现为"对话没反应"，后端 agent_runs 却完整）；该队列只留 `graph_updated`/`quiz_ready`/`error` 三类通知。**两条对话路径都要传**（`process_message_stream` 与 `process_message`），回归 `tests/test_event_bus.py`。
+- **SSE 事件改动三处同步**：`core/agent/events.py` 发射 → `chat_service._consume_agent_events`（**白名单 if/elif，无 else，不加就静默丢弃**）→ `frontend/src/api/index.js` 回调分发；运行类事件**必带 run_id**。**请求内事件（thinking/text_delta/tool_*/agent_*）只能走 `run_agent_loop(event_queue=...)` 的请求私有队列，禁止经 `event_bus`（`broadcast`/`notify`）** —— per-user 队列是对话流与常驻长连接 `/knowledge/events` 的**共享队列**，两个消费者会互相抢事件（2026-09-26 故障：长连接抢走 text_delta → 前端空流 → 表现为"对话没反应"，后端 agent_runs 却完整）；该队列只留 `graph_updated`/`quiz_ready`/`error` 三类通知。**两条对话路径都要传**（`process_message_stream` 与 `process_message`），回归 `tests/test_event_bus.py`。
+- **通知类事件只有两个投递口（A2-1b，`publish` 已删除）**：全局刷新走 `broadcast(type, data=None)`；发给他一人走 `notify(user_id, type, data=None)`。**`notify` 先落库再推**（`core/notices.py` 的 `pending_notices`，与 agent_runs 同库）：推成功即标记已投递（与重连补拉互斥，不重复渲染），无订阅者则留库 → 客户端重连经 `GET /knowledge/notices/pending` 补拉。**别在调用方另写"推丢了就算"的分支，也别为通知另建一张表**；新增按 user_id 分区的行必须同步 `backend-admin` 删号清单与 `main.py::_prune_once` 的 `_JOBS`。
 - **开发态自动刷新（改代码 → 页面自动同步，2026-09-27）**：前端改动走 **Vite HMR**（内置，无需接线）；后端改动靠 `chatStore.connectSSE` 的**断线重连信号** —— uvicorn `--reload` 重启必掐断 SSE → `onopen` 发 `backend-reloaded` 事件 → `HomeView` 重挂当前子视图（`:key="viewEpoch"`）+ `refreshGraph()`，**仅 `import.meta.env.DEV` 生效**（生产不受网络抖动影响）。⚠️ 新增子视图若数据由组件自己 `onMounted` 拉取，**必须挂 `:key="viewEpoch"`**，否则改后端后该页数据不刷新。事件名常量 `chatStore.BACKEND_RELOADED_EVENT` 是唯一来源。`start.ps1` 后端另加 `--reload-dir data/prompts`（不在 `app/` 下，漏了改 `.j2` 不重载）。
 - **掌握度更新的唯一主信号 = 出题判分**：`grade_answer` 答对确定性 +20；`update_mastery` 只认 3 种硬证据（实测模型**从不主动调用**它）。**手动改掌握度的入口已全部删除（2026-09-28）：节点详情滑块 + `PUT /knowledge/node/{id}/mastery` 端点 + `chatStore.updateMastery`，勿重加**（`update_node_info` 的 mastery 写入通道本身保留，判分要用）。触发类提示词必须写成**铁律**并写明"**不要**用追问代替出题"（对立表述），否则会被更强的既有教学原则盖过；出题必须跨调用去重（`avoid_questions=`），否则重答同题可刷掌握度。
 - **错误码**：`core/error_codes.py` 定义 `ErrorCode.*`；异常信息以 `[E-XXX]` 开头并走 `log_error()`。
@@ -75,7 +76,7 @@
 2. **messages 双形**：`_build_api_messages` / `estimate_single_call` 兼容 dict 与 Pydantic，`agent/estimator._predict_completion_features` 只读 dict。
 3. **token 指标冗余**：`context_tokens` 可由 `token_usage` 推导，向后兼容保留。
 4. **双记录并存**：conversations 消息内嵌 thinking/tools（前端在消费）vs `agent_runs.evidence`；回源要知道两处，未来以 agent_runs 为回放源。
-5. **`/knowledge/events` 两个陷阱**：必须 `subscribe(user_id=...)`（全局队列收不到 per-user 事件）；`_cleanup_stale_queues` 会清空闲队列 → 已加 `_active_subs` 保护，否则长连接**永久收不到事件**；`publish(user_id=X)` 只在 X 队列已存在时投递。
+5. **`/knowledge/events` 两个陷阱**：必须 `subscribe(user_id=...)`（全局队列收不到 per-user 事件）；`_cleanup_stale_queues` 会清空闲队列 → 已加 `_active_subs` 保护，否则长连接**永久收不到事件**；`notify(X, ...)` 只在 X 队列已存在时投递（否则留库待补拉，断线期间的通知不会丢）。
 6. **分层保留**：`store.prune(full_days=30, strip_days=180)`，启动 + 每日 GC 自动执行。
 7. **已收敛的历史遗留（别引回来）**：`core→api` 反向依赖、私有符号跨模块、llm_client 上帝模块、工具注册 3 处分散（均 2026-09-08/09-15 处理）。
 8. 想知道"为什么这么设计"：`docs/项目历程_决策与效果记录.md` + `.codebuddy/memory/MEMORY.md`。
@@ -86,6 +87,8 @@
 |---|---|
 | 端点 / 请求响应 schema | 起后端后 `http://localhost:8000/docs`（**唯一端点级权威**） |
 | 整体架构与快速上手 | 根 `README.md` |
+| **数据根 / 路径取径（唯一声明处）** | `backend/app/core/storage.py`（`DATA_ROOT` + 每域取径函数，保留一版旧路径回退）；一次性迁移 = `backend/scripts/migrate_data_root.py`（**默认 dry-run**，`--apply` 才动）；回归 `backend/tests/test_storage_paths.py` / `test_migrate_data_root.py` |
+| **全项目架构问题清单与重构路线（P0~P2 / Phase A-B-C）** | `docs/架构/整体架构_问题清单与重构方案.md`（根因「主体性错层」另见 `TODO.md` §架构债务）；**执行施工计划 / 分工与验收 / 任务 ID** → `docs/架构/重构实施计划_可执行清单.md` |
 | **Agent 内核逐模块职责 / 时序 / 改码坑** | `backend/app/core/agent/README.md` |
 | **工具系统（注册表 / 分发 / 不变量）改码指南** | `backend/app/core/agent_tools/README.md` |
 | **加/改一个工具（一工具一文件、三条硬约定、检查清单）** | `backend/app/core/agent_tools/tools/README.md` |
@@ -114,6 +117,6 @@
 
 ## 6. 提交与测试纪律
 
-- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **1164 passed, 7 deselected**（2026-09-27 实测；另一会话改动多时先重跑确认）。
+- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **1549 passed, 7 deselected**（2026-10-09 实测；比 2026-09-27 的 1164 多出约 385 例，因多端写入 / DB busy / 事件契约 / A1b 迁移等新测试）。旧记的「已知红」`tests/test_event_bus.py::test_user_queue_lazy_creation` 已随 A2 修好并关闭，**现在应全绿**。后台套件基线 = `backend-admin/tests` **41 passed**。
 - 提交按**文件族**拆；单文件跨主题按**依赖方向**排序（先被调用方）；测试与其修复同一提交；不混无关改动。
 - 与其他 AI 会话共存：提交前 `git status` 看清别人 WIP，**路径限定 add**。
