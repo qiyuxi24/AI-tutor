@@ -27,6 +27,7 @@ from app.core.knowledge_graph import (
     LEARN_MARK_UNDERSTOOD,
     LEARN_MARK_UNKNOWN,
 )
+from app.core.learning import session as learn
 from app.core.quiz.consent import (
     CONSENT_QUIZ_NO,
     CONSENT_QUIZ_YES,
@@ -198,26 +199,24 @@ async def handler(args, kg) -> str:
     # 为什么需要这一层：学生的"好"是双义的 —— 起点节是「不懂/没看过」时，
     # "好" = 同意往下走（开讲），但关键词判定同样会给出 consent=yes，
     # 于是模型可能拿这个"同意"去**考一节还没讲过的节**。
-    # 顺序学习的口径很清楚：**本轮只处理起点节**（`_stash_learn_target` 挂的），
+    # 顺序学习的口径很清楚：**本轮只处理起点节**（学习会话 `learning.turn_of` 读），
     # 且只有起点节是「已懂（待出题验证）」时才该考；节点级出题在学习模式里也不认
     # （挂不到小节 → 判分不走小节口径 → 闭环断掉）。
-    consent = getattr(kg, "quiz_consent", None)
-    said = str(getattr(kg, "student_input", "") or "")
+    turn = learn.turn_of(kg)
+    consent = turn.consent if turn else None
+    said = str(turn.student_input) if turn else ""
     assumed_understood = False
 
-    learn_target = getattr(kg, "learn_target", None)
-    if learn_target and learn_target.get("node_id") == node_id:
-        tidx = int(learn_target.get("index") or 0)
-        tsid = str(learn_target.get("section_id") or "")
-        ttitle = learn_target.get("title")
-        if learn_target.get("passed"):
+    if turn and turn.node_id == node_id:
+        tidx, tsid, ttitle = turn.index, turn.section_id, turn.title
+        if turn.passed:
             # 全部小节都过了（或起点节已通过）：既不用讲也不用考 —— 别再出题
             return (
                 f"⛔ 第 {tidx} 节「{ttitle}」({tsid}) 已经**通过**了 —— "
                 "这个知识点的小节都过完了，不用再考它：简短肯定学生就好。"
                 "（想复习某一节的话，让学生直接在普通对话里说「出道题考我」。）"
             )
-        if not learn_target.get("needs_quiz"):
+        if not turn.needs_quiz:
             # 本节还不是「待出题验证」。只有一种情况可以放行 —— **硬兜底 B**（2026-09-30 用户拍板）：
             #   本节**没被标记**（unknown）+ 学生本轮明确同意出题
             #   → 把他要考的这一节记为「已懂」（`mark_by=user`，语义 = 他自评懂了），放行出题。
@@ -227,8 +226,7 @@ async def handler(args, kg) -> str:
             # ⛔ 只对 `unknown` 生效：`confused`（学生自评不懂 / 系统连续两次答错降级）
             #    **一律不兜底** —— 把它翻成已懂必须走"讲完 + mark_section_understood"，
             #    否则 2026-09-30 那个"降级被翻回已懂 → 一直在出题"的死循环会重现（补五）。
-            if (learn_target.get("mark") == LEARN_MARK_UNKNOWN
-                    and consent == CONSENT_QUIZ_YES):
+            if turn.mark == LEARN_MARK_UNKNOWN and consent == CONSENT_QUIZ_YES:
                 _assume_understood_by_student(kg, node_id, tsid)
                 assumed_understood = True
             else:
@@ -252,8 +250,8 @@ async def handler(args, kg) -> str:
     # 学生没明确同意就不许出题。为什么做成服务端硬拦：模型对"该不该出题 / 他答应没答应"
     # 判断极不稳 —— 真机连着两轮口头承诺"题目稍等一下会自动推给你"却一次工具都没调；
     # 另一轮把 0/10 说成"Bingo 答对了"，顺脚往下考。→ 把决策权交回学生：**先问、他答应了才出**。
-    # 同意结论由 `chat_service._stash_quiz_consent` 挂在 kg 上（工具只拿得到 (args, kg)）。
-    # ⚠️ 属性缺失 = 没有会话上下文（脚本 / 测试 / 节点详情「按小节出题」接口）→ **放行**，不拦。
+    # 同意结论由 `chat_service._stash_quiz_consent` 绑进学习会话（工具只拿得到 (args, kg)）。
+    # ⚠️ 没有会话 = 非对话路径直调（脚本 / 测试 / 节点详情「按小节出题」接口）→ **放行**，不拦。
     if consent is not None and consent != CONSENT_QUIZ_YES:
         return (refusal_text(said) if consent == CONSENT_QUIZ_NO
                 else ask_first_text(said))

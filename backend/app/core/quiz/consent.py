@@ -14,8 +14,8 @@
 不确定 = 不放行出题（让模型先去问一句）—— **宁可多问一句，也不要擅自出题**。
 
 谁在用
-    · `chat_service._stash_quiz_consent`  ← 对话路径把结论挂到 kg 上（每请求新建的实例）
-    · `agent_tools/tools/quiz_generate`   ← 出题前读它做硬拦
+    · `chat_service._stash_quiz_consent`  ← 对话路径把结论绑进学习会话（`learning.bind_consent`）
+    · `agent_tools/tools/quiz_generate`   ← 出题前经 `learning.turn_of(kg)` 读它做硬拦
     · `scripts/smoke_*` / 测试 / 节点详情「按小节出题」接口：**没有这个上下文 → 一律放行**。
 """
 

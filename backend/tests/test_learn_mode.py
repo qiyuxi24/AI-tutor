@@ -23,6 +23,7 @@ from app.core.knowledge_graph import (
     LEARN_MARK_UNDERSTOOD,
     KnowledgeGraph,
 )
+from app.core.learning import session as learn
 from app.core.quiz.quiz_store import QuizStore
 from app.services import chat_service
 from app.services.chat_service import _build_learn_block, _is_learn_opener, learn_mode_kind
@@ -491,8 +492,7 @@ def test_quiz_tool_rejects_when_start_needs_teaching(kg, spy):
     kg.create_section("n1", "第一节", content="甲" * 60)
     kg.create_section("n1", "第二节", content="乙" * 60)
     chat_service._stash_learn_target(kg, _focus(kg))          # 起点 = s01（unknown → 该讲）
-    kg.quiz_consent = ""
-    kg.student_input = "这个知识点主要讲什么？"
+    learn.bind_consent(kg, consent="", student_input="这个知识点主要讲什么？")
 
     out = asyncio.run(quiz_generate.handler(
         {"node_id": "n1", "section_id": "s01"}, kg))
@@ -512,8 +512,7 @@ def test_quiz_tool_assumes_understood_when_student_asked_for_a_quiz(kg, spy):
     """
     kg.create_section("n1", "第一节", content="甲" * 60)
     chat_service._stash_learn_target(kg, _focus(kg))
-    kg.quiz_consent = "yes"
-    kg.student_input = "考考我"
+    learn.bind_consent(kg, consent="yes", student_input="考考我")
 
     out = asyncio.run(quiz_generate.handler(
         {"node_id": "n1", "section_id": "s01"}, kg))
@@ -535,7 +534,7 @@ def test_quiz_tool_does_not_revive_confused_even_with_consent(kg, spy):
     kg.create_section("n1", "第一节", content="甲" * 60)
     kg.set_section_learn("n1", "s01", mark=LEARN_MARK_CONFUSED, mark_by=LEARN_MARK_BY_AI)
     chat_service._stash_learn_target(kg, _focus(kg))
-    kg.quiz_consent = "yes"
+    learn.bind_consent(kg, consent="yes")
 
     out = asyncio.run(quiz_generate.handler(
         {"node_id": "n1", "section_id": "s01"}, kg))
@@ -551,7 +550,7 @@ def test_quiz_tool_in_learn_mode_says_already_passed(kg, spy):
     kg.create_section("n1", "第一节", content="甲" * 60)
     kg.set_section_learn("n1", "s01", passed=True)
     chat_service._stash_learn_target(kg, _focus(kg))          # 起点 = 最后一节（已通过）
-    kg.quiz_consent = "yes"
+    learn.bind_consent(kg, consent="yes")
 
     out = asyncio.run(quiz_generate.handler(
         {"node_id": "n1", "section_id": "s01"}, kg))
@@ -566,7 +565,7 @@ def test_quiz_tool_in_learn_mode_rejects_node_level_quiz(kg, spy):
     kg.create_section("n1", "第一节", content="甲" * 60)
     kg.set_section_learn("n1", "s01", mark=LEARN_MARK_UNDERSTOOD)
     chat_service._stash_learn_target(kg, _focus(kg))          # 起点 = s01（已懂 → 该考）
-    kg.quiz_consent = "yes"
+    learn.bind_consent(kg, consent="yes")
 
     out = asyncio.run(quiz_generate.handler({"node_id": "n1"}, kg))
 
@@ -580,7 +579,7 @@ def test_quiz_tool_in_learn_mode_rejects_skipping_ahead(kg, spy):
     kg.create_section("n1", "第二节", content="乙" * 60)
     kg.set_section_learn("n1", "s01", mark=LEARN_MARK_UNDERSTOOD)
     chat_service._stash_learn_target(kg, _focus(kg))
-    kg.quiz_consent = "yes"
+    learn.bind_consent(kg, consent="yes")
 
     out = asyncio.run(quiz_generate.handler(
         {"node_id": "n1", "section_id": "s02"}, kg))
@@ -594,7 +593,7 @@ def test_quiz_tool_in_learn_mode_allows_start_section(kg, spy):
     kg.create_section("n1", "第一节", content="甲" * 60)
     kg.set_section_learn("n1", "s01", mark=LEARN_MARK_UNDERSTOOD)
     chat_service._stash_learn_target(kg, _focus(kg))
-    kg.quiz_consent = "yes"
+    learn.bind_consent(kg, consent="yes")
 
     out = asyncio.run(quiz_generate.handler(
         {"node_id": "n1", "section_id": "s01"}, kg))
@@ -607,10 +606,11 @@ def test_quiz_fallback_schedules_when_model_forgot_to_call(kg, quiz_spy, tmp_pat
     """起点是「已懂」+ 学生本轮明确同意 + 模型没调 quiz_generate → 后端补一道。"""
     kg.create_section("n1", "定义", content="甲" * 60)
     kg.set_section_learn("n1", "s01", mark=LEARN_MARK_UNDERSTOOD)
-    kg.quiz_consent = "yes"                 # 学生点头（"好"）—— 兜底的硬前置
+    chat_service._stash_learn_target(kg, _focus(kg))        # 起点 = s01（已懂 → 待出题验证）
+    learn.bind_consent(kg, consent="yes", student_input="好")   # 学生点头 —— 兜底的硬前置
 
     ok = chat_service.ensure_section_quiz_scheduled(
-        kg, _focus(kg), _result(), store=_store(tmp_path))
+        kg, _result(), store=_store(tmp_path))
 
     assert ok is True
     assert quiz_spy == [(USER_ID, "n1", "s01")]
@@ -620,18 +620,19 @@ def test_quiz_fallback_skips_without_student_consent(kg, quiz_spy, tmp_path):
     """⛔ 学生没明确同意 → 一道也不补（题宁可晚一轮，也不能不请自来）。"""
     kg.create_section("n1", "定义", content="甲" * 60)
     kg.set_section_learn("n1", "s01", mark=LEARN_MARK_UNDERSTOOD)
-    kg.quiz_consent = ""
+    chat_service._stash_learn_target(kg, _focus(kg))
+    learn.bind_consent(kg, consent="")
 
     assert chat_service.ensure_section_quiz_scheduled(
-        kg, _focus(kg), _result(), store=_store(tmp_path)) is False
+        kg, _result(), store=_store(tmp_path)) is False
     assert quiz_spy == []
 
 
 def test_stash_quiz_consent_exposes_verdict(kg):
-    """`_stash_quiz_consent` 把"学生说了什么 + 同不同意"挂到 kg 上（工具层硬拦的依据）。"""
+    """`_stash_quiz_consent` 把"学生说了什么 + 同不同意"绑进学习会话（工具层硬拦的依据）。"""
     assert chat_service._stash_quiz_consent(
         kg, [{"role": "user", "content": "考考我"}]) == "yes"
-    assert kg.student_input == "考考我"
+    assert learn.turn_of(kg).student_input == "考考我"
 
     assert chat_service._stash_quiz_consent(
         kg, [{"role": "user", "content": "先讲讲吧"}]) == "no"
@@ -643,10 +644,11 @@ def test_quiz_fallback_skips_when_model_already_quizzed(kg, quiz_spy, tmp_path):
     """模型本轮真的调了 quiz_generate → 兜底让路（不重复出题）。"""
     kg.create_section("n1", "定义", content="甲" * 60)
     kg.set_section_learn("n1", "s01", mark=LEARN_MARK_UNDERSTOOD)
-    kg.quiz_consent = "yes"
+    chat_service._stash_learn_target(kg, _focus(kg))
+    learn.bind_consent(kg, consent="yes")
 
     ok = chat_service.ensure_section_quiz_scheduled(
-        kg, _focus(kg), _result("quiz_generate"), store=_store(tmp_path))
+        kg, _result("quiz_generate"), store=_store(tmp_path))
 
     assert ok is False and quiz_spy == []
 
@@ -655,9 +657,11 @@ def test_quiz_fallback_skips_when_start_needs_teaching(kg, quiz_spy, tmp_path):
     """起点是「不懂 / 没看过」→ 该开讲，不该出题（兜底只补"验证题"）。"""
     kg.create_section("n1", "定义", content="甲" * 60)
     kg.set_section_learn("n1", "s01", mark=LEARN_MARK_CONFUSED)
+    chat_service._stash_learn_target(kg, _focus(kg))        # 起点 = s01（不懂 → 该讲不该考）
+    learn.bind_consent(kg, consent="yes")                   # 同意也拦得住：错在"这节不该考"
 
     assert chat_service.ensure_section_quiz_scheduled(
-        kg, _focus(kg), _result(), store=_store(tmp_path)) is False
+        kg, _result(), store=_store(tmp_path)) is False
     assert quiz_spy == []
 
 
@@ -665,25 +669,26 @@ def test_quiz_fallback_skips_when_student_still_has_a_question(kg, quiz_spy, tmp
     """学生手上还有没作答的题 → 不再塞第二道（一次只留一道）。"""
     kg.create_section("n1", "定义", content="甲" * 60)
     kg.set_section_learn("n1", "s01", mark=LEARN_MARK_UNDERSTOOD)
-    kg.quiz_consent = "yes"
+    chat_service._stash_learn_target(kg, _focus(kg))
+    learn.bind_consent(kg, consent="yes")
     store = _store(tmp_path)
     _seed_pending(store)
 
     assert chat_service.ensure_section_quiz_scheduled(
-        kg, _focus(kg), _result(), store=store) is False
+        kg, _result(), store=store) is False
     assert quiz_spy == []
 
 
 def test_learn_target_stash_exposes_start_section(kg):
-    """`_stash_learn_target` 把"本轮该处理的节"挂到 kg 上（工具层硬校验的唯一入口）。"""
+    """`_stash_learn_target` 把"本轮该处理的节"绑进学习会话（工具层硬校验的唯一入口）。"""
     kg.create_section("n1", "第一节", content="甲" * 60)
     kg.create_section("n1", "第二节", content="乙" * 60)
     kg.set_section_learn("n1", "s01", passed=True)
 
     target = chat_service._stash_learn_target(kg, _focus(kg))
 
-    assert target["section_id"] == "s02" and target["index"] == 2
-    assert kg.learn_target["section_id"] == "s02"
+    assert target.section_id == "s02" and target.index == 2
+    assert learn.turn_of(kg).section_id == "s02"
 
 
 def test_block_declares_state_authority(kg):

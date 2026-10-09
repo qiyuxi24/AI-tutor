@@ -422,7 +422,29 @@ class KnowledgeGraph:
                 )
             """)
 
-        # 9. 自动迁移：给旧表补缺失列（subject/board/user_id/created_at/updated_at/sources）
+            # 9. 学习会话表（B1，2026-10-10）：「本轮该处理哪一节 / 该做什么 / 学生同意没有」
+            #    的**唯一归属对象** —— 在此之前这三件事挂在**每次请求新建的 kg 实例**上
+            #    （`kg.learn_target` / `kg.quiz_consent` / `kg.student_input`），谁写谁读只能靠
+            #    注释，工具层（只拿得到 `(args, kg)`）只能猜。语义与动作集合在
+            #    `core/learning/session.py`（本表只管存储，同 `set_section_learn` 的分工）。
+            #    两个约束都写进 schema：node_id 走 FK 级联（删节点/删学科即清会话，不留悬空
+            #    引用）；user_id 是分区键，而**删号清单由 schema 派生**（带 user_id 的表一律清）
+            #    → 这一列同时是"用户隔离"与"删号不漏介质"的依据（回归 test_learning_session）。
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS learning_sessions (
+                    user_id         INTEGER NOT NULL,
+                    node_id         TEXT NOT NULL,
+                    section_id      TEXT NOT NULL DEFAULT '',
+                    intended_action TEXT NOT NULL DEFAULT '',
+                    consent         TEXT NOT NULL DEFAULT '',
+                    reason          TEXT NOT NULL DEFAULT '',
+                    updated_at      TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (user_id, node_id),
+                    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+                )
+            """)
+
+        # 10. 自动迁移：给旧表补缺失列（subject/board/user_id/created_at/updated_at/sources）
         self._auto_migrate()
 
     def _auto_migrate(self) -> None:
@@ -1409,6 +1431,43 @@ class KnowledgeGraph:
                for m in LEARN_MARKS},
             "all_passed": bool(states) and passed == len(states),
         }
+
+    # ── 学习会话（B1）：存储在这一层，语义在 core/learning/session.py ──────────
+    # 为什么存储放这里：knowledge.db 的表只有这一处定义（AGENTS.md §1）；语义放那边是为了
+    # 让"一轮学习该做什么"有一个不依赖 API 层 / 提示词的对象，B2（策略）与 B3（调度）复用。
+
+    def upsert_learning_session(self, node_id: str, *, section_id: str = "",
+                                intended_action: str = "", consent: str = "",
+                                reason: str = "") -> None:
+        """写/更新该用户在该节点的学习会话（每人每节点一行，幂等 UPSERT）。
+
+        `updated_at` 由本层统一盖章（调用方不传时间，避免各处各写一个 now）。
+        """
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO learning_sessions
+                    (user_id, node_id, section_id, intended_action, consent, reason, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, node_id) DO UPDATE SET
+                    section_id      = excluded.section_id,
+                    intended_action = excluded.intended_action,
+                    consent         = excluded.consent,
+                    reason          = excluded.reason,
+                    updated_at      = excluded.updated_at
+                """,
+                (self.user_id, node_id, section_id, intended_action, consent, reason,
+                 datetime.now().isoformat()),
+            )
+
+    def get_learning_session(self, node_id: str) -> Optional[dict]:
+        """读该用户在该节点的学习会话；没有则 None（不建行 —— 读操作零副作用）。"""
+        row = self._conn.execute(
+            "SELECT node_id, section_id, intended_action, consent, reason, updated_at "
+            "FROM learning_sessions WHERE user_id = ? AND node_id = ?",
+            (self.user_id, node_id),
+        ).fetchone()
+        return dict(row) if row else None
 
     def delete_section(self, node_id: str, section_id: str) -> bool:
         """删小节：删 manifest 条目 + 删对应 MD 文件。返回是否真删掉。

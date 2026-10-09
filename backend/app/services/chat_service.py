@@ -38,6 +38,7 @@ from app.core.token_counter import count_tokens
 from app.core.error_codes import ErrorCode, log_error, publish_error_event
 from app.core.event_bus import broadcast, GRAPH_UPDATED, TEXT_DELTA
 from app.core.knowledge_writer import apply_suggestion, load_suggestions, save_suggestions
+from app.core.learning import session as learning
 from app.core.quiz.chat_grade import auto_grade_pending
 
 logger = logging.getLogger("ai-tutor")
@@ -488,23 +489,21 @@ def learn_target_section(kg: KnowledgeGraph, focus_node: dict | None) -> dict | 
 #  出题前的「学生同意」（2026-09-30）
 #
 #  判定逻辑与文案在 `app/core/quiz/consent.py`（**全库唯一实现**，工具层也用同一份）。
-#  这里只负责：把"本轮学生说了什么 / 他同意出题吗"挂到 kg 上（每请求新建的实例），
+#  这里只负责：把"本轮学生说了什么 / 他同意出题吗"绑进学习会话（`core/learning/session.py`），
 #  供 `quiz_generate` 读 —— 工具 handler 只有 `(args, kg)`，没有会话上下文。
 # ══════════════════════════════════════════════════════════════════
 
 def _stash_quiz_consent(kg: KnowledgeGraph, messages: list) -> str:
     """
-    把"本轮学生输入 + 是否同意出题"挂到 kg 上，供**工具层**硬拦（`quiz_generate` 读它）。
+    把"本轮学生输入 + 是否同意出题"绑进**学习会话**（`core/learning/session.py`），
+    供**工具层**硬拦（`quiz_generate` 经 `learning.turn_of(kg)` 读它）。
 
-    **不设属性时工具一律放行**：`kg` 上没有这两个属性 = 没有会话上下文
+    **没绑会话时工具一律放行**：kg 上没有 `_learn_turn` = 没有会话上下文
     （脚本 / 测试 / 节点详情「按小节出题」接口直调）—— 硬拦只作用于对话路径。
     """
     from app.core.quiz.consent import classify_quiz_consent
     text = _last_user_text(messages)
-    consent = classify_quiz_consent(text)
-    kg.student_input = text
-    kg.quiz_consent = consent
-    return consent
+    return learning.bind_consent(kg, consent=classify_quiz_consent(text), student_input=text)
 
 
 def _has_pending_quiz(user_id: int, store=None) -> bool:
@@ -523,27 +522,28 @@ def _has_pending_quiz(user_id: int, store=None) -> bool:
         return False
 
 
-def _stash_learn_target(kg: KnowledgeGraph, focus_node: dict | None) -> dict | None:
+def _stash_learn_target(kg: KnowledgeGraph, focus_node: dict | None) -> "learning.LearnTurn | None":
     """
-    把"本轮该处理的小节"挂到 kg 上，供**工具层**硬校验（B2：越级记账直接拒）。
+    把"本轮该处理的小节"绑进学习会话（`core/learning/session.py`），供**工具层**硬校验
+    （B2：越级记账直接拒）。
 
     为什么走这个渠道：工具 handler 只拿得到 `(args, kg)` —— 没有会话上下文。
-    `kg` 是**每请求新建**的实例（`KnowledgeGraph(user_id=…)`，请求结束即 close），
-    当"本请求的学习目标"用是安全的，不会跨请求串味。
+    本轮判定挂在 kg 的 `_learn_turn` 上，**唯一读写方是 learning 模块**
+    （有静态守卫测试防回退）；`kg` 每请求新建，不会跨请求串味。
     """
-    target = learn_target_section(kg, focus_node)
-    if target:
-        kg.learn_target = target
-    return target
+    return learning.bind_target(kg, learn_target_section(kg, focus_node))
 
 
-def ensure_section_quiz_scheduled(kg: KnowledgeGraph, focus_node: dict | None,
-                                  result, *, store=None) -> bool:
+def ensure_section_quiz_scheduled(kg: KnowledgeGraph, result, *, store=None) -> bool:
     """
     **B1 出题兜底**：学习模式后续轮里，若"本轮该出题验证的小节"确实没出题，由后端补一道。
 
+    只读学习会话（`learning.turn_of(kg)`，请求开始时由 `_stash_learn_target` 绑定）——
+    起点节的派生**只有 `learn_target_section` 一处**，这里不再重算（重算 = 第二个事实源，
+    恰是 B1 要消灭的东西）。
+
     触发条件（全部满足才补）：
-      · **学生本轮明确同意出题**（`kg.quiz_consent == "yes"`）—— 先问再出，学生点头才动；
+      · **学生本轮明确同意出题**（会话里 consent == "yes"）—— 先问再出，学生点头才动；
       · 本轮起点小节是「已懂」（待出题验证）—— 不懂 / 没看过的节该讲，不该考；
       · 模型本轮**没有调过** `quiz_generate`（看 `result.rounds` 的工具轨迹，**不解析文本**）；
       · 学生手上还没有未作答的题（否则一次堆两道，他把谁当"这一题"都分不清）；
@@ -558,21 +558,21 @@ def ensure_section_quiz_scheduled(kg: KnowledgeGraph, focus_node: dict | None,
         # ⛔ 硬前置：**学生本轮明确同意**才兜底（2026-09-30 用户口径：出题前必须先问）——
         #    没有同意就什么都不做，把"先问一句"留给模型（题宁可晚一轮，也不能不请自来）。
         from app.core.quiz.consent import CONSENT_QUIZ_YES
-        if getattr(kg, "quiz_consent", None) != CONSENT_QUIZ_YES:
+        turn = learning.turn_of(kg)
+        if turn is None or turn.consent != CONSENT_QUIZ_YES:
             return False
-        target = learn_target_section(kg, focus_node)
-        if not target or not target["needs_quiz"] or not target["section_id"]:
-            return False
+        if not turn.active or not turn.needs_quiz or not turn.section_id:
+            return False                       # 非学习轮 / 该讲 / 该收尾 —— 都不该由这里出题
         user_id = int(getattr(kg, "user_id", 0) or 0)
         if _has_pending_quiz(user_id, store=store):
-            logger.info(f"学习模式出题兜底跳过：学生尚有未作答的题（{target['node_id']}/"
-                        f"{target['section_id']}）")
+            logger.info(f"学习模式出题兜底跳过：学生尚有未作答的题（{turn.node_id}/"
+                        f"{turn.section_id}）")
             return False
         from app.core.quiz.chat_quiz import start_background_generation
         ok = start_background_generation(
-            user_id, node_id=target["node_id"], section_id=target["section_id"])
+            user_id, node_id=turn.node_id, section_id=turn.section_id)
         logger.info(f"学习模式出题兜底（模型未出题，后端补一道）："
-                    f"{target['node_id']}/{target['section_id']} → "
+                    f"{turn.node_id}/{turn.section_id} → "
                     f"{'已排期' if ok else '已有出题任务在跑，跳过'}")
         return ok
     except Exception as e:  # noqa: BLE001
@@ -958,8 +958,9 @@ async def process_message(user_id: int, messages: list,
         #    ★ 学习模式开场轮 → no_tools：第一轮只允许输出开场说明（硬保证，见 loop.py）
         focus_node = kg.get_node(current_node) if current_node else None
         learn_kind = learn_mode_kind(kg, focus_node, messages)
-        # B2：把"本轮该处理的小节"先挂到 kg 上，工具层据此**硬拒越级记账**
-        learn_target = _stash_learn_target(kg, focus_node) if learn_kind == "normal" else None
+        # B2：把"本轮该处理的小节"绑进学习会话，工具层据此**硬拒越级记账**
+        if learn_kind == "normal":
+            _stash_learn_target(kg, focus_node)
         # 出题同意（2026-09-30）：学生没明确同意时，`quiz_generate` 会被服务端拒掉
         _stash_quiz_consent(kg, messages)
         result = await run_agent_loop(
@@ -971,8 +972,7 @@ async def process_message(user_id: int, messages: list,
 
         # B1 出题兜底（2026-09-30）：学习模式后续轮，模型没调 quiz_generate 就由后端补一道
         # —— 学生不必因为模型的手滑而干等（真机：连着两轮口头承诺，一次工具都没调）
-        if learn_target and learn_target["needs_quiz"]:
-            ensure_section_quiz_scheduled(kg, focus_node, result)
+        ensure_section_quiz_scheduled(kg, result)
 
         # 5. 图谱分析作为后台任务执行，不阻塞对话回复
         #    ★ 传入 user_id 而非 kg 实例，让 _analyze_and_apply 自己管理 kg 生命周期
@@ -1046,8 +1046,9 @@ async def process_message_stream(
         # 学习模式开场轮 → no_tools：第一轮只允许输出开场说明（硬保证，见 loop.py）
         focus_node = kg.get_node(current_node) if current_node else None
         learn_kind = learn_mode_kind(kg, focus_node, messages)
-        # B2：把"本轮该处理的小节"先挂到 kg 上，工具层据此**硬拒越级记账**
-        learn_target = _stash_learn_target(kg, focus_node) if learn_kind == "normal" else None
+        # B2：把"本轮该处理的小节"绑进学习会话，工具层据此**硬拒越级记账**
+        if learn_kind == "normal":
+            _stash_learn_target(kg, focus_node)
         # 出题同意（2026-09-30）：学生没明确同意时，`quiz_generate` 会被服务端拒掉
         _stash_quiz_consent(kg, messages)
         agent_task = asyncio.create_task(
@@ -1065,8 +1066,8 @@ async def process_message_stream(
         result = await agent_task
 
         # B1 出题兜底（2026-09-30）：学习模式后续轮，模型没调 quiz_generate 就由后端补一道
-        if learn_target and learn_target["needs_quiz"]:
-            ensure_section_quiz_scheduled(kg, focus_node, result)
+        # —— 学生不必因为模型的手滑而干等（真机：连着两轮口头承诺，一次工具都没调）
+        ensure_section_quiz_scheduled(kg, result)
 
         # 图谱分析（复用现有逻辑）
         user_msgs = [m for m in messages if (m.role if hasattr(m, 'role') else m['role']) == 'user']

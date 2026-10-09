@@ -15,6 +15,7 @@ import pytest
 
 from app.core import agent_tools
 from app.core.agent_tools.tools import quiz_generate
+from app.core.learning import session as learn
 from app.core.quiz import chat_quiz
 from app.core.quiz.quiz_store import QuizManager
 
@@ -135,8 +136,8 @@ def test_quiz_generate_guidance_requires_consent():
 
 # ══════════════════════════════════════════════════════════════════
 #  出题同意硬拦（2026-09-30）
-#  `kg.quiz_consent` 由 `chat_service._stash_quiz_consent` 挂上；属性缺失 = 没有会话
-#  上下文（脚本/测试/接口直调）→ 放行（fail-open），所以老测试不受影响。
+#  同意结论由 `chat_service._stash_quiz_consent` 经 `learning.bind_consent` 绑进学习会话；
+#  没有会话 = 没有会话上下文（脚本/测试/接口直调）→ 放行（fail-open），所以老测试不受影响。
 # ══════════════════════════════════════════════════════════════════
 
 def _consent_kg(consent, said, monkeypatch):
@@ -149,8 +150,7 @@ def _consent_kg(consent, said, monkeypatch):
     monkeypatch.setattr(chat_quiz, "generate_and_publish", fake_generate)
     chat_quiz._INFLIGHT.clear()
     kg = _FakeKg({"bt": {"id": "bt", "name": "二叉树"}})
-    kg.quiz_consent = consent
-    kg.student_input = said
+    learn.bind_consent(kg, consent=consent, student_input=said)
     return kg, started
 
 

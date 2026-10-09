@@ -22,6 +22,7 @@
 """
 
 from app.core.knowledge_graph import LEARN_MARK_BY_AI, LEARN_MARK_UNDERSTOOD
+from app.core.learning import session as learn
 
 from ..registry import TIER_FREE, _spec
 
@@ -83,18 +84,18 @@ def handler(args, kg) -> str:
     idx = sections.index(entry) + 1
 
     # ── B2 越级硬拒（2026-09-30）──────────────────────────────────────────
-    # 学习模式下"本轮该处理的小节"由 `chat_service._stash_learn_target` 挂在 kg 上
-    # （工具 handler 只拿得到 `(args, kg)`，没有会话上下文，只能走这条路传）。
+    # 学习模式下"本轮该处理的小节"来自**学习会话**（`core/learning/session.py`，B1 起
+    # 这类本轮判定的唯一归属对象）—— 工具 handler 只拿得到 `(args, kg)`，没有会话上下文，
+    # 所以本轮判定挂在 kg 上、由 learning 模块独家读写。
     # 为什么要硬拒：真机里模型把 0/10 讲成"Bingo 答对了"、宣布"这一节就这么过了"，
     # 然后跳去讲后面的节 —— 口头约束压不住它自己的叙事，但**状态不能被它带跑**：
     # 跳过未通过的节去给后面的节记账，一律拒掉，让它只能回到起点节。
-    target = getattr(kg, "learn_target", None)
-    if target and target.get("node_id") == node_id and idx > int(target.get("index") or 0):
-        tidx = int(target.get("index") or 0)
+    turn = learn.turn_of(kg)
+    if turn and turn.node_id == node_id and idx > turn.index:
         return (
-            f"⛔ 学习模式下要**按顺序推进**：现在该处理的是第 {tidx} 节"
-            f"「{target.get('title')}」({target.get('section_id')})，它还没通过 —— "
-            f"不能跳过它去给第 {idx} 节记账。请先处理第 {tidx} 节"
+            f"⛔ 学习模式下要**按顺序推进**：现在该处理的是第 {turn.index} 节"
+            f"「{turn.title}」({turn.section_id})，它还没通过 —— "
+            f"不能跳过它去给第 {idx} 节记账。请先处理第 {turn.index} 节"
             f"（讲完就调本工具；已懂则直接 `quiz_generate` 出题验证），然后再往下走。"
         )
 
