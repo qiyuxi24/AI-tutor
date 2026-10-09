@@ -4,7 +4,8 @@ pytest 全局配置：路径设置与共享 fixtures。
 设计：
 - 让 `import app.*` 在 pytest 下可用（无论从哪个目录启动 pytest）
 - 单元测试不依赖真实网络/LLM：所有涉及 embedding / LLM 的路径均在测试内 mock
-- 测试不得污染开发库：用量记账默认落 `backend/app/data/agent_runs/`，见 _isolate_usage_db
+- 测试不得污染开发库：用量记账 / 待投递通知默认落 `backend/app/data/agent_runs/`，
+  见 _isolate_usage_db / _isolate_notices_db
 """
 import sys
 from pathlib import Path
@@ -33,3 +34,24 @@ def _isolate_usage_db(monkeypatch):
         return real_connect(db_dir)
 
     monkeypatch.setattr(usage_mod, "_connect", guarded)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_notices_db(monkeypatch):
+    """待投递通知（A2-3）与用量同库同根：不隔离就会往开发库塞测试通知。
+
+    与 _isolate_usage_db 同一手法，但抛的是 `sqlite3.OperationalError` ——
+    `notices.record` / `mark_delivered` / `take_pending` 都以 `except sqlite3.Error`
+    兜底（推送主流程不受影响，只是没落库）；直连通知存储的测试显式传 tmp_path 照常可写。
+    """
+    import sqlite3
+
+    from app.core import notices as notices_mod
+    real_connect = notices_mod._connect
+
+    def guarded(db_dir=None):
+        if db_dir is None:
+            raise sqlite3.OperationalError("测试隔离：pending_notices 只接受显式 db_dir 写入")
+        return real_connect(db_dir)
+
+    monkeypatch.setattr(notices_mod, "_connect", guarded)

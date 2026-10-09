@@ -550,8 +550,11 @@ async def _loop_core(
 
 def _persist_run(run_id: str, user_id: int, started: float,
                  status: str, steps: list[dict], result: AgentRunResult | None = None,
-                 db_dir=None) -> None:
-    """把一次运行写入 agent_runs 表（正常/异常统一出口，失败仅记日志）。"""
+                 db_dir=None, events_written: int | None = None) -> None:
+    """把一次运行写入 agent_runs 表（正常/异常统一出口，失败仅记日志）。
+
+    `events_written`（A2-2）：本次 run 写出的事件数，投递目标可计数时给出（None = 未知）。
+    """
     try:
         _save_run({
             "run_id": run_id, "user_id": user_id, "status": status,
@@ -563,6 +566,7 @@ def _persist_run(run_id: str, user_id: int, started: float,
             "token_estimate": result.token_estimate if result else {},
             "final_text": _clip(result.text) if result else "",
             "evidence": steps,
+            "events_written": events_written,
         }, db_dir=db_dir)
     except Exception as e:  # 落库失败不影响主流程
         logger.warning(f"agent run 落库失败: {e}")
@@ -583,6 +587,7 @@ async def run_agent_loop(
     user_id: int | None = None,
     emitter: AgentEventEmitter | None = None,
     event_queue=None,
+    event_sink=None,
     db_dir=None,
     no_tools: bool = False,
 ) -> AgentRunResult:
@@ -609,6 +614,10 @@ async def run_agent_loop(
         event_queue:   事件私有队列（可选）。传入时默认 emitter 直投该队列，不占用
                        event_bus 的 per-user 队列 —— 对话流必须传，否则常驻的
                        /knowledge/events 长连接会抢走 text_delta（见 events.py 说明）。
+        event_sink:    事件投递目标（可选，A2）。`event_queue` 之外的显式选择：
+                       「本路径不推事件」请传 `events.NullSink()`（可计数），
+                       而不是塞一个没人消费的 Queue。`user_id` 有值且两者都没给
+                       → 构造 emitter 时抛 ValueError（漏传必须立刻炸，见 events.py）。
         db_dir:        agent_runs 库所在目录（默认 backend/data/agent_runs；测试注入临时目录用）
         no_tools:      True = **本次 run 禁止调用任何工具**（协议层 tool_choice="none" +
                        丢弃网关不守规时吐出的 tool_calls）。学习模式的**开场轮**用它：
@@ -631,7 +640,10 @@ async def run_agent_loop(
     rlog = RunLogger(run_id, user_id=user_id, db_dir=db_dir)
     # 消息发射中间件：默认构造绑定本 run 的 run_id + user_id（user_id 为空自动静默）；
     # 调用方注入自定义 emitter 可接管分发（分发/管理策略后续都在 agent_events 层扩展）。
-    emitter = emitter or AgentEventEmitter(run_id, user_id, queue=event_queue)
+    # ⚠️ A2：user_id 有值时必须显式给出投递目标（event_queue 或 event_sink），
+    #    否则 AgentEventEmitter 抛 ValueError —— 旧的"静默回落 event_bus"已删除。
+    emitter = emitter or AgentEventEmitter(run_id, user_id,
+                                           queue=event_queue, sink=event_sink)
     try:
         result = await _loop_core(
             system_prompt, messages, kg=kg, max_rounds=max_rounds,
@@ -648,8 +660,10 @@ async def run_agent_loop(
                  error=str(e), tool_calls=guard.tool_calls,
                  elapsed=round(guard.elapsed(), 1))
         if user_id is not None:
-            _persist_run(run_id, user_id, started, "error", steps, db_dir=db_dir)
+            _persist_run(run_id, user_id, started, "error", steps, db_dir=db_dir,
+                         events_written=getattr(emitter, "events_written", None))
         raise
     if user_id is not None:
-        _persist_run(run_id, user_id, started, "ok", steps, result, db_dir=db_dir)
+        _persist_run(run_id, user_id, started, "ok", steps, result, db_dir=db_dir,
+                     events_written=getattr(emitter, "events_written", None))
     return result

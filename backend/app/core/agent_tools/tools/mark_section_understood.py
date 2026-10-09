@@ -64,7 +64,7 @@ GUIDANCE = """
 
 def handler(args, kg) -> str:
     """同步 handler：只写 manifest（毫秒级），不需要线程池之外的任何等待。"""
-    from app.core.event_bus import GRAPH_UPDATED, publish     # 延迟导入：避免拖慢启动
+    from app.core.event_bus import GRAPH_UPDATED, broadcast   # 延迟导入：避免拖慢启动
 
     node_id = str(args.get("node_id", "") or "").strip()
     section_id = str(args.get("section_id", "") or "").strip()
@@ -104,7 +104,7 @@ def handler(args, kg) -> str:
     except Exception as e:  # noqa: BLE001 —— 工具永不抛异常，失败给模型可读文案
         return f"记录小节学习状态失败（{node_id}/{section_id}）：{e}"
 
-    publish(GRAPH_UPDATED)          # 图谱 / 学习看板 / 节点详情跟着刷新
+    broadcast(GRAPH_UPDATED)        # 图谱 / 学习看板 / 节点详情跟着刷新
     progress = kg.section_learn_progress(node_id)
     return (
         f"已把第 {idx} 节「{entry.get('title')}」({section_id}) 记为「已懂」"

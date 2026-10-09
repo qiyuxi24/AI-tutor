@@ -15,6 +15,7 @@ import asyncio
 import json
 
 from app.core.agent.loop import run_agent_loop
+from app.core.agent.events import NullSink
 from app.core.knowledge_graph import KnowledgeGraph
 
 # 轻量系统提示：引导模型在需要时调用知识图谱工具（与 chat_service 的工具说明同源）
@@ -47,7 +48,8 @@ async def _run(user_id: int, prompt: str):
     try:
         messages = [{"role": "user", "content": prompt}]
         # 传 user_id：运行记录（证据级）自动写入 agent_runs 表，无需再 save_trace
-        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=user_id)
+        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=user_id,
+                                      event_sink=NullSink())
         print("=== RESULT ===")
         print(json.dumps({
             "user_id": user_id,

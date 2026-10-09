@@ -44,6 +44,7 @@ sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
 from app.core.agent import debug_log as dlog              # noqa: E402  （读清理决策用）
 from app.core.agent import loop as loop_mod               # noqa: E402  （注入清理阈值用）
 from app.core.agent.loop import run_agent_loop            # noqa: E402
+from app.core.agent.events import NullSink                # noqa: E402
 from app.core.knowledge_graph import KnowledgeGraph       # noqa: E402
 
 _UID = 90001  # 临时用户，只在临时库里出现
@@ -133,6 +134,7 @@ def _section(title: str, prompt: str, *, max_rounds: int,
         result = asyncio.run(run_agent_loop(
             f"【运行盐 {salt}】\n{_SYSTEM}", [{"role": "user", "content": prompt}],
             kg=kg, user_id=_UID, db_dir=db_dir, max_rounds=max_rounds,
+            event_sink=NullSink(),
         ))
     finally:
         loop_mod.AGENT_CLEAR_TOOL_RESULTS_TOKENS = old   # 恢复，别影响下一节

@@ -19,7 +19,7 @@
 
 import logging
 
-from app.core.event_bus import GRAPH_UPDATED, publish
+from app.core.event_bus import GRAPH_UPDATED, broadcast
 from app.core.knowledge_graph import (
     LEARN_MARK_BY_AI,
     LEARN_MARK_BY_USER,
@@ -115,7 +115,7 @@ def _assume_understood_by_student(kg, node_id: str, section_id: str) -> bool:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"兜底记「已懂」失败（{node_id}/{section_id}）：{e}")
         return False
-    publish(GRAPH_UPDATED)      # 节点详情 / 学习看板跟着刷新
+    broadcast(GRAPH_UPDATED)      # 节点详情 / 学习看板跟着刷新
     logger.info(f"出题兜底：学生要求考 {node_id}/{section_id} → 记为「已懂」(学生自评)")
     return True
 
@@ -173,7 +173,7 @@ def _mark_section_taught(kg, node_id: str, section_id: str) -> dict:
     except Exception as e:      # noqa: BLE001
         logger.warning(f"记小节「已懂」失败（{node_id}/{section_id}）：{e}")
         return none
-    publish(GRAPH_UPDATED)      # 节点详情 / 学习看板跟着刷新
+    broadcast(GRAPH_UPDATED)      # 节点详情 / 学习看板跟着刷新
     return {"marked": True, "downgraded": False}
 
 

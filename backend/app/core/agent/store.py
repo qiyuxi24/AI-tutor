@@ -26,6 +26,7 @@
         "total_llm_calls": n, "context_tokens": n,
         "token_usage": {...}, "estimated_prompt_tokens": n,
         "token_estimate": {...},  # 发送前预估（estimator.to_dict()，与真值同表可对照）
+        "events_written": n,      # 写出事件数（可空：仅可计数投递目标给出，见 loop._persist_run）
         "final_text": "...", "evidence": [...],
     })
 """
@@ -47,7 +48,11 @@ _DB_FILE = "agent_runs.db"
 
 # 老库补列清单：**新增列必须写在这里**（CREATE TABLE IF NOT EXISTS 不会给老表加字段，
 # 回归见 tests/test_agent_run_store.py::test_legacy_db_gets_token_estimate_column）。
-_COLUMN_MIGRATIONS = {"token_estimate": "TEXT NOT NULL DEFAULT '{}'"}
+_COLUMN_MIGRATIONS = {
+    "token_estimate": "TEXT NOT NULL DEFAULT '{}'",
+    # 写出事件数（A2-2）：可空 —— 仅当投递目标可计数时才有值（NULL = 未知，如队列目标）
+    "events_written": "INTEGER",
+}
 
 # 单条 tool 结果/参数存库上限（防御失控工具写爆 DB；正常工具结果远小于此。
 # ponytail: 简单截断护栏，真需要全量时调大即可）
@@ -69,6 +74,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     token_usage         TEXT NOT NULL DEFAULT '{}',
     estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0,
     token_estimate TEXT NOT NULL DEFAULT '{}',
+    events_written INTEGER,
     final_text  TEXT NOT NULL DEFAULT '',
     evidence    TEXT NOT NULL DEFAULT '[]'
 );
@@ -107,8 +113,9 @@ def save_run(run: dict, db_dir: Path | None = None) -> None:
                 """INSERT INTO agent_runs (
                        run_id, user_id, status, started_at, ended_at,
                        total_llm_calls, context_tokens, token_usage,
-                       estimated_prompt_tokens, token_estimate, final_text, evidence)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       estimated_prompt_tokens, token_estimate, events_written,
+                       final_text, evidence)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(run_id) DO UPDATE SET
                        status = excluded.status,
                        ended_at = excluded.ended_at,
@@ -117,6 +124,7 @@ def save_run(run: dict, db_dir: Path | None = None) -> None:
                        token_usage = excluded.token_usage,
                        estimated_prompt_tokens = excluded.estimated_prompt_tokens,
                        token_estimate = excluded.token_estimate,
+                       events_written = excluded.events_written,
                        final_text = excluded.final_text,
                        evidence = excluded.evidence""",
                 (
@@ -126,6 +134,7 @@ def save_run(run: dict, db_dir: Path | None = None) -> None:
                     json.dumps(run.get("token_usage", {}), ensure_ascii=False),
                     run.get("estimated_prompt_tokens", 0),
                     json.dumps(run.get("token_estimate", {}), ensure_ascii=False),
+                    run.get("events_written"),
                     run.get("final_text", ""),
                     json.dumps(run.get("evidence", []), ensure_ascii=False),
                 ),
@@ -150,6 +159,7 @@ def _row_to_run(row: sqlite3.Row) -> dict:
         "token_usage": json.loads(row["token_usage"] or "{}"),
         "estimated_prompt_tokens": row["estimated_prompt_tokens"],
         "token_estimate": json.loads(row["token_estimate"] or "{}"),
+        "events_written": row["events_written"],
         "final_text": row["final_text"],
         "evidence": json.loads(row["evidence"] or "[]"),
     }

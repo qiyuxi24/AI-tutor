@@ -196,11 +196,11 @@ def publish_error_event(code_tuple: tuple, message: str, module: str,
                         detail: str = "") -> None:
     """
     安全发布错误事件到 SSE 事件总线（失败时静默，不影响主流程）。
-    消除 graph_analyzer / chat_service 中 3 处重复的 try-except publish("error")。
+    消除 graph_analyzer / chat_service 中 3 处重复的 try-except 广播 error 事件。
     """
     try:
-        from app.core.event_bus import publish
-        publish("error", {
+        from app.core.event_bus import broadcast, ERROR
+        broadcast(ERROR, {
             "code": ErrorCode.code_only(code_tuple),
             "message": message,
             "module": module,

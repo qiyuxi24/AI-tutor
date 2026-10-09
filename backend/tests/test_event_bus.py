@@ -2,20 +2,24 @@
 事件总线（Event Hub）单元测试。
 
 覆盖：
-- 全局广播：publish 不带 user_id → 全局 subscribe 收到
-- per-user 路由：publish 带 user_id → 只有该用户 subscribe 收到，其他用户收不到
-- 向后兼容：旧 publish(type, data) + subscribe() 仍正常工作
+- 全局广播：broadcast() → 全局 subscribe 收到
+- per-user 路由：notify(user_id, …) → 只有该用户 subscribe 收到，其他用户收不到
+- 广播覆盖面：broadcast() 同时到全局队列与**每个** per-user 队列
 - 惰性创建：用户队列在 subscribe 时才创建
 - 事件类型常量：常量值与事件 type 一致
+
+⚠️ A2-1b：`publish(type, data, user_id=None)` 已拆成 `broadcast()` / `notify()`。原先
+同一个**可选参数**兼职两种路由（不带=广播给所有人、带上=只给这一个人），调用点少写
+一个关键字就从"发给一个人"静默变成"发给所有人"，而代码读起来一模一样。
 """
 import asyncio
 import json
 
 from app.core import event_bus
 from app.core.agent import events as agent_events
-from app.core.agent.events import AgentEventEmitter
+from app.core.agent.events import AgentEventEmitter, NullSink
 from app.core.event_bus import (
-    publish, subscribe, get_user_queue,
+    broadcast, notify, subscribe, get_user_queue,
     GRAPH_UPDATED, ERROR, TOOL_START, TOOL_RESULT,
     THINKING, TEXT_DELTA, AGENT_START, AGENT_DONE,
 )
@@ -46,8 +50,8 @@ async def _collect_all(gen, events_list, max_events=1):
             break
 
 
-def test_global_broadcast_backward_compat():
-    """publish 不带 user_id → 全局 subscribe() 收到（兼容旧端点）。"""
+def test_broadcast_reaches_global_queue():
+    """broadcast() → 全局 subscribe() 收到（旧端点仍可用）。"""
     _reset_state()
     events = []
 
@@ -55,7 +59,7 @@ def test_global_broadcast_backward_compat():
         gen = subscribe()
         collect_task = asyncio.ensure_future(_collect_all(gen, events, max_events=1))
         await asyncio.sleep(0.05)
-        publish(GRAPH_UPDATED, {"node_id": "test_node"})
+        broadcast(GRAPH_UPDATED, {"node_id": "test_node"})
         await asyncio.wait_for(collect_task, timeout=1.0)
 
     asyncio.run(_run())
@@ -66,7 +70,7 @@ def test_global_broadcast_backward_compat():
 
 
 def test_per_user_routing():
-    """publish 带 user_id → 只有该用户的 subscribe(user_id) 收到。"""
+    """notify(user_id) → 只有该用户的 subscribe(user_id) 收到。"""
     _reset_state()
     user1_events = []
     user2_events = []
@@ -77,7 +81,7 @@ def test_per_user_routing():
         t1 = asyncio.ensure_future(_collect_all(gen1, user1_events, max_events=1))
         t2 = asyncio.ensure_future(_collect_all(gen2, user2_events, max_events=1))
         await asyncio.sleep(0.05)
-        publish(TOOL_START, {"tool": "rag_search"}, user_id=1)
+        notify(1, TOOL_START, {"tool": "rag_search"})
         await asyncio.wait_for(t1, timeout=1.0)
         t2.cancel()
         try:
@@ -93,8 +97,8 @@ def test_per_user_routing():
     _reset_state()
 
 
-def test_global_broadcast_reaches_all_users():
-    """publish 不带 user_id → 全局广播到所有用户队列。"""
+def test_broadcast_reaches_all_users():
+    """broadcast() → 全局广播到所有用户队列。"""
     # 重置全局状态，避免跨 test 函数的 event loop 绑定冲突
     event_bus._global_queue = None
     event_bus._user_queues.clear()
@@ -110,7 +114,7 @@ def test_global_broadcast_reaches_all_users():
         t1 = asyncio.ensure_future(_collect_all(gen1, user1_events, max_events=1))
         t2 = asyncio.ensure_future(_collect_all(gen2, user2_events, max_events=1))
         await asyncio.sleep(0.05)
-        publish(GRAPH_UPDATED)
+        broadcast(GRAPH_UPDATED)
         await asyncio.wait_for(asyncio.gather(t1, t2), timeout=1.0)
 
     asyncio.run(_run())
@@ -125,20 +129,36 @@ def test_global_broadcast_reaches_all_users():
 
 
 def test_user_queue_lazy_creation():
-    """用户队列在 subscribe 时才创建。"""
-    _reset_state()
+    """用户队列在 subscribe 时才创建（惰性），订阅断开即摘掉。
 
+    ⚠️ 断言必须发生在**订阅存活期间**：多端 fan-out 之后，订阅者断开时
+    `_drop_user_queue` 会摘掉自己的队列（该用户再无队列则条目消失），
+    所以旧的"断开后条目仍在"不再成立。
+    """
+    _reset_state()
     assert 99 not in event_bus._user_queues
-    asyncio.run(_start_and_cancel_subscribe(99, sleep=0.1))
-    assert 99 in event_bus._user_queues
 
+    async def _run():
+        gen = subscribe(user_id=99)
+        task = asyncio.ensure_future(_collect_all(gen, [], max_events=1))
+        await asyncio.sleep(0.1)
+        created = 99 in event_bus._user_queues   # 订阅期间 = 已创建
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return created
+
+    assert asyncio.run(_run()) is True
+    assert 99 not in event_bus._user_queues      # 断开即摘掉（不留僵尸队列）
     _reset_state()
 
 
-def test_unpublished_user_event_silently_dropped():
-    """publish 给未订阅的用户 → 静默丢弃，不报错。"""
+def test_notify_unsubscribed_user_does_not_raise():
+    """notify 给未订阅的用户 → 不报错，留库待补拉（A2-3 起不再"静默丢弃"）。"""
     _reset_state()
-    publish(TOOL_RESULT, {"tool": "rag_search", "ok": True}, user_id=888)
+    notify(888, TOOL_RESULT, {"tool": "rag_search", "ok": True})
     _reset_state()
 
 
@@ -157,13 +177,43 @@ def test_event_type_constants():
 # ── 新增：公开接口 + 线程安全 + 消费者排空模式 ──
 
 
-def test_get_user_queue_returns_same_instance():
-    """get_user_queue 返回的队列与 subscribe 内部使用的队列是同一实例。"""
+def test_get_user_queue_creates_independent_queue_per_subscriber():
+    """多端 fan-out：每个订阅者拿到**独立**队列，不再是共享的那一条。
+
+    旧实现（2026-10-07 前）每个 user_id 只有一条队列 —— 同一账户两端都
+    `await` 同一个 `q.get()`，事件被先醒的一端抢走，另一端永远收不到。
+    """
     _reset_state()
     q1 = get_user_queue(42)
     q2 = get_user_queue(42)
-    assert q1 is q2
-    assert 42 in event_bus._user_queues
+    assert q1 is not q2
+    assert event_bus._user_queues[42] == {q1, q2}
+    _reset_state()
+
+
+def test_two_subscribers_of_same_user_both_receive():
+    """同一账户两端订阅 → 同一条通知**两端都收到**（fan-out）。
+
+    回归：`/knowledge/events` 在两端各建一条长连接时，graph_updated / quiz_ready
+    只能被一端收到（另一端界面永远停在旧数据上）。
+    """
+    _reset_state()
+    a_events, b_events = [], []
+
+    async def _run():
+        ta = asyncio.ensure_future(
+            _collect_all(subscribe(user_id=1), a_events, max_events=1))
+        tb = asyncio.ensure_future(
+            _collect_all(subscribe(user_id=1), b_events, max_events=1))
+        await asyncio.sleep(0.05)  # 两端都挂起在各自的 q.get() 上
+        notify(1, GRAPH_UPDATED, {"node_id": "n1"})
+        await asyncio.gather(ta, tb)
+
+    asyncio.run(_run())
+    assert len(a_events) == 1, f"A 端没收到: {a_events}"
+    assert len(b_events) == 1, f"B 端没收到: {b_events}"
+    assert a_events[0]["node_id"] == "n1"
+    assert b_events[0]["node_id"] == "n1"
     _reset_state()
 
 
@@ -176,7 +226,7 @@ def test_get_user_queue_pre_creation_eliminates_race():
         q = get_user_queue(1)  # 预创建
         get_task = asyncio.ensure_future(q.get())
         await asyncio.sleep(0.01)  # 让 get_task 挂起在 q.get() 上
-        publish(TEXT_DELTA, {"text": "hello", "run_id": "r1"}, user_id=1)
+        notify(1, TEXT_DELTA, {"text": "hello", "run_id": "r1"})
         event = await asyncio.wait_for(get_task, timeout=1.0)
         collected.append(event)
 
@@ -205,11 +255,11 @@ def test_ensure_loop_no_ghost_creation():
     _reset_state()
 
 
-def test_publish_no_loop_silently_drops():
-    """无 loop 时 publish 不崩溃，静默丢弃事件。"""
+def test_notify_no_loop_does_not_raise():
+    """无 loop 时 notify 不崩溃（无处可推 → 留库待补拉）。"""
     _reset_state()
-    # 不在 async 上下文，不设置 _loop → publish 应静默跳过
-    publish(TEXT_DELTA, {"text": "ghost"}, user_id=1)  # 不抛异常
+    # 不在 async 上下文，不设置 _loop → notify 应跳过推送
+    notify(1, TEXT_DELTA, {"text": "ghost"})  # 不抛异常
     _reset_state()
 
 
@@ -223,8 +273,8 @@ def test_consumer_drain_after_task_completion():
 
         async def fake_agent():
             await asyncio.sleep(0.01)  # 让消费者先挂起在 q.get()
-            publish(TEXT_DELTA, {"text": "hello", "run_id": "r1"}, user_id=1)
-            publish(AGENT_DONE, {"rounds": 1, "total_llm_calls": 1, "run_id": "r1"}, user_id=1)
+            notify(1, TEXT_DELTA, {"text": "hello", "run_id": "r1"})
+            notify(1, AGENT_DONE, {"rounds": 1, "total_llm_calls": 1, "run_id": "r1"})
 
         agent_task = asyncio.ensure_future(fake_agent())
 
@@ -266,7 +316,7 @@ def test_consumer_handles_agent_exception():
 
         async def crashing_agent():
             await asyncio.sleep(0.01)
-            publish(TEXT_DELTA, {"text": "partial", "run_id": "r1"}, user_id=1)
+            notify(1, TEXT_DELTA, {"text": "partial", "run_id": "r1"})
             raise RuntimeError("agent crashed")
 
         agent_task = asyncio.ensure_future(crashing_agent())
@@ -358,27 +408,41 @@ def test_request_scoped_event_bypasses_user_broadcast_queue(monkeypatch):
     """AgentEventEmitter(queue=...) 的事件走私有队列，绝不进 per-user 广播队列。
 
     锁死的不变量：传了私有 queue → 事件直投该队列，既不入 event_bus 的 per-user
-    队列，常驻长连接（subscribe(user_id=...)）也收不到。若 events.py 的
-    `if self.queue is not None:` 分支被移除，emit 会回落到 publish(..., user_id=1)，
-    本测试三条断言全变红。
+    队列，常驻长连接（subscribe(user_id=...)）也收不到。
 
-    断言#2 为何 spy `publish` 而非查"队列为空"：per-user 队列是**事后**观测 ——
+    ⚠️ 2026-10-08（A2-1a）后本测试的**机制变了、价值仍在**：A2-1a 起 run 事件
+    根本不 import `publish`（回落路径物理不存在，另由
+    `tests/test_event_contract.py::test_run_events_have_no_event_bus_path` 结构性守死），
+    所以"断言#2"已由构造保证。保留它是**第二张网**（防有人重新引入一条经 event_bus 的路径）。
+
+    断言#2 为何 spy 投递口而非查"队列为空"：per-user 队列是**事后**观测 ——
     破坏态下事件虽进了该队列，却会被常驻长连接（正挂起在 q.get() 上）抢先消费，
-    队列随即变空 → "为空"断言在破坏态**误绿**。改为 spy `events.publish`，直接
-    断言"请求内事件**从未**发起过 publish"（动作语义，与事件事后是否被消费无关）。
+    队列随即变空 → "为空"断言在破坏态**误绿**。改为 spy，直接断言
+    "请求内事件**从未**发起过投递"（动作语义，与事件事后是否被消费无关）。
+
+    spy 目标 = **`event_bus` 的两个投递口**（源头）而非 events 模块里的引用点：
+    引用点在 A2-1a 后已不存在（AttributeError）；且 spy 源头能盖住**任何**进
+    event_bus 的路径，引用点只能盖住一处（模块加载时 `from ... import notify`
+    绑定函数对象的写法就盖不住）。A2-1b 后投递口有两个（broadcast / notify），
+    两个都 spy 才算完整。
     """
     _reset_state()
     ks_events = []
     publish_calls: list = []
 
-    # spy 包住真正的 publish：既记录调用，又保留破坏态"事件真进了 per-user 队列"的行为
-    real_publish = event_bus.publish
+    # spy 包住真正的 broadcast/notify：既记录调用，又保留破坏态"事件真进了 per-user 队列"的行为
+    real_broadcast, real_notify = event_bus.broadcast, event_bus.notify
 
-    def spy_publish(*args, **kwargs):
-        publish_calls.append((args, kwargs))
-        return real_publish(*args, **kwargs)
+    def spy_broadcast(*args, **kwargs):
+        publish_calls.append(("broadcast", args, kwargs))
+        return real_broadcast(*args, **kwargs)
 
-    monkeypatch.setattr(agent_events, "publish", spy_publish)
+    def spy_notify(*args, **kwargs):
+        publish_calls.append(("notify", args, kwargs))
+        return real_notify(*args, **kwargs)
+
+    monkeypatch.setattr(event_bus, "broadcast", spy_broadcast)
+    monkeypatch.setattr(event_bus, "notify", spy_notify)
 
     async def _run():
         # 常驻长连接（等价前端进对话页即建立的 /knowledge/events），先挂起在 q.get() 上
@@ -407,30 +471,32 @@ def test_request_scoped_event_bypasses_user_broadcast_queue(monkeypatch):
     # 1) 事件进了私有队列
     assert q.qsize() == 1, f"私有队列没拿到事件: {q.qsize()}"
     assert q.get_nowait() == {"type": TEXT_DELTA, "run_id": "r1", "text": "正文"}
-    # 2) 请求内事件从未走 event_bus.publish（动作语义，非"队列事后为空"）
-    assert publish_calls == [], f"请求内事件串进了 event_bus.publish: {publish_calls}"
+    # 2) 请求内事件从未走 event_bus 的任何投递口（动作语义，非"队列事后为空"）
+    assert publish_calls == [], f"请求内事件串进了 event_bus: {publish_calls}"
     # 3) 常驻长连接收不到
     assert ks_events == [], f"常驻长连接抢到了请求内事件: {ks_events}"
     _reset_state()
 
 
-def test_non_stream_chat_also_passes_private_queue(monkeypatch):
-    """非流式 POST /chat 也必须给 agent 传私有队列（2026-09-26 收口）。
+def test_non_stream_chat_declares_explicit_null_sink(monkeypatch):
+    """非流式 POST /chat 必须**显式声明**「本路径不推事件」（A2-2）。
 
-    它和 /chat/stream 的差别只在"没人消费事件"，不在"该不该推"：不传队列时
-    emitter 会回落到 publish(user_id=...)，把 thinking/text_delta 灌进 per-user
-    广播队列 → 被常驻长连接抢走并污染通知流。若 chat_service.process_message
-    里的 event_queue 参数被删掉，本测试变红。
+    它和 /chat/stream 的差别只在"没人消费事件"，不在"该不该推"。A2 契约下
+    `user_id` 有值就必须给出投递目标，漏传在 `AgentEventEmitter` 构造处直接抛
+    ValueError；"不推"的显式写法是 `NullSink()`（可计数 → 落 agent_runs.events_written）。
+    若 `chat_service.process_message` 把参数删掉、或改回"塞一个没人消费的 Queue"，
+    本测试变红。
     """
     from app.services import chat_service
 
     captured = {}
 
     async def fake_loop(prompt, messages, *, kg=None, user_id=None, event_queue=None,
-                        db_dir=None, no_tools=False):
+                        event_sink=None, db_dir=None, no_tools=False):
         # ⚠️ `no_tools` 必须留在签名里：学习模式开场轮用它禁工具（2026-09-30 加），
         # 少了这个形参 → `process_message` 传参直接 TypeError，整条断言变成 E-CHAT-002。
         captured["queue"] = event_queue
+        captured["sink"] = event_sink
         captured["user_id"] = user_id
 
         class _Result:
@@ -461,8 +527,9 @@ def test_non_stream_chat_also_passes_private_queue(monkeypatch):
         user_id=1, messages=[{"role": "user", "content": "hi"}]))
 
     assert reply == "ok"
-    assert captured.get("queue") is not None, \
-        "非流式路径没传私有队列 → 请求内事件会污染 per-user 广播队列"
+    assert isinstance(captured.get("sink"), NullSink), \
+        "非流式路径必须显式传 NullSink —— 既不推事件，也不回落 event_bus"
+    assert captured.get("queue") is None
 
 
 # ── helpers ──
@@ -481,15 +548,3 @@ async def _collect_all(gen, events_list, max_events=1):
         events_list.append(payload)
         if len(events_list) >= max_events:
             break
-
-
-async def _start_and_cancel_subscribe(user_id, sleep=0.1):
-    """启动 subscribe 然后取消（触发队列惰性创建）。"""
-    gen = subscribe(user_id=user_id)
-    task = asyncio.ensure_future(_collect_all(gen, [], max_events=1))
-    await asyncio.sleep(sleep)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass

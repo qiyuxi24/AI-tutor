@@ -26,6 +26,7 @@ from typing import AsyncGenerator
 from datetime import datetime
 from app.core.prompt_loader import get_system_prompt
 from app.core.agent.loop import run_agent_loop
+from app.core.agent.events import NullSink
 from app.core.agent_tools import TOOLS_PROMPT  # 注册表生成的「工具调用指南」段落
 from app.core.agent_tools.registry import build_authorization_block
 from app.core.config import settings
@@ -35,7 +36,7 @@ from app.core.knowledge_graph import KnowledgeGraph
 from app.core.profile import UserProfile
 from app.core.token_counter import count_tokens
 from app.core.error_codes import ErrorCode, log_error, publish_error_event
-from app.core.event_bus import publish, TEXT_DELTA
+from app.core.event_bus import broadcast, GRAPH_UPDATED, TEXT_DELTA
 from app.core.knowledge_writer import apply_suggestion, load_suggestions, save_suggestions
 from app.core.quiz.chat_grade import auto_grade_pending
 
@@ -845,7 +846,7 @@ async def _analyze_and_apply(user_message: str, ai_reply: str,
 
         # 如果有自动应用的变更，发布 graph_updated 事件通知前端刷新
         if applied_list:
-            publish("graph_updated")
+            broadcast(GRAPH_UPDATED)
 
         # RAG 增量索引：对本次实际变更的节点重新建立语义索引
         if applied_list:
@@ -949,9 +950,11 @@ async def process_message(user_id: int, messages: list,
 
         # 4. Agent 主循环：LLM ↔ 工具 多轮串联，直到自然给出最终回复
         #    ★ 传 user_id：即使无 SSE 订阅，运行记录也写入 agent_runs（默认可观测）
-        #    ★ 传私有队列：本路径不消费事件，但请求内事件**不得**走 event_bus 的
-        #      per-user 广播队列 —— 常驻长连接 /knowledge/events 会抢走并丢弃它们，
-        #      还会污染通知流（见 core/agent/events.py）。队列无人读取，随 run 回收。
+        #    ★ 传 NullSink（A2-2）：本路径不消费事件 → **显式**声明"不推"，
+        #      而不是塞一个没人消费的 Queue（半吊子写法）。请求内事件**不得**走
+        #      event_bus 的 per-user 广播队列 —— 常驻长连接 /knowledge/events 会抢走
+        #      并丢弃它们，还会污染通知流（见 core/agent/events.py）。
+        #      事件数经 emitter 记入 agent_runs.events_written（"回复送到前端没有"的观测口径）。
         #    ★ 学习模式开场轮 → no_tools：第一轮只允许输出开场说明（硬保证，见 loop.py）
         focus_node = kg.get_node(current_node) if current_node else None
         learn_kind = learn_mode_kind(kg, focus_node, messages)
@@ -961,7 +964,7 @@ async def process_message(user_id: int, messages: list,
         _stash_quiz_consent(kg, messages)
         result = await run_agent_loop(
             system_prompt, messages, kg=kg, user_id=user_id,
-            event_queue=asyncio.Queue(),
+            event_sink=NullSink(),
             no_tools=learn_kind == "opener",
         )
         reply = result.text
@@ -1071,7 +1074,7 @@ async def process_message_stream(
             last_user = user_msgs[-1].content if hasattr(user_msgs[-1], 'content') else user_msgs[-1]['content']
             await _analyze_and_apply(last_user, result.text, user_id)
 
-        publish("graph_updated")
+        broadcast(GRAPH_UPDATED)
 
         # 冗余兜底帧：agent loop 的最终文本是「收尾一次性单帧」下发的（非逐 token），
         # 那一帧若在 _consume_agent_events 的排空窗口丢失，前端会整条消息拿不到内容，

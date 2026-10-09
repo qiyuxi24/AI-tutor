@@ -342,11 +342,12 @@ def spy(monkeypatch):
 def events(monkeypatch):
     """捕获推送的事件类型。
 
-    注意打在**本模块**的 `publish` 上：`quiz_generate` 是模块顶层 `from ... import publish`，
-    打 `event_bus.publish` 对它无效（这是本仓库 import 风格带来的真实差异）。
+    注意打在**本模块**的 `broadcast` 上：`quiz_generate` 是模块顶层
+    `from ... import broadcast`，打 `event_bus.broadcast` 对它无效
+    （这是本仓库 import 风格带来的真实差异）。
     """
     seen = []
-    monkeypatch.setattr(quiz_generate, "publish", lambda ev, *a, **kw: seen.append(ev))
+    monkeypatch.setattr(quiz_generate, "broadcast", lambda ev, *a, **kw: seen.append(ev))
     return seen
 
 

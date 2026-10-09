@@ -7,6 +7,7 @@ import asyncio
 from types import SimpleNamespace
 
 from app.core.agent import loop as loop_mod
+from app.core.agent.events import NullSink
 from app.core.llm import usage as llm_usage
 from app.core.token_counter import TokenUsage
 
@@ -84,7 +85,7 @@ def test_agent_loop_actually_records_usage(tmp_path, monkeypatch):
     monkeypatch.setattr(loop_mod, "_chat_once", fake_chat)
     asyncio.run(loop_mod.run_agent_loop(
         "sys", [{"role": "user", "content": "hi"}],
-        kg=None, user_id=42, db_dir=tmp_path,
+        kg=None, user_id=42, db_dir=tmp_path, event_sink=NullSink(),
     ))
 
     out = llm_usage.summary(since_hours=1, db_dir=tmp_path)

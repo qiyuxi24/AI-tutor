@@ -226,15 +226,12 @@ def test_quiz_generate_rejects_missing_node_id():
 
 def test_background_task_reports_timeout_and_releases_slot(monkeypatch):
     """后台子任务超时必须回报主对话（推 ok=False）并释放占位 —— 否则该用户永远出不了题。"""
-    published = []
-
     async def _hang(user_id, *, node_id, section_id="", count=1):
         await asyncio.sleep(10)
 
     monkeypatch.setattr(chat_quiz, "generate_and_publish", _hang)
     monkeypatch.setattr(chat_quiz, "CHAT_QUIZ_TIMEOUT_SECS", 0.05)
-    monkeypatch.setattr(chat_quiz, "publish",
-                        lambda t, d, user_id: published.append((t, d, user_id)))
+    published = _patch_publish(monkeypatch)
 
     _run(chat_quiz._run_guarded(7, "bt", 1))
 
@@ -277,10 +274,7 @@ def test_generate_and_publish_pushes_questions_without_answers(
         tmp_path, monkeypatch):
     """出题成功 → 推 quiz_ready；推送载荷**不含答案/解析**（防作弊）。"""
     _patch_store(monkeypatch, tmp_path)
-    published = []
-    monkeypatch.setattr(chat_quiz, "publish",
-                        lambda etype, data=None, user_id=None: published.append(
-                            (etype, data, user_id)))
+    published = _patch_publish(monkeypatch)
 
     class _FakeKgForGen:
         def __init__(self, user_id):
@@ -362,9 +356,14 @@ def _patch_generator(monkeypatch, seen: dict):
 
 
 def _patch_publish(monkeypatch):
+    """捕获 `chat_quiz` 的定向通知（A2-1b 起投递口 = `event_bus.notify`）。
+
+    记录形状仍是 `(etype, data, user_id)` —— 调用顺序变了（收件人在前），
+    断言处不必跟着改。
+    """
     published = []
-    monkeypatch.setattr(chat_quiz, "publish",
-                        lambda etype, data=None, user_id=None: published.append(
+    monkeypatch.setattr(chat_quiz, "notify",
+                        lambda user_id, etype, data=None, **kw: published.append(
                             (etype, data, user_id)))
     return published
 
@@ -459,10 +458,7 @@ def test_node_level_quiz_uses_node_sources_without_mounting(tmp_path, monkeypatc
 def test_generate_and_publish_reports_failure(tmp_path, monkeypatch):
     """出题失败 → 推 ok=False（学生不会永远等下去）。"""
     _patch_store(monkeypatch, tmp_path)
-    published = []
-    monkeypatch.setattr(chat_quiz, "publish",
-                        lambda etype, data=None, user_id=None: published.append(
-                            (etype, data, user_id)))
+    published = _patch_publish(monkeypatch)
 
     class _KgNoNode:
         def __init__(self, user_id):

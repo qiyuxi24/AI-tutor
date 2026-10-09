@@ -32,7 +32,7 @@ import logging
 import time
 
 from app.core.agent.debug_log import RunLogger
-from app.core.event_bus import QUIZ_READY, publish
+from app.core.event_bus import QUIZ_READY, notify
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.quiz.quiz_store import quiz_manager
 
@@ -199,9 +199,8 @@ async def generate_and_publish(user_id: int, *, node_id: str,
     try:
         node = kg.get_node(node_id)
         if node is None:
-            publish(QUIZ_READY, {"ok": False, "node_id": node_id,
-                                 "message": f"知识点 {node_id} 不存在，无法出题"},
-                    user_id=user_id)
+            notify(user_id, QUIZ_READY, {"ok": False, "node_id": node_id,
+                                         "message": f"知识点 {node_id} 不存在，无法出题"})
             return
 
         subject = node.get("name") or node_id
@@ -233,9 +232,8 @@ async def generate_and_publish(user_id: int, *, node_id: str,
         )
         questions = result["questions"]
         if not questions:
-            publish(QUIZ_READY, {"ok": False, "node_id": node_id, "subject": subject,
-                                 "message": "出题未产出可用题目，请稍后再试"},
-                    user_id=user_id)
+            notify(user_id, QUIZ_READY, {"ok": False, "node_id": node_id, "subject": subject,
+                                         "message": "出题未产出可用题目，请稍后再试"})
             return
 
         # 记录来源知识点：knowledge_point 是字符串字段、语义就是"关联知识点（用于回填图谱）"，
@@ -252,23 +250,22 @@ async def generate_and_publish(user_id: int, *, node_id: str,
         for qid in ids:
             _mount_quiz_ref(kg, node_id, qid, section_id)
 
-        publish(QUIZ_READY, {
+        notify(user_id, QUIZ_READY, {
             "ok": True,
             "node_id": node_id,
             "section_id": section_id,
             "section_title": _section_title(kg, node_id, section_id),
             "subject": subject,
             "questions": [_public_question(i, q) for i, q in zip(ids, questions)],
-        }, user_id=user_id)
+        })
         logger.info(f"对话内出题完成：user={user_id} node={node_id} "
                     f"section={section_id or '-'} 题目数={len(ids)}"
                     f"（依据片段 {result['materials_used']} 个，来源文件 {len(source_docs)} 份）")
 
     except Exception as e:
         logger.error(f"对话内出题失败（user={user_id} node={node_id}）: {e}")
-        publish(QUIZ_READY, {"ok": False, "node_id": node_id,
-                             "message": "出题失败，请稍后再试"},
-                user_id=user_id)
+        notify(user_id, QUIZ_READY, {"ok": False, "node_id": node_id,
+                                     "message": "出题失败，请稍后再试"})
     finally:
         kg.close()
 
@@ -297,14 +294,14 @@ async def _run_guarded(user_id: int, node_id: str, count: int,
         ok, reason = False, "timeout"
         rlog.log("bg", "quiz_bg_timeout", "后台出题超时", level="ERROR",
                  node_id=node_id, timeout_secs=CHAT_QUIZ_TIMEOUT_SECS)
-        publish(QUIZ_READY, {"ok": False, "node_id": node_id,
-                             "message": "出题超时了，请稍后再试"}, user_id=user_id)
+        notify(user_id, QUIZ_READY, {"ok": False, "node_id": node_id,
+                                     "message": "出题超时了，请稍后再试"})
     except Exception as e:  # generate_and_publish 已自兜底，这里是双保险
         ok, reason = False, "error"
         rlog.log("bg", "quiz_bg_error", "后台出题异常", level="ERROR",
                  node_id=node_id, error=str(e))
-        publish(QUIZ_READY, {"ok": False, "node_id": node_id,
-                             "message": "出题失败，请稍后再试"}, user_id=user_id)
+        notify(user_id, QUIZ_READY, {"ok": False, "node_id": node_id,
+                                     "message": "出题失败，请稍后再试"})
     finally:
         rlog.log("bg", "quiz_bg_end", "后台出题任务结束", ok=ok, reason=reason,
                  node_id=node_id, elapsed=round(time.monotonic() - started, 1))

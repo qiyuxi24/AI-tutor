@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from app.core.agent import loop as agent_loop, store as run_store
 from app.core.agent.context import TOOL_RESULT_CLEARED
 from app.core.agent.events import (
-    AgentEventEmitter,
+    AgentEventEmitter, NullSink,
     AGENT_START, AGENT_DONE,
     TOOL_START, TOOL_RESULT,
     THINKING, TEXT_DELTA,
@@ -291,7 +291,8 @@ def test_run_persists_to_agent_runs_evidence(tmp_path, monkeypatch):
     _install_fake_execute(monkeypatch)
 
     result = asyncio.run(run_agent_loop(
-        "sys", [{"role": "user", "content": "连边"}], kg=object(), user_id=7, db_dir=tmp_path,
+        "sys", [{"role": "user", "content": "连边"}], kg=object(), user_id=7,
+        db_dir=tmp_path, event_sink=NullSink(),
     ))
     assert result.total_llm_calls == 2
     assert len(result.evidence) == 4  # tool_call + tool_result + final_text + loop_stop
@@ -325,7 +326,8 @@ def test_run_persists_to_agent_runs_evidence(tmp_path, monkeypatch):
     # 纯文本 run：同样落库，无工具证据
     _install_fake_chat(monkeypatch, [_resp(_msg(content="纯回答"))], received)
     asyncio.run(run_agent_loop(
-        "sys", [{"role": "user", "content": "hi"}], kg=object(), user_id=7, db_dir=tmp_path,
+        "sys", [{"role": "user", "content": "hi"}], kg=object(), user_id=7,
+        db_dir=tmp_path, event_sink=NullSink(),
     ))
     runs = run_store.list_runs(7, db_dir=tmp_path)
     assert len(runs) == 2
@@ -385,26 +387,42 @@ class _CollectEmitter:
         self.events.append((event_type, data))
 
 
-def test_agent_emitter_injects_run_id_and_routes(monkeypatch):
-    """AgentEventEmitter.emit 自动注入 run_id 并精准路由 user_id。"""
-    calls = []
-    monkeypatch.setattr("app.core.agent.events.publish",
-                        lambda t, d, user_id: calls.append((t, d, user_id)))
-    AgentEventEmitter("run-abc", user_id=9).emit(TEXT_DELTA, text="hi")
-    AgentEventEmitter("run-abc", user_id=9).emit(AGENT_DONE, rounds=1, total_llm_calls=2)
-    assert calls == [
-        (TEXT_DELTA, {"run_id": "run-abc", "text": "hi"}, 9),
-        (AGENT_DONE, {"run_id": "run-abc", "rounds": 1, "total_llm_calls": 2}, 9),
-    ]
+# 原 `test_agent_emitter_injects_run_id_and_routes` 已删除（A2, 2026-10-08）：
+# 它锁的正是被 A2 取消的**静默回落**行为 —— `user_id` 有值 + 不给 queue 时
+# emit 会去调 `event_bus.publish(user_id=...)`。现在那一步改为**抛 ValueError**，
+# run 事件也不再经 event_bus。新契约的行为断言在 `tests/test_event_contract.py`
+# （run_id 注入 / 私有队列直投 / 绝不 publish），此处不再保留旧行为的副本。
 
 
-def test_agent_emitter_silent_without_user(monkeypatch):
-    """无 user 的 run 静默不发布（不污染全局广播/订阅者）。"""
-    calls = []
-    monkeypatch.setattr("app.core.agent.events.publish", lambda *a, **k: calls.append(a))
+def test_agent_emitter_silent_without_user():
+    """无 user 的 run 静默不推事件（不污染全局广播 / 订阅者），且不报错。"""
     AgentEventEmitter("run-abc").emit(THINKING, text="x")
     AgentEventEmitter("run-abc").emit(TEXT_DELTA, text="y")
-    assert calls == []
+
+
+def test_run_accepts_explicit_null_sink(monkeypatch, tmp_path):
+    """`event_sink=NullSink()` = 显式「本路径不推事件」，run 正常跑完且可计数。
+
+    A2 契约的另一半：`user_id` 有值但**不打算推**事件的调用方（非流式 /chat、
+    脚本、单测）必须显式说出来，而不是塞一个没人消费的 Queue
+    （原先 `chat_service.process_message` 就是这么写的）。NullSink 的 count
+    就是"本次 run 写出了几条事件"的观测口径。
+    """
+    received = []
+    _install_fake_chat(monkeypatch, [_resp(_msg(content="好的"))], received)
+
+    sink = NullSink()
+    result = asyncio.run(run_agent_loop(
+        "sys", [{"role": "user", "content": "hi"}],
+        kg=object(), user_id=7, db_dir=tmp_path, event_sink=sink,
+    ))
+
+    assert result.text == "好的"
+    assert sink.count >= 1   # 至少 agent_start / text_delta / agent_done
+    # A2-2 验收：写出事件数落 agent_runs（GET /agent/runs/{id} 可见，观测"回复送到前端没有"）
+    run = run_store.get_run(7, run_store.list_runs(7, db_dir=tmp_path)[0]["run_id"],
+                            db_dir=tmp_path)
+    assert run["events_written"] == sink.count
 
 
 def test_loop_events_flow_through_emitter(monkeypatch):

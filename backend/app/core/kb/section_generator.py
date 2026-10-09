@@ -518,6 +518,16 @@ class SectionGenerator:
         message = (f"生成小节 {len(created)} 个"
                    + (f"，失败 {len(failed)} 个" if failed else ""))
         logger.info(f"节点小节化（{node_id}）：{message}")
+        # A4-3：小节化成功后删掉主 MD 的骨架占位（`{id}.md` 只含「待完善...」，正文已进小节）；
+        # 只有小节真正成文（created 非空）才删，失败/增补无新侧面时保留原样。
+        # 走 getattr + try：测试替身 kg 可能没有该方法（或缺能力），降级语义：不毁小节化。
+        _remove_skeleton = getattr(kg, "remove_skeleton_md", None)
+        if created and callable(_remove_skeleton):
+            try:
+                if _remove_skeleton(node_id):
+                    logger.info(f"节点小节化（{node_id}）：已删除主 MD 骨架占位（{node_id}.md）")
+            except Exception as e:                    # noqa: BLE001 —— 删骨架失败不阻断
+                logger.debug(f"删除节点 {node_id} 骨架 MD 失败（忽略）：{e}")
         return {"status": "ok", "created": created, "failed": failed, "message": message}
 
     # ────────────────────────────────────────────
@@ -837,7 +847,7 @@ async def _run_regeneration(user_id: int, node_id: str, *, replace: bool,
     推事件的理由：前端只认这条通知刷新图谱/详情 —— 失败也推一次，学生那点开看到的就是
     "内容没变"（而不是界面永远停在旧数据上以为改成功了）。
     """
-    from app.core.event_bus import GRAPH_UPDATED, publish
+    from app.core.event_bus import GRAPH_UPDATED, notify
     from app.core.knowledge_graph import KnowledgeGraph
 
     kg = KnowledgeGraph(user_id=user_id)
@@ -852,7 +862,7 @@ async def _run_regeneration(user_id: int, node_id: str, *, replace: bool,
     finally:
         kg.close()
         _INFLIGHT.discard((user_id, node_id))
-        publish(GRAPH_UPDATED, {"node_id": node_id}, user_id=user_id)
+        notify(user_id, GRAPH_UPDATED, {"node_id": node_id})
 
 
 def start_background_regeneration(user_id: int, node_id: str, *, replace: bool = False,

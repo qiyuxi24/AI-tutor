@@ -27,7 +27,7 @@ def _store(tmp_path, user_id: int = 7):
 
 
 class _FakeKg:
-    """最小 KnowledgeGraph 替身（只用到 user_id / get_node / update_node_info）"""
+    """最小 KnowledgeGraph 替身（只用到 user_id / get_node / update_node_info / add_mastery）"""
 
     def __init__(self, nodes=None, mastery_fails=False):
         self.user_id = 7
@@ -35,6 +35,7 @@ class _FakeKg:
         self._mastery_fails = mastery_fails
         self.mastery_updates = []   # [(node_id, mastery)]
         self.mastery_meta = []      # [(reason, evidence)] —— KG-D4 事件元信息
+        self.increment_calls = []   # [(node_id, delta)] —— 走的是增量而非绝对值
 
     def get_node(self, node_id):
         return self._nodes.get(node_id)
@@ -45,6 +46,18 @@ class _FakeKg:
         self.mastery_updates.append((node_id, data.get("mastery")))
         self.mastery_meta.append((meta.get("mastery_reason"), meta.get("mastery_evidence")))
         self._nodes.setdefault(node_id, {})["mastery"] = data.get("mastery")
+
+    def add_mastery(self, node_id, delta, *, caller="human", reason="manual", evidence=""):
+        """增量替身：与真实实现同口径（基于当前值累加 + 封顶 100，返回落库值）。"""
+        if self._mastery_fails:
+            raise PermissionError("人类创建的节点")
+        cur = int(self._nodes.get(node_id, {}).get("mastery") or 0)
+        after = max(0, min(100, cur + int(delta)))
+        self._nodes.setdefault(node_id, {})["mastery"] = after
+        self.mastery_updates.append((node_id, after))
+        self.mastery_meta.append((reason, evidence))
+        self.increment_calls.append((node_id, int(delta)))
+        return after
 
 
 def _seed_question(store, *, source, question_text, knowledge_point=""):
@@ -110,6 +123,17 @@ def test_grade_answer_mastery_capped_at_100():
     note = chat_grade.apply_mastery_after_answer(kg, "stack", correct=True)
     assert kg.mastery_updates == [("stack", 100)]
     assert "100" in note
+
+
+def test_apply_mastery_uses_increment_not_absolute():
+    """判分抬升必须走**增量**接口（多端并发安全）。
+
+    旧实现是 `min(100, get_node().mastery + 20)` 后写绝对值 —— 同一账户两端
+    同时答对时两端都基于同一快照算 → 只 +20 而不是 +40（lost update）。
+    """
+    kg = _FakeKg({"stack": {"id": "stack", "name": "栈", "mastery": 20}})
+    chat_grade.apply_mastery_after_answer(kg, "stack", correct=True)
+    assert kg.increment_calls == [("stack", 20)]
 
 
 def test_grade_answer_mastery_permission_error_is_silent():

@@ -35,10 +35,10 @@ def kg(tmp_path):
 
 @pytest.fixture
 def events(monkeypatch):
-    """捕获 `publish` 的事件类型（工具内部延迟导入，所以打 event_bus 模块上的名字）。"""
+    """捕获广播的事件类型（工具内部延迟导入，所以打 event_bus 模块上的名字）。"""
     seen = []
     import app.core.event_bus as bus
-    monkeypatch.setattr(bus, "publish", lambda ev, *a, **kw: seen.append(ev))
+    monkeypatch.setattr(bus, "broadcast", lambda ev, *a, **kw: seen.append(ev))
     return seen
 
 

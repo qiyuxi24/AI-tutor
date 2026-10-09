@@ -123,6 +123,11 @@ def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
       - 答错 → **不变**。不做惩罚性扣分：答错说明还没学牢，交给 AI 用苏格拉底追问补救，
         扣分只会打击学生。
 
+    ⚠️ 走**增量**接口 `kg.add_mastery`（2026-10-07 多端修复）：旧实现先 `get_node`
+    读出旧值、再写绝对值 `min(100, current + 20)` —— 同一账户两端同时判分答对时，
+    两端都基于同一快照算 → 只 +20 而不是 +40（lost update）。increment 在写事务内
+    读当前值，天然免疫。
+
     参数:
         evidence: 证据引用（题目 id），随掌握度事件落库（KG-D4）→ 可回溯"这 20 分哪来的"。
 
@@ -137,14 +142,13 @@ def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
     name = node.get("name") or node_id
     if current >= 100:
         return f"「{name}」掌握度已是满值 100，无需再提升。"
-    new = min(100, current + MASTERY_CORRECT_GAIN)
     try:
         # caller="human"：这是**用户答题**的结果，不是 AI 自作主张。
         # 原先写 "ai" 会被 `_guard_human_content` 拦下（AI 无权改人类创建的节点）→
         # 用户手动建的知识点**永远无法通过答题提分**（静默写不进去，只留一条 warning）。
         # 2026-09-29 补测试时暴露。
-        kg.update_node_info(node_id, {"mastery": new}, caller="human",
-                            mastery_reason="quiz_correct", mastery_evidence=evidence)
+        new = kg.add_mastery(node_id, MASTERY_CORRECT_GAIN, caller="human",
+                             reason="quiz_correct", evidence=evidence)
     except Exception as e:
         # 人类创建的节点 AI 无权改（PermissionError）——判分照常返回，只是不改进度
         logger.warning(f"判分后更新掌握度失败（{node_id}）: {e}")

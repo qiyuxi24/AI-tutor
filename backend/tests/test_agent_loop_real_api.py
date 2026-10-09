@@ -23,6 +23,7 @@ import re
 import pytest
 
 from app.core.agent.loop import run_agent_loop
+from app.core.agent.events import NullSink
 from app.core.agent import store as run_store
 from app.core.knowledge_graph import KnowledgeGraph
 
@@ -95,7 +96,8 @@ async def test_L1_tool_selection_add_node(tmp_path):
     try:
         messages = [{"role": "user", "content":
             "请给知识图谱添加一个新知识点：快速排序，它是重要的排序算法，请给它一个合理难度。"}]
-        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid)
+        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid,
+                                      event_sink=NullSink())
 
         # 断言1：至少触发了一个工具
         assert len(result.rounds) > 0, "期望触发工具但模型未调用任何工具"
@@ -127,7 +129,8 @@ async def test_L2_argument_extraction_add_node(tmp_path):
     try:
         messages = [{"role": "user", "content":
             "请添加一个新知识点：归并排序，内容写一段简要说明。"}]
-        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid)
+        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid,
+                                      event_sink=NullSink())
 
         assert len(result.rounds) > 0, "期望触发工具但未触发"
 
@@ -164,7 +167,8 @@ async def test_L3_result_utilization(tmp_path):
     try:
         messages = [{"role": "user", "content":
             "请添加一个新知识点：深度优先搜索（DFS），简要描述其原理。"}]
-        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid)
+        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid,
+                                      event_sink=NullSink())
 
         assert len(result.rounds) > 0, "期望触发工具但未触发"
 
@@ -187,7 +191,8 @@ async def test_L4_natural_termination(tmp_path):
     try:
         messages = [{"role": "user", "content":
             "你好，请用一句话向我解释什么是算法。"}]
-        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid)
+        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid,
+                                      event_sink=NullSink())
 
         # 自然终止：无工具调用
         if len(result.rounds) > 0:
@@ -219,7 +224,7 @@ async def test_L4_multi_tool_chain(tmp_path):
         messages = [{"role": "user", "content":
             "请做两件事：1. 添加新知识点'贪心算法'；2. 把它的掌握度设为 60。"}]
         result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid,
-                                       max_rounds=5)
+                                       max_rounds=5, event_sink=NullSink())
 
         # 核心断言：至少触发了 2 个工具
         assert len(result.rounds) >= 2, (
@@ -248,7 +253,8 @@ async def test_token_usage_recorded(tmp_path):
     try:
         messages = [{"role": "user", "content":
             "请添加一个新知识点：哈希表，简要说明其原理。"}]
-        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid)
+        result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid,
+                                      event_sink=NullSink())
 
         # total_llm_calls 至少 1
         assert result.total_llm_calls >= 1, "total_llm_calls 为 0"
@@ -276,7 +282,8 @@ async def test_trace_persisted_to_agent_runs(tmp_path):
         messages = [{"role": "user", "content":
             "请添加一个新知识点：二叉树，简要说明。"}]
         result = await run_agent_loop(_SYSTEM, messages, kg=kg, user_id=uid,
-                                      db_dir=tmp_path / "agent_runs")
+                                      db_dir=tmp_path / "agent_runs",
+                                      event_sink=NullSink())
 
         # 落库为一条 status=ok 的运行
         runs = run_store.list_runs(uid, db_dir=tmp_path / "agent_runs")

@@ -7,6 +7,7 @@ import sqlite3
 import time
 
 from app.core.agent import debug_log
+from app.core.agent.events import NullSink
 
 
 def _rows(db_dir):
@@ -144,7 +145,7 @@ def test_loop_writes_debug_trail(tmp_path, monkeypatch):
 
     result = asyncio.run(agent_loop.run_agent_loop(
         "sys", [{"role": "user", "content": "汉诺塔怎么理解"}],
-        kg=object(), user_id=7, db_dir=tmp_path,
+        kg=object(), user_id=7, db_dir=tmp_path, event_sink=NullSink(),
     ))
 
     rows = debug_log.recent(db_dir=tmp_path)
@@ -181,7 +182,7 @@ def test_debug_log_excludes_message_content(tmp_path, monkeypatch):
 
     asyncio.run(agent_loop.run_agent_loop(
         "sys", [{"role": "user", "content": secret}],
-        kg=object(), user_id=7, db_dir=tmp_path,
+        kg=object(), user_id=7, db_dir=tmp_path, event_sink=NullSink(),
     ))
 
     conn = debug_log._connect(tmp_path)

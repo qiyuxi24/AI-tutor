@@ -77,6 +77,7 @@ def _fmt_state(st: dict) -> str:
 async def _run(args) -> int:
     from app.core import agent_tools
     from app.core.agent.loop import run_agent_loop
+    from app.core.agent.events import NullSink
     from app.core.event_bus import get_user_queue
     from app.core.knowledge_graph import KnowledgeGraph, read_learn_state
     from app.services.chat_service import (
@@ -129,7 +130,8 @@ async def _run(args) -> int:
         # 与生产同源：开场轮由 learn_mode_kind 判定，并对该 run 禁工具
         kind = learn_mode_kind(kg, node, messages)
         result = await run_agent_loop(prompt, messages, kg=kg, user_id=args.user,
-                                      no_tools=(kind == "opener"))
+                                      no_tools=(kind == "opener"),
+                                      event_sink=NullSink())
         calls = [(r.get("tool"), r.get("ok")) for r in result.rounds]
         all_calls.append(calls)
         replies.append(result.text)

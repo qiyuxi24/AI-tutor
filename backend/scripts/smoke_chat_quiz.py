@@ -44,7 +44,7 @@ def _setup_logging() -> None:
 
 async def _wait_quiz_ready(user_id: int) -> dict:
     """等后台出题的 quiz_ready 事件（模拟前端长连接收推送）。"""
-    q = get_user_queue(user_id)     # 必须先建队列，否则 publish 会静默丢弃
+    q = get_user_queue(user_id)     # 必须先建队列，否则 notify 无处可推（只落库）
     deadline = time.monotonic() + WAIT_SECONDS
     while True:
         left = deadline - time.monotonic()
@@ -63,11 +63,13 @@ async def _simulate_turn(args) -> int:
     模型到底会不会主动出题，只能真跑一轮才知道。
     """
     from app.core.agent.loop import run_agent_loop
+    from app.core.agent.events import NullSink
     from app.services.chat_service import _build_system_prompt
 
     kg = KnowledgeGraph(user_id=args.user)
     # ⚠️ 必须先建事件队列再跑 loop：背景任务完成时若队列还不存在，
-    # publish(..., user_id=X) 会**静默丢弃** quiz_ready（详见 event_bus.publish）。
+    # notify(X, ...) 找不到订阅者 → 只落库不推送（生产由前端补拉兜底，
+    # 但本脚本要在**当次**打印出题结果，落库那条路接不上）。
     get_user_queue(args.user)
 
     messages = [{"role": "user", "content": args.simulate}]
@@ -79,7 +81,8 @@ async def _simulate_turn(args) -> int:
     print("\n── 运行 agent loop（真机）──")
 
     started = time.monotonic()
-    result = await run_agent_loop(prompt, messages, kg=kg, user_id=args.user)
+    result = await run_agent_loop(prompt, messages, kg=kg, user_id=args.user,
+                                  event_sink=NullSink())
     print(f"  耗时 {time.monotonic() - started:.1f}s | LLM 调用 {result.total_llm_calls} 次")
 
     calls = [(r["tool"], r["ok"]) for r in result.rounds]

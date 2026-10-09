@@ -3,6 +3,7 @@
 store 已被 agent_loop 落库与 token_estimator 历史预估覆盖主路径，
 此处补充 schema 级边界：upsert 幂等、越权隔离、历史 token 排序过滤。
 """
+from app.core import storage
 from app.core.agent import store as store
 
 
@@ -63,11 +64,12 @@ def test_recent_completion_tokens_order_and_filter(tmp_path):
 
 
 def test_default_db_dir_points_to_data(tmp_path):
-    """默认库目录应位于 backend/data/agent_runs（随 Docker ./backend/data 卷持久化）。"""
+    """A1b：默认库目录应位于单一 DATA_ROOT：<repo>/data/agent_runs。"""
     d = store.default_db_dir()
     assert d.name == "agent_runs"
-    assert "backend" in d.parts
-    assert "data" in d.parts
+    assert "backend" not in d.parts            # A1b 起不再挂在 backend/ 下
+    assert d.parent == storage.DATA_ROOT       # 单根
+    assert d == storage.records_dir("agent_runs")
 
 
 def test_token_estimate_roundtrip(tmp_path):
@@ -114,6 +116,41 @@ def test_legacy_db_gets_token_estimate_column(tmp_path):
     assert store.get_run(1, "old", db_dir=tmp_path)["token_estimate"] == {}
     _seed(tmp_path, "new", user_id=1)
     assert store.list_runs(1, db_dir=tmp_path)[0]["token_estimate"] == {}
+
+
+def test_events_written_roundtrip(tmp_path):
+    """写出事件数（A2-2）随 run 落库：详情可读；未给出 → None（未知，如队列目标）。"""
+    store.save_run({
+        "run_id": "w1", "user_id": 6, "started_at": 1.0,
+        "events_written": 3, "evidence": [],
+    }, db_dir=tmp_path)
+    _seed(tmp_path, "w2", user_id=6)  # 未传 events_written → NULL
+
+    assert store.get_run(6, "w1", db_dir=tmp_path)["events_written"] == 3
+    assert store.get_run(6, "w2", db_dir=tmp_path)["events_written"] is None
+
+
+def test_legacy_db_gets_events_written_column(tmp_path):
+    """老库（建表时无 events_written 列）打开时自动补列，老行读为 None。"""
+    import sqlite3
+    db = tmp_path / "agent_runs.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("""
+        CREATE TABLE agent_runs (
+            run_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ok', started_at REAL NOT NULL, ended_at REAL,
+            total_llm_calls INTEGER NOT NULL DEFAULT 0,
+            context_tokens INTEGER NOT NULL DEFAULT 0,
+            token_usage TEXT NOT NULL DEFAULT '{}',
+            estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            final_text TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '[]')
+    """)
+    conn.execute("INSERT INTO agent_runs (run_id, user_id, started_at) VALUES ('old', 1, 1.0)")
+    conn.commit()
+    conn.close()
+
+    assert store.get_run(1, "old", db_dir=tmp_path)["events_written"] is None
+    assert store.get_run(1, "old", db_dir=tmp_path)["token_estimate"] == {}
 
 
 # ═══════════════ 清理 / 删除 / 统计（2026-09-08 治理面） ═══════════════
