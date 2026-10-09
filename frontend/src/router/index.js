@@ -3,9 +3,9 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 /**
  * 路由表
  *
- * 已取消 #/login 路由页与路由守卫：站点无登录墙，未登录状态由
- * HomeView.onMounted → authStore.ensureSession() 静默登录体验账户兜住。
- * 登录/注册表单改由 LoginDialog 承载（点头像 / 设置页"切换账号"打开）。
+ * 不设 #/login 路由页与路由守卫：**登录墙由 HomeView 首屏承载** ——
+ * HomeView.onMounted → authStore.ensureSession() 为 false → 弹 mandatory 的 LoginDialog。
+ * 登录/注册表单也由它复用（点头像 / 设置页"切换账号"，此时可关闭）。
  * 加回登录页 = 加回路由 + 守卫 + api 层 401 跳转三处，别只加一处。
  */
 const routes = [

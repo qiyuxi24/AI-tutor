@@ -603,7 +603,7 @@ Write-Host "  运维后端日志: logs\uvicorn-admin.log" -ForegroundColor White
 Write-Host ""
 Write-Host "  运维后台管理员: admin / admin123" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "  默认管理员: admin / admin123" -ForegroundColor DarkGray
+Write-Host "  主系统账号: 首屏弹登录框，自行注册即可（未设 DEFAULT_ADMIN_PASSWORD 时不预建 admin）" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "按 Ctrl+C 停止所有服务..." -ForegroundColor Yellow
 Write-Host ""

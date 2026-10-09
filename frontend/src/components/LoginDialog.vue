@@ -2,9 +2,10 @@
 /**
  * LoginDialog.vue — 登录 / 注册弹窗
  *
- * 站点默认静默登录体验账户（authStore.ensureSession），本弹窗只承担"切换账号"：
- * 左侧活动栏头像或设置页按钮打开它，成功后由父组件重载页面。
- * 原路由页 views/LoginView.vue 已删除（路由表也不再引用）。
+ * 两种用法（同一个组件，差别在 mandatory）：
+ * - mandatory=true  → **登录墙**：HomeView 首屏未登录时弹出，不可关闭、不可点遮罩关掉
+ * - mandatory=false → **切换账号**：左侧活动栏头像或设置页按钮打开，随时可关
+ * 成功后由父组件重载页面。原路由页 views/LoginView.vue 已删除（路由表也不再引用）。
  */
 import { ref, computed, watch } from 'vue'
 import { useAuthStore } from '../stores/authStore'
@@ -12,6 +13,8 @@ import { clientError } from '../utils/errorCodes.js'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
+  /** 登录墙模式：不可关闭（未登录时不该能躲开它） */
+  mandatory: { type: Boolean, default: false },
 })
 const emit = defineEmits(['update:visible', 'success'])
 
@@ -73,10 +76,13 @@ async function handleSubmit() {
 <template>
   <el-dialog
     v-model="show"
-    :title="isRegister ? '注册账号' : '切换账号'"
+    :title="isRegister ? '注册账号' : (mandatory ? '登录账号' : '切换账号')"
     width="380px"
     align-center
     append-to-body
+    :show-close="!mandatory"
+    :close-on-click-modal="!mandatory"
+    :close-on-press-escape="!mandatory"
   >
     <form class="login-form" @submit.prevent="handleSubmit">
       <div class="form-group">

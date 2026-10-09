@@ -11,31 +11,30 @@ export const apiClient = axios.create({
 // ═══ 公共工具 ═══
 
 /**
- * 401 时的统一处理：清除凭据 + 静默重新登录
+ * 401 时的统一处理：清除凭据 + 回到登录墙
  * axios 拦截器和 fetch 流式请求共用此逻辑
  *
- * 站点已取消 #/login 路由页（无登录墙），所以这里**不能**再跳登录页，
- * 否则用户被丢到一个不存在的路由 → 白屏。改为直接静默重登体验账户。
- *
  * ⚠️ localStorage 与 Pinia **必须一起清**：authStore 的 token 只在初始化时读过一次
- * localStorage，只清 localStorage 的话 isLoggedIn 仍为 true → ensureSession 拿旧值
- * 判"已登录"而不重新登录，用户侧表现为"发了消息没反应"。
+ * localStorage，只清 localStorage 的话 isLoggedIn 仍为 true，用户会停在
+ * "看似已登录、但每个请求都 401"的半死状态。
  */
 async function handleUnauthorized() {
   // ponytail: 不比对"请求发出时用的 token"，并发旧请求的 401 会把刚换来的新 token
-  // 也清掉一次（代价 = 多一次静默登录，不会坏）。要消除就把请求时的 token 记进
+  // 也清掉一次（代价 = 多一次重载，不会坏）。要消除就把请求时的 token 记进
   // config，401 时比对不一致直接忽略。
   localStorage.removeItem('ai_tutor_token')
   localStorage.removeItem('ai_tutor_user')
   try {
     // 动态 import 打断 api ↔ store 的静态循环依赖（调用时两边都已加载完毕）
     const { useAuthStore } = await import('../stores/authStore.js')
-    const auth = useAuthStore()
-    auth.logout()
-    await auth.ensureSession()
+    useAuthStore().logout()
   } catch {
-    // 无活跃 pinia 的场合忽略：localStorage 已清，下次 HomeView 挂载时会再登一次
+    // 无活跃 pinia 的场合忽略：localStorage 已清，下面重载即可
   }
+  // ponytail: 直接整体重载，复用 HomeView.onMounted 的登录墙；代价是丢掉页面上
+  // 未提交的编辑状态。要避免就改成 authStore 暴露响应式标志、由 HomeView 监听。
+  // 不会死循环：localStorage 已清空 → 重载后 ensureSession 立即 false → 只弹墙，不再发请求。
+  window.location.reload()
 }
 
 // ═══ 请求拦截器：自动附加 JWT token ═══
@@ -48,10 +47,10 @@ apiClient.interceptors.request.use((config) => {
 })
 
 // 登录/注册接口的 401 是"账号密码错"，不是"会话过期"。
-// 必须豁免：否则弹窗里输错密码会触发 handleUnauthorized → ensureSession → 再登录
-// → 再 401 → 无限递归。（/auth/me 不豁免，它 401 就是 token 真的失效了）
+// 必须豁免：否则弹窗里输错密码会触发 handleUnauthorized → 整页重载 → 页面被刷掉、
+// 输错密码的提示一闪而过。（/auth/me 不豁免，它 401 就是 token 真的失效了）
 // change-password 也豁免：后端旧密码错误返回 400，但万一返回 401（或 token 恰好过期），
-// 静默重登会把用户**换成体验账户**，改密码就改到别人账号上了。
+// 重载会把用户直接踢回登录墙，改密码的上下文全丢。
 const AUTH_ENDPOINTS = ['/auth/login', '/auth/register', '/auth/change-password']
 
 // ═══ 响应拦截器：401 时清除 token 并静默重登 ═══
@@ -158,9 +157,10 @@ export const activateLlmModel = (modelId) =>
  * @param {Function} callbacks.onError - 出错时调用 (error: string)
  * @param {string} currentNode - 当前教学位置的知识点 ID（可选）
  * @param {Object|null} kb - 知识库上下文范围 {nodeIds: [], name: string}
+ * @param {string} convId - 前端对话 ID（多端登录下按对话串行；缺省 = 不串行）
  * @returns {AbortController} 用于取消请求
  */
-export const sendMessageStream = (messages, callbacks = {}, currentNode = '', kb = null) => {
+export const sendMessageStream = (messages, callbacks = {}, currentNode = '', kb = null, convId = '') => {
   const controller = new AbortController()
   const { onToken, onThinking, onToolStart, onToolResult, onAgentStart, onAgentDone, onDone, onError } = callbacks
 
@@ -171,6 +171,7 @@ export const sendMessageStream = (messages, callbacks = {}, currentNode = '', kb
     current_node: currentNode,
     kb_node_ids: kb?.nodeIds || null,
     kb_node_name: kb?.name || null,
+    conv_id: convId || null,
   })
 
   const headers = { 'Content-Type': 'application/json' }

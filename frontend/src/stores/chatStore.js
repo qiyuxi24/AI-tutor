@@ -31,6 +31,7 @@ import { sendMessageStream, apiClient } from '../api/index.js'
 // 注：空回复文案改用 E-CLIENT-008（`clientError('CHAT_EMPTY')`）——比通用 E-COMM-007
 // 更准确，且直接指向「可重试」；因此不再需要 fmt / ErrorDefs。
 import { clientError } from '../utils/errorCodes.js'
+import { normalizeEdges } from '../utils/graphNormalize.js'
 
 // 按 user_id 隔离 localStorage，防止切换账号后对话历史泄露
 const _uid = (() => {
@@ -51,6 +52,12 @@ const STORAGE_KEY_CURRENT = `ai_tutor_current_${_uid}`
  * HomeView 监听本事件 → 局部重挂当前视图 + 重拉图谱。
  */
 export const BACKEND_RELOADED_EVENT = 'backend-reloaded'
+
+// SSE 断线重连退避：首断 5s，每次翻倍，60s 封顶。
+// 定值重连（原实现固定 5s、无上限）在后端长时间不可用时会以 12 次/分的频率
+// 无限刷请求，且**登出后依旧继续**（A3-1）。
+const SSE_RECONNECT_BASE_MS = 5000
+const SSE_RECONNECT_MAX_MS = 60000
 
 // 后端 graph_middleware.SUBJECT_UNCLASSIFIED 的对应值。
 // 「未分类」= 无学科归属节点的合成分组名，不是真实学科（不出现在学科列表里，
@@ -135,17 +142,57 @@ export const useChatStore = defineStore('chat', () => {
             title: c.title,
             messages: c.messages,
             createdAt: c.createdAt,
+            // 本地修改时刻：后端据此判断这份快照是不是旧的（旧快照会被拒绝写入）
+            updatedAt: c.updatedAt || c.createdAt,
           }))
         // 使用 sync 端点全量同步（后端合并）
-        await apiClient.post('/api/v1/conversations/sync', {
+        const { data } = await apiClient.post('/api/v1/conversations/sync', {
           conversations: nonEmpty,
         })
+        adoptRemote(data?.conversations)
       } catch {
         // 同步失败不影响本地使用，静默忽略
       } finally {
         syncPending = false
       }
     }, 500)
+  }
+
+  /**
+   * 采纳后端返回的权威版本 —— 防覆盖的**另一半**。
+   *
+   * 后端 sync 返回的是库里真实状态：本地那份若是旧快照会被拒绝写入，此时必须用
+   * 后端的版本刷回来，否则用户在另一端看到的是旧消息、以为消息丢了。
+   * 正在流式生成的对话不动（本地才是最新的）。
+   * 只写 localStorage、不再触发同步（否则会 sync → adopt → sync 无限循环）。
+   */
+  function adoptRemote(remote) {
+    if (!Array.isArray(remote) || remote.length === 0) return
+    let changed = false
+    for (const r of remote) {
+      if (loading.value && r.id === currentId.value) continue
+      const remoteAt = Number(r.updatedAt) || 0
+      const local = conversations.value.find(c => c.id === r.id)
+      if (!local) {
+        conversations.value.push({
+          id: r.id,
+          title: r.title,
+          messages: r.messages || [],
+          createdAt: r.createdAt || Date.now(),
+          updatedAt: remoteAt,
+        })
+        changed = true
+        continue
+      }
+      const localAt = Number(local.updatedAt) || Number(local.createdAt) || 0
+      if (remoteAt > localAt) {
+        local.messages = r.messages || []
+        local.title = r.title
+        local.updatedAt = remoteAt
+        changed = true
+      }
+    }
+    if (changed) persist(true)
   }
 
   /**
@@ -167,6 +214,7 @@ export const useChatStore = defineStore('chat', () => {
             title: c.title,
             messages: c.messages || [],
             createdAt: c.createdAt || c.created_at || Date.now(),
+            updatedAt: c.updatedAt || c.createdAt || Date.now(),
           }))
           // 写入 localStorage
           persist()
@@ -225,16 +273,9 @@ export const useChatStore = defineStore('chat', () => {
         ...n,
         level: (n.tags || []).find(t => ['一级','二级','三级'].includes(t)) || '一级'
       }))
-      // ★ 统一字段映射：后端字段 from_node/to_node → 前端字段 source/target
-      // ForceGraph 的 renderGraph 会再次做兼容映射，确保即使 Store 未映射也不会出错
-      knowledgeEdges.value = (data.edges || []).map((e, i) => ({
-        ...e,
-        source: e.from_node || e.from,
-        target: e.to_node || e.to,
-        label: e.label || '',
-        relation: e.relation || '',
-        edgeId: e.id,     // 数据库主键 ID（用于精确的 updateEdge/deleteEdge 操作）
-      }))
+      // ★ 字段映射的唯一实现 = utils/graphNormalize.normalizeEdge
+      // （原先这里 / forceGraphEngine / ForceGraph.vue 各写一遍，漏改一处就画不出边）
+      knowledgeEdges.value = normalizeEdges(data.edges)
       graphLoaded.value = true
       graphError.value = ''
       // 图谱变更 → 下一步推荐 / 统计随之刷新（单一数据源 = 图谱）
@@ -618,6 +659,9 @@ export const useChatStore = defineStore('chat', () => {
     await ensureSubjectSelected()
     await fetchGraph()
     // 连接 SSE，后端数据变更时自动刷新图谱
+    // （init = "开始工作"的唯一入口，顺带解除 dispose/disconnectSSE 的永久断开，
+    //  否则开发态 HMR 重挂 HomeView 后就再也连不上了）
+    sseStopped = false
     connectSSE()
   }
 
@@ -625,10 +669,25 @@ export const useChatStore = defineStore('chat', () => {
   let sseSource = null
   let sseReconnectTimer = null
   let sseWasDown = false   // 断线标记：只认"断过线又连上"= 后端重载，首次连接不算
+  let sseStopped = false   // 已显式断开（登出 / 视图卸载）→ 禁止一切（重）连接
+  let sseReconnectDelay = SSE_RECONNECT_BASE_MS
+
+  /** 关连接 + 清重连定时器（只清资源，不改"是否允许连接"的意愿） */
+  function _closeSSE() {
+    if (sseReconnectTimer) {
+      clearTimeout(sseReconnectTimer)
+      sseReconnectTimer = null
+    }
+    if (sseSource) {
+      sseSource.close()
+      sseSource = null
+    }
+  }
 
   function connectSSE() {
+    if (sseStopped) return
     // 清理旧连接和重连定时器
-    disconnectSSE()
+    _closeSSE()
     // 必须已登录才连接 SSE（后端强制认证）
     const token = localStorage.getItem('ai_tutor_token')
     if (!token) return
@@ -636,10 +695,18 @@ export const useChatStore = defineStore('chat', () => {
       const url = `/api/v1/knowledge/events?token=${encodeURIComponent(token)}`
       sseSource = new EventSource(url)
       sseSource.onopen = () => {
+        sseReconnectDelay = SSE_RECONNECT_BASE_MS   // 连上了 → 退避复位
+        // 首连与重连都要补拉离线通知（A2-3）：出题是后台任务（~40s 才回），
+        // 断线窗口里产生的 quiz_ready 只能靠后端落库那条路救回来。
+        fetchPendingNotices()
         // 首连成功什么都不做；断线后重连成功 = 后端已重载 → 通知页面刷新
         if (!sseWasDown) return
         sseWasDown = false
-        window.dispatchEvent(new CustomEvent(BACKEND_RELOADED_EVENT))
+        // 发射端也只认开发态：生产环境一次网络抖动不该打这个信号
+        // （接收端 HomeView 本来就有 DEV 判断，但信号本身也不该进生产）
+        if (import.meta.env.DEV) {
+          window.dispatchEvent(new CustomEvent(BACKEND_RELOADED_EVENT))
+        }
       }
       sseSource.onmessage = (event) => {
         try {
@@ -660,10 +727,11 @@ export const useChatStore = defineStore('chat', () => {
         // 断线原因可能是后端重载、网络抖动、后端挂了 —— 一律记为"断过线"，
         // 重连成功时统一刷新（刷新幂等且廉价，无法区分也不必区分）。
         sseWasDown = true
-        sseSource.close()
-        sseSource = null
-        // 5 秒后重连（保存引用以便取消）
-        sseReconnectTimer = setTimeout(() => connectSSE(), 5000)
+        _closeSSE()
+        if (sseStopped) return
+        // 退避重连：5s → 10s → … → 60s 封顶（后端久挂时不刷屏、不烧电）
+        sseReconnectTimer = setTimeout(() => connectSSE(), sseReconnectDelay)
+        sseReconnectDelay = Math.min(sseReconnectDelay * 2, SSE_RECONNECT_MAX_MS)
       }
     } catch {
       // SSE 不支持时静默失败
@@ -740,6 +808,30 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * 补拉离线期间产生的通知（A2-3）。
+   *
+   * 为什么需要：出题是后台任务（约 40s 才回），这段时间里用户可能关掉页面或断网，
+   * 实时推送就无处可投（后端 notify 找不到订阅队列）。后端会把这类通知先落库
+   * （`pending_notices`），本函数在 SSE 建连/重连后取走，复用实时事件的同一套分发分支。
+   * 后端"取走即标记已投递"，因此不会与实时推送重复渲染同一张题卡。
+   */
+  async function fetchPendingNotices() {
+    try {
+      const { data } = await apiClient.get('/api/v1/knowledge/notices/pending')
+      for (const notice of data?.notices || []) {
+        if (notice.type === 'quiz_ready') handleQuizReady(notice)
+        else if (notice.type === 'graph_updated') refreshGraph()
+        else if (notice.type === 'error') {
+          console.warn(`[SSE Error] ${notice.code} | ${notice.module}: ${notice.message}`,
+                       notice.detail || '')
+        }
+      }
+    } catch {
+      // 补拉失败不影响实时通道：通知仍在库里，下次连上再取
+    }
+  }
+
+  /**
    * 「去学习」：以某个知识点为教学内容开一轮学习 —— 新建对话 + 记下当前知识点 + 发首条消息。
    *
    * 为什么要发一条消息（而不是只设状态）：后端的小节级教学上下文（【学习模式】段落）
@@ -760,22 +852,51 @@ export const useChatStore = defineStore('chat', () => {
     await send(`开始学习「${name || nodeId}」`)
   }
 
-  /** 断开 SSE 并取消重连定时器 */
+  /**
+   * 断开 SSE 并**禁止再重连**（登出 / 视图卸载调用，A3-1）。
+   *
+   * 与"_closeSSE"的区别：那个只是换连接，这个是"这条连接不要了"。
+   * 想重新连上必须再走 init()（它会复位 sseStopped）——登录成功后本就整页重载，
+   * 天然满足；这样就不存在"登出后旧会话仍在后台重连"的窗口。
+   */
   function disconnectSSE() {
-    if (sseReconnectTimer) {
-      clearTimeout(sseReconnectTimer)
-      sseReconnectTimer = null
+    sseStopped = true
+    sseWasDown = false
+    _closeSSE()
+  }
+
+  /**
+   * 视图卸载 / 登出：释放全部常驻资源（SSE、定时器、在途流）。可重复调用。
+   *
+   * 为什么必须有一个统一出口：防抖同步（500ms）、SSE 抑制（3s）、SSE 重连
+   * 三处各挂一个裸 setTimeout，没有任何地方成组清理 —— 组件卸载后定时器
+   * 仍会戳 store（A3-3）。
+   */
+  function dispose() {
+    disconnectSSE()
+    if (sseSuppressTimer) {
+      clearTimeout(sseSuppressTimer)
+      sseSuppressTimer = null
     }
-    if (sseSource) {
-      sseSource.close()
-      sseSource = null
+    if (syncDebounceTimer) {
+      clearTimeout(syncDebounceTimer)
+      syncDebounceTimer = null
     }
+    if (streamController) {
+      streamController.abort()
+      streamController = null
+    }
+    loading.value = false
   }
 
   // ─── 持久化 ───
   // 核心规则：只有有内容的对话才写入 localStorage + 同步到后端
   // 空对话（messages.length === 0）不存储
-  function persist() {
+  /**
+   * @param {boolean} [skipSync] true = 只写 localStorage、不回推后端
+   *   （采纳后端权威版本时用，否则会 sync → adopt → sync 递归）
+   */
+  function persist(skipSync = false) {
     // 过滤掉空对话，只有有内容的对话才持久化
     const nonEmpty = conversations.value.filter(c => c.messages.length > 0)
     localStorage.setItem(STORAGE_KEY_CONVERSATIONS, JSON.stringify(nonEmpty))
@@ -788,7 +909,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     // 双写：同步到后端（防抖，避免频繁请求）
-    syncToBackend()
+    if (!skipSync) syncToBackend()
   }
 
   // ─── 当前对话是否为空（无任何消息） ───
@@ -900,6 +1021,8 @@ export const useChatStore = defineStore('chat', () => {
     const msg = conv.messages[idx]
     if (msg && msg.role === 'assistant') {
       conv.messages.splice(idx, 1, { ...msg, ...patch(msg) })
+      // 内容在变 → 提升本地修改时刻（多端防覆盖：让这份快照"够新"）
+      conv.updatedAt = Date.now()
     }
   }
 
@@ -912,6 +1035,7 @@ export const useChatStore = defineStore('chat', () => {
   function renderAssistant(conv, msg, replaceLast = false) {
     if (replaceLast) conv.messages.pop()
     conv.messages.push(msg)
+    conv.updatedAt = Date.now()
     persist()
   }
 
@@ -929,6 +1053,8 @@ export const useChatStore = defineStore('chat', () => {
 
     // 追加用户消息
     conv.messages.push({ role: 'user', content: text })
+    // 内容变化 → 提升本地修改时刻（多端防覆盖：后端据此判断这份快照是不是旧的）
+    conv.updatedAt = Date.now()
 
     // 如果是第一条消息，自动用前 20 字设定标题
     // 此时对话从"空"变为"有内容"，需要持久化
@@ -941,6 +1067,13 @@ export const useChatStore = defineStore('chat', () => {
     loading.value = true
     // 对话已有内容，持久化（persist 内部会过滤空对话，此对话现在不会被过滤）
     persist()
+
+    // 新一次发送前先掐掉上一次在途的流（A3-2）：否则两条流会同时往同一个气泡写
+    // token（用户连点/重试时表现为"内容来回跳"），且旧流的 onDone 会把新气泡覆盖掉。
+    if (streamController) {
+      streamController.abort()
+      streamController = null
+    }
 
     // 使用流式 API
     streamController = sendMessageStream(
@@ -975,6 +1108,7 @@ export const useChatStore = defineStore('chat', () => {
         // 流式完成
         onDone: (fullReply) => {
           loading.value = false
+          streamController = null
           if (fullReply) {
             persist()
           } else {
@@ -991,12 +1125,14 @@ export const useChatStore = defineStore('chat', () => {
         // 出错
         onError: (errorMsg) => {
           loading.value = false
+          streamController = null
           // 移除占位消息，替换为错误消息
           renderAssistant(conv, { role: 'assistant', content: errorMsg }, true)
         },
       },
       currentNode.value,
       kbContext.value,
+      conv.id, // 多端串行键：同一对话的请求在后端排队，避免两端同时改同一份历史
     )
   }
 
@@ -1039,6 +1175,9 @@ export const useChatStore = defineStore('chat', () => {
     send,
     retryLast,
     startLearning,
+    // 生命周期（A3）：登出 / 卸载时释放 SSE、定时器与在途流
+    disconnectSSE,
+    dispose,
     // 图谱数据
     knowledgeNodes,
     knowledgeEdges,

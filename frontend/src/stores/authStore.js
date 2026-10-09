@@ -1,23 +1,13 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { apiClient } from '../api/index.js'
+import { useChatStore } from './chatStore.js'
 import { encryptPassword } from '../utils/crypto.js'
 import { formatError } from '../utils/errorCodes.js'
 
 const STORAGE_KEY_TOKEN = 'ai_tutor_token'
 const STORAGE_KEY_USER = 'ai_tutor_user'
 
-// 免登录体验账户：无 token 时静默登录它（不存在则先注册）。
-// 站点已取消 #/login 路由页，"登录"退化为切换账号。
-//
-// DEFAULT_PASS 必须与后端建号用的 DEFAULT_ADMIN_PASSWORD 一致，否则静默登录会
-// 失败（login 401 + register 409）→ 首屏弹登录框让用户手工登录。构建期可用
-// VITE_DEMO_PASSWORD 覆盖，避免把口令烘进生产产物（见 README 配置表）。
-const DEFAULT_USER = 'admin'
-const DEFAULT_PASS = import.meta.env.VITE_DEMO_PASSWORD || 'admin123'
-
-// in-flight 去重：首屏并发请求可能同时 401，只允许触发一次静默登录
-let sessionPromise = null
 
 export const useAuthStore = defineStore('auth', () => {
   // ─── 状态 ───
@@ -121,6 +111,15 @@ export const useAuthStore = defineStore('auth', () => {
   function logout() {
     setToken(null)
     setUser(null)
+    // 会话没了，常驻 SSE 必须一起断（A3-1）：它带着 token 走 query，
+    // 不清就会拿一个已失效的 token 无限重连（后端 401 → onerror → 再连）。
+    // chatStore 不反向静态依赖本模块，故直接引入；调用点（401 处理 / onMounted）
+    // 都发生在 pinia 初始化之后，useChatStore() 有活跃实例可用。
+    try {
+      useChatStore().disconnectSSE()
+    } catch {
+      // 无活跃 pinia（早于 app 挂载的极端情形）：凭据已清，重连也无 token 可用
+    }
   }
 
   // ─── 初始化时验证 token 有效性 ───
@@ -138,19 +137,13 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  // ─── 确保有可用会话（无登录墙：无 token 就静默登体验账户）───
-  // 唯一调用点：HomeView.onMounted（首屏）与 api 层 401 处理（token 过期）。
+  // ─── 确保有可用会话（登录墙：无 token 或 token 失效 = 未登录）───
+  // 唯一调用点：HomeView.onMounted（首屏）；返回 false 时由 HomeView 弹 mandatory 登录墙。
+  //
+  // 2026-10-06 取消"静默登录体验账户"：它把默认口令烘进了前端产物（任何人可从 JS 里读出），
+  // 且所有访客共用一个账号，与"按 user_id 隔离"的设计目标相悖。
   async function ensureSession() {
-    if (isLoggedIn.value && (await checkAuth())) return true
-    if (!sessionPromise) {
-      sessionPromise = (async () => {
-        // 先用默认账户登录；首次启动库里没这个账户时注册兜底
-        return (await login(DEFAULT_USER, DEFAULT_PASS)) || (await register(DEFAULT_USER, DEFAULT_PASS))
-      })().finally(() => {
-        sessionPromise = null
-      })
-    }
-    return sessionPromise
+    return isLoggedIn.value && (await checkAuth())
   }
 
   return {

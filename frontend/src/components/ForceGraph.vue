@@ -21,6 +21,7 @@ import { notifyError, confirmAction } from '../utils/feedback'
 import { useGraphForces } from '../utils/graphForces'
 import { useContextMenu } from '../utils/contextMenu'
 import { createForceGraphEngine } from '../utils/forceGraphEngine'
+import { normalizeEdge } from '../utils/graphNormalize'
 
 /* ================================================================
    组件 Props
@@ -195,10 +196,9 @@ async function handleDrawTarget(fromId, toId) {
       if (!resolved) { resolved = true; stop(); resolve() }
     }, 5000)
     const stop = watch(() => props.edges, (newEdges) => {
-      const found = (newEdges || []).find(e => {
-        const eSource = e.source || e.from_node || e.from
-        const eTarget = e.target || e.to_node || e.to
-        return eSource === fromId && eTarget === toId && e.relation === 'related'
+      const found = (newEdges || []).find((e) => {
+        const { source, target } = normalizeEdge(e)
+        return source === fromId && target === toId && e.relation === 'related'
       })
       if (found) {
         resolved = true

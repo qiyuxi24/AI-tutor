@@ -25,6 +25,7 @@
 
 import * as d3 from 'd3'
 import { FORCE_DEFAULTS } from './graphForces'
+import { normalizeEdge } from './graphNormalize'
 
 /* ================================================================
    渲染常量（纯值，与实例无关）
@@ -106,13 +107,10 @@ function normalizeNodes(rawNodes) {
 
 function normalizeLinks(rawEdges, nodeIdSet) {
   return (rawEdges || [])
-    .map((e) => ({
-      source: e.source || e.from_node || e.from,
-      target: e.target || e.to_node || e.to,
-      label: e.label || '',
-      relation: e.relation || '',
-      edgeId: e.edgeId,
-    }))
+    .map((e) => {
+      const { source, target, label, relation, edgeId } = normalizeEdge(e)
+      return { source, target, label, relation, edgeId }
+    })
     // 过滤悬空边：d3.forceLink 要求边两端节点必须存在，否则直接抛 "node not found"。
     // 按学科/板块切片时后端会保留跨切片边（保证子图连通性可见），必须在此丢弃。
     .filter((l) => nodeIdSet.has(l.source) && nodeIdSet.has(l.target))

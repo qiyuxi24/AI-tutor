@@ -156,12 +156,14 @@ const quizViewKey = computed(() =>
 )
 
 onMounted(async () => {
-  // 先确保有会话（无 token 时静默登录体验账户）：init() 会立刻打一批需要 token
-  // 的接口，没先登录整屏就是 401。
-  // ponytail: 失败一律弹登录框，不区分"口令不对"和"后端没起"——弹框里带着真实
-  // 错误信息，用户至少知道该干什么。要精确区分就让 ensureSession 返回原因而非 boolean。
+  // 登录墙：未登录就只弹 LoginDialog（mandatory），**不拉任何需要 token 的数据** ——
+  // init() 里的 fetchSubjects/fetchGraph/connectSSE 全都要 token，没先登录整屏就是 401。
+  // 登录成功后由 handleLoginSuccess 重载页面，再走一遍这里。
   const ok = await authStore.ensureSession()
-  if (!ok) showLoginDialog.value = true
+  if (!ok) {
+    showLoginDialog.value = true
+    return
+  }
   // init() 内部依次：fetchSubjects() → ensureSubjectSelected() → fetchGraph() → connectSSE()
   store.init()
   // 悬浮球开关（真值源 = 服务端账号偏好，跟账号走）→ 写入共享状态，供 FloatingBall 使用
@@ -178,6 +180,9 @@ onUnmounted(() => {
   if (import.meta.env.DEV) {
     window.removeEventListener(BACKEND_RELOADED_EVENT, handleBackendReloaded)
   }
+  // 视图卸载 = 本次会话的生命周期结束：断 SSE、清定时器、掐在途流（A3）。
+  // 不做的话离开页面后仍在后台重连 / 定时同步。重挂时 init() 会重新接线。
+  store.dispose()
 })
 
 /** 切换账号：打开登录弹窗（#/login 路由页已取消，也不再提供"退出登录"）*/
@@ -641,11 +646,15 @@ const slideTransition = {
       @profile-updated="store.refreshGraph()"
     />
 
-    <!-- 登录 / 注册弹窗（切换账号） -->
-    <LoginDialog v-model:visible="showLoginDialog" @success="handleLoginSuccess" />
+    <!-- 登录 / 注册弹窗：未登录时是登录墙（不可关），已登录时是"切换账号" -->
+    <LoginDialog
+      v-model:visible="showLoginDialog"
+      :mandatory="!authStore.isLoggedIn"
+      @success="handleLoginSuccess"
+    />
 
-    <!-- 新手引导 -->
-    <OnboardingGuide ref="onboardingRef" />
+    <!-- 新手引导：登录后再展示（未登录时挂着会被登录墙遮住，语义也不对） -->
+    <OnboardingGuide v-if="authStore.isLoggedIn" ref="onboardingRef" />
   </div>
 </template>
 
