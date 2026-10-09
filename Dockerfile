@@ -46,7 +46,7 @@ COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
     -r /app/backend/requirements.txt
 
-# 拷贝后端代码（.dockerignore 已排除 backend/data、.env、venv）
+# 拷贝后端代码（.dockerignore 已排除 .env、venv 与 data/ 各运行时域，只放行 data/prompts）
 COPY backend/ /app/backend/
 
 # 提示词模板（Jinja2）：prompt_loader.py 将目录解析为「项目根/data/prompts」，

@@ -4,7 +4,9 @@
 #   up      重新构建并启动（改了代码/配置后用）
 #   restart 只重启容器（不重建镜像）
 cd "$(dirname "$0")/.." || exit 1
-p=$(grep -E '^PORT=' .env 2>/dev/null | cut -d= -f2); p=${p:-8080}
+# PORT 既可能是纯端口（8080），也可能是绑地址形式（127.0.0.1:8080，见线上实例手册），
+# 这里统一裁到端口号，否则会拼出 http://127.0.0.1:127.0.0.1:8080/... 这种非法 URL
+p=$(grep -E '^PORT=' .env 2>/dev/null | cut -d= -f2); p=${p:-8080}; p=${p##*:}
 case "${1:-status}" in
   up)      docker compose up -d --build ;;
   restart) docker compose restart ;;

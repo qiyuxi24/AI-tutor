@@ -110,15 +110,31 @@ cp .env.example .env
 把本地已有的用户数据传到服务器**对应挂载目录**：
 
 ```bash
-# 本地生成：
-mkdir -p data/knowledge data/conversations data/profiles backend/data
+# 本地生成（A1b 单一 DATA_ROOT 后，**全部用户数据都在 <repo>/data/<域>**）：
+mkdir -p data
 
-# 本地执行（PowerShell）：
-scp -r data/knowledge    root@服务器IP:/opt/ai-tutor/data/
+# 本地执行（PowerShell）—— 逐域同步到服务器上的同一个数据根：
+scp -r data/knowledge     root@服务器IP:/opt/ai-tutor/data/
 scp -r data/conversations root@服务器IP:/opt/ai-tutor/data/
-scp -r data/profiles     root@服务器IP:/opt/ai-tutor/data/
-scp -r backend/data      root@服务器IP:/opt/ai-tutor/backend/
+scp -r data/profiles      root@服务器IP:/opt/ai-tutor/data/
+scp -r data/kb            root@服务器IP:/opt/ai-tutor/data/
+scp -r data/rag           root@服务器IP:/opt/ai-tutor/data/
+scp -r data/quiz          root@服务器IP:/opt/ai-tutor/data/
+scp -r data/collector     root@服务器IP:/opt/ai-tutor/data/
+scp -r data/agent_runs    root@服务器IP:/opt/ai-tutor/data/
+scp -r data/agent_debug   root@服务器IP:/opt/ai-tutor/data/
+scp -r data/llm           root@服务器IP:/opt/ai-tutor/data/   # 每用户模型配置（含明文 API Key）
 ```
+
+> ⚠️ **老部署（A1b 之前建的）升级上来**：数据还在宿主机的 `backend/data/` 与 `backend/app/data/`，
+> 而新代码只认 `data/`。必须先在服务器上跑一次迁移，否则容器起来后知识库/题库/RAG 全是空的：
+>
+> ```bash
+> docker compose run --rm ai-tutor python backend/scripts/migrate_data_root.py            # 先 dry-run
+> docker compose run --rm ai-tutor python backend/scripts/migrate_data_root.py --apply    # 确认后执行
+> ```
+>
+> 迁移前先按 Q6 备份宿主机卷。
 
 > 注意：`data/prompts`（提示词模板）随镜像走，**不要**从本地覆盖，否则容器内模板与代码版本不一致。
 
@@ -164,7 +180,7 @@ docker compose logs ai-tutor
 常见原因：
 - `SECRET_KEY` 为空或太短（后端拒绝启动）
 - API Key 失效（`/api/health` 本身不依赖 Key，看聊天时日志）
-- 挂载目录权限不足：`chown -R 1000:1000 data backend/data`（容器内以 root 运行一般无此问题）
+- 挂载目录权限不足：`chown -R 1000:1000 data`（容器内以 root 运行一般无此问题）
 
 ### Q3: 为什么必须单 worker？
 事件总线（图谱更新后向前端 SSE 推送）与速率限制是**进程内状态**。`--workers 1` 是硬约束，entrypoint.sh 已固定，勿改。
@@ -187,11 +203,11 @@ docker compose up -d --build --no-deps
 ```
 
 ### Q6: 备份数据
-只需备份挂载的四个目录即可（SQLite 文件可在线复制，最稳先停容器）：
+A1b 之后**只有一个数据根**：宿主机 `./data/`（其下 `knowledge/ conversations/ profiles/ kb/ rag/ quiz/ collector/ agent_runs/ agent_debug/ llm/ keys/`），日志在 `./backend/logs/`。SQLite 文件可在线复制，最稳先停容器：
 
 ```bash
 docker compose stop
-tar czf ai-tutor-backup-$(date +%F).tar.gz data backend/data
+tar czf ai-tutor-backup-$(date +%F).tar.gz data
 docker compose start
 ```
 

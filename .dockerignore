@@ -31,10 +31,21 @@ frontend/dist/
 frontend/.vite/
 
 # ─── 运行时数据（由 docker-compose 挂载卷提供，不进镜像）───
+# ⚠️ A1b 单一 DATA_ROOT（2026-10-09）后全部用户数据都在 data/<域>；
+#    原先靠 `backend/data/` 一条整目录覆盖，现在必须逐域列出 ——
+#    否则 data/llm/{uid}/models.json（**API Key 明文**）会随构建上下文一起传给 Docker daemon。
 data/knowledge/
 data/conversations/
 data/profiles/
-backend/data/
+data/kb/
+data/rag/
+data/quiz/
+data/collector/
+data/agent_runs/
+data/agent_debug/
+data/llm/
+data/keys/
+data/traces/
 backend/eval_data/
 
 # ─── 测试与工具脚本（非运行时必需）───
