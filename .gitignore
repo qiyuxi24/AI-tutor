@@ -9,6 +9,12 @@
 *.pem
 *.p12
 *.pfx
+# 服务器 SSH 连接配置与私钥（本地保存，绝不入库）
+/ssh.config
+/server.ssh.config
+/id_rsa*
+/id_ed25519*
+*.ppk
 secrets/
 credentials.json
 
@@ -115,8 +121,11 @@ whoosh_index/
 # 后端运行时数据（知识库索引、测验库等，可重建）
 backend/data/
 
-# 项目根 data/ 运行时数据（用户图谱 / 画像 / trace / KB 索引等，本地生成不入库）
+# 项目根 data/ 运行时数据（用户图谱 / 画像 / trace / KB 索引 / 运行记录 / 每用户模型 Key，本地生成不入库）
 # 注意：data/prompts/*.j2 模板与 data/ 下 *.md 文档仍保留入库
+# ⚠️ A1b 单一 DATA_ROOT 迁移（2026-10-09）后，下面 4 个域**原先在 backend/data/ 下**、
+#    被上一条整目录规则 `backend/data/` 一并保护；搬到 /data/ 后必须逐个列出 ——
+#    否则 `data/llm/{uid}/models.json`（**API Key 明文**，见 AGENTS.md §0）会被 git add 收进历史。
 /data/knowledge/
 /data/profiles/
 /data/traces/
@@ -125,6 +134,10 @@ backend/data/
 /data/kb/
 /data/rag/
 /data/collector/
+/data/llm/
+/data/agent_runs/
+/data/agent_debug/
+/data/keys/
 
 # 一次性比赛/调研材料（本地保留，不入库）
 /guochuang.pdf
@@ -150,3 +163,14 @@ backend/data/
 
 AI-tutor_通俗介绍.md
 冲刺计划_备赛四周末.md
+
+# ════════════════════════════════════════════
+# AI 会话留下的临时探测 / pytest 目录（2026-10-08 由环境配置会话追加）
+# 这类目录过去会以未跟踪状态污染 git status
+# ════════════════════════════════════════════
+.probe_*/
+.pytest_*/
+.pytest_cache/
+**/.pytest_cache/
+**/.pytest_tmp/
+pytest-of-*/
