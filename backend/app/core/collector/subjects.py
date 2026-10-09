@@ -17,10 +17,12 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
+from app.core import storage
+
 logger = logging.getLogger("ai-tutor")
 
 # 默认学科目录文件：backend/data/collector/subjects.json
-_SUBJECTS_PATH = Path(__file__).parent.parent.parent.parent / "data" / "collector" / "subjects.json"
+_SUBJECTS_PATH = storage.collector_dir() / "subjects.json"
 
 
 def load_subjects(path: Optional[Path] = None) -> dict:

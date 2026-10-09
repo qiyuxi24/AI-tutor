@@ -14,9 +14,10 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+from app.core import storage
 from app.core.quiz.schema import Question
 
-_QUIZ_DIR = Path(__file__).parent.parent.parent.parent / "data" / "quiz"
+_QUIZ_DIR = storage.quiz_dir()
 
 
 class QuizStore:
@@ -213,6 +214,29 @@ class QuizStore:
         ).fetchall()
         return [self._row_to_question(dict(r)) for r in rows]
 
+    def delete_by_knowledge_points(self, knowledge_points: list[str]) -> int:
+        """删除这些知识点（= 图谱节点 id）名下的题目与作答记录，返回删掉的题数。
+
+        用途：图谱节点 / 学科被删（`KnowledgeGraph.remove_node` / `remove_subject`）后，
+        题库里 `knowledge_point = node_id` 的题就成了孤儿 —— 题库页归不到任何节点，
+        判分还会把掌握度写回一个已经不存在的节点。空入参是 no-op。
+        """
+        points = [p for p in (knowledge_points or []) if p]
+        if not points:
+            return 0
+        marks = ",".join("?" * len(points))
+        with self._conn:
+            ids = [r["id"] for r in self._conn.execute(
+                f"SELECT id FROM questions WHERE knowledge_point IN ({marks})", points)]
+            if not ids:
+                return 0
+            qmarks = ",".join("?" * len(ids))
+            self._conn.execute(
+                f"DELETE FROM attempts WHERE question_id IN ({qmarks})", ids)
+            self._conn.execute(
+                f"DELETE FROM questions WHERE id IN ({qmarks})", ids)
+        return len(ids)
+
     def stats(self) -> dict:
         row = self._conn.execute(
             "SELECT COUNT(*) AS total FROM questions"
@@ -251,6 +275,26 @@ class QuizStore:
             "section_id": row.get("section_id") or "",
             "created_at": row["created_at"],
         }
+
+
+def purge_orphan_questions(user_id: int, knowledge_points: list[str]) -> int:
+    """删图时顺带清题库孤儿题（`knowledge_point ∈ knowledge_points`），返回删掉的题数。
+
+    收口给 `KnowledgeGraph.remove_node / remove_subject` 调用。**题库库不存在就直接返回 0、
+    绝不建目录** —— 这条路径只是"删图时顺带清理"，不能让一个只用了图谱的用户凭空多出
+    一份 `quiz.db`（测试里也靠这一点保证删节点用例不碰 `backend/data/quiz`）。
+    """
+    points = [p for p in (knowledge_points or []) if p]
+    if not points:
+        return 0
+    db = _QUIZ_DIR / str(user_id) / "quiz.db"
+    if not db.exists():
+        return 0
+    store = QuizStore(db.parent)
+    try:
+        return store.delete_by_knowledge_points(points)
+    finally:
+        store.close()
 
 
 class QuizManager:

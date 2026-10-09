@@ -153,3 +153,47 @@ def test_delete_board_maps_validation_error_to_400(client, isolate):
 
     assert r.status_code == 400
     assert "没有板块" in r.json()["detail"]
+
+
+# ── 建图进行中：改名 / 解散板块一律 409 ────────────────
+#
+# 与 `DELETE /knowledge/graph` 的护栏同源（GQ-15，见 graph_generator.is_graph_building）：
+# 建图会把节点按**旧的** subject / board 重新写进来，改名与解绑会被覆盖成半成品。
+# 删除整科早有护栏，这三个端点当时漏了 —— 多端登录下"一端建图、另一端改名"
+# 会真的撞上（2026-10-07 补）。
+
+
+@pytest.fixture
+def building():
+    """模拟"该用户正在建图"。"""
+    from app.core.kb import graph_generator
+
+    graph_generator._GRAPH_INFLIGHT.clear()
+    graph_generator.try_begin_graph_build(USER_ID)
+    try:
+        yield
+    finally:
+        graph_generator._GRAPH_INFLIGHT.clear()
+
+
+def test_rename_subject_rejected_while_building(client, isolate, building):
+    r = client.patch(SUBJECT_URL, json={"old_name": "数据结构", "new_name": "算法"})
+
+    assert r.status_code == 409
+    assert "建图" in r.json()["detail"]
+    assert _FakeKG.calls == [], "护栏必须在进数据层之前拦下"
+
+
+def test_rename_board_rejected_while_building(client, isolate, building):
+    r = client.patch(BOARD_URL, json={
+        "subject": "数据结构", "old_name": "线性表", "new_name": "线性结构"})
+
+    assert r.status_code == 409
+    assert _FakeKG.calls == []
+
+
+def test_delete_board_rejected_while_building(client, isolate, building):
+    r = client.delete(BOARD_URL, params={"subject": "数据结构", "board": "线性表"})
+
+    assert r.status_code == 409
+    assert _FakeKG.calls == []

@@ -17,10 +17,12 @@ from pathlib import Path
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+from app.core import storage
+
 logger = logging.getLogger(__name__)
 
-# 私钥默认落盘位置：项目根 data/keys/（运行时数据，不进代码库）
-KEY_PATH = Path(__file__).resolve().parents[3] / "data" / "keys" / "rsa_private.pem"
+# 私钥默认落盘位置：项目根 data/keys/（运行时数据，不进代码库；取径声明在 core/storage.py）
+KEY_PATH = storage.keys_dir() / "rsa_private.pem"
 
 _OAEP = padding.OAEP(
     mgf=padding.MGF1(algorithm=hashes.SHA256()),

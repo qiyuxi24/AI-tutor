@@ -25,6 +25,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from app.core import storage
 from app.core.rag.chunker import chunk_markdown
 from app.core.rag.vector_store import VectorStore
 from app.core.hybrid_search.fusion import DEFAULT_ALPHA, fuse
@@ -40,8 +41,8 @@ MIN_SCORE = 0.25
 # 两路宽召回条数（与 kb_manager.RECALL_TOP_K 对齐），融合后再截断到 top_k
 RECALL_TOP_K = 30
 
-# 数据目录：data/rag
-_RAG_DIR = Path(__file__).parent.parent.parent.parent / "data" / "rag"
+# 数据目录：data/rag（取径的唯一声明处 = core/storage.py）
+_RAG_DIR = storage.rag_dir()
 
 
 def _chunk_key(node_id: str, chunk_index: int) -> str:

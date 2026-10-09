@@ -15,6 +15,7 @@ class ChatRequest(BaseModel):
     current_node: Optional[str] = None  # 当前教学位置的知识点 ID（可选）
     kb_node_ids: Optional[List[int]] = None  # 知识库上下文范围：选中的文件/文件夹节点 ID
     kb_node_name: Optional[str] = None       # 当前选中的知识库范围名称（用于提示词）
+    conv_id: Optional[str] = None            # 前端对话 ID：多端登录下按对话串行（不传 = 不串行）
 
 class ChatResponse(BaseModel):
     """后端返回给前端的响应体"""

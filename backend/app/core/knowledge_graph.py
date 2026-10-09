@@ -24,9 +24,12 @@ import sqlite3
 import threading
 import unicodedata
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+
+from app.core import storage
 
 logger = logging.getLogger("ai-tutor")
 
@@ -270,7 +273,7 @@ class KnowledgeGraph:
 
     def __init__(self, user_id: int, data_dir: Optional[Path] = None):
         if data_dir is None:
-            data_dir = Path(__file__).parent.parent.parent.parent / "data" / "knowledge"
+            data_dir = storage.knowledge_dir()
         self.data_dir = Path(data_dir)
         self.db_path = self.data_dir / "knowledge.db"
         self.user_id = user_id  # 当前用户 ID，用于数据隔离
@@ -291,10 +294,13 @@ class KnowledgeGraph:
         self._manifest_lock = threading.Lock()
 
         # 连接数据库并建表
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        # timeout/busy_timeout：多端同时写同一库时**等写锁**而不是立刻抛
+        # "database is locked"（SQLite 单写者模型本身就是串行，见 _write_txn）。
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10.0)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")  # 写前日志，提升并发性能
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute("PRAGMA busy_timeout=10000")
         self._create_tables()
 
     # ════════════════════════════════════════════
@@ -544,6 +550,24 @@ class KnowledgeGraph:
                 "CREATE INDEX IF NOT EXISTS idx_doc_node_marks_doc "
                 "ON doc_node_marks(user_id, doc_id)"
             )
+
+    @contextmanager
+    def _write_txn(self):
+        """写事务：**BEGIN IMMEDIATE 立即取写锁**，让"读-算-写"整体串行（多端并发安全）。
+
+        为什么不用 `with self._conn:`（deferred）：deferred 事务读时不取锁，
+        WAL 下两连接可能读到同一快照，后写者拿到 SQLITE_BUSY_SNAPSHOT 而失败。
+        IMMEDIATE 让第二个连接在 BEGIN 处就排队（busy_timeout 内串行），
+        这正是"多端并发写 = 串行"的落点。**不要在事务内调用别的写方法（不可重入）。**
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
 
     def _invalidate_cache(self) -> None:
         """写操作后清空缓存"""
@@ -1665,9 +1689,24 @@ class KnowledgeGraph:
             return False
         return True
 
+    def _purge_quiz_for_nodes(self, node_ids: list[str]) -> None:
+        """清掉题库里以这些节点为知识点的题（删图留孤儿题 → 判分会把掌握度复活到已删节点）。
+
+        收口在此（而非各调用方）：`remove_node` 有三个调用方（API / `delete_node` 工具 /
+        `merge_ai_suggestion`），放这里一次覆盖。清理失败只记 warning，绝不阻断删图
+        （题库是不可重算的旁路数据，删图才是主操作）。
+        """
+        if not node_ids:
+            return
+        try:
+            from app.core.quiz.quiz_store import purge_orphan_questions
+            purge_orphan_questions(self.user_id, node_ids)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"清理孤儿题目失败（user={self.user_id}）: {e}")
+
     def remove_node(self, node_id: str, caller: str = "human") -> int:
         """
-        删除节点及其 MD 文件，外键级联自动删除关联边
+        删除节点及其 MD 文件，外键级联自动删除关联边；并清掉题库里以它为知识点的题
 
         参数:
             node_id: 要删除的节点 ID
@@ -1709,6 +1748,7 @@ class KnowledgeGraph:
 
         self._invalidate_cache()
         self.invalidate_content_cache(node_id)
+        self._purge_quiz_for_nodes([node_id])
         return edge_count
 
     def remove_subject(self, subject: str) -> dict:
@@ -1773,6 +1813,7 @@ class KnowledgeGraph:
 
         self._invalidate_cache()
         self.invalidate_content_cache()
+        self._purge_quiz_for_nodes(node_ids)
         return {
             "subject": subj,
             "deleted_nodes": len(node_ids),
@@ -1996,6 +2037,48 @@ class KnowledgeGraph:
                     f"改名：旧名 {old_name!r} 已属其他节点，未改指（节点 {node_id}）"
                 )
         self._invalidate_cache()
+
+    def add_mastery(self, node_id: str, delta: int, *, caller: str = "human",
+                    reason: str = "manual", evidence: str = "") -> int:
+        """掌握度**增量**写入（多端并发安全），封顶 100，返回更新后的掌握度。
+
+        为什么单独一个方法（而不是给 `update_node_info` 加参数）：
+        增量必须在**同一写事务内**"读当前值 → 算新值 → 写回"，与绝对赋值是两条
+        代码路径；揉进 `update_node_info` 会让"读-改-写"的竞态重新长回来。
+
+        多端场景（2026-10-07）：A 端刚把 mastery 改成 50，B 端的快照还是 0，
+        B 端判分答对 +20 → 结果必须是 70。旧实现"读出旧值算新值再写绝对值"
+        会写回 20（lost update）。
+
+        参数:
+            delta:    增量（可为负；结果夹在 [0, 100]）
+            caller:   "human" / "ai"（AI 不得改人类创建的节点）
+            reason:   事件 reason（quiz_correct / self_report / manual …）
+            evidence: 证据引用（如 `question:12`）
+
+        异常:
+            ValueError: 节点不存在
+            PermissionError: AI 试图修改人类创建的节点
+        """
+        self._guard_human_content(caller, node_id)
+        delta = int(delta)
+        with self._write_txn():
+            row = self._conn.execute(
+                "SELECT mastery FROM nodes WHERE id = ? AND user_id = ?",
+                (node_id, self.user_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"节点不存在：{node_id}")
+            before = int(row["mastery"] or 0)
+            after = max(0, min(100, before + delta))
+            self._conn.execute(
+                "UPDATE nodes SET mastery = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                (after, datetime.now().isoformat(), node_id, self.user_id),
+            )
+            if after != before:
+                self._record_mastery_event(node_id, before, after, reason, evidence)
+        self._invalidate_cache()
+        return after
 
     def _record_mastery_event(self, node_id: str, before_val: int, after_val: int,
                               reason: str = "manual", evidence: str = "") -> None:
@@ -2319,6 +2402,38 @@ class KnowledgeGraph:
                 (status, datetime.now().isoformat(), node_id, self.user_id),
             )
         self._invalidate_cache()
+
+    def remove_skeleton_md(self, node_id: str) -> bool:
+        """小节化成功后删除主 MD 的**骨架占位**（A4-3）。
+
+        为什么：`create_node_with_content` 对无正文的新节点写入的 `{id}.md` 只是占位
+        （`## 概述\n\n待完善...\n`，见 `ORIGIN_NOTES`）；正文经小节管线落进 `{id}/` 小节 MD
+        后，这张单 MD 就只剩"同一节点两种形态并存"的冗余，且直读它会拿到"待完善..."。
+
+        安全边界（只删**骨架**，绝不动老节点真实正文）：
+        - 仅当节点**已小节化**（`has_sections`，内容已在小节里）才可能删；
+        - 单 MD 必须含骨架占位符「待完善」才删 —— 老节点/有正文的单 MD 就算被小节化，
+          也**保留原样**（那才是它的唯一内容）。
+        - 幂等：单 MD 不存在（已删/本就无）→ False。
+
+        返回 True 表示有文件被删除。是文件层操作，**不动 nodes/edges**（图谱检索仍只看 SQLite）。
+        """
+        if not self.has_sections(node_id):
+            return False
+        md_path = self.nodes_dir / f"{node_id}.md"
+        if not md_path.is_file():
+            return False
+        try:
+            text = md_path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if "待完善" not in text:
+            return False
+        try:
+            md_path.unlink()
+        except OSError:
+            return False
+        return True
 
     # ════════════════════════════════════════════
     #  边 CRUD

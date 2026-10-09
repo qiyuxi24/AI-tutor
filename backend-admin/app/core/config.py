@@ -15,13 +15,19 @@ load_dotenv(dotenv_path=_PROJECT_ROOT / ".env", override=False)
 
 @dataclass
 class Settings:
-    # 复用主系统的 SQLite 数据库（与 backend/app/main.py 指向同一文件）
+    # ⚠️ 下面这几条路径是**主系统 `core/storage.py` 的镜像**（两个 app 包名都叫 `app`，
+    # 不能互相 import）—— 任何一条改错 = 运维后台读另一个库 / 删别的目录（P0-1 就是这么来的）。
+    # 一致性由主系统 `backend/tests/test_storage_paths.py` 的 admin 对照用例锁死。
+
+    # 复用主系统的 SQLite 数据库（= storage.knowledge_db）
     db_path: str = str(_PROJECT_ROOT / "data" / "knowledge" / "knowledge.db")
 
-    # 主系统其余存储的落点（照抄 backend/app/core/* 里的相对路径约定：
-    # 知识库/图谱向量在 backend/data，对话在根 data/conversations）。
+    # 主系统其余存储的落点（= storage 的 DATA_ROOT / conversations_dir / profiles_dir）：
+    # **A1b 后全部收敛进单一 DATA_ROOT**（<repo>/data）：知识库·图谱向量·题库·模型配置·
+    # 运行记录（agent_runs/llm_usage）·debug_log 均在 DATA_ROOT/<域> 下。
     # 仅用于「查看用户数据量」与「删除用户时清理数据」，读不到/表不存在时按 0 处理。
-    backend_data_dir: str = str(_PROJECT_ROOT / "backend" / "data")
+    backend_data_dir: str = str(_PROJECT_ROOT / "data")
+    records_dir: str = str(_PROJECT_ROOT / "data")
     conversations_db: str = str(_PROJECT_ROOT / "data" / "conversations" / "conversations.db")
     # 用户画像与头像（主系统 core/profile/store.py::default_data_dir）：
     # 头像落 <profiles_dir>/avatars/{uid}.png，删号必须一并清（avatar_store.AVATAR_DIRNAME）
@@ -43,6 +49,7 @@ class Settings:
         return cls(
             db_path=os.getenv("ADMIN_DB_PATH", cls.db_path),
             backend_data_dir=os.getenv("ADMIN_BACKEND_DATA_DIR", cls.backend_data_dir),
+            records_dir=os.getenv("ADMIN_RECORDS_DIR", cls.records_dir),
             conversations_db=os.getenv("ADMIN_CONVERSATIONS_DB", cls.conversations_db),
             profiles_dir=os.getenv("ADMIN_PROFILES_DIR", cls.profiles_dir),
             secret_key=os.getenv("ADMIN_SECRET_KEY", cls.secret_key),

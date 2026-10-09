@@ -64,13 +64,14 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "default_admin_password", "admin123")
     # 数据目录也必须指到 tmp：删号用例会 rmtree 这些路径
     monkeypatch.setattr(settings, "backend_data_dir", str(tmp_path / "backend_data"))
+    monkeypatch.setattr(settings, "records_dir", str(tmp_path / "records"))
     monkeypatch.setattr(settings, "conversations_db", str(tmp_path / "conversations.db"))
     # 头像目录同理：不指到 tmp 的话，"删号清头像"的断言会去删开发机上真实的头像文件
     monkeypatch.setattr(settings, "profiles_dir", str(tmp_path / "profiles"))
     init_db()
 
-    # Agent 运行记录库（backend/data/agent_runs）
-    runs_db = tmp_path / "backend_data" / "agent_runs" / "agent_runs.db"
+    # 记录型库（agent_runs + llm_usage；主系统落 backend/app/data/agent_runs）
+    runs_db = tmp_path / "records" / "agent_runs" / "agent_runs.db"
     runs_db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(runs_db))
     conn.executescript(
@@ -90,6 +91,18 @@ def client(tmp_path, monkeypatch):
             VALUES (strftime('%s','now') + 0, 'agent_loop',    'MiniMax-M3', 1, 1000, 100, 200),
                    (strftime('%s','now') + 0, 'agent_loop',    'MiniMax-M3', 2, 3000, 200, 100),
                    (strftime('%s','now') + 0, 'quiz_generate', 'MiniMax-M3', 1, 1000,   0, 900);
+
+        -- 待投递通知（主系统 core/notices.py 落库，A2-3）：含题目正文等用户内容，
+        -- 删号必须一并清 —— 它同样按 user_id 分区、同样不带 FK 级联
+        CREATE TABLE pending_notices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL, kind TEXT NOT NULL,
+            payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL,
+            delivered_at REAL
+        );
+        INSERT INTO pending_notices (user_id, kind, payload, created_at)
+            VALUES (1, 'quiz_ready', '{"node_id":"n1"}', 0),
+                   (2, 'quiz_ready', '{"node_id":"n2"}', 0);
         """
     )
     conn.commit()
@@ -354,11 +367,16 @@ def test_delete_user_removes_rows_and_files(client, tmp_path):
     finally:
         conn.close()
 
-    runs_db = Path(settings.backend_data_dir) / "agent_runs" / "agent_runs.db"
+    runs_db = Path(settings.records_dir) / "agent_runs" / "agent_runs.db"
     conn = sqlite3.connect(str(runs_db))
     try:
         assert conn.execute("SELECT COUNT(*) FROM agent_runs WHERE user_id = 1").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM agent_runs WHERE user_id = 2").fetchone()[0] == 1
+        # 待投递通知（A2-3）与 agent_runs 同库：漏一行就是"已删号仍能被补拉出题目"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM pending_notices WHERE user_id = 1").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM pending_notices WHERE user_id = 2").fetchone()[0] == 1
     finally:
         conn.close()
 
@@ -439,7 +457,7 @@ def test_batch_delete_removes_only_selected_users_and_their_files(client):
     finally:
         conn.close()
 
-    runs_db = Path(settings.backend_data_dir) / "agent_runs" / "agent_runs.db"
+    runs_db = Path(settings.records_dir) / "agent_runs" / "agent_runs.db"
     conn = sqlite3.connect(str(runs_db))
     try:
         assert conn.execute("SELECT COUNT(*) FROM agent_runs WHERE user_id = 1").fetchone()[0] == 0
@@ -726,7 +744,7 @@ def test_usage_group_by_whitelist_and_empty_defaults(client):
 
 def test_usage_summary_tolerates_missing_db(tmp_path, monkeypatch):
     """记账库还没建（新部署）时返回空结构，不能把运维页面打挂。"""
-    monkeypatch.setattr(settings, "backend_data_dir", str(tmp_path / "nope"))
+    monkeypatch.setattr(settings, "records_dir", str(tmp_path / "nope"))
     out = llm_usage_summary()
     assert out["total"]["calls"] == 0
     assert out["total"]["cache_hit_rate"] == 0.0

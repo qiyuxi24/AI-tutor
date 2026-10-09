@@ -17,16 +17,15 @@ from app.core.auth import (
     create_access_token,
     get_current_user,
 )
+from app.core import storage
 from app.core import transport_crypto
 from app.core.rate_limiter import login_rate_limiter
 from app.core.error_codes import ErrorCode, log_error
 
 router = APIRouter(tags=["认证"])
 
-# 数据库路径（从项目根目录解析）
-from pathlib import Path as _Path
-_PROJECT_ROOT = _Path(__file__).resolve().parent.parent.parent.parent.parent
-DB_PATH = str(_PROJECT_ROOT / "data" / "knowledge" / "knowledge.db")
+# 数据库路径：取径的唯一声明处 = core/storage.py
+DB_PATH = str(storage.knowledge_db())
 
 
 # ---------- 请求/响应模型 ----------
@@ -228,8 +227,8 @@ async def change_password(
     """
     修改当前用户密码（需提供原密码，两个密码均为 RSA 密文）。
 
-    ⚠️ 原密码错误刻意返回 **400 而非 401**：前端 axios 拦截器把 401 一律当作
-    "会话过期" → 清 token 并静默登录体验账户，用户输错一次原密码就会被换号。
+    ⚠️ 原密码错误刻意返回 **400 而非 401**：前端拦截器把非豁免端点的 401 一律当作
+    "会话过期" → 整页重载回到登录墙，用户输错一次原密码就被踢出去、上下文全丢。
     前端 `AUTH_ENDPOINTS` 白名单同样豁免本端点，双保险。
 
     不撤销已签发的 token：JWT 无状态，改密码后当前会话继续有效

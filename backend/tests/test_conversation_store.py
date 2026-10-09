@@ -68,3 +68,44 @@ def test_explicit_updated_at_from_client_wins(tmp_path):
         "created_at": 1000.0, "updated_at": 6000.0,
     })
     assert store.get_conversation("c1")["updated_at"] == 6000.0
+
+
+# ══════════════════════════════════════════════════════════════════
+# 多端登录防覆盖（2026-10-07）
+#
+# 背景：localStorage 为主 + 全量 sync 的旧策略是"同 id 直接覆盖"。
+# 同一账户在 A/B 两端登录时，B 的 localStorage 是旧快照，它照样全量上传
+# → 把 A 刚聊出来的新消息整段盖回去（数据丢失，且无任何报错）。
+#
+# 新不变量：客户端**显式**给出 updated_at 时，它就是"这份快照的修改时刻"，
+# 只有比库里更新才允许覆盖；更旧 = 拒绝写入，返回库里版本（调用方据此刷新本地）。
+# 未给出 updated_at（老前端 / 单条保存不传）→ 维持原有语义，向后兼容。
+# ══════════════════════════════════════════════════════════════════
+
+def test_stale_client_updated_at_does_not_overwrite(tmp_path):
+    """旧快照（updated_at 更小）不得覆盖新内容，且返回库里版本。"""
+    store = ConversationStore(user_id=1, data_dir=tmp_path)
+    store.save_conversation({
+        "id": "c1", "messages": _msgs("new"),
+        "created_at": 1000.0, "updated_at": 2000.0,
+    })
+
+    returned = store.save_conversation({
+        "id": "c1", "messages": _msgs("old"),
+        "created_at": 1000.0, "updated_at": 1500.0,
+    })
+
+    assert store.get_conversation("c1")["messages"][-1]["content"] == "new"
+    assert returned == 2000.0, "应返回库里版本，供调用方刷新本地快照"
+
+
+def test_sync_rejects_stale_snapshot(tmp_path):
+    """全量同步路径同样防覆盖：旧设备的全量上传不能把新消息盖回去。"""
+    store = ConversationStore(user_id=1, data_dir=tmp_path)
+    store.sync_from_client([
+        {"id": "c1", "messages": _msgs("v2"), "createdAt": 1000.0, "updatedAt": 2000.0},
+    ])
+    merged = store.sync_from_client([
+        {"id": "c1", "messages": _msgs("v1"), "createdAt": 1000.0, "updatedAt": 1500.0},
+    ])["conversations"]
+    assert merged[0]["messages"][-1]["content"] == "v2"

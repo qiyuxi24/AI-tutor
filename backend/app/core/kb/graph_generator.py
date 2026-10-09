@@ -1314,6 +1314,16 @@ class GraphGenerator:
             self._record_sources(kg, nid, sources)
         if mode != "append" and done:
             self._mark_filled(kg, nid)
+            # A4-3 兜底：内容确认已在小节里 → 顺手清掉主 MD 骨架占位（历史遗留的双形态）。
+            # generate() 已在"成文成功"时删过；这里覆盖"上次中断在标已填充之前"的遗留。
+            # 防御式同上：缺方法 / 非骨架 → 静默跳过（remove_skeleton_md 内部已验"待完善"）。
+            _rm = getattr(kg, "remove_skeleton_md", None)
+            if callable(_rm):
+                try:
+                    if _rm(nid):
+                        logger.info(f"节点小节化（{name}）：清理主 MD 骨架占位（{nid}.md）")
+                except Exception as e:                # noqa: BLE001 —— 删骨架失败不毁建图
+                    logger.debug(f"清理节点 {nid} 骨架 MD 失败（忽略）：{e}")
         if failed:
             logger.warning(
                 f"小节化（{name}）：{len(failed)} 个小节成文失败（已标 failed，可单独重试），"

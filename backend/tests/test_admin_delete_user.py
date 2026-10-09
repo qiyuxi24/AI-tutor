@@ -206,36 +206,89 @@ def test_delete_user_rows_tolerates_legacy_db(tmp_path):
         conn.close()
 
 
-def test_purge_user_storage_removes_all_per_user_dirs(tmp_path, monkeypatch):
-    """删号后的磁盘清理必须覆盖「节点 MD / kb / rag / **quiz**」四个按用户分目录 + 头像文件。
+def _make_sqlite(path: Path, script: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.executescript(script)
+        conn.commit()
+    finally:
+        conn.close()
 
-    回归来源（2026-09-26 审计）：roots 漏了题库（`core/quiz/quiz_store.py::_QUIZ_DIR`
-    = `backend/data/quiz/<uid>`，与 kb/rag 同数据根）→ 删号后该用户题目与判分记录残留。
-    2026-09-28 追加头像：它是**单文件**（`data/profiles/avatars/{uid}.png`），
-    只 rmtree 目录的清理逻辑会把它整条漏掉，所以单独断言。
+
+# 按用户分目录的域（主系统 backend/data/{kind}/{uid}）
+_KINDS = ("kb", "rag", "quiz", "collector", "llm")
+
+
+def test_purge_user_storage_covers_all_media(tmp_path, monkeypatch):
+    """删号必须清干净**每一类**介质，且不动别的用户。
+
+    口径 = 方案 §3 A1a 步骤 5：四张表（conversations / agent_runs / llm_usage /
+    agent_debug_logs）+ 按用户目录（nodes 与 kb|rag|quiz|collector|llm）+ 两个单文件
+    （画像 JSON、头像 PNG）。历史回归：roots 漏过题库（2026-09-26）、单文件头像漏过
+    （2026-09-28）、records 落点错到 backend/data（2026-10-07）。
     """
     data_root = tmp_path / "backend_data"
-    mine = [data_root / kind / "1" for kind in ("kb", "rag", "quiz")]
-    mine.append(tmp_path / "knowledge" / "nodes" / "1")
-    for d in mine:
+    records_root = tmp_path / "records"
+    knowledge_dir = tmp_path / "knowledge"
+    profiles_dir = tmp_path / "profiles"
+
+    # 目录型：uid=1 全部造出；uid=2 各留一份作「不得误删」对照
+    dirs_1 = [knowledge_dir / "nodes" / "1"] + [data_root / k / "1" for k in _KINDS]
+    dirs_2 = [data_root / k / "2" for k in _KINDS]
+    for d in dirs_1 + dirs_2:
         d.mkdir(parents=True)
         (d / "keep.txt").write_text("x", encoding="utf-8")
-    avatar = tmp_path / "profiles" / "avatars" / "1.png"
+
+    # 单文件型：画像 JSON + 头像
+    avatar = profiles_dir / "avatars" / "1.png"
     avatar.parent.mkdir(parents=True)
     avatar.write_bytes(b"\x89PNG")
-    other = data_root / "quiz" / "2"
-    other.mkdir(parents=True)
+    (profiles_dir / "1.json").write_text("{}", encoding="utf-8")
+    other_profile = profiles_dir / "2.json"
+    other_profile.write_text("{}", encoding="utf-8")
+
+    # 表型：四个库各造 uid=1 / uid=2 两行
+    _make_sqlite(tmp_path / "conversations.db",
+                 "CREATE TABLE conversations (id INTEGER, user_id INTEGER);"
+                 "INSERT INTO conversations VALUES (1, 1), (2, 2);")
+    _make_sqlite(records_root / "agent_runs" / "agent_runs.db",
+                 "CREATE TABLE agent_runs (run_id TEXT, user_id INTEGER);"
+                 "INSERT INTO agent_runs VALUES ('a', 1), ('b', 2);"
+                 "CREATE TABLE llm_usage (id INTEGER, user_id INTEGER);"
+                 "INSERT INTO llm_usage VALUES (1, 1), (2, 2);")
+    _make_sqlite(records_root / "agent_debug" / "debug_log.db",
+                 "CREATE TABLE agent_debug_logs (id INTEGER, user_id INTEGER);"
+                 "INSERT INTO agent_debug_logs VALUES (1, 1), (2, 2);")
 
     monkeypatch.setattr(admin_db, "settings", types.SimpleNamespace(
-        db_path=str(tmp_path / "knowledge" / "knowledge.db"),
+        db_path=str(knowledge_dir / "knowledge.db"),
         backend_data_dir=str(data_root),
+        records_dir=str(records_root),
         conversations_db=str(tmp_path / "conversations.db"),
-        profiles_dir=str(tmp_path / "profiles"),
+        profiles_dir=str(profiles_dir),
     ))
 
     admin_db.purge_user_storage(1)
 
-    for d in mine:
+    for d in dirs_1:
         assert not d.exists(), f"{d} 未被清理"
+    for d in dirs_2:
+        assert d.exists(), f"{d} 被误删"
     assert not avatar.exists(), "头像文件未被清理"
-    assert other.exists(), "其他用户的目录不得被删"
+    assert not (profiles_dir / "1.json").exists(), "画像 JSON 未被清理"
+    assert other_profile.exists(), "他人画像被误删"
+
+    def _remaining(db_file: Path, table: str) -> list[int]:
+        conn = sqlite3.connect(str(db_file))
+        try:
+            return [r[0] for r in conn.execute(
+                f"SELECT user_id FROM {table} ORDER BY user_id")]
+        finally:
+            conn.close()
+
+    assert _remaining(tmp_path / "conversations.db", "conversations") == [2]
+    assert _remaining(records_root / "agent_runs" / "agent_runs.db", "agent_runs") == [2]
+    assert _remaining(records_root / "agent_runs" / "agent_runs.db", "llm_usage") == [2]
+    assert _remaining(records_root / "agent_debug" / "debug_log.db",
+                      "agent_debug_logs") == [2]

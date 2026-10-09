@@ -12,13 +12,14 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from app.core import storage
 from .markdown import parse_markdown_to_data
 from .schema import PROFILE_SCHEMA_VERSION, default_profile_data, merge_patch, now
 
 
 def default_data_dir() -> Path:
-    """画像目录：项目根 data/profiles（本文件 → 上溯 4 层 = 项目根）"""
-    return Path(__file__).resolve().parents[4] / "data" / "profiles"
+    """画像目录：项目根 data/profiles（取径的唯一声明处 = core/storage.py）"""
+    return storage.profiles_dir()
 
 
 class ProfileStore:

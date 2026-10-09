@@ -22,6 +22,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from app.core import storage
+
 # ─── 配置态取值 ───
 STATUS_UNVERIFIED = "unverified"    # 新建 / 改过接入参数 / 从停用恢复 → 未验证
 STATUS_AVAILABLE = "available"      # 连通性测试通过
@@ -33,8 +35,8 @@ _ACCESS_FIELDS = ("name", "base_url", "api_key", "model")
 
 
 def default_data_dir() -> Path:
-    """模型配置目录：backend/data/llm（本文件 → 上溯 3 层 = backend）。"""
-    return Path(__file__).resolve().parents[3] / "data" / "llm"
+    """模型配置目录：backend/data/llm（取径的唯一声明处 = core/storage.py）。"""
+    return storage.llm_dir()
 
 
 def mask_key(key: str) -> str:

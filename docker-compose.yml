@@ -10,10 +10,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        # 体验账户口令（构建期烘进前端）；留空则用前端源码默认值。
-        # 设了 DEFAULT_ADMIN_PASSWORD 就必须同时设它，否则首屏静默登录失败
-        - VITE_DEMO_PASSWORD=${VITE_DEMO_PASSWORD:-}
     image: ai-tutor:latest
     container_name: ai-tutor
     restart: unless-stopped
@@ -44,17 +40,21 @@ services:
 
     volumes:
       # ── 运行时数据持久化（宿主机目录需预先创建；提示词模板 data/prompts 留在镜像内）──
-      # 知识图谱 + 节点 MD 文件
+      # A1b 后全部收敛进单一 /app/data（= storage.DATA_ROOT）：知识库/图谱/题库/采集/模型配置/
+      # 运行记录/列表全部落 /app/data/<域>；不再挂 /app/backend/data 或 /app/backend/app/data。
+      # 提示词模板（/app/data/prompts）由镜像 baked，故**保留子目录挂载**而非整挂 /app/data，
+      # 避免屏蔽镜像内的 prompts。
       - ./data/knowledge:/app/data/knowledge
-      # 对话历史
       - ./data/conversations:/app/data/conversations
-      # 用户画像
       - ./data/profiles:/app/data/profiles
-      # 上传知识库(RAG) + 出题数据（backend/data 下）
-      - ./backend/data:/app/backend/data
-      # 运行记录库（agent_runs / agent_debug）实际落在 backend/app/data，不在上面
-      # 那条卷内 —— 不挂的话容器一重建，排查用的历史记录全丢
-      - ./backend/app/data:/app/backend/app/data
+      # 上传知识库(RAG) + 出题 + 采集 + 每用户模型配置（原 /app/backend/data 下的域）
+      - ./data/kb:/app/data/kb
+      - ./data/rag:/app/data/rag
+      - ./data/quiz:/app/data/quiz
+      - ./data/collector:/app/data/collector
+      # 运行记录 / 调试流水（原 /app/backend/app/data 下）
+      - ./data/agent_runs:/app/data/agent_runs
+      - ./data/agent_debug:/app/data/agent_debug
       # 应用日志（tutor.log + 轮转备份）
       - ./backend/logs:/app/backend/logs
 

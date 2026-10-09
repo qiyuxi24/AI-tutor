@@ -23,14 +23,17 @@ import sqlite3
 import time
 from pathlib import Path
 
-# 记录库数据根：backend/app/data（⚠️ 不在 Docker 的 ./backend/data 卷内，
-# 靠 docker-compose 单挂 ./backend/app/data，见其注释）
-DATA_ROOT = Path(__file__).resolve().parents[1] / "data"
+from app.core import storage
+
+# 记录库数据根：单一 DATA_ROOT（A1b 后并入单根；每个记录库落在 DATA_ROOT/<kind>）。
+# 取径的唯一声明处 = core/storage.py；各库目录走 `default_dir(kind)` →
+# storage.records_dir(kind)（别再在这里数 parents）。
+DATA_ROOT = storage.DATA_ROOT
 
 
 def default_dir(folder: str) -> Path:
     """某个记录库的默认目录（folder 即库所在的子目录名）。"""
-    return DATA_ROOT / folder
+    return storage.records_dir(folder)
 
 
 def connect(folder: str, filename: str, schema: str, db_dir=None) -> sqlite3.Connection:

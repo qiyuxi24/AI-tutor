@@ -26,6 +26,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+from app.core import storage
 from app.core.llm import embed_texts    # 嵌入唯一出口：llm/embed.py（模型名/截断/失败兜底集中一处）
 from app.core.kb.kb_store import KbStore
 from app.core.kb.doc_vector_store import DocVectorStore
@@ -49,8 +50,8 @@ CHUNK_OVERLAP = 50      # 相邻分块重叠，保证语义连续性
 PARENT_EXPAND_CHARS = 1500   # 每个命中子块最多回溯到的父文本字符数（固定预算，父级扩展是预算决策非固定动作）
 PARENT_MAX_BLOCKS = 8        # 最多拼接的相邻块数（防止极端长文件拼接过多）
 
-# 数据目录：data/kb
-_KB_DIR = Path(__file__).parent.parent.parent.parent / "data" / "kb"
+# 数据目录：data/kb（取径的唯一声明处 = core/storage.py）
+_KB_DIR = storage.kb_dir()
 
 
 # 标题行识别：Markdown ATX 标题、电子书章节行（book.py 产物「【第 N 章：标题】」）

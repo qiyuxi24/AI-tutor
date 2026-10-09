@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from app.core import storage
+
 # 资源状态（manager 也复用这套）
 RESOURCE_PENDING = "pending"
 RESOURCE_INDEXED = "indexed"     # 已入库（区别于原始 'done'，见 B1.1 测试）
@@ -310,7 +312,7 @@ class CollectorStoreManager:
     """按用户管理 CollectorStore（每用户一个 data_dir/{uid}/collector.db）"""
 
     def __init__(self, data_dir: Optional[Path] = None):
-        base = Path(__file__).parent.parent.parent.parent / "data" / "collector"
+        base = storage.collector_dir()
         self.data_dir = Path(data_dir) if data_dir else base
         self._stores: dict[int, CollectorStore] = {}
 

@@ -62,7 +62,8 @@ from app.core.kb import graph_generator
 from app.core.error_codes import ErrorCode, log_error
 from app.core.quiz.quiz_store import quiz_manager
 from app.core.auth import get_current_user, get_current_user_from_token
-from app.core.event_bus import publish, subscribe
+from app.core.event_bus import GRAPH_UPDATED, broadcast, subscribe
+from app.core import notices
 from app.core.graph_analyzer import GraphAnalyzer
 from app.models.schemas import (
     DecomposeRequest, UpdateEdgeRequest, UpdateNodeInfoRequest,
@@ -124,12 +125,31 @@ async def knowledge_events(user_id: int = Depends(get_current_user_from_token)):
 
     2026-09-14 改为**按用户订阅**（原来是 subscribe() 全局队列）：
       - 必要：对话内出题完成的 `quiz_ready` 事件带题目内容，走 per-user 路由，
-        全局队列收不到（publish 带 user_id 时只投该用户队列）；
+        全局队列收不到（notify 只投该用户队列）；
       - 顺带修掉一个既有泄漏：全局广播的 graph_updated 会被所有在线用户都收到。
-      全局广播仍能到达（publish 无 user_id 时会同时投递到每个用户队列），
-      所以 graph_updated 行为不变。
+      全局广播仍能到达（broadcast 同时投递到每个用户队列），所以 graph_updated 行为不变。
+
+    ⚠️ 这条连接**会断**（切页 / 网络抖动 / 后端重载）。断开期间由 `notify` 落库的通知
+      不会被丢：客户端重连后经 GET /knowledge/notices/pending 补拉（见 core/notices.py）。
     """
     return StreamingResponse(subscribe(user_id=user_id), media_type="text/event-stream")
+
+
+@router.get("/knowledge/notices/pending")
+async def pending_notices(since: float | None = Query(
+        None, description="只取此时间戳（epoch 秒）之后产生的通知；不传 = 全部"),
+        user_id: int = Depends(get_current_user)):
+    """**补拉**离线期间产生的通知（A2-3）。取走即标记已投递。
+
+    谁需要它：`quiz_ready` 是后台任务约 40s 后产生的 —— 用户在这段时间里关掉页面、
+    切到别的端、或网络断了一下，实时推送就无处可投。后端 `notify()` 会把这类通知
+    先落库；前端在 SSE 连接建立（含重连）后调本端点补做一次，把"AI 说稍等片刻"
+    真正兑现成那几张题卡。
+
+    返回 `{notices: [{"type": "quiz_ready", ...}, ...]}`（`type` 与实时事件同构，
+    前端复用同一套分发分支）。
+    """
+    return {"notices": notices.take_pending(user_id, since=since)}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -202,7 +222,7 @@ async def delete_graph(subject: str = Query(..., description="要删除的学科
         logging.getLogger("ai-tutor").warning(
             f"清理 RAG 索引失败（学科 {subj}，{len(node_ids)} 个节点）: {e}")
 
-    publish("graph_updated")
+    broadcast(GRAPH_UPDATED)
     return {"status": "ok", **result}
 
 
@@ -225,6 +245,11 @@ async def rename_subject(req: RenameSubjectRequest,
         raise HTTPException(status_code=400,
                             detail="「未分类」是系统合成的分组，不能作为学科名")
 
+    # 建图中拒绝（与 DELETE /knowledge/graph 同源护栏，见 graph_generator.is_graph_building）：
+    # 建图会把节点按**旧的** subject 重新写进来，改名会被覆盖成半成品。
+    if graph_generator.is_graph_building(user_id):
+        raise HTTPException(status_code=409, detail="正在建图，请等建图完成后再改学科名")
+
     kg = KnowledgeGraph(user_id=user_id)
     try:
         result = kg.rename_subject(req.old_name, req.new_name)
@@ -233,7 +258,7 @@ async def rename_subject(req: RenameSubjectRequest,
     finally:
         kg.close()
 
-    publish("graph_updated")
+    broadcast(GRAPH_UPDATED)
     return {"status": "ok", **result}
 
 
@@ -248,6 +273,10 @@ async def rename_board(req: RenameBoardRequest,
     请求体：`{"subject": "数据结构", "old_name": "线性表", "new_name": "线性结构"}`
     返回：  `{"status": "ok", "subject", "old_board", "new_board", "renamed_nodes"}`
     """
+    # 建图中拒绝（同 DELETE /knowledge/graph 的护栏）
+    if graph_generator.is_graph_building(user_id):
+        raise HTTPException(status_code=409, detail="正在建图，请等建图完成后再改板块名")
+
     kg = KnowledgeGraph(user_id=user_id)
     try:
         result = kg.rename_board(req.subject, req.old_name, req.new_name)
@@ -256,7 +285,7 @@ async def rename_board(req: RenameBoardRequest,
     finally:
         kg.close()
 
-    publish("graph_updated")
+    broadcast(GRAPH_UPDATED)
     return {"status": "ok", **result}
 
 
@@ -272,6 +301,9 @@ async def delete_board(subject: str = Query(..., description="所属学科名"),
 
     返回：`{"status": "ok", "subject", "board", "moved_nodes"}`
     """
+    if graph_generator.is_graph_building(user_id):
+        raise HTTPException(status_code=409, detail="正在建图，请等建图完成后再解散板块")
+
     kg = KnowledgeGraph(user_id=user_id)
     try:
         result = kg.remove_board(subject, board)
@@ -280,7 +312,7 @@ async def delete_board(subject: str = Query(..., description="所属学科名"),
     finally:
         kg.close()
 
-    publish("graph_updated")
+    broadcast(GRAPH_UPDATED)
     return {"status": "ok", **result}
 
 
@@ -315,7 +347,7 @@ async def fill_pending_graph(subject: str = Query(..., description="课名，如
     try:
         result = await graph_generator.GraphGenerator(user_id=user_id).fill_pending_nodes(kg, subject)
         if result["status"] == "ok" and result["filled"]:
-            publish("graph_updated")
+            broadcast(GRAPH_UPDATED)
         return result
     finally:
         kg.close()
@@ -449,7 +481,7 @@ async def generate_node_sections(node_id: str,
         result = await SectionGenerator(user_id).generate(
             kg, node_id, force=bool(req.force) if req else False)
         if result.get("status") == "ok" and result.get("created"):
-            publish("graph_updated")
+            broadcast(GRAPH_UPDATED)
         return result
     finally:
         kg.close()
@@ -567,7 +599,7 @@ async def update_section_learn(node_id: str, section_id: str,
                 mastery_evidence=f"node:{node_id}",
             )
             mastery = MASTERY_ALL_SECTIONS_PASSED
-            publish("graph_updated")     # 图谱节点颜色 / 学习看板跟着变
+            broadcast(GRAPH_UPDATED)     # 图谱节点颜色 / 学习看板跟着变
         return {"section_id": section_id, "learn": learn,
                 "mastery": mastery, "progress": progress}
     finally:
@@ -678,7 +710,7 @@ async def _create_node_via_pipeline(kg: KnowledgeGraph, data: dict) -> tuple[str
     node_data["id"] = real_id
     node_data["file"] = f"nodes/{real_id}.md"
 
-    publish("graph_updated")
+    broadcast(GRAPH_UPDATED)
     return real_id, node_data
 
 
@@ -747,7 +779,7 @@ async def update_node(node_id: str, data: dict = Body(...), user_id: int = Depen
                 caller="human",
             )
 
-        publish("graph_updated")
+        broadcast(GRAPH_UPDATED)
         return {"status": "ok"}
     finally:
         kg.close()
@@ -769,7 +801,7 @@ async def update_node_info(node_id: str, request: UpdateNodeInfoRequest,
     kg = KnowledgeGraph(user_id=user_id)
     try:
         kg.update_node_info(node_id, data)
-        publish("graph_updated")
+        broadcast(GRAPH_UPDATED)
         return {"status": "ok", "node_id": node_id, "updated": list(data.keys())}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -793,7 +825,7 @@ async def delete_node(node_id: str, user_id: int = Depends(get_current_user)):
             rag_manager.delete_node_index(user_id, node_id)
         except Exception as e:
             logging.getLogger("ai-tutor").warning(f"清理 RAG 索引失败（节点 {node_id}）: {e}")
-        publish("graph_updated")
+        broadcast(GRAPH_UPDATED)
         return {"deleted": True, "node_id": node_id, "removed_edges": removed_edges}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -816,7 +848,7 @@ async def create_edge(data: dict = Body(...), user_id: int = Depends(get_current
     kg = KnowledgeGraph(user_id=user_id)
     try:
         kg.add_edge(data)
-        publish("graph_updated")
+        broadcast(GRAPH_UPDATED)
         return {"status": "ok", "edge": data}
     except ValueError as e:
         # 判断是否是重复边错误
@@ -852,7 +884,7 @@ async def update_edge(edge_id: int, request: UpdateEdgeRequest,
             if e["id"] == edge_id:
                 updated_edge = e
                 break
-        publish("graph_updated")
+        broadcast(GRAPH_UPDATED)
         return {"status": "ok", "edge_id": edge_id, "edge": updated_edge}
     except ValueError as e:
         msg = str(e)
@@ -874,7 +906,7 @@ async def delete_edge(edge_id: int, user_id: int = Depends(get_current_user)):
     kg = KnowledgeGraph(user_id=user_id)
     try:
         kg.remove_edge_by_id(edge_id)
-        publish("graph_updated")
+        broadcast(GRAPH_UPDATED)
         return {"deleted": True, "edge_id": edge_id}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -961,7 +993,7 @@ async def decompose_question(request: DecomposeRequest,
                 pass
 
         if created_nodes or created_edges:
-            publish("graph_updated")
+            broadcast(GRAPH_UPDATED)
 
         return {
             "target": result["target"],

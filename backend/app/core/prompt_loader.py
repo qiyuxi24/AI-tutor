@@ -8,10 +8,11 @@
 检索区块、工具能力说明、空图谱提示由调用方（`chat_service._build_system_prompt`）另行拼接。
 """
 from jinja2 import Environment, FileSystemLoader
-from pathlib import Path
 
-# 找到项目根目录下的 data/prompts 文件夹
-PROMPT_DIR = Path(__file__).parent.parent.parent.parent / "data" / "prompts"
+from app.core import storage
+
+# 提示词模板目录：取径的唯一声明处 = core/storage.py
+PROMPT_DIR = storage.prompts_dir()
 
 # 创建 Jinja2 环境
 env = Environment(loader=FileSystemLoader(str(PROMPT_DIR)))

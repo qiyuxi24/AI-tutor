@@ -1,6 +1,6 @@
 import asyncio
+import sqlite3
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +16,7 @@ from app.api.v1.quiz import router as quiz_router
 from app.api.v1.collector import router as collector_router
 from app.api.v1.agent_runs import router as agent_runs_router
 from app.api.v1.llm_models import router as llm_models_router
+from app.core import storage
 from app.core.config import settings
 from app.core.error_codes import ErrorCode, log_error
 from app.core.logging_setup import setup_logging
@@ -40,7 +41,7 @@ async def lifespan(app: FastAPI):
     import sqlite3
     from app.core.auth import ensure_user_columns, get_password_hash
 
-    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "knowledge" / "knowledge.db"
+    db_path = storage.knowledge_db()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(str(db_path))
@@ -86,11 +87,13 @@ async def lifespan(app: FastAPI):
     # 唯一落点：新增记录表只需在 _JOBS 加一行，不必再抄一遍"启动 + 每日"两段。
     from app.core.agent import debug_log, store as run_store
     from app.core.llm import usage as llm_usage
+    from app.core import notices
 
     _JOBS = (
         ("agent_runs", run_store.prune),   # 分层：30 天全量 / 180 天摘 evidence / 180+ 删
         ("调试日志", debug_log.prune),      # 14 天
         ("用量明细", llm_usage.prune),      # 365 天
+        ("待投递通知", notices.prune),      # 7 天（A2-3：未补拉的通知也得过期）
     )
 
     def _prune_once(tag: str) -> None:
@@ -149,6 +152,33 @@ app.include_router(llm_models_router, prefix="/api/v1")
 # ════════════════════════════════════════════
 #  全局异常处理器：捕获未处理的异常，返回结构化错误信息
 # ════════════════════════════════════════════
+
+@app.exception_handler(sqlite3.OperationalError)
+async def sqlite_busy_handler(request: Request, exc: sqlite3.OperationalError):
+    """SQLite 写锁等待超时 → 503 + Retry-After（**不要**报成 500）。
+
+    多端同时写同一库（一个账户在多端登录 / 多用户并发）时，SQLite 单写者模型让
+    后到者在连接级 `busy_timeout`（10s）内排队等锁；等不到就抛 "database is locked"。
+    这是**临时**竞争、稍后重试即可，不是服务器内部错误 —— 报 500 会让前端把它
+    和真故障混为一谈，也无法触发重试。
+
+    非 locked 的 `OperationalError`（表不存在 / 语法错）仍是真故障 → 交回 500。
+    """
+    if "locked" not in str(exc).lower():
+        return await global_exception_handler(request, exc)
+    error_msg = log_error(
+        ErrorCode.COMM_SERVER_ERROR,
+        detail=f"sqlite busy: {exc}",
+        exception=exc,
+        context={"path": str(request.url.path), "method": request.method,
+                 "reason": "sqlite_busy"},
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"detail": f"{error_msg}（数据正在被另一处写入，请稍后重试）"},
+        headers={"Retry-After": "1"},
+    )
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

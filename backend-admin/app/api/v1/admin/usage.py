@@ -1,6 +1,6 @@
 """LLM 用量与 prompt 缓存命中统计（只读）。
 
-数据源 = 主系统 `llm_usage` 表（`backend/data/agent_runs/agent_runs.db`），一次真实
+数据源 = 主系统 `llm_usage` 表（`backend/app/data/agent_runs/agent_runs.db`），一次真实
 LLM 调用一行，token 明细取自**供应商响应里的 `usage`**（含
 `prompt_tokens_details.cached_tokens`）——计费真值，不是本地估算。
 

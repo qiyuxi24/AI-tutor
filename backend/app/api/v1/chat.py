@@ -15,6 +15,7 @@ from fastapi import APIRouter, Request, Depends
 from fastapi.responses import StreamingResponse, JSONResponse
 from app.models.schemas import ChatRequest, ChatResponse
 from app.core.auth import get_current_user
+from app.core.keyed_lock import keyed_lock
 from app.core.rate_limiter import chat_rate_limiter
 from app.services.chat_service import process_message, process_message_stream
 
@@ -53,23 +54,34 @@ def _check_chat_rate_limit(request: Request) -> bool:
     return None
 
 
+def _conv_lock_key(user_id: int, conv_id: str | None) -> str:
+    """同一用户同一对话的串行键（多端同时追问同一对话 → 排队）。
+
+    无 conv_id（老前端 / 非对话场景）→ 空串 = **不加锁**，保持原有并发行为。
+    """
+    return f"{user_id}:{conv_id}" if conv_id else ""
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def handle_chat(request: ChatRequest, raw_request: Request,
                       user_id: int = Depends(get_current_user)):
     """
     处理对话请求（一次性回复，兼容旧版前端）
+
+    多端串行：同一用户同一对话的回合排队执行（见 `core/keyed_lock`）。
     """
     rate_limit_resp = _check_chat_rate_limit(raw_request)
     if rate_limit_resp:
         return rate_limit_resp
 
     kb = _build_kb_context(request)
-    reply, graph_analysis = await process_message(
-        user_id=user_id,
-        messages=request.messages,
-        current_node=request.current_node,
-        kb=kb,
-    )
+    async with keyed_lock(_conv_lock_key(user_id, request.conv_id)):
+        reply, graph_analysis = await process_message(
+            user_id=user_id,
+            messages=request.messages,
+            current_node=request.current_node,
+            kb=kb,
+        )
     return ChatResponse(reply=reply, graph_analysis=graph_analysis)
 
 
@@ -78,6 +90,9 @@ async def handle_chat_stream(request: ChatRequest, raw_request: Request,
                              user_id: int = Depends(get_current_user)):
     """
     统一流式对话端点（方案 B）
+
+    多端串行：锁包住**整个回合**的产出（含全部 SSE 事件），所以第二端要等第一端
+    跑完才开始推流 —— 等待期间前端没有任何输出，这是"按对象串行"的既定代价。
     """
     rate_limit_resp = _check_chat_rate_limit(raw_request)
     if rate_limit_resp:
@@ -86,13 +101,14 @@ async def handle_chat_stream(request: ChatRequest, raw_request: Request,
     async def event_stream():
         kb = _build_kb_context(request)
 
-        async for sse_chunk in process_message_stream(
-            messages=request.messages,
-            user_id=user_id,
-            current_node=request.current_node,
-            kb=kb,
-        ):
-            yield sse_chunk
+        async with keyed_lock(_conv_lock_key(user_id, request.conv_id)):
+            async for sse_chunk in process_message_stream(
+                messages=request.messages,
+                user_id=user_id,
+                current_node=request.current_node,
+                kb=kb,
+            ):
+                yield sse_chunk
 
     return StreamingResponse(
         event_stream(),
