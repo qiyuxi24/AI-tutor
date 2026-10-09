@@ -150,6 +150,45 @@ def test_two_phase_creates_sections_and_writes_back_summary(monkeypatch):
     assert all(c["max_tokens"] == sg.SECTION_WRITE_MAX_TOKENS for c in write_calls)
 
 
+# ── A4-3 接线：成文成功后删主 MD 骨架占位 ────────────────────────────
+
+class _SkeletonTrackingKG(FakeKG):
+    """在 FakeKG 上记账 remove_skeleton_md（真 KG 会删骨架占位，假 KG 只记录调用）。"""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.skeleton_remove_calls = []
+
+    def remove_skeleton_md(self, node_id):
+        self.skeleton_remove_calls.append(node_id)
+        return True
+
+
+def test_generate_calls_remove_skeleton_md_after_creating_sections(monkeypatch):
+    """A4-3 接线：小节化**成文成功后**触发 remove_skeleton_md（删骨架占位）。"""
+    plan = '{"sections":[{"title":"定义","kind":"definition","brief":"是什么"}],"summary":""}'
+    _make_fake_llm(monkeypatch, plan, lambda prompt: LONG)
+    kg = _SkeletonTrackingKG(nodes=[_node()])
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(kg, "double_integral"))
+
+    assert result["status"] == "ok" and result["created"]
+    assert kg.skeleton_remove_calls == ["double_integral"]
+
+
+def test_generate_skips_remove_skeleton_md_when_nothing_created(monkeypatch):
+    """append 但本资料没有新侧面（created 空）→ 不触发删骨架（不是"成文成功"）。"""
+    _make_fake_llm(monkeypatch, '{"sections":[]}', lambda prompt: LONG)
+    kg = _SkeletonTrackingKG(nodes=[_node()])
+    kg.manifests["double_integral"] = {"sections": [{"id": "s01", "title": "旧", "status": "filled"}]}
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", append=True))
+
+    assert result["status"] == "skipped"
+    assert kg.skeleton_remove_calls == [], "无新侧面（created 空）不属于成文成功，不删骨架"
+
+
 def test_single_section_when_content_needs_only_one(monkeypatch):
     """只规划出一节也能正常收口（不强制凑数）"""
     plan = '{"sections":[{"title":"定义","kind":"definition","brief":"是什么"}],"summary":""}'

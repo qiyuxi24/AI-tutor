@@ -429,3 +429,46 @@ def test_preview_cache_invalidated_by_new_section(kg):
 
 def test_node_content_text_missing_node_is_empty(kg):
     assert kg.node_content_text("ghost") == ""
+
+
+# ── A4-3：小节化成功后删除主 MD 骨架占位（remove_skeleton_md）─────
+# 边界：只删「骨架占位」（含「待完善」，无正文），绝不碰老节点真实正文单 MD。
+
+def test_remove_skeleton_md_deletes_stub_after_sectionize(kg):
+    """骨架节点（主 MD 是「待完善...」占位）小节化后，主 MD 被删，只剩 {id}/ 小节。"""
+    kg.create_node_with_content({"id": "s", "name": "栈", "tags": ["数据结构"]},
+                                origin="book")          # 无正文 → 主 MD = 骨架占位
+    assert "待完善" in (kg.nodes_dir / "s.md").read_text(encoding="utf-8")
+    kg.create_section("s", "定义", content="栈是后进先出。")
+
+    assert kg.remove_skeleton_md("s") is True
+    assert not (kg.nodes_dir / "s.md").exists(), "小节化后主 MD 骨架占位应删掉"
+    assert (kg.nodes_dir / "s").is_dir(), "小节文件夹保留"
+    # 读取口径不受影响：仍拿小节正文
+    assert "后进先出" in kg.node_content_text("s")
+
+
+def test_remove_skeleton_md_keeps_legacy_content_md(kg):
+    """老节点（主 MD 有真实正文）即使小节化也不删主 MD —— 那是它的唯一内容。"""
+    _seed_node(kg)                                      # 主 MD 正文 = "正文"
+    kg.create_section("n1", "定义", content="定义内容")
+
+    assert kg.remove_skeleton_md("n1") is False
+    assert (kg.nodes_dir / "n1.md").exists(), "老节点真实正文不能删"
+
+
+def test_remove_skeleton_md_no_sections_is_noop(kg):
+    """未小节化（无小节）→ 不删（防御：别把普通节点的主 MD 当骨架删掉）。"""
+    kg.create_node_with_content({"id": "s", "name": "栈", "tags": ["数据结构"]},
+                                origin="book")
+    assert kg.remove_skeleton_md("s") is False
+    assert (kg.nodes_dir / "s.md").exists()
+
+
+def test_remove_skeleton_md_idempotent_and_missing_is_noop(kg):
+    kg.create_node_with_content({"id": "s", "name": "栈", "tags": ["数据结构"]},
+                                origin="book")
+    kg.create_section("s", "定义", content="内容")
+    assert kg.remove_skeleton_md("s") is True
+    assert kg.remove_skeleton_md("s") is False, "已删（不存在）→ False，幂等"
+    assert kg.remove_skeleton_md("ghost") is False, "节点不存在 → False"

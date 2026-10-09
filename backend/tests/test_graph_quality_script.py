@@ -11,6 +11,7 @@ from scripts.inspect_graph_quality import (
     fuzzy_pairs,
     load_graph,
     merge_dupes,
+    node_body,
     plan_merge,
     section_metrics,
 )
@@ -62,6 +63,33 @@ def test_plan_merge_prefers_non_fragment_name(tmp_path):
 
     assert plan[0]["keep"]["id"] == "a", "碎片名（复习）即使是长正文也不当保留者"
     assert [n["id"] for n in plan[0]["drop"]] == ["b"]
+
+
+def test_plan_merge_ranks_section_node_by_section_body(tmp_path):
+    """小节化节点没有主 MD，保留者排序必须按小节正文算（A4-2 回归）。
+
+    `_rank_nodes`/`plan_merge` 之前用 `body_of`（直读 `{id}.md`），对刚小节化的节点返回
+    空串 → 正文更长的真实保留者被误当成空壳，反而被正文短的同名老单 MD 节点并掉。
+    """
+    nodes_dir = tmp_path / "nodes"
+    # 「sec」是小节化节点：正文全在 s01.md，主 MD 不存在（设计 D1）
+    sec = nodes_dir / "1" / "sec"
+    sec.mkdir(parents=True)
+    (sec / "s01.md").write_text("## 定义\n" + "小节正文" * 500, encoding="utf-8")
+    (sec / "manifest.json").write_text(json.dumps({
+        "node_id": "sec",
+        "sections": [{"id": "s01", "file": "s01.md", "status": "filled"}],
+    }, ensure_ascii=False), encoding="utf-8")
+    # 「leg」同名老单 MD 节点：正文短
+    (nodes_dir / "1" / "leg.md").write_text("# 队列\n\n短正文", encoding="utf-8")
+
+    assert node_body(nodes_dir, 1, "sec") != "", "小节正文要能被读到"
+    assert len(node_body(nodes_dir, 1, "sec")) > len(node_body(nodes_dir, 1, "leg"))
+
+    plan = plan_merge(dupe_groups([_node("sec", "队列"), _node("leg", "队列")]), nodes_dir)
+
+    assert plan[0]["keep"]["id"] == "sec", "小节化节点按小节正文当选保留者"
+    assert [n["id"] for n in plan[0]["drop"]] == ["leg"]
 
 
 def test_merge_dupes_redirects_edges_and_deletes_redundant(tmp_path):

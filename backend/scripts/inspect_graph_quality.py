@@ -205,6 +205,21 @@ def section_paths(nodes_dir: Path, user_id, node_id: str) -> list[Path]:
             if isinstance(s, dict) and s.get("file")]
 
 
+def node_body(nodes_dir: Path, user_id, node_id: str) -> str:
+    """节点正文（**小节优先**，口径与主系统 `KnowledgeGraph.node_content_text` 一致）。
+
+    小节化节点没有主 MD（设计 D1），正文全在小节文件里 —— 直读 `{node_id}.md` 会拿到空串或
+    骨架占位。**任何"取正文/比正文长度"的地方**都必须走这里，否则刚小节化的节点会被误判成
+    空壳，导致合并时挑错保留者。老节点没有小节才回落到 `body_of`（单 MD）。
+    """
+    section_body = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in section_paths(nodes_dir, user_id, node_id)
+        if p.exists()
+    )
+    return section_body or body_of(nodes_dir, user_id, node_id)
+
+
 def read_manifest_file(path: Path) -> dict | None:
     """读 manifest.json（不存在或 JSON 损坏 → None，不抛）"""
     if not path.exists():
@@ -385,12 +400,9 @@ def audit(nodes: list[dict], edges: list[dict], nodes_dir: Path,
     ids = {n["id"] for n in nodes}
     # 正文口径：**有小节就只算小节正文**（内容层已在小节里，主 MD 对新建节点只剩骨架占位，
     # 拿它当正文会把刚小节化的节点误判成空壳）；老节点没有小节才回落到单 MD。
-    bodies: dict[str, str] = {}
-    for n in nodes:
-        section_body = "\n".join(p.read_text(encoding="utf-8")
-                                 for p in section_paths(nodes_dir, n.get("user_id"), n["id"])
-                                 if p.exists())
-        bodies[n["id"]] = section_body or body_of(nodes_dir, n.get("user_id"), n["id"])
+    bodies: dict[str, str] = {
+        n["id"]: node_body(nodes_dir, n.get("user_id"), n["id"]) for n in nodes
+    }
     lens = sorted(len(b) for b in bodies.values())
 
     # GQ-21 多源度量：数据源（nodes.sources / doc_node_marks）任一未就绪都降级为"跳过"
@@ -550,7 +562,7 @@ def _rank_nodes(nodes: list[dict], nodes_dir: Path) -> list[dict]:
     """
     return sorted(nodes, key=lambda x: (
         is_fragment_name(x.get("name", "")),
-        -len(body_of(nodes_dir, x.get("user_id"), x["id"])),
+        -len(node_body(nodes_dir, x.get("user_id"), x["id"])),
     ))
 
 
@@ -583,7 +595,7 @@ def merge_dupes(db_path: Path, plan: list[dict], action: str = "同名合并") -
         kg = KnowledgeGraph(user_id=item["user_id"], data_dir=db_path.parent)
         try:
             keep_id = item["keep"]["id"]
-            keep_body = body_of(db_path.parent / "nodes", item["user_id"], keep_id)
+            keep_body = node_body(db_path.parent / "nodes", item["user_id"], keep_id)
             for node in item["drop"]:
                 drop_id = node["id"]
                 for edge in [e for e in kg.edges
@@ -607,7 +619,7 @@ def merge_dupes(db_path: Path, plan: list[dict], action: str = "同名合并") -
                 # ⚠ 不能要求 keep_body 非空：GQ-17 语义归拢的代表节点可能是空骨架，
                 # 此时也必须并入（否则被并节点的正文随删除一起消失）。append 幂等，
                 # 并入后刷新 keep_body，避免后续节点正文重复追加。
-                drop_body = body_of(db_path.parent / "nodes", item["user_id"], drop_id)
+                drop_body = node_body(db_path.parent / "nodes", item["user_id"], drop_id)
                 if drop_body and drop_body not in keep_body:
                     kg.update_node_content(keep_id, drop_body, mode="append")
                     stats["content_appended"] += 1
@@ -785,13 +797,13 @@ def run_consolidate(args, nodes: list[dict], edges: list[dict],
         keep = item["keep"]
         n_edges = sum(1 for e in edges if keep["id"] in (e["from_node"], e["to_node"]))
         print(f"\n  [族] 保留 {keep['id']}「{keep['name']}」"
-              f"（正文 {len(body_of(nodes_dir, keep.get('user_id'), keep['id']))} 字，"
+              f"（正文 {len(node_body(nodes_dir, keep.get('user_id'), keep['id']))} 字，"
               f"涉及边 {n_edges} 条）")
         print(f"       依据：{item['reason'] or '—'}")
         for node in item["drop"]:
             d_edges = sum(1 for e in edges if node["id"] in (e["from_node"], e["to_node"]))
             print(f"       合并 → 删除 {node['id']}「{node['name']}」"
-                  f"（正文 {len(body_of(nodes_dir, node.get('user_id'), node['id']))} 字，"
+                  f"（正文 {len(node_body(nodes_dir, node.get('user_id'), node['id']))} 字，"
                   f"待重定向边 {d_edges} 条）")
 
     if not args.apply:
@@ -870,12 +882,12 @@ def main() -> None:
         for item in plan:
             print(f"\n  [uid{item['user_id']}｜{item['subject'] or '未分科'}] "
                   f"保留 {item['keep']['id']}「{item['keep']['name']}」"
-                  f"（正文 {len(body_of(nodes_dir, item['user_id'], item['keep']['id']))} 字）")
+                  f"（正文 {len(node_body(nodes_dir, item['user_id'], item['keep']['id']))} 字）")
             for node in item["drop"]:
                 n_edges = sum(1 for e in edges
                               if node["id"] in (e["from_node"], e["to_node"]))
                 print(f"    合并 → 删除 {node['id']}「{node['name']}」"
-                      f"（正文 {len(body_of(nodes_dir, node['user_id'], node['id']))} 字，"
+                      f"（正文 {len(node_body(nodes_dir, node['user_id'], node['id']))} 字，"
                       f"待重定向边 {n_edges} 条）")
         if args.apply:
             stats = merge_dupes(db_path, plan)

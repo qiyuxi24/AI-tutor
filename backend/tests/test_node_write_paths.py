@@ -269,7 +269,7 @@ def _patch_api_user(kg, monkeypatch):
     monkeypatch.setattr(kapi, "KnowledgeGraph", lambda user_id: kg)
     monkeypatch.setattr(KnowledgeGraph, "close", lambda self: None)
     monkeypatch.setattr(kapi, "assign_taxonomy", _async(None))
-    monkeypatch.setattr(kapi, "publish", lambda *a, **kw: None)
+    monkeypatch.setattr(kapi, "broadcast", lambda *a, **kw: None)
 
 
 # ── POST /knowledge/node 建节点写流程的对外可观测行为 ──
@@ -327,7 +327,7 @@ def test_fill_endpoint_publishes_only_when_something_filled(kg, monkeypatch):
 
     _patch_api_user(kg, monkeypatch)
     events = []
-    monkeypatch.setattr(kapi, "publish", lambda *a, **kw: events.append(a))
+    monkeypatch.setattr(kapi, "broadcast", lambda *a, **kw: events.append(a))
 
     async def _ok(self, kg_, subject):
         return {"subject": subject, "status": "ok", "filled": ["队列"],
