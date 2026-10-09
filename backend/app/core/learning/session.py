@@ -173,7 +173,10 @@ def bind_target(kg, target: Optional[dict]) -> Optional[LearnTurn]:
     turn.mark = str(target.get("mark") or "")
     turn.passed = bool(target.get("passed"))
     turn.needs_quiz = bool(target.get("needs_quiz"))
-    turn.action = action_for(passed=turn.passed, needs_quiz=turn.needs_quiz)
+    # `action` 优先用**策略层**（`core/teaching/policy.decide`）算好的那一份 —— 提示词里说的动作
+    # 与工具层硬拦认的动作必须同源；缺省才回退本模块的 `action_for`（脚本 / 旧测试直构造 target）。
+    turn.action = str(target.get("action") or "") or action_for(
+        passed=turn.passed, needs_quiz=turn.needs_quiz)
     turn.reason = _reason_for(turn)
     _persist(kg, turn)
     return turn

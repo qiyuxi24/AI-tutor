@@ -39,6 +39,7 @@ from app.core.error_codes import ErrorCode, log_error, publish_error_event
 from app.core.event_bus import broadcast, GRAPH_UPDATED, TEXT_DELTA
 from app.core.knowledge_writer import apply_suggestion, load_suggestions, save_suggestions
 from app.core.learning import session as learning
+from app.core.teaching import policy
 from app.core.quiz.chat_grade import auto_grade_pending
 
 logger = logging.getLogger("ai-tutor")
@@ -260,21 +261,13 @@ def learn_mode_kind(kg: KnowledgeGraph, focus_node: dict | None, messages: list)
 def _learn_states(kg: KnowledgeGraph, node_id: str) -> list[tuple[int, dict, dict]]:
     """小节 + 学习状态，带上 1-based 序号：`[(i, section, learn_state), ...]`。
 
-    与 `_learn_start` 一起组成**起点规则的唯一实现** —— 学习块的清单 / 起点理由、
-    B1 出题兜底、B2 越级校验三处共用，别各写一份（漂移起来很难查）。
+    本函数只负责**从图谱读书**（唯一的 kg 边界），"起点是哪一节 / 该讲还是该考 / 为什么"
+    一律交给 `core/teaching/policy.decide()` —— 学习块清单、起点理由、B1 出题兜底、
+    B2 越级校验四处共用同一份判定，别在调用方再抄一遍（漂移起来很难查）。
     """
     from app.core.knowledge_graph import read_learn_state
     return [(i, s, read_learn_state(s))
             for i, s in enumerate(kg.list_sections(node_id), 1)]
-
-
-def _learn_start(states: list[tuple[int, dict, dict]]) -> tuple[int, dict, dict]:
-    """起点 = **按顺序**第一个还没通过的小节（用户口径原话："按照先后顺序"）。
-
-    全通过时返回最后一节（理由文案另有分支说明）。刻意不按"不懂优先"重排 ——
-    那会让学生刚标记的节被后面的未标记节插队，顺序感就没了。
-    """
-    return next((it for it in states if not it[2]["passed"]), states[-1])
 
 
 def _build_learn_block(kg: KnowledgeGraph, focus_node: dict | None,
@@ -332,25 +325,20 @@ def _build_learn_block(kg: KnowledgeGraph, focus_node: dict | None,
             flag += "、已读完"
         lines.append(f"  {i}. [{s.get('id')}] {s.get('title')} —— {flag}")
 
-    passed_n = sum(1 for _, _, st in states if st["passed"])
-
-    start_idx, start_sec, start_state = _learn_start(states)
-    if start_state["passed"]:
-        start_reason = "全部小节都已通过 —— 只需简短肯定并告诉学生这个知识点拿下了"
-    elif start_state["mark"] == LEARN_MARK_CONFUSED:
-        # 系统降级（连续两次答错，mark_by=ai）**不能**说成"学生标了不懂"（2026-09-30）——
-        # 两者都进入讲解，但归因不同：前者是系统判的，后者是学生自己说的。
-        start_reason = ("连续两次答错、系统已降级为「不懂」—— 从这里开始把它讲一遍"
-                        if start_state.get("mark_by") == LEARN_MARK_BY_AI
-                        else "学生标了不懂，从这里开始讲")
-    elif start_state["mark"] == LEARN_MARK_UNDERSTOOD:
-        start_reason = "已懂 —— **先出题验证**，别重讲"
-    else:
-        start_reason = "还没看过 —— 按新课讲"
+    # ── 策略判定（B2）：起点是哪一节 / 该讲还是该考 / 为什么 ─────────────
+    # 判定**不再写在这里** —— 唯一出口是 `core/teaching/policy.decide()`（纯数据进、纯数据出），
+    # 学习块、工具层目标（`learn_target_section`）、出题兜底、越级硬拦共用同一份结论。
+    # 本函数此后只剩**渲染**职责：清单文案、正文截断、两套模板（开场轮 / 后续轮）。
+    directive = policy.decide(node_id=node_id, states=states)
+    start = directive.target
+    start_idx = start.index
+    start_sec = {"id": start.section_id, "title": start.title}
+    start_reason = directive.reason
+    passed_n = directive.passed_count
 
     body = ""
     try:
-        body = (kg.read_section(node_id, start_sec.get("id")) or "").strip()
+        body = (kg.read_section(node_id, start.section_id) or "").strip()
     except Exception:  # noqa: BLE001
         body = ""
     if len(body) > 900:
@@ -457,7 +445,10 @@ def learn_target_section(kg: KnowledgeGraph, focus_node: dict | None) -> dict | 
     """
     "本轮该处理的小节" = 顺序上第一个未通过的节，连同它现在的状态。
 
-    返回 `{node_id, index, section_id, title, mark, needs_quiz}`；不适用时 None。
+    判定本身在 `core/teaching/policy.decide()`（**唯一策略出口**），这里只是把图谱读成
+    `states` 再把 `Directive.target` 还原成工具层沿用的字典形状。
+
+    返回 `{node_id, index, section_id, title, mark, passed, needs_quiz, action}`；不适用时 None。
     `needs_quiz=True` 表示该节是「已懂」→ 本轮该**出题验证**（而不是开讲）。
     """
     if not focus_node:
@@ -470,19 +461,12 @@ def learn_target_section(kg: KnowledgeGraph, focus_node: dict | None) -> dict | 
     except Exception as e:  # noqa: BLE001 —— 兜底能力出问题不能影响对话
         logger.warning(f"读小节状态失败（{node_id}）：{e}")
         return None
-    if not states:
+    directive = policy.decide(node_id=node_id, states=states)
+    if not directive.active:
         return None
-    from app.core.knowledge_graph import LEARN_MARK_UNDERSTOOD
-    idx, sec, st = _learn_start(states)
-    return {
-        "node_id": node_id,
-        "index": idx,
-        "section_id": str(sec.get("id") or ""),
-        "title": str(sec.get("title") or ""),
-        "mark": st.get("mark"),
-        "passed": bool(st.get("passed")),
-        "needs_quiz": (not st.get("passed")) and st.get("mark") == LEARN_MARK_UNDERSTOOD,
-    }
+    # `action` 一并带出：B1 的 `LearnTurn` 直接采用它（缺省才回退 `learning.action_for`），
+    # 于是"提示词里说的动作"与"工具层硬拦认的动作"不可能分叉。
+    return {**directive.target.as_dict(), "action": directive.action}
 
 
 # ══════════════════════════════════════════════════════════════════
