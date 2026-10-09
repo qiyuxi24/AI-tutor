@@ -1095,7 +1095,8 @@ async def get_next_to_learn(user_id: int = Depends(get_current_user)):
     """
     获取"下一步该学什么"的推荐。
 
-    返回拓扑排序中第一个 mastery < 50 的节点。
+    返回拓扑排序中第一个「还没学会」的节点（阈值口径唯一实现 =
+    `core/graph_order.MASTERY_NEXT_THRESHOLD`）。
     如果全部已掌握，返回 node_id=None。
 
     返回: NextToLearnResponse

@@ -30,6 +30,7 @@ from typing import Optional
 from datetime import datetime
 
 from app.core import storage
+from app.core.graph_order import is_unmastered, order_key
 
 logger = logging.getLogger("ai-tutor")
 
@@ -805,16 +806,23 @@ class KnowledgeGraph:
         """
         对所有 prerequisite 边构成的 DAG 做拓扑排序，返回学习顺序。
 
-        算法（Kahn's Algorithm）：
+        算法（Kahn's Algorithm + **同层口径**）：
         1. 只考虑 relation='prerequisite' 的边
         2. 入度为 0 的节点作为起点
-        3. 每次移除一个入度为 0 的节点，更新其出边的目标入度
+        3. 每次从"当前可学集合"里挑 **掌握度排序键最小** 的那个（B3-1，2026-10-10）：
+           前置未达标排后 → 掌握度升序 → id 升序；口径的唯一实现在 `core/graph_order.py`
+           （`graph_middleware.path_board` 的 recommended 用的是同一个键）
+
+        为什么不再用 FIFO（旧实现）：同层多个可学节点时，谁先学只看数据库行序，
+        与"哪一节更弱 / 前置打没打好"完全无关 —— 学生拿到的"下一步"是随机的。
 
         返回：
             拓扑排序后的节点 ID 列表（从最基础到最进阶）。
             如果没有节点，返回空列表。
             如果图有环，返回部分排序结果。
         """
+        import heapq
+
         # 获取所有节点 ID
         all_ids = self.get_node_ids()
         if not all_ids:
@@ -826,9 +834,10 @@ class KnowledgeGraph:
             (self.user_id,)
         ).fetchall()
 
-        # 构建邻接表和入度表
+        # 构建邻接表、入度表、前置表（前置表只服务于同层排序键）
         in_degree = {nid: 0 for nid in all_ids}
         adj = {nid: [] for nid in all_ids}
+        prereqs_of = {nid: [] for nid in all_ids}
 
         for edge in prereq_edges:
             from_id = edge["from_node"]
@@ -838,18 +847,31 @@ class KnowledgeGraph:
             if from_id in adj and to_id in in_degree:
                 adj[from_id].append(to_id)
                 in_degree[to_id] += 1
+                prereqs_of[to_id].append(from_id)
 
-        # Kahn 算法
-        queue = [nid for nid, deg in in_degree.items() if deg == 0]
+        nodes_by_id = {n["id"]: n for n in self.nodes}
+
+        def _push(heap, nid):
+            heapq.heappush(heap, (order_key(
+                nodes_by_id.get(nid) or {"id": nid},
+                prereq_unmastered=any(is_unmastered(nodes_by_id.get(p))
+                                      for p in prereqs_of[nid]),
+            ), nid))
+
+        # Kahn 算法：可学集合用**最小堆**（键 = 同层口径），不是 FIFO
+        heap = []
+        for nid in all_ids:
+            if in_degree[nid] == 0:
+                _push(heap, nid)
         result = []
 
-        while queue:
-            current = queue.pop(0)
+        while heap:
+            _, current = heapq.heappop(heap)
             result.append(current)
             for neighbor in adj[current]:
                 in_degree[neighbor] -= 1
                 if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
+                    _push(heap, neighbor)
 
         # 如果还有未处理的节点（有环），追加到末尾
         for nid in all_ids:
@@ -909,11 +931,12 @@ class KnowledgeGraph:
         has_incoming = {e["to_node"] for e in prereq_edges}
         root_nodes = [n for n in ordered if n not in has_incoming]
 
-        # 推荐下一步：第一个 mastery < 50 的节点
+        # 推荐下一步：顺序上第一个"还没学会"的节点
+        # （阈值口径唯一实现 = `core/graph_order.MASTERY_NEXT_THRESHOLD`，别在这里写 50）
         current_recommendation = None
         for nid in ordered:
             node = self.get_node(nid)
-            if node and node.get("mastery", 0) < 50:
+            if node and is_unmastered(node):
                 current_recommendation = nid
                 break
 
@@ -950,7 +973,7 @@ class KnowledgeGraph:
         unmastered_prereqs = []
         for pid in prereqs:
             pn = self.get_node(pid)
-            if pn and pn.get("mastery", 0) < 50:
+            if pn and is_unmastered(pn):
                 unmastered_prereqs.append(pn["name"])
 
         reason = f"学习路径上的下一个知识点"

@@ -24,6 +24,12 @@ from __future__ import annotations
 from collections import deque
 from typing import Optional
 
+from app.core.graph_order import (
+    MASTERY_NEXT_THRESHOLD,
+    is_unmastered as _unmastered,
+    order_key,
+)
+
 # 合成学科名：无学科归属的节点（tags 中无学科标签）在统计与切片中的统一分组名。
 # 不是真实学科，因此不出现在 get_subjects() 里。
 SUBJECT_UNCLASSIFIED = "未分类"
@@ -102,13 +108,9 @@ def list_boards(kg, subject: str) -> list[dict]:
 #  主路径（把「学习路径」画成一条线）
 # ══════════════════════════════════════════════════════════════════
 
-# 「还没学会」阈值：与 `KnowledgeGraph.get_learning_path` 的推荐口径一致（mastery < 50）。
-# 只用来决定「该从哪个节点动手」，不参与四档配色（那是 mastery_bucket 的职责）。
-MASTERY_NEXT_THRESHOLD = 50
-
-
-def _unmastered(node: dict) -> bool:
-    return int(node.get("mastery") or 0) < MASTERY_NEXT_THRESHOLD
+# 「还没学会」阈值（`MASTERY_NEXT_THRESHOLD`）与**同层排序口径**（`order_key`）的唯一实现
+# 都在 `core/graph_order.py`（B3-2 收敛：以前 50 写在三处）。
+# ⚠️ 与 `mastery_bucket` 的四档阈值（MASTERY_WEAK / MASTERY_MASTERED）**不是一回事**。
 
 
 def _prereq_pairs(edges: list[dict], node_ids: set[str]) -> list[tuple[str, str]]:
@@ -542,11 +544,16 @@ def path_board(kg, subject: Optional[str] = None,
         })
 
     # 排序：层号优先，其次 id —— 卡片位置必须稳定（学会一个就乱跳会让人找不到东西）
+    # 注：这里**刻意不按掌握度**排（看板卡片要稳定）；掌握度只影响 recommended（下一段）。
     items.sort(key=lambda it: (it["level"], it["id"]))
 
+    # 推荐：已解锁且未掌握 → 层号 → **同层口径**（前置达标优先 → 掌握度升序 → id）。
+    # 口径的唯一实现是 `graph_order.order_key`，与 `KnowledgeGraph.topological_sort`
+    # 的 Kahn 取键同源（B3-1）—— 别在这里再写一遍 (mastery, id)。
     recommended = sorted(
         (it for it in items if not it["blocked_by"] and it["mastery"] < MASTERY_MASTERED),
-        key=lambda it: (it["level"], it["mastery"], it["id"]),
+        key=lambda it: (it["level"],) + order_key(
+            it, prereq_unmastered=bool(it["blocked_by"])),
     )[:5]
 
     stats = {"total": len(items), "locked": 0}
