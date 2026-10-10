@@ -8,7 +8,7 @@
 > 3. 迁出时保留日期与关键证据（文件 / 测试名），便于回溯"当时验证到哪一步"。
 >
 > 来源：`TODO.md`（2026-09-13 迁出 P0/P1 已完成项 + 原「✅ 已完成（归档）」节）、`TODO_Collector.md`（B1/B2 已完成项）。
-> 上次整理：2026-09-13
+> 上次整理：2026-09-13（最近追加：2026-10-10 §4.5 真流式）
 
 ---
 
@@ -163,6 +163,26 @@
   `tests/test_learn_mode.py`（学习块：开场轮/后续轮两套）、`tests/test_mark_section_tool.py`（新工具）。
   真机冒烟脚本 `backend/scripts/smoke_learn_mode.py`（提示词类改动只能真跑验证；
   **注意它会污染所跑账号的题库与事件流**，见开发日志 2026-09-30 补的"踩坑"）。
+
+### 4.5 真流式：正文逐 token 下发（2026-10-10）
+- 原状：`loop.py` 两处 `emitter.emit(TEXT_DELTA, text=整段)`、`_chat_once` 未开 `stream=True`
+  → 流式只到**事件粒度**；2000 token 级回答要等整段生成（真机同问题 **52.8s**）才一次性蹦出。
+- 做法：新增 `core/llm/stream.py::chat_create_stream`（`chat_create` 的流式变体：正文逐 chunk
+  回调 `on_delta`，把 chunk 累积成**与非流式同形**的响应对象；**不建 client、不自己回退** ——
+  候选链/重试仍唯一在 `chat_create`）→ `loop._chat_once(on_delta=...)` → `_DeltaPump` 逐片推
+  `TEXT_DELTA`，并按片数门控收尾整段帧（**推过就不补** = 不重复；**一片没推才补** = 前端不丢内容）。
+  同时 `tool_calls` delta 按 `index` 聚合回 `message.tool_calls`，本模块之后的逻辑完全不分叉。
+- 真机依据（2026-10-10，MiniMax-M3 + NWPU 备用网关）：`stream=True` 逐片下发（首字节 425ms /
+  首正文 2022ms / 整段 14.4s）；**`tool_calls` 确以 delta 下发**（设计文档 §11 的阻塞问题）；
+  `stream_options.include_usage` 可用（末 chunk 带 usage，含 `cached_tokens`）；
+  `reasoning_details` 流式元素形状与非流式一致。
+- 端到端：`run_agent_loop` 真机 **131 片**、首帧 6.0s / 整段 21.4s，且拼接正文 == `result.text`
+  （**无重复、无丢失**，这条是"门控收尾帧"的核心验收）。
+- 回归：`tests/test_llm_stream.py`（7 例）+ `tests/test_agent_loop.py` 流式 4 例；离线全量 **1621 passed**。
+- 有意行为变化：工具轮的过渡语（"我先查一下…"）现在也会实时显示 —— 内容 delta 出现在 tool_calls
+  delta **之前**，不先发就做不到"最终轮边生成边显示"；契约见
+  `test_tool_round_narration_streams_before_final_answer`。
+- 未闭环（留在 `TODO.md`）：`strip_think_tags` 仍是整段正则（未做流式状态机）；隐藏中间轮文本需前端"撤帧"。
 
 ## 5. RAG / 知识库
 - 知识库目录树（递归多级 + 上传/删除/检索/上下文选择）
