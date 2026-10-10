@@ -167,3 +167,108 @@ describe('dispose 清定时器（A3-3）', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 })
+
+describe('对话持久化与流式收口（缺陷 A/B/C 回归）', () => {
+  // store 里的 key 由模块加载时的 user id 派生（test 环境恒为 'guest'）。
+  const CONV_KEY = 'ai_tutor_conversations_guest'
+  const CUR_KEY = 'ai_tutor_current_guest'
+
+  it('C-2：persist 时当前对话为空 → 移除 current 键（非空串），且不把历史写成 []', () => {
+    const store = useChatStore()
+    // 内存：一条有内容的历史 + 一个空的当前对话
+    store.conversations.push({
+      id: 'h1', title: '历史', messages: [{ role: 'user', content: 'hi' }],
+      createdAt: 1, updatedAt: 1,
+    })
+    store.conversations.push({ id: 'e1', title: '新对话', messages: [], createdAt: 2 })
+    store.currentId = 'h1'
+    // 磁盘上已落盘历史（模拟上一轮 persist）
+    localStorage.setItem(CONV_KEY, JSON.stringify([
+      { id: 'h1', title: '历史', messages: [{ role: 'user', content: 'hi' }], createdAt: 1 },
+    ]))
+    localStorage.setItem(CUR_KEY, 'h1')
+
+    // switchConversation 内部会调用 persist()，切到空对话 e1
+    store.switchConversation('e1')
+
+    // 历史未被 "[]" 覆盖
+    const stored = JSON.parse(localStorage.getItem(CONV_KEY))
+    expect(stored.map(c => c.id)).toContain('h1')
+    // current 被移除，而不是写成空串
+    expect(localStorage.getItem(CUR_KEY)).toBeNull()
+  })
+
+  it('C-1：startLearning() 之后对话键未被提前 persist 清空，学习对话已落盘', async () => {
+    const store = useChatStore()
+
+    await store.startLearning('node-1', '线性表')
+
+    const stored = JSON.parse(localStorage.getItem(CONV_KEY))
+    expect(Array.isArray(stored)).toBe(true)
+    expect(stored.length).toBeGreaterThan(0)                 // 不是 "[]"
+    const conv = stored.find(c => c.nodeId === 'node-1')
+    expect(conv).toBeTruthy()                                // 知识点绑定已落盘
+    expect(conv.messages.length).toBeGreaterThan(0)          // 提问正文已写入
+    expect(localStorage.getItem(CUR_KEY)).toBe(conv.id)      // current 指向它（未被清空）
+  })
+
+  it('B：switchConversation 恢复 currentNode；send 的 current_node 取自对话绑定', async () => {
+    const store = useChatStore()
+    store.conversations.push({
+      id: 'a', title: 'A', messages: [{ role: 'user', content: 'x' }], createdAt: 1, nodeId: 'nA',
+    })
+    store.conversations.push({ id: 'b', title: 'B', messages: [], createdAt: 2, nodeId: 'nB' })
+    store.currentId = 'a'
+
+    store.switchConversation('b')
+    expect(store.currentNode).toBe('nB')
+
+    await store.send('继续')
+    // sendMessageStream(messages, callbacks, currentNode, kb, convId)
+    const args = sendMessageStream.mock.calls.at(-1)
+    expect(args[2]).toBe('nB')
+  })
+
+  it('A：收到 agent_done 后 loading=false，且正文已落盘', async () => {
+    sendMessageStream.mockImplementation((msgs, cbs) => {
+      cbs.onToken('你好')            // 流式写入正文
+      cbs.onAgentDone({ rounds: 1 }) // 后端 loop 结束 → 立即收口
+      return { abort: vi.fn() }
+    })
+    const store = useChatStore()
+
+    await store.send('提问')
+
+    expect(store.loading).toBe(false)
+    const stored = JSON.parse(localStorage.getItem(CONV_KEY))
+    const conv = stored.find(c => c.messages.some(m => m.role === 'assistant'))
+    expect(conv).toBeTruthy()
+    const assistant = conv.messages.find(m => m.role === 'assistant')
+    expect(assistant.content).toBe('你好')   // 非空 → 刷新不丢正文
+  })
+
+  it('C-4：adoptRemote 识别 snake_case 的 updated_at（远程较新时覆盖本地）', async () => {
+    vi.useFakeTimers()
+    localStorage.setItem(CONV_KEY, JSON.stringify([
+      { id: 'r1', title: '本地旧', messages: [{ role: 'user', content: 'old' }], createdAt: 1, updatedAt: 1 },
+    ]))
+    localStorage.setItem(CUR_KEY, 'r1')
+    apiClient.post.mockResolvedValueOnce({
+      data: {
+        conversations: [{
+          id: 'r1', title: '远程新',
+          messages: [{ role: 'assistant', content: 'remote' }],
+          created_at: 1, updated_at: Date.now() + 100000,
+        }],
+      },
+    })
+
+    const store = useChatStore()
+    await store.init()                 // 本地有数据 → syncToBackend（500ms 防抖）
+    await vi.advanceTimersByTimeAsync(500)
+
+    const conv = store.conversations.find(c => c.id === 'r1')
+    expect(conv.title).toBe('远程新')
+    expect(conv.messages).toEqual([{ role: 'assistant', content: 'remote' }])
+  })
+})

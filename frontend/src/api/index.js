@@ -206,7 +206,8 @@ export const sendMessageStream = (messages, callbacks = {}, currentNode = '', kb
       const decoder = new TextDecoder()
       let fullReply = ''
       // 冗余兜底：后端在 [DONE] 前会再带一份最终文本。
-      // agent loop 的最终文本是「收尾一次性单帧」下发的（非逐 token），
+      // 正文已改为逐 token 流式下发（llm/stream.py，2026-10-10），但"一片都没收到"
+      // 仍可能发生（模型无正文 / 网关不支持流 → 后端只补一帧整段），
       // 那一帧若在事件排空窗口丢失，前端会整条消息都拿不到内容。
       let finalReply = ''
       let buffer = ''

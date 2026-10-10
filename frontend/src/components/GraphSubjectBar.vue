@@ -10,11 +10,10 @@
  *   store.subjectSummaries（学科 + 节点数/掌握度统计） → 渲染
  *   store.currentSubject（当前选中） → 高亮
  *   store.setSubject()（左键点击） → 按需拉取该学科子图
- *   store.deleteSubjectGraph()（右键菜单） → 删除该学科整张图
+ *   store.deleteSubjectGraph()（条目菜单） → 删除该学科整张图
  *
- * 交互：左键切换学科，右键弹菜单（与图谱画布的右键同一套机制，见 utils/contextMenu.js）。
- * 删除**有意不做 hover 按钮**：侧栏条目窄，悬浮按钮既挤压文字又易误触，且会与画布
- * 「右键出菜单」的行为分叉。
+ * 交互：左键切换学科，条目右侧常驻三点按钮弹操作菜单（开关与图谱画布右键共用一套机制，
+ * 见 utils/contextMenu.js）。
  *
  * 视觉：条目样式与 ConversationSidebar 统一 —— 浅色强调底 + 左侧色条表示选中，
  * 无边框条目，4px 细滚动条。
@@ -32,13 +31,13 @@ import ContextMenu from './ContextMenu.vue'
 const store = useChatStore()
 const { subjectSummaries, currentSubject } = storeToRefs(store)
 
-// 右键菜单：与画布共用同一套开关；targetData = 被右键的学科摘要对象
+// 条目菜单：与画布共用同一套开关，由常驻三点按钮触发；targetData = 该学科摘要对象
 const {
   visible: menuVisible,
   x: menuX,
   y: menuY,
   targetData: menuSubject,
-  open: openMenu,
+  openAt: openMenuAt,
   close: closeMenu,
 } = useContextMenu()
 
@@ -117,9 +116,8 @@ async function handleDelete() {
         :key="s.subject"
         class="subject-item"
         :class="{ active: currentSubject === s.subject, muted: s.unclassified }"
-        :title="`${s.subject}：${s.node_count} 节点，已掌握 ${s.mastered_count}（右键可删除本学科图谱）`"
+        :title="`${s.subject}：${s.node_count} 节点，已掌握 ${s.mastered_count}`"
         @click="handleSelect(s)"
-        @contextmenu.prevent="openMenu($event, 'subject', s)"
       >
         <svg class="subject-icon" width="16" height="16" viewBox="0 0 24 24" fill="none"
              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -138,6 +136,16 @@ async function handleDelete() {
             <span class="subject-bar-fill" :style="{ width: masteryPct(s) + '%' }"></span>
           </span>
         </span>
+
+        <button
+          class="item-more"
+          title="重命名 / 删除"
+          @click.stop="openMenuAt($event.currentTarget, 'subject', s)"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+            <circle cx="12" cy="5" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="12" cy="19" r="1.7" />
+          </svg>
+        </button>
       </div>
 
       <p v-if="!subjectSummaries.length" class="subject-empty">
@@ -146,7 +154,7 @@ async function handleDelete() {
       </p>
     </div>
 
-    <!-- 右键菜单：容器与画布共用；「未分类」是后端合成的散落节点分组，不是真实学科 -->
+    <!-- 条目菜单：容器与画布共用；「未分类」是后端合成的散落节点分组，不是真实学科 -->
     <ContextMenu :visible="menuVisible" :x="menuX" :y="menuY" @close="closeMenu">
       <template #default="{ close }">
         <template v-if="menuSubject && !menuSubject.unclassified">
@@ -260,6 +268,30 @@ async function handleDelete() {
 .subject-item.active .subject-icon {
   opacity: 1;
   color: var(--color-accent);
+}
+
+/* 三点按钮：常驻，点击弹条目菜单；长学科名收缩让位，按钮压在文字之上 */
+.item-more {
+  flex-shrink: 0;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.item-more:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
 }
 
 .subject-body {

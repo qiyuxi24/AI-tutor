@@ -68,13 +68,6 @@ const greetingMessages = [
         <h3>有什么想学的？</h3>
         <p v-for="(g, i) in greetingMessages" :key="i">{{ g }}</p>
       </div>
-
-      <!-- 加载指示 -->
-      <div v-if="store.loading" class="loading-indicator">
-        <span class="dot-pulse"></span>
-        <span>AI 思考中…</span>
-      </div>
-
       <!-- 底部锚点 -->
       <div ref="messagesEnd"></div>
     </main>

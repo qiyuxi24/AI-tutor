@@ -38,7 +38,7 @@
       </el-button>
     </div>
 
-    <!-- 目录树：勾选 = 生成来源；右键 = 单个文件的操作 -->
+    <!-- 目录树：勾选 = 生成来源；条目三点 = 单个文件的操作 -->
     <div class="kb-tree-wrap" v-if="tree.length">
       <el-tree
         ref="treeRef"
@@ -56,13 +56,21 @@
           <div
             class="kb-node"
             :class="{ selected: selectedNode?.id === data.id }"
-            @contextmenu.prevent="openMenu($event, 'kb', data)"
           >
             <span class="kb-node-icon">
               <svg v-if="data.type === 'folder'" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
               <svg v-else viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
             </span>
             <span class="kb-node-name">{{ data.name }}</span>
+            <button
+              class="item-more"
+              title="更多操作"
+              @click.stop="openMenuAt($event.currentTarget, 'kb', data)"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="12" cy="5" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="12" cy="19" r="1.7" />
+              </svg>
+            </button>
           </div>
         </template>
       </el-tree>
@@ -86,7 +94,7 @@
       {{ stats.files }} 个文件 · {{ stats.chunks }} 个向量分块
     </div>
 
-    <!-- 右键菜单：单个文件 / 文件夹的操作 -->
+    <!-- 条目菜单：单个文件 / 文件夹的操作 -->
     <ContextMenu :visible="menuVisible" :x="menuX" :y="menuY" @close="closeMenu">
       <template #default="{ close }">
         <template v-if="menuNode">
@@ -194,14 +202,15 @@
  * KbPanel.vue — 知识库侧栏（知识图谱页右侧，展开/收起由 HomeView 的容器控制）
  *
  * 职责：
- *   - 目录树：建文件夹 / 上传 / 勾选（生成来源）/ 右键菜单（预览 · 在浏览器中打开 · 放入上下文 · 删除）
+ *   - 目录树：建文件夹 / 上传 / 勾选（生成来源）/ 条目三点菜单（预览 · 在浏览器中打开 · 放入上下文 · 删除）
  *   - 顶部一键生成：勾选文件或文件夹 → 输入学科名 → 生成该学科知识图谱
  *   - 底部：当前检索范围（写进 chatStore.kbContext，对话据此带 kb_node_ids）
  *
  * 数据流：本组件直接读写 store（与 GraphSubjectBar 同款），
  * 不向父级转发动作——HomeView 只管它的展开与收起。
  *
- * 为什么文件操作放右键而不留 hover 按钮：侧栏窄，三个悬浮按钮既挤压文件名又易误触。
+ * 为什么文件操作收在三点菜单里：侧栏窄，逐个平铺按钮既挤压文件名又易误触，
+ * 一个常驻三点按钮足够。
  */
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -246,13 +255,13 @@ const stats = ref({ files: 0, chunks: 0 })
 const subjectInput = ref('')
 const generating = ref(false)
 
-// 右键菜单：targetData = 被右键的目录节点
+// 条目菜单：由常驻三点按钮触发；targetData = 该目录节点
 const {
   visible: menuVisible,
   x: menuX,
   y: menuY,
   targetData: menuNode,
-  open: openMenu,
+  openAt: openMenuAt,
   close: closeMenu,
 } = useContextMenu()
 
@@ -299,7 +308,7 @@ function handleNodeDblClick(data) {
 }
 
 /**
- * 右键文件 → 在图谱中显示：把「这份资料影响了哪些知识图谱节点」交给 HomeView
+ * 菜单「在图谱中显示」：把「这份资料影响了哪些知识图谱节点」交给 HomeView
  * （切图谱视图 + 高亮 + 选中该文件的小节/题目）。
  * 注意 `data.id` 就是 KB 的 file 节点 id，也就是来源条目里的 `doc_id`（同一个命名空间）。
  */
@@ -340,7 +349,7 @@ async function openPreview(data) {
 }
 
 /**
- * 右键「在浏览器中打开」：把原件交给浏览器原生处理（PDF/图片 直接内置阅读器，
+ * 菜单「在浏览器中打开」：把原件交给浏览器原生处理（PDF/图片 直接内置阅读器，
  * 其余格式浏览器能认的认、认不了的（docx/pptx）自动下载）—— 比在弹窗里渲染省事得多。
  *
  * 开窗必须**同步**先做：await 之后用户手势已过期，再 window.open 会被弹窗拦截；
@@ -387,7 +396,7 @@ async function loadPreviewText(data) {
   }
 }
 
-/** 新建文件夹：传 folder 则作为其子目录（右键菜单），否则用当前选中节点 */
+/** 新建文件夹：传 folder 则作为其子目录（条目菜单），否则用当前选中节点 */
 function openCreateFolder(folder = null) {
   if (folder) selectedNode.value = folder
   newFolderName.value = ''
@@ -414,7 +423,7 @@ async function createFolder() {
   }
 }
 
-/** 右键「上传到此文件夹」：选中它再走同一条上传路径（父目录取 selectedNode） */
+/** 菜单「上传到此文件夹」：选中它再走同一条上传路径（父目录取 selectedNode） */
 function uploadInto(folder) {
   selectedNode.value = folder
   fileInputRef.value?.click()
@@ -634,12 +643,36 @@ onMounted(() => {
   color: var(--color-yellow);
 }
 .kb-node-name {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
   font-size: 13px;
   color: var(--color-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 三点按钮：常驻，点击弹条目菜单；长文件名收缩让位，按钮压在文字之上 */
+.item-more {
+  flex-shrink: 0;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.item-more:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
 }
 
 .kb-empty {

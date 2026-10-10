@@ -171,14 +171,17 @@ export const useChatStore = defineStore('chat', () => {
     let changed = false
     for (const r of remote) {
       if (loading.value && r.id === currentId.value) continue
-      const remoteAt = Number(r.updatedAt) || 0
+      // 兼容两种命名：本地上行的 payload 是 camelCase，后端 _all_conversations
+      // 返回的是 snake_case（updated_at/created_at）——只认一种会让 remoteAt 恒为 0，
+      // 远程较新的版本永远判不出来（缺陷 C-4）。
+      const remoteAt = Number(r.updatedAt ?? r.updated_at) || 0
       const local = conversations.value.find(c => c.id === r.id)
       if (!local) {
         conversations.value.push({
           id: r.id,
           title: r.title,
           messages: r.messages || [],
-          createdAt: r.createdAt || Date.now(),
+          createdAt: r.createdAt ?? r.created_at ?? Date.now(),
           updatedAt: remoteAt,
         })
         changed = true
@@ -614,45 +617,52 @@ export const useChatStore = defineStore('chat', () => {
 
   // ─── 初始化：从 localStorage 恢复（优先），否则从后端加载 ───
   async function init() {
+    // 第 1 步：读 localStorage。解析失败 / 结构异常 → 视为"本地为空"继续，
+    // **不再**用一个 try 把后面的「拉后端 / 建新对话」全吞掉（缺陷 C-3）。
+    let saved = []
     try {
-      const saved = localStorage.getItem(STORAGE_KEY_CONVERSATIONS)
-      if (saved) {
-        conversations.value = JSON.parse(saved)
-        // 过滤掉可能残留的空对话（防御性编程）
-        conversations.value = conversations.value.filter(c => c.messages.length > 0)
-      }
-
-      // localStorage 有数据 → 直接恢复当前对话
-      if (conversations.value.length > 0) {
-        const cid = localStorage.getItem(STORAGE_KEY_CURRENT)
-        if (cid && conversations.value.some((c) => c.id === cid)) {
-          currentId.value = cid
-        }
-        // 有数据时也同步到后端（双向合并）
-        syncToBackend()
-      } else {
-        // localStorage 为空 → 尝试从后端加载
-        const loaded = await loadFromBackend()
-        if (loaded && conversations.value.length > 0) {
-          // 后端有数据，取最新的一条作为当前对话
-          currentId.value = conversations.value[0].id
-        }
-      }
-
-      // 如果没有当前对话（本地和后端都没有数据），自动创建新对话
-      if (!currentId.value) {
-        const conv = {
-          id: generateId(),
-          title: '新对话',
-          messages: [],
-          createdAt: Date.now(),
-        }
-        conversations.value.unshift(conv)
-        currentId.value = conv.id
+      const raw = localStorage.getItem(STORAGE_KEY_CONVERSATIONS)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        saved = Array.isArray(parsed) ? parsed.filter(c => c.messages?.length > 0) : []
       }
     } catch {
-      // ignore
+      saved = []
     }
+    conversations.value = saved
+
+    // 第 2 步：本地有内容 → 恢复当前对话；本地为空 → **一定**尝试从后端加载
+    if (conversations.value.length > 0) {
+      const cid = localStorage.getItem(STORAGE_KEY_CURRENT)
+      if (cid && conversations.value.some((c) => c.id === cid)) {
+        currentId.value = cid
+      }
+      // 有数据时也同步到后端（双向合并）
+      syncToBackend()
+    } else {
+      const loaded = await loadFromBackend()
+      if (loaded && conversations.value.length > 0) {
+        // 后端有数据，取最新的一条作为当前对话
+        currentId.value = conversations.value[0].id
+      }
+    }
+
+    // 第 3 步：仍没有当前对话（本地和后端都没有数据）→ 自动创建新对话
+    if (!currentId.value) {
+      const conv = {
+        id: generateId(),
+        title: '新对话',
+        messages: [],
+        createdAt: Date.now(),
+      }
+      conversations.value.unshift(conv)
+      currentId.value = conv.id
+    }
+
+    // 回填当前教学位置（缺陷 B-4）：以当前对话的 nodeId 绑定为准，否则刷新后
+    // 学习模式会丢失（currentNode 从不持久化）。
+    currentNode.value = currentConversation.value?.nodeId || ''
+
     // 一次性加载知识图谱：先取学科列表并自动选中一个
     // （一次只渲染一个学科，不再默认拉全量）
     await fetchSubjects()
@@ -846,8 +856,10 @@ export const useChatStore = defineStore('chat', () => {
     // 把题卡投回**正确的**对话（见 handleQuizReady / _quizTargetConversation）
     const conv = currentConversation.value
     if (conv) {
+      // 只打标记，**不**在这里 persist：此刻 messages 仍为空，persist 会把
+      // localStorage 的对话键写成 "[]" 覆盖历史（缺陷 C-1）。真正的落盘交给
+      // 紧随其后的 send()（它会先写入消息再 persist）。
       conv.nodeId = nodeId
-      persist()
     }
     await send(`开始学习「${name || nodeId}」`)
   }
@@ -882,6 +894,10 @@ export const useChatStore = defineStore('chat', () => {
       clearTimeout(syncDebounceTimer)
       syncDebounceTimer = null
     }
+    if (streamPersistTimer) {
+      clearTimeout(streamPersistTimer)
+      streamPersistTimer = null
+    }
     if (streamController) {
       streamController.abort()
       streamController = null
@@ -905,7 +921,9 @@ export const useChatStore = defineStore('chat', () => {
     if (curConv && curConv.messages.length > 0) {
       localStorage.setItem(STORAGE_KEY_CURRENT, currentId.value)
     } else {
-      localStorage.setItem(STORAGE_KEY_CURRENT, '')
+      // 当前对话为空 → **移除**键（不再写空串）。空串会被下次 init 当成一个
+      // "存在但无效"的 id，既匹配不到对话、又覆盖掉上一个有效选择（缺陷 C-2）。
+      localStorage.removeItem(STORAGE_KEY_CURRENT)
     }
 
     // 双写：同步到后端（防抖，避免频繁请求）
@@ -941,6 +959,8 @@ export const useChatStore = defineStore('chat', () => {
     }
     conversations.value.unshift(conv)
     currentId.value = conv.id
+    // 新对话没有知识点绑定 → 清空当前教学位置（缺陷 B-3）。
+    currentNode.value = ''
     // 注意：空对话不持久化！persist() 会过滤 messages.length === 0 的对话
     persist()
     return conv
@@ -959,6 +979,8 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     currentId.value = id
+    // 回填"正在学哪个知识点"（缺陷 B-2）：以目标对话的 nodeId 绑定为准。
+    currentNode.value = conversations.value.find(c => c.id === id)?.nodeId || ''
     persist()
   }
 
@@ -1007,6 +1029,32 @@ export const useChatStore = defineStore('chat', () => {
 
   // ─── 流式请求的 AbortController（用于取消） ───
   let streamController = null
+
+  // 每次 send() 递增：流回调据此判断"这个事件是不是属于当前这次流"。
+  // 旧流被 abort 后仍可能有一个迟到事件挤进来，序号不匹配就丢弃（缺陷 A 护栏）。
+  let streamSeq = 0
+
+  // 流式过程节流落盘（缺陷 A-2）：最少 STREAM_PERSIST_THROTTLE_MS 间隔写一次
+  // localStorage/后端，保证学生在流中途 F5 时正文已落盘（而非只在 onDone 才写）。
+  const STREAM_PERSIST_THROTTLE_MS = 1500
+  let streamPersistTimer = null
+  let streamPersistLast = 0
+
+  /** 节流版 persist：首次立即写，之后按窗口合并（尾写不丢最后一次变更）。 */
+  function throttledPersist() {
+    const now = Date.now()
+    const elapsed = now - streamPersistLast
+    if (elapsed >= STREAM_PERSIST_THROTTLE_MS) {
+      streamPersistLast = now
+      persist()
+    } else if (!streamPersistTimer) {
+      streamPersistTimer = setTimeout(() => {
+        streamPersistTimer = null
+        streamPersistLast = Date.now()
+        persist()
+      }, STREAM_PERSIST_THROTTLE_MS - elapsed)
+    }
+  }
 
   // ─── 流式渲染：把"事件 → 改 store"收敛成一份（回调只负责转交） ───
   /**
@@ -1075,20 +1123,28 @@ export const useChatStore = defineStore('chat', () => {
       streamController = null
     }
 
+    // 本次流的序号：回调据此判断事件是否属于当前这次流（缺陷 A 护栏）
+    const seq = ++streamSeq
+
     // 使用流式 API
     streamController = sendMessageStream(
       conv.messages.slice(0, -1), // 不含占位消息的对话历史
       {
-        // 每收到一个 token，追加到占位消息
-        onToken: (token) =>
-          patchLastAssistant(conv, (msg) => ({ content: msg.content + token })),
+        // 每收到一个 token，追加到占位消息；同时**节流落盘**（缺陷 A-2）：
+        // 流中途刷新也不会丢正文（原先只有 onDone 才 persist）。
+        onToken: (token) => {
+          patchLastAssistant(conv, (msg) => ({ content: msg.content + token }))
+          throttledPersist()
+        },
         // AI 思考过程
-        onThinking: (text) =>
+        onThinking: (text) => {
           patchLastAssistant(conv, (msg) => {
             const thinking = msg.thinking || []
             thinking.push(text)
             return { thinking }
-          }),
+          })
+          throttledPersist()
+        },
         // 工具开始执行
         onToolStart: (data) =>
           patchLastAssistant(conv, (msg) => {
@@ -1097,14 +1153,24 @@ export const useChatStore = defineStore('chat', () => {
             return { tools }
           }),
         // 工具执行完毕
-        onToolResult: (data) =>
+        onToolResult: (data) => {
           patchLastAssistant(conv, (msg) => ({
             tools: (msg.tools || []).map((t) =>
               t.tool === data.tool && t.round === data.round && t.status === 'running'
                 ? { ...t, status: data.ok ? 'done' : 'error', result: data }
                 : t
             ),
-          })),
+          }))
+          throttledPersist()
+        },
+        // Agent 循环结束：后端在 loop 收尾（loop_stop=natural）就发这个事件，
+        // 远早于 [DONE]（后者在 _analyze_and_apply 之后才发，可能晚数十秒）。
+        // 收到即收口 loading 并把正文落盘（缺陷 A-1：否则「AI 思考中…」一直转）。
+        onAgentDone: () => {
+          if (seq !== streamSeq) return   // 旧流迟到的事件，忽略
+          loading.value = false
+          persist()
+        },
         // 流式完成
         onDone: (fullReply) => {
           loading.value = false
@@ -1130,7 +1196,9 @@ export const useChatStore = defineStore('chat', () => {
           renderAssistant(conv, { role: 'assistant', content: errorMsg }, true)
         },
       },
-      currentNode.value,
+      // 以**对话绑定**为准（缺陷 B-1）：否则切走再切回、或刷新后 currentNode 丢失时，
+      // 会带着错误的知识点（或空）去请求。
+      conv.nodeId || currentNode.value || '',
       kbContext.value,
       conv.id, // 多端串行键：同一对话的请求在后端排队，避免两端同时改同一份历史
     )

@@ -15,13 +15,13 @@ import ContextMenu from './ContextMenu.vue'
 
 const store = useChatStore()
 
-// 右键菜单：与图谱侧栏同一套开关（utils/contextMenu.js），targetData = 被右键的对话
+// 条目操作菜单：与图谱侧栏同一套开关（utils/contextMenu.js），由常驻三点按钮触发
 const {
   visible: menuVisible,
   x: menuX,
   y: menuY,
   targetData: menuConv,
-  open: openMenu,
+  openAt: openMenuAt,
   close: closeMenu,
 } = useContextMenu()
 
@@ -45,7 +45,7 @@ function setEditInput(el) {
 }
 
 /**
- * 进入内联编辑（右键菜单「重命名对话」入口）。标题本就在「localStorage 为主 + 后端全量
+ * 进入内联编辑（条目菜单「重命名对话」入口）。标题本就在「localStorage 为主 + 后端全量
  * 同步」的契约里，改完 persist() 会自动把新标题同步过去，不需要额外请求。
  */
 async function startRename(conv) {
@@ -111,9 +111,8 @@ async function handleDelete() {
           :key="conv.id"
           class="history-item"
           :class="{ active: conv.id === store.currentId }"
-          :title="`${conv.title}（右键可重命名 / 删除）`"
+          :title="conv.title"
           @click="handleSwitch(conv.id)"
-          @contextmenu.prevent="openMenu($event, 'conversation', conv)"
         >
           <svg class="chat-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -129,12 +128,22 @@ async function handleDelete() {
             @blur="commitRename"
           />
           <span v-else class="item-title">{{ conv.title }}</span>
+          <button
+            v-if="editingId !== conv.id"
+            class="item-more"
+            title="重命名 / 删除"
+            @click.stop="openMenuAt($event.currentTarget, 'conversation', conv)"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="12" cy="5" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="12" cy="19" r="1.7" />
+            </svg>
+          </button>
         </div>
       </template>
       <div v-if="!store.hasConversations" class="empty-hint">暂无历史对话</div>
     </nav>
 
-    <!-- 右键菜单：容器与图谱侧栏共用 -->
+    <!-- 条目菜单：容器与图谱侧栏共用 -->
     <ContextMenu :visible="menuVisible" :x="menuX" :y="menuY" @close="closeMenu">
       <template #default="{ close }">
         <div class="menu-item" @click="close(); startRename(menuConv)">
@@ -256,12 +265,36 @@ async function handleDelete() {
 .chat-icon { flex-shrink: 0; opacity: 0.5; }
 
 .item-title {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
   font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 1.3;
+}
+
+/* 三点按钮：常驻，点击弹条目菜单；长标题收缩让位，按钮压在文字之上 */
+.item-more {
+  flex-shrink: 0;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.item-more:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
 }
 
 /* 内联重命名输入框：就地替换标题，不弹窗 */
