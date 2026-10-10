@@ -43,7 +43,7 @@ def _install_fake_chat(monkeypatch, responses: list) -> list:
     received = []
 
     async def fake_chat(api_messages, *, temperature, tools=None, max_tokens=2000,
-                        user_id=None):
+                        user_id=None, on_delta=None):
         received.append({"messages": copy.deepcopy(api_messages), "tools": tools})
         item = queue.pop(0)
         if item is None:

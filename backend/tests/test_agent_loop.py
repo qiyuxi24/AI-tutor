@@ -53,11 +53,13 @@ def _install_fake_chat(monkeypatch, responses: list, received: list):
     queue = list(responses)
 
     async def fake_chat(api_messages, *, temperature, tools=None,
-                        tool_choice=None, max_tokens=2000, user_id=None):
+                        tool_choice=None, max_tokens=2000, user_id=None,
+                        on_delta=None):
         received.append({
             "messages": copy.deepcopy(api_messages),
             "tools": copy.deepcopy(tools),
             "tool_choice": tool_choice,
+            "on_delta": on_delta,      # 非空 = 走了流式（2026-10-10）
         })
         return queue.pop(0)
 
@@ -149,7 +151,8 @@ def test_no_tools_falls_back_when_gateway_rejects_tool_choice(monkeypatch):
     calls = {"n": 0}
 
     async def fake_chat(api_messages, *, temperature, tools=None,
-                        tool_choice=None, max_tokens=2000, user_id=None):
+                        tool_choice=None, max_tokens=2000, user_id=None,
+                        on_delta=None):
         # ⚠️ `user_id` 必须留在签名里：合并 origin/main 后 `_chat_once` 会带
         # `user_id=user_id`（用户级模型链），少了它 → TypeError 被当成"网关拒绝" → 降级路径假绿。
         calls["n"] += 1
@@ -360,7 +363,8 @@ def test_force_finish_llm_error_fallback(monkeypatch):
     queue = list(responses)
 
     async def fake_chat(api_messages, *, temperature, tools=None,
-                        tool_choice=None, max_tokens=2000, user_id=None):
+                        tool_choice=None, max_tokens=2000, user_id=None,
+                        on_delta=None):
         item = queue.pop(0)
         if item is None:
             raise RuntimeError("[E-LLM-001] 模拟超时")
@@ -443,6 +447,98 @@ def test_loop_events_flow_through_emitter(monkeypatch):
     assert fake.events[0][1]["max_rounds"] == 5
     assert fake.events[-1][1]["rounds"] == 1
     assert fake.events[-1][1]["total_llm_calls"] == 2
+
+
+# ─── 真流式：正文逐 chunk 下发（2026-10-10，TODO「[P1]『流式』名不副实」）────
+# 桩 `_chat_once` 时**真的调用 on_delta** = 模拟 llm/stream.py 的逐 chunk 回调。
+# 走非流式的旧桩（不调 on_delta）→ 仍只发一帧整段，前端不丢内容（下面两条都锁）。
+
+def _install_streaming_chat(monkeypatch, rounds, received=None):
+    """rounds = [(chunks, tool_calls), ...]：每轮把 chunks 依次喂给 on_delta 后返回响应。"""
+    queue = list(rounds)
+
+    async def fake_chat(api_messages, *, temperature, tools=None, tool_choice=None,
+                        max_tokens=2000, user_id=None, on_delta=None):
+        if received is not None:
+            received.append({"on_delta": on_delta, "tool_choice": tool_choice,
+                             "tools": tools})
+        chunks, tool_calls = queue.pop(0)
+        for c in chunks:
+            if on_delta is not None:
+                on_delta(c)
+        return _resp(_msg(content="".join(chunks), tool_calls=tool_calls))
+
+    monkeypatch.setattr(agent_loop, "_chat_once", fake_chat)
+
+
+def _text_deltas(fake):
+    return [d["text"] for t, d in fake.events if t == TEXT_DELTA]
+
+
+def test_stream_emits_one_text_delta_per_chunk(monkeypatch):
+    """流式：正文**逐片**推 TEXT_DELTA（不是生成完整段后一帧），结尾不再补整段。"""
+    received = []
+    _install_streaming_chat(monkeypatch, [(["二重", "积分是", "对面积的积分。"], None)], received)
+    _install_fake_execute(monkeypatch)
+    fake = _CollectEmitter()
+
+    result = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}],
+                                        kg=object(), emitter=fake))
+
+    assert received[0]["on_delta"] is not None      # 流式开关就位
+    assert _text_deltas(fake) == ["二重", "积分是", "对面积的积分。"]
+    assert result.text == "二重积分是对面积的积分。"
+
+
+def test_tool_round_narration_streams_before_final_answer(monkeypatch):
+    """工具轮的过渡语也会实时流出（行为变化，见 loop.py 模块 docstring「真流式」段）。
+
+    为什么**必然**如此：内容 delta 出现在 tool_calls delta **之前**，不先发就做不到
+    "最终轮边生成边显示"。本用例把这条取舍写成契约（要改就得先有"撤帧"机制）。
+    """
+    _install_streaming_chat(monkeypatch, [
+        (["我先查一下你的资料。"], [_tc("rag_search", {"query": "二重积分"}, tc_id="c1")]),
+        (["根据资料，二重积分是……"], None),
+    ])
+    _install_fake_execute(monkeypatch)
+    fake = _CollectEmitter()
+
+    result = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}],
+                                        kg=object(), emitter=fake))
+
+    assert _text_deltas(fake) == ["我先查一下你的资料。", "根据资料，二重积分是……"]
+    assert result.text == "根据资料，二重积分是……"   # 结果仍是最终轮（证据/落库口径不变）
+
+
+def test_force_finish_streams_and_does_not_duplicate(monkeypatch):
+    """达上限强制收尾：收尾正文也逐片流，且**不再**补一帧整段（防重复出字）。"""
+    received = []
+    _install_streaming_chat(monkeypatch, [
+        ([], [_tc("update_mastery", {"node_id": "a"}, tc_id="c1")]),
+        (["本轮先到这里。", "你可以继续下一节。"], None),
+    ], received)
+    _install_fake_execute(monkeypatch)
+    fake = _CollectEmitter()
+
+    result = asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}],
+                                        kg=object(), max_rounds=0, emitter=fake))
+
+    assert received[-1]["tool_choice"] == "none"      # 收尾轮仍禁工具
+    assert _text_deltas(fake) == ["本轮先到这里。", "你可以继续下一节。"]
+    assert result.text == "本轮先到这里。你可以继续下一节。"
+
+
+def test_no_deltas_falls_back_to_single_full_text(monkeypatch):
+    """没有逐片（测试桩 / 网关不支持流 / 模型无正文）→ 仍补一帧整段，前端不丢内容。"""
+    received = []
+    _install_fake_chat(monkeypatch, [_resp(_msg(content="完整回答。"))], received)
+    _install_fake_execute(monkeypatch)
+    fake = _CollectEmitter()
+
+    asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}],
+                               kg=object(), emitter=fake))
+
+    assert _text_deltas(fake) == ["完整回答。"]
 
 
 # ─── S8 Tool Result Clearing 的接线（P1-③）───────────────────

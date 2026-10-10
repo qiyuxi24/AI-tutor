@@ -116,7 +116,8 @@ def _install_fake_chat(monkeypatch, responses, received):
 
     it = iter(responses)
 
-    async def fake_chat_create(messages, *, temperature=0.3, tools=None, user_id=None):
+    async def fake_chat_create(messages, *, temperature=0.3, tools=None, user_id=None,
+                               on_delta=None, **kw):
         received.append({"messages": messages, "tools": tools})
         return next(it)
 

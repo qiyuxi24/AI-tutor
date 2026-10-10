@@ -15,6 +15,16 @@
 - 单工具超时：asyncio.wait_for 包 asyncio.to_thread（参考 Votek tool_timeout_secs）
 - 工具异常隔离：执行出错/超时以错误文案作为 tool 内容回填，循环不炸
 
+真流式（2026-10-10，TODO「[P1]『流式』名不副实」）：
+- 每一轮 `_chat_once` 都走 `llm.stream.chat_create_stream`（stream=True），正文**逐 chunk**
+  经 `_DeltaPump` 推 `TEXT_DELTA` —— 首屏延迟从"整段生成时间"降到"首 chunk 时间"
+  （真机：2000 token 级回答整段 40s+ → 首 chunk 约 2s）。
+- tool_calls 也以 delta 下发，由 llm 层按 index 聚合回与非流式同形的 message ——
+  本模块之后的逻辑（自然终止判定 / 回填 / 证据）完全不分叉。
+- **行为变化（有意）**：工具轮模型常带一句过渡语（"我先查一下…"），现在它也会实时显示
+  （以前只有最终轮文本下发）。这正是流式的代价：内容出现在 tool_calls delta 之前，
+  不先发就无法做到"最终轮边生成边显示"。若要隐藏中间轮文本，需要前端"撤帧"机制，另议。
+
 观测与记录（2026-09-08 整合，取代旧 jsonl save_trace）：
   - 一次运行 = 一个 run_id；所有实时事件（EventBus）与落库记录（agent_runs 表）共享该 run_id，
     前端拿到 run_id 即可回源完整证据，两套记录自此打通。
@@ -40,6 +50,7 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from app.core.agent.context import AgentContext, TOOL_RESULTS_KEEP_BATCHES
@@ -56,6 +67,7 @@ from app.core.agent_tools import KG_TOOLS, execute_kg_tool_async, tool_timeout_s
 from app.core.config import settings
 from app.core.llm.clients import MODEL_NAME
 from app.core.llm.fallback import chat_create as _chat_create
+from app.core.llm.stream import chat_create_stream as _chat_create_stream
 from app.core.llm.thinking import LLM_EXTRA_BODY as _LLM_EXTRA_BODY, strip_think_tags as _strip_think_tags
 from app.core.llm.usage import record as _record_llm_usage
 from app.core.token_counter import (
@@ -145,15 +157,42 @@ def _estimate_send(api_messages: list[dict], *, user_id: int | None,
         return {}
 
 
+class _DeltaPump:
+    """一次 `_chat_once` 的正文增量泵：逐 chunk 推 TEXT_DELTA，并记住推过几片。
+
+    收尾处据 `count` 决定要不要再补一帧整段：**推过就不补**（补了 = 正文重复），
+    一片都没推（模型无正文 / 网关不支持流 / 测试桩）才补 —— 等价旧行为，
+    保证"没有任何一片时前端仍拿得到完整文本"这条不变量不破。
+    """
+
+    __slots__ = ("emitter", "count")
+
+    def __init__(self, emitter: "AgentEventEmitter") -> None:
+        self.emitter = emitter
+        self.count = 0
+
+    def __call__(self, text: str) -> None:
+        if not text:
+            return
+        self.count += 1
+        self.emitter.emit(TEXT_DELTA, text=text)
+
+
 async def _chat_once(api_messages: list[dict], *, temperature: float,
                      tools: list | None = None, tool_choice: str | None = None,
                      max_tokens: int = AGENT_MAX_TOKENS,
-                     user_id: int | None = None):
+                     user_id: int | None = None,
+                     on_delta: Callable[[str], None] | None = None):
     """单次 LLM 调用封装（瞬时重试 + 错误码映射 + 模型静默降级到备用）。
 
     tool_choice 透传给 chat_create：强制收尾用 "none"（保留 tools 块以维持缓存前缀，
     语义上仍保证"只出文本、不调工具"）。测试通过 patch 本函数注入假响应。
     user_id 透传给 chat_create：走该用户的自有模型链（未配置则回落 .env 系统默认档）。
+
+    **on_delta 非空 = 流式**（2026-10-10，TODO「流式名不副实」）：正文逐 chunk 回调
+    on_delta（首屏延迟 = 首 chunk 时间，而非整段生成时间）；返回值仍是**与非流式同形**
+    的响应对象（content / tool_calls / reasoning_details / usage / model 齐全），
+    所以调用点后面的逻辑一行都不用分叉。on_delta=None 保持原非流式行为（测试桩）。
     """
     kwargs = {
         "messages": api_messages,
@@ -165,6 +204,8 @@ async def _chat_once(api_messages: list[dict], *, temperature: float,
         kwargs["tools"] = tools
     if tool_choice is not None:
         kwargs["tool_choice"] = tool_choice
+    if on_delta is not None:
+        return await _chat_create_stream(user_id=user_id, on_delta=on_delta, **kwargs)
     return await _chat_create(user_id=user_id, **kwargs)
 
 
@@ -292,11 +333,13 @@ async def _finish_without_tools(ctx: AgentContext, *, temperature: float,
     （降级重试就是 2 次，不为好看只加 1）。
     """
     resp, attempts = None, 0
+    pump = _DeltaPump(emitter)      # 收尾正文也流式（首屏延迟 = 首 chunk 时间）
     try:
         attempts += 1
         resp = await _chat_once(ctx.messages, temperature=temperature,
                                 tools=KG_TOOLS, tool_choice="none",
-                                user_id=getattr(emitter, "user_id", None))
+                                user_id=getattr(emitter, "user_id", None),
+                                on_delta=pump)
     except Exception as e:
         rlog.log("loop", "finish_tool_choice_unsupported",
                  "网关拒绝 tool_choice=none，降级为不带 tools 的旧收尾行为",
@@ -304,7 +347,8 @@ async def _finish_without_tools(ctx: AgentContext, *, temperature: float,
         try:
             attempts += 1
             resp = await _chat_once(ctx.messages, temperature=temperature,   # 降级：不带 tools
-                                    user_id=getattr(emitter, "user_id", None))
+                                    user_id=getattr(emitter, "user_id", None),
+                                    on_delta=pump)
         except Exception as e2:
             rlog.log("loop", "force_finish_failed", "强制收尾 LLM 调用失败，退化为固定文案",
                      level="WARNING", error=str(e2), stop_reason=stop_reason)
@@ -323,7 +367,8 @@ async def _finish_without_tools(ctx: AgentContext, *, temperature: float,
         text = "本轮工具调用已达上限。你可以把请求拆小后再试，我会接着帮你完成。"
         rlog.log("loop", "empty_final_text", "收尾仍无文本，退化为固定文案",
                  level="WARNING", stop_reason=stop_reason)
-    emitter.emit(TEXT_DELTA, text=text)
+    if pump.count == 0:      # 流式已逐片推过 → 不再补整段（否则正文重复）
+        emitter.emit(TEXT_DELTA, text=text)
     return _build_result(text, rounds=rounds, steps=steps, llm_calls=llm_calls,
                          context_tokens=context_tokens, token_usage=token_usage,
                          estimated_prompt_tokens=estimated_prompt_tokens,
@@ -428,6 +473,7 @@ async def _loop_core(
                      "未越预算线，保留历史原文以维持缓存前缀链（改写中段 = 剪链）",
                      ctx_tokens=ctx_tokens, threshold=AGENT_CLEAR_TOOL_RESULTS_TOKENS)
         round_start = time.monotonic()
+        pump = _DeltaPump(emitter)      # 本轮正文增量泵（多轮时各轮独立计数）
         if no_tools:
             # 「本轮禁止调用工具」的**协议层硬保证**（2026-09-30，用户反馈驱动）：
             # 光在提示词里写"禁止调用任何工具"模型照样调（实测：学习模式开场轮第一轮就
@@ -437,16 +483,16 @@ async def _loop_core(
             try:
                 resp = await _chat_once(ctx.messages, temperature=temperature,
                                         tools=KG_TOOLS, tool_choice="none",
-                                        user_id=user_id)
+                                        user_id=user_id, on_delta=pump)
             except Exception as e:      # noqa: BLE001 —— 网关差异，降级而非报错
                 rlog.log("loop", "no_tools_choice_unsupported",
                          "网关拒绝 tool_choice=none（本轮禁工具），降级为不带 tools",
                          level="WARNING", error=str(e))
                 resp = await _chat_once(ctx.messages, temperature=temperature,
-                                        user_id=user_id)
+                                        user_id=user_id, on_delta=pump)
         else:
             resp = await _chat_once(ctx.messages, temperature=temperature, tools=KG_TOOLS,
-                                    user_id=user_id)
+                                    user_id=user_id, on_delta=pump)
         llm_ms = int((time.monotonic() - round_start) * 1000)
         llm_calls += 1
         usage = extract_usage(resp)
@@ -461,7 +507,8 @@ async def _loop_core(
                  duration_ms=llm_ms, prompt_tokens=usage.prompt_tokens,
                  completion_tokens=usage.completion_tokens,
                  tool_calls=len(msg.tool_calls or []),
-                 has_text=bool(msg.content))
+                 has_text=bool(msg.content),
+                 deltas=pump.count)   # 逐 token 流出的片数（0 = 走了非流式/无正文）
 
         # 开场轮禁工具的**兜底**：协议层已用 tool_choice="none"，但网关不守规时仍可能吐
         # tool_calls —— 直接丢弃，保证"学习模式第一轮只出文本"这条不变量真的成立。
@@ -488,7 +535,8 @@ async def _loop_core(
                 text = "我已收到你的问题，但刚才没能组织好回答。请换个说法再问我一次。"
                 rlog.log("loop", "empty_final_text", "自然结束但无文本，退化为固定文案",
                          level="WARNING", rounds=round_idx)
-            emitter.emit(TEXT_DELTA, text=text)
+            if pump.count == 0:      # 流式已逐片推过 → 不再补整段（否则正文重复）
+                emitter.emit(TEXT_DELTA, text=text)
             steps.append({"ts": time.time(), "kind": "final_text", "text": _clip(text)})
             return _build_result(text, rounds=rounds, steps=steps, llm_calls=llm_calls,
                                  context_tokens=context_tokens, token_usage=token_usage,

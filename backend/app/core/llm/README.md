@@ -19,6 +19,7 @@
 | `thinking.py` | MiniMax-M3 适配 | `extra_body(thinking)` `strip_think_tags` `LLM_EXTRA_BODY` | 思考拆分到 `reasoning_content`、思考开关、响应兜底剥离 |
 | `retry.py` | 请求健壮性 | `with_retry` `is_retryable` `map_api_error` | 指数退避 + 抖动重试；异常 → 错误码 `RuntimeError` |
 | `fallback.py` | 主备回退 | `chat_create` `LLM_CANDIDATES` | **对话调用唯一出口**：候选链顺序尝试，失败静默切下一个 |
+| `stream.py` | 流式变体 | `chat_create_stream` | `chat_create` + `stream=True`：正文**逐 chunk** 回调，并把 chunk 累积成**与非流式同形**的响应对象 |
 | `user_models.py` | 每用户模型 | `ModelStore` | 用户自配对话模型（存储 + 状态机 + 候选链）；对外只回 Key 掩码 |
 | `call.py` | 一次性调用 | `call_llm` | 不带工具的纯文本/JSON：出题 / 判分 / 图谱分析 |
 | `embed.py` | 嵌入（**检索侧**） | `embed_texts` `EMBEDDING_MODEL` `EMBED_BATCH_SIZE` `MAX_EMBED_CHARS` | **检索侧嵌入唯一出口**（kb 向量化 / 图谱 RAG）；语义去重侧 `kb/embedder.py::ApiEmbedder` 共用同名常量与失败语义 |
@@ -33,6 +34,8 @@
 agent/loop.py._chat_once ──┐
                            ├─→ fallback.chat_create ─→ retry.with_retry ─→ clients.client
 call.py::call_llm ─────────┘        (主→备静默降级)      (瞬时错误退避)      (AsyncOpenAI)
+                    │
+                    └─(需要逐 token)→ stream.chat_create_stream ─→ 同上（stream=True）
 
 kb / rag / quiz / graph_analyzer ─→ call_llm ─→ chat_create ─→ …
                                         └─→ json_extract.extract_json（解析响应）
@@ -42,13 +45,15 @@ kb.embedder.ApiEmbedder ─→ 同步 OpenAI（同一模型；语义去重专用
 ```
 
 **两条真路径**：带工具的多轮循环走 `agent/loop.py`；不带工具的一次性生成走 `call_llm`。
+`_chat_once(on_delta=...)` 非空时经 `stream.chat_create_stream` 拿**逐 chunk** 正文
+（`stream.py` 不建 client、不自己回退 —— 候选链与重试仍唯一在 `chat_create`）。
 **其他任何地方都不应该出现 `chat.completions.create`。** 嵌入调用只允许两处：本包的
 `embed_texts`（检索侧）与 `kb/embedder.py::ApiEmbedder`（语义去重侧，必须同步 + hash 兜底），
 两者共用 `EMBEDDING_MODEL` / `EMBED_BATCH_SIZE` / `MAX_EMBED_CHARS` 与失败语义。
 
 ---
 
-## 3. 三份「唯一出口」契约
+## 3. 「唯一出口」契约
 
 ### 3.1 `chat_create(user_id=..., **kwargs)` —— 对话唯一出口
 
@@ -62,7 +67,19 @@ kb.embedder.ApiEmbedder ─→ 同步 OpenAI（同一模型；语义去重专用
 - **不触发回退的错误**：`400` / `404` / `422` 等"请求本身错了"（换模型也没用），
   以及非 401/402/403/429/5xx 的 `APIStatusError`。回退条件见 `should_fallback`。
 
-### 3.2 `call_llm(system_prompt, messages, max_tokens=2000, thinking=True, kind=..., user_id=...)` —— 一次性文本
+### 3.2 `chat_create_stream(user_id=..., on_delta=..., **kwargs)` —— 对话流式变体（2026-10-10）
+
+- **唯一用途**：需要正文**逐 chunk** 下发时（`agent/loop._chat_once(on_delta=...)`）。
+  首屏延迟 = 首 chunk 时间，而非整段生成时间（真机：2000 token 级 40s+ → 首 chunk ~2s）。
+- **返回值与非流式同形**：`choices[0].message.{content,tool_calls,reasoning_details}` /
+  `usage` / `model` —— 调用方无需分叉。`tool_calls` 的 delta 已按 `index` 聚合还原。
+- **不建 client、不自己回退**：候选链 + 瞬时重试仍唯一在 `chat_create`。回退只作用于
+  **建流**那一刻；流一旦建立，中途异常只能抛（不换档重放，已下发 chunk 会重复）。
+- 自动带 `stream_options={"include_usage": True}`（末 chunk 出 usage）。网关**明确以
+  400/422 拒绝**该参数时去掉它重开（丢 usage，聊天不崩）；其他错误原样抛。
+- 真机依据与踩坑（tool_calls 确以 delta 下发、reasoning_details 形状）见 `stream.py` docstring。
+
+### 3.3 `call_llm(system_prompt, messages, max_tokens=2000, thinking=True, kind=..., user_id=...)` —— 一次性文本
 
 **必须记住的一条**：M3 的**思考与正文共享 `max_tokens` 预算**（见 §4.1）。
 所以：
@@ -72,7 +89,7 @@ kb.embedder.ApiEmbedder ─→ 同步 OpenAI（同一模型；语义去重专用
 | 出题 / 判分 / 图谱分析（要模型想清楚，输出不长） | 默认 `thinking=True`，`max_tokens` 按需 |
 | 批量结构化抽取（图谱生成 / 整份 Markdown） | **`thinking=False`** + 显式调大 `max_tokens` |
 
-### 3.3 `embed_texts(texts, max_chars)` —— 检索侧嵌入唯一出口
+### 3.4 `embed_texts(texts, max_chars)` —— 检索侧嵌入唯一出口
 
 - 返回与入参**等长**的向量列表；**空输入 / API 失败 / 条数对不上**一律返回 `[]`，**不抛异常**。
 - 调用方据此降级：RAG 跳过注入，KB 退化为 BM25-only（向量列写 NULL）。
@@ -80,7 +97,7 @@ kb.embedder.ApiEmbedder ─→ 同步 OpenAI（同一模型；语义去重专用
 - 单次最多 10 条（`EMBED_BATCH_SIZE`，DashScope 硬限制，超限报 400）。
 - **语义去重侧**（图谱生成同义合并 / 先修推断 C5）走 `kb/embedder.py::ApiEmbedder`：必须**同步**（调用方 `prerequisite` / `graph_generator` 都是同步流程）且需要 **hash 兜底**（无 key / 欠费时仍要能跑），故保留独立实现；但模型名/批大小/截断/失败语义与本模块一致（2026-09-15 收口，`tests/test_api_embedder.py` 锁死不再分叉）。
 
-### 3.4 `extract_json(raw, kind="object"|"array")` —— JSON 唯一出口
+### 3.5 `extract_json(raw, kind="object"|"array")` —— JSON 唯一出口
 
 - 返回解析结果；**失败返回 `None`** —— 注意 `[]` 是合法结果，**判空必须用 `is None`**。
 - 两级兜底：① 三策略定位（原文 / ```json 代码块 / 括号配平片段，跳过字符串内括号）
@@ -138,7 +155,8 @@ M3 把思考裹在 `ϩ…ϩ` 标签里（`thinking.py`），且**思考消耗的
 ```bash
 cd backend
 venv/Scripts/python.exe -m pytest tests/test_llm_call.py tests/test_llm_fallback.py \
-    tests/test_minimax_thinking.py tests/test_json_extract.py tests/test_embed_texts.py -q
+    tests/test_minimax_thinking.py tests/test_json_extract.py tests/test_embed_texts.py \
+    tests/test_llm_stream.py -q
 venv/Scripts/python.exe -m pytest tests/ -q -m "not llm_api"     # 离线全量
 venv/Scripts/python.exe -m pytest tests/test_agent_loop_real_api.py -q -m llm_api   # 真实付费 API（需 pytest-asyncio）
 ```
@@ -149,7 +167,7 @@ venv/Scripts/python.exe -m pytest tests/test_agent_loop_real_api.py -q -m llm_ap
 
 | 位置 | 关系 |
 |---|---|
-| `../../agent/loop.py` | 带工具的多轮调用方（唯一使用 `chat_create` 的业务路径） |
+| `../../agent/loop.py` | 带工具的多轮调用方（唯一使用 `chat_create` / `chat_create_stream` 的业务路径） |
 | `docs/AgentLoop/AgentLoop_业界调研与学习路线.md` · `docs/AgentLoop/AgentLoop_重构设计讨论.md` | Agent Loop 侧设计 |
 | `docs/上下文工程/token_consumption_prediction_research.md` | token 计费与预估（`agent/estimator.py` 的依据） |
 | `AGENTS.md` §0 | 三段 key / 模型配置的真值位置 |
