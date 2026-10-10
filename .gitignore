@@ -140,7 +140,7 @@ backend/data/
 /data/keys/
 
 # 下载缓存（采集/抓取类的哈希名 blob，3.6 MB；本地保留、不入库 —— 提交比赛材料时别把缓存带进仓库）
-/data-gym-cache/
+data-gym-cache/
 
 # 一次性比赛/调研材料（本地保留，不入库）
 /guochuang.pdf
