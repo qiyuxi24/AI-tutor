@@ -1061,7 +1061,8 @@ async def process_message_stream(
 
         broadcast(GRAPH_UPDATED)
 
-        # 冗余兜底帧：agent loop 的最终文本是「收尾一次性单帧」下发的（非逐 token），
+        # 冗余兜底帧：正文已改为**逐 token 流式**下发（llm/stream.py，2026-10-10），
+        # 但"一片都没收到"仍可能发生（模型无正文 / 网关不支持流 → loop 只补一帧整段）；
         # 那一帧若在 _consume_agent_events 的排空窗口丢失，前端会整条消息拿不到内容，
         # 表现为气泡凭空消失。这里在 [DONE] 前再带一份，
         # 前端仅在「一帧 token 都没收到」时用它兜底（见 api/index.js finalReply）。
