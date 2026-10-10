@@ -89,6 +89,7 @@
 | 整体架构与快速上手 | 根 `README.md` |
 | **数据根 / 路径取径（唯一声明处）** | `backend/app/core/storage.py`（`DATA_ROOT` + 每域取径函数，保留一版旧路径回退）；一次性迁移 = `backend/scripts/migrate_data_root.py`（**默认 dry-run**，`--apply` 才动）；回归 `backend/tests/test_storage_paths.py` / `test_migrate_data_root.py` |
 | **全项目架构问题清单与重构路线（P0~P2 / Phase A-B-C）** | `docs/架构/整体架构_问题清单与重构方案.md`（根因「主体性错层」另见 `TODO.md` §架构债务）；**执行施工计划 / 分工与验收 / 任务 ID** → `docs/架构/重构实施计划_可执行清单.md` |
+| **比赛材料里的数字 / 能力口径（唯一来源，别自己数）** | `docs/架构/可演示事实清单.md`（实测数字 + 「能演示」/「只能写不能演」的分界 + 禁止出现的说法）；演示步骤 = `docs/架构/演示操作卡.md`；剩余工作与红线 = `docs/架构/插件作业单_2026-10-10.md`；每轮施工/复核的记录 = `docs/架构/通宵交底_2026-10-10.md` |
 | **Agent 内核逐模块职责 / 时序 / 改码坑** | `backend/app/core/agent/README.md` |
 | **工具系统（注册表 / 分发 / 不变量）改码指南** | `backend/app/core/agent_tools/README.md` |
 | **加/改一个工具（一工具一文件、三条硬约定、检查清单）** | `backend/app/core/agent_tools/tools/README.md` |
@@ -117,6 +118,6 @@
 
 ## 6. 提交与测试纪律
 
-- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **1549 passed, 7 deselected**（2026-10-09 实测；比 2026-09-27 的 1164 多出约 385 例，因多端写入 / DB busy / 事件契约 / A1b 迁移等新测试）。旧记的「已知红」`tests/test_event_bus.py::test_user_queue_lazy_creation` 已随 A2 修好并关闭，**现在应全绿**。后台套件基线 = `backend-admin/tests` **41 passed**。
+- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **1590 passed, 7 deselected**（2026-10-10 实测；B1 学习会话 / B2 教学策略 / B3 排序与阈值落地后净增 41 例）。历史：1549（2026-10-09）、1512 + 1 failed（2026-10-07，那条"他会话 WIP"已随 A2 关闭）。后台套件基线 = `backend-admin/tests` **41 passed**。
 - 提交按**文件族**拆；单文件跨主题按**依赖方向**排序（先被调用方）；测试与其修复同一提交；不混无关改动。
 - 与其他 AI 会话共存：提交前 `git status` 看清别人 WIP，**路径限定 add**。
