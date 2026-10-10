@@ -11,6 +11,7 @@
 
 import json
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +19,9 @@ from app.core import storage
 from app.core.quiz.schema import Question
 
 _QUIZ_DIR = storage.quiz_dir()
+
+# 题集分组键（SQL）：老行（batch_id 为空）按 legacy-<id> 各自成组，保证历史里不丢老题
+_BATCH_KEY_SQL = "COALESCE(NULLIF(batch_id, ''), 'legacy-' || id)"
 
 
 class QuizStore:
@@ -51,6 +55,7 @@ class QuizStore:
                     source         TEXT DEFAULT '',    -- 出题依据（参考片段，可选）
                     source_docs    TEXT NOT NULL DEFAULT '', -- 题目来源**文件**：[{doc_id, doc_name}] 的 JSON
                     section_id     TEXT NOT NULL DEFAULT '', -- 题目归属的小节（空 = 节点级出题）
+                    batch_id       TEXT NOT NULL DEFAULT '', -- 出题批次：一次出题 = 一个题集（历史记录分组用）
                     created_at     TEXT DEFAULT (datetime('now'))
                 )
             """)
@@ -77,6 +82,9 @@ class QuizStore:
         `source_docs` 是 2026-09-28 加的（题目来源文件），老用户库里没有这一列。
         `section_id` 是 2026-09-29 加的（题目归属小节）—— 判分要据此把"这一节学会了"
         写回小节状态，没有这一列就无法区分"这道题考的是哪一节"。
+        `batch_id` 是 2026-10-10 加的（出题历史记录）—— 一次出题 = 一个题集，
+        没有这一列就无法把同一批题聚成"之前出的那套题"。老行留空，聚合查询按
+        `legacy-<id>` 各自成组（不漏出历史）。
         """
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(questions)")}
         if "source_docs" not in cols:
@@ -87,6 +95,14 @@ class QuizStore:
             with self._conn:
                 self._conn.execute(
                     "ALTER TABLE questions ADD COLUMN section_id TEXT NOT NULL DEFAULT ''")
+        if "batch_id" not in cols:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE questions ADD COLUMN batch_id TEXT NOT NULL DEFAULT ''")
+        # 索引必须在补列之后建（老表此刻才有 batch_id 列）
+        with self._conn:
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_questions_batch ON questions (batch_id)")
 
     def close(self) -> None:
         self._conn.close()
@@ -96,7 +112,7 @@ class QuizStore:
                        subject: str = "", node_id: Optional[int] = None,
                        difficulty: str = "medium", source: str = "",
                        source_docs: Optional[list[dict]] = None,
-                       section_id: str = "") -> list[int]:
+                       section_id: str = "", batch_id: str = "") -> list[int]:
         """
         批量保存题目，返回题目 id 列表（兼容 Question 对象或 dict）。
 
@@ -108,8 +124,12 @@ class QuizStore:
                     对话内出题取该图谱节点的资料来源（`KnowledgeGraph.get_sources`）；
                     按小节出题时取该节的 `sources`。存 JSON 文本，读侧解析回列表。
             section_id: 题目归属的小节（空 = 节点级出题）。判分回写靠它定位"哪一节的题"。
+            batch_id: 出题批次（历史记录分组用）。**留空则自动生成** —— 一次
+                    `save_questions` 调用 = 一个题集，调用方无需关心；只有"多次
+                    调用要归到同一套题"时才显式传同一个 id。
         """
         docs_json = json.dumps(source_docs or [], ensure_ascii=False)
+        batch_id = batch_id or uuid.uuid4().hex[:12]
         ids = []
         with self._conn:
             for q in questions:
@@ -119,8 +139,8 @@ class QuizStore:
                     INSERT INTO questions
                         (node_id, subject, type, question, options_json, answer_json,
                          points, difficulty, analysis, comment_prompt, knowledge_point,
-                         source, source_docs, section_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         source, source_docs, section_id, batch_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     node_id,
                     subject,
@@ -136,6 +156,7 @@ class QuizStore:
                     source,
                     docs_json,
                     section_id,
+                    batch_id,
                 ))
                 ids.append(cur.lastrowid)
         return ids
@@ -214,6 +235,68 @@ class QuizStore:
         ).fetchall()
         return [self._row_to_question(dict(r)) for r in rows]
 
+    # ── 题集（出题历史记录）──
+    def count_batches(self) -> int:
+        """题集总数（分页用）。老行没有 batch_id → 各自算一个题集。"""
+        row = self._conn.execute(
+            f"SELECT COUNT(DISTINCT {_BATCH_KEY_SQL}) AS n FROM questions"
+        ).fetchone()
+        return row["n"] if row else 0
+
+    def list_batches(self, limit: int = 50, offset: int = 0) -> list[dict]:
+        """
+        列出题集（= 出题历史），最新出的在前。
+
+        一次 `save_questions` 调用 = 一个题集。老库里 `batch_id` 为空的历史行
+        按 `legacy-<id>` 各自成组 —— 老题依然在历史里看得到，不会"找不到"。
+        """
+        rows = self._conn.execute(f"""
+            SELECT
+                {_BATCH_KEY_SQL}     AS batch_id,
+                MAX(subject)         AS subject,
+                MAX(node_id)         AS node_id,
+                MAX(knowledge_point) AS knowledge_point,
+                MAX(section_id)      AS section_id,
+                MAX(source)          AS source,
+                MAX(difficulty)      AS difficulty,
+                COUNT(*)             AS question_count,
+                MAX(created_at)      AS created_at,
+                MAX(id)              AS last_id
+            FROM questions
+            GROUP BY {_BATCH_KEY_SQL}
+            ORDER BY last_id DESC
+            LIMIT ? OFFSET ?
+        """, (limit, offset)).fetchall()
+        return [{
+            "batch_id": r["batch_id"],
+            "subject": r["subject"] or "",
+            "node_id": r["node_id"],
+            "knowledge_point": r["knowledge_point"] or "",
+            "section_id": r["section_id"] or "",
+            "source": r["source"] or "",
+            "difficulty": r["difficulty"] or "",
+            "question_count": r["question_count"],
+            "created_at": r["created_at"] or "",
+        } for r in rows]
+
+    def list_by_batch(self, batch_id: str, limit: int = 200) -> list[dict]:
+        """取某个题集里的题目（与 `list_questions` 同构）。空 batch_id → []。"""
+        if not batch_id:
+            return []
+        if batch_id.startswith("legacy-"):
+            raw = batch_id[len("legacy-"):]
+            if not raw.isdigit():
+                return []
+            rows = self._conn.execute(
+                "SELECT * FROM questions WHERE id = ?", (int(raw),)
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM questions WHERE batch_id = ? ORDER BY id LIMIT ?",
+                (batch_id, limit),
+            ).fetchall()
+        return [self._row_to_question(dict(r)) for r in rows]
+
     def delete_by_knowledge_points(self, knowledge_points: list[str]) -> int:
         """删除这些知识点（= 图谱节点 id）名下的题目与作答记录，返回删掉的题数。
 
@@ -273,6 +356,7 @@ class QuizStore:
             "knowledge_point": row["knowledge_point"],
             "source_docs": json.loads(row.get("source_docs") or "[]"),
             "section_id": row.get("section_id") or "",
+            "batch_id": row.get("batch_id") or "",
             "created_at": row["created_at"],
         }
 

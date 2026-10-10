@@ -27,6 +27,14 @@ export const gradeQuizQuestion = (questionId, userAnswer) =>
 /** 题库统计 */
 export const getQuizStats = () => apiClient.get('/api/v1/quiz/stats')
 
+/** 出题历史（题集）列表，最新在前 */
+export const listQuizBatches = (limit = 50, offset = 0) =>
+  apiClient.get('/api/v1/quiz/batches', { params: { limit, offset } })
+
+/** 取某次出题（题集）的题目 */
+export const getBatchQuestions = (batchId) =>
+  apiClient.get(`/api/v1/quiz/batches/${encodeURIComponent(batchId)}/questions`)
+
 // ═══ 试卷导出（Word / PDF / Markdown）═══
 
 /**

@@ -16,6 +16,8 @@ import {
   gradeQuizQuestion,
   getQuizStats,
   getQuizQuestion,
+  listQuizBatches,
+  getBatchQuestions,
   downloadQuiz,
   readBlobError,
 } from '../api/quiz.js'
@@ -137,6 +139,7 @@ async function handleGenerate() {
         ElMessage.success(`已生成 ${questions.value.length} 道题目`)
       }
       loadStats()
+      loadBatches()   // 新出的这套题立即计入历史角标
     }
   } catch (e) {
     genError.value = e.response?.data?.detail || e.message || '出题失败'
@@ -262,8 +265,73 @@ async function focusQuestion(id) {
   }
 }
 
+// ─── 出题历史（题集）───
+// 每次出题 = 一个题集；历史抽屉列出全部题集，点开可回看/判分/导出，
+// 避免生成的题散在题库里「找不到」。
+const historyVisible = ref(false)
+const batches = ref([])
+const batchesTotal = ref(0)
+const historyLoading = ref(false)
+const openingBatch = ref('')
+
+const difficultyLabels = { easy: '简单', medium: '中等', hard: '困难' }
+
+async function loadBatches() {
+  historyLoading.value = true
+  try {
+    const res = await listQuizBatches(100, 0)
+    batches.value = res.data.batches || []
+    batchesTotal.value = res.data.total || 0
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '加载出题历史失败')
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+function openHistory() {
+  historyVisible.value = true
+  loadBatches()
+}
+
+/** 载入某个历史题集：形状对齐 handleGenerate 的 questions 项，使其可判分/导出 */
+async function openBatch(b) {
+  openingBatch.value = b.batch_id
+  try {
+    const res = await getBatchQuestions(b.batch_id)
+    const qs = res.data.questions || []
+    if (!qs.length) {
+      ElMessage.warning('该记录没有题目')
+      return
+    }
+    questions.value = qs.map((q, i) => ({ ...q, localIdx: i, dbId: q.id }))
+    answers.value = {}
+    results.value = {}
+    rejectedCount.value = 0
+    materialsUsed.value = 0
+    requestedCount.value = qs.length
+    if (b.subject && !subject.value.trim()) subject.value = b.subject
+    historyVisible.value = false
+    ElMessage.success(`已载入历史题目 ${qs.length} 道`)
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '加载历史题目失败')
+  } finally {
+    openingBatch.value = ''
+  }
+}
+
+/** 后端 created_at 是 UTC（SQLite datetime('now')）→ 转本地展示 */
+function formatTime(s) {
+  if (!s) return ''
+  const d = new Date(String(s).replace(' ', 'T') + 'Z')
+  if (Number.isNaN(d.getTime())) return s
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 onMounted(() => {
   loadStats()
+  loadBatches()   // 按钮角标显示历史题集数；打开抽屉时再刷新一次
   // 从节点详情跳入时：预填主题（仅在原为空时覆盖）+ 聚焦指定题目
   if (props.initialSubject && !subject.value.trim()) {
     subject.value = props.initialSubject
@@ -279,10 +347,21 @@ onMounted(() => {
     <main class="quiz-content">
       <div class="quiz-inner">
         <header class="qc-header">
-          <h2>AI 出题</h2>
-          <p class="qc-subtitle">
-            AI 基于你上传的教材 / 例题 / 真题（知识库）出题，只依据真实材料，避免凭空乱出。支持单选 / 多选 / 判断 / 填空 / 简答，自动判分并给出解析。
-          </p>
+          <div class="qc-header-main">
+            <h2>AI 出题</h2>
+            <p class="qc-subtitle">
+              AI 基于你上传的教材 / 例题 / 真题（知识库）出题，只依据真实材料，避免凭空乱出。支持单选 / 多选 / 判断 / 填空 / 简答，自动判分并给出解析。
+            </p>
+          </div>
+          <el-button class="history-entry" @click="openHistory">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+              <path d="M12 7v5l4 2" />
+            </svg>
+            历史出题
+            <span v-if="batchesTotal" class="history-count">{{ batchesTotal }}</span>
+          </el-button>
         </header>
 
         <!-- 出题配置 -->
@@ -474,6 +553,34 @@ onMounted(() => {
         </section>
       </div>
     </main>
+
+    <!-- 出题历史：列出之前生成的每个题集，点开即可回看 / 判分 / 导出 -->
+    <el-drawer v-model="historyVisible" title="出题历史" size="420px">
+      <div v-loading="historyLoading" class="history-list">
+        <div v-if="!historyLoading && !batches.length" class="history-empty">
+          <p>还没有出题记录</p>
+          <p class="history-empty-tip">输入主题点「开始出题」，之后每次出题都会记录在这里</p>
+        </div>
+        <div
+          v-for="b in batches"
+          :key="b.batch_id"
+          class="history-item"
+          :class="{ opening: openingBatch === b.batch_id }"
+          @click="openBatch(b)"
+        >
+          <div class="hi-top">
+            <span class="hi-subject">{{ b.subject || '未命名主题' }}</span>
+            <span class="hi-count">{{ b.question_count }} 题</span>
+          </div>
+          <div class="hi-meta">
+            <span v-if="b.source === 'chat'" class="hi-tag">对话内</span>
+            <span v-if="b.section_id" class="hi-tag">小节</span>
+            <span class="hi-diff">{{ difficultyLabels[b.difficulty] || b.difficulty }}</span>
+            <span class="hi-time">{{ formatTime(b.created_at) }}</span>
+          </div>
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -497,7 +604,31 @@ onMounted(() => {
 }
 
 .qc-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   margin-bottom: 20px;
+}
+
+.qc-header-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.history-entry {
+  flex-shrink: 0;
+}
+
+.history-entry svg {
+  margin-right: 5px;
+  vertical-align: -2px;
+}
+
+.history-entry .history-count {
+  margin-left: 5px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
 }
 
 .qc-header h2 {
@@ -709,5 +840,87 @@ onMounted(() => {
   background: var(--color-bg-hover);
   border-radius: 8px;
   padding: 8px 12px;
+}
+
+/* 出题历史抽屉 */
+.history-list {
+  min-height: 120px;
+}
+
+.history-empty {
+  text-align: center;
+  color: var(--color-text-tertiary);
+  padding: 48px 16px;
+  font-size: 14px;
+}
+
+.history-empty p {
+  margin: 4px 0;
+}
+
+.history-empty-tip {
+  font-size: 12px;
+}
+
+.history-item {
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  margin-bottom: 10px;
+}
+
+.history-item:hover {
+  border-color: var(--color-accent);
+  background: var(--color-bg-hover);
+}
+
+.history-item.opening {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.hi-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hi-subject {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hi-count {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.hi-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.hi-tag {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--color-bg-hover);
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.hi-time {
+  margin-left: auto;
 }
 </style>

@@ -7,6 +7,8 @@
   GET    /quiz/questions/{id}        - 获取单题详情
   POST   /quiz/{id}/grade            - 判分（客观题规则判分 / 简答题 LLM 判分）
   GET    /quiz/stats                 - 题库统计
+  GET    /quiz/batches               - 出题历史（题集）列表
+  GET    /quiz/batches/{id}/questions- 某次出题的题目
 
 说明：
 - 需要 JWT 认证，按用户隔离
@@ -166,6 +168,41 @@ async def grade(question_id: int,
         **result,
         "analysis": q["analysis"],
     }
+
+
+@router.get("/quiz/batches")
+async def list_batches(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    user_id: int = Depends(get_current_user),
+):
+    """
+    列出出题历史（题集），最新出的在前。
+
+    一次出题 = 一个题集（`save_questions` 一次调用）。老库里没有批次标记的历史题
+    各成一集，仍在列表中可见。返回:
+        {"batches": [{"batch_id","subject","question_count","created_at",...}],
+         "total": int}
+    """
+    store = quiz_manager._get_store(user_id)
+    return {
+        "batches": store.list_batches(limit=limit, offset=offset),
+        "total": store.count_batches(),
+    }
+
+
+@router.get("/quiz/batches/{batch_id}/questions")
+async def get_batch_questions(
+    batch_id: str,
+    user_id: int = Depends(get_current_user),
+):
+    """取某次出题（题集）的全部题目，供历史记录回看 / 判分 / 导出。找不到 → 404。"""
+    store = quiz_manager._get_store(user_id)
+    questions = store.list_by_batch(batch_id)
+    if not questions:
+        raise HTTPException(status_code=404,
+                            detail=ErrorCode.user_message(ErrorCode.QUIZ_NOT_FOUND))
+    return {"batch_id": batch_id, "questions": questions}
 
 
 @router.get("/quiz/stats")
