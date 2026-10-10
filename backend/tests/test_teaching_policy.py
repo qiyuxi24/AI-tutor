@@ -171,3 +171,54 @@ def test_bind_target_still_derives_action_without_policy_key(kg):
     })
 
     assert turn.action == learn.ACTION_QUIZ
+
+
+# ── 5. B2 策略边界 4 条（2026-10-10 照填）─────────────────────────
+
+def test_start_prefers_order_over_confused_mark():
+    """三段式起点：顺序第一个未通过者胜出 —— 「不懂」不能越过它前面的「已懂」插队。"""
+    states = _states(
+        (None, True),                    # s01 已通过
+        (LEARN_MARK_UNDERSTOOD, False),  # s02 已懂
+        (LEARN_MARK_CONFUSED, False),    # s03 不懂
+        ("unknown", False),              # s04 未标记
+    )
+
+    d = policy.decide(node_id="n1", states=states)
+
+    assert (d.target.index, d.target.section_id) == (2, "s02")
+    assert d.action == learn.ACTION_QUIZ and d.reason == policy.REASON_UNDERSTOOD
+
+
+def test_unknown_mark_falls_back_to_unseen():
+    """`mark` 是未知取值（脏数据 / 新标记位）→ REASON_UNSEEN 兜底，不抛异常、不猜。"""
+    d = policy.decide(node_id="n1", states=_states(("weird", False)))
+
+    assert d.reason == policy.REASON_UNSEEN
+    assert d.action == learn.ACTION_TEACH and d.target.needs_quiz is False
+
+
+def test_bind_target_prefers_policy_action_over_state(kg):
+    """target 里 `action` 与 (passed, needs_quiz) 不一致时，**以 action 为准**（策略层是唯一来源）。"""
+    turn = learn.bind_target(kg, {
+        "node_id": "n1", "index": 2, "section_id": "s02", "title": "计算例题",
+        "mark": LEARN_MARK_UNDERSTOOD, "passed": False, "needs_quiz": True,
+        "action": learn.ACTION_TEACH,   # 与 needs_quiz=True 推出的 quiz 冲突 → 以它为准
+    })
+
+    assert turn.action == learn.ACTION_TEACH
+    assert turn.needs_quiz is True      # 状态快照不被 action 改写
+
+
+@pytest.mark.parametrize("mark, passed", [
+    (None, True),                     # 已通过 → wrapup
+    (LEARN_MARK_UNDERSTOOD, False),   # 已懂 → quiz
+    (LEARN_MARK_CONFUSED, False),     # 不懂 → teach
+    ("unknown", False),               # 未标记 → teach
+])
+def test_decide_action_matches_action_for(mark, passed):
+    """`decide()` 的 action 与 `learning.action_for(passed, needs_quiz)` 四种组合逐个相等（锁住不分叉）。"""
+    d = policy.decide(node_id="n1", states=_states((mark, passed)))
+
+    assert d.action == learn.action_for(passed=d.target.passed,
+                                        needs_quiz=d.target.needs_quiz)
