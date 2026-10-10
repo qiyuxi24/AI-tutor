@@ -4,11 +4,11 @@
 绕过它直读 `nodes_dir/{id}.md` 会拿到骨架占位「待完善...」或空串 —— 小节化节点没有主 MD
 （设计 D1），正文只在小节 MD 里；图谱上下文注入 / RAG 索引 / 出题依据 / 先修推断都会因此失明。
 
-做法：静态扫 `backend/app`（`core/knowledge_graph.py` 是唯一出口定义处，自有其读写写法，排除），
+做法：静态扫 `backend/app`（`core/kg/` 包是唯一出口定义处，自有其读写写法，排除），
 任何仍把 `nodes_dir` 与 `.md` 拼成**单节点正文路径**的地方都必须进白名单并写明理由。
 白名单之外的命中即禁 —— 防"再冒出一个直读"。
 
-注意：本节只守**正文读取**；写路径、小节 manifest 管理、图谱结构方法都在 `knowledge_graph.py`
+注意：本节只守**正文读取**；写路径、小节 manifest 管理、图谱结构方法都在 `core/kg/`
 内部（已排除），不在此扫描范围。
 """
 import re
@@ -36,7 +36,8 @@ def _offenders() -> list[str]:
     hits = []
     for path in _APP_DIR.rglob("*.py"):
         rel = path.relative_to(_APP_DIR).as_posix()
-        if rel == "core/knowledge_graph.py":
+        # 唯一出口实现处：拆分后落在 core/kg/ 包（knowledge_graph.py 只剩转发层）
+        if rel == "core/knowledge_graph.py" or rel.startswith("core/kg/"):
             continue
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             code = line.split("#", 1)[0].rstrip()  # 去内联/整行注解，防注释误报
