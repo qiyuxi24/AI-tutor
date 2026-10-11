@@ -1,5 +1,5 @@
 ﻿# ============================================================
-# TutorAgent 一键启动脚本 (PowerShell) —— 唯一启动入口
+# AI Tutor 一键启动脚本 (PowerShell) —— 唯一启动入口
 #
 #  默认：装了 Docker 且守护进程可用 → 容器模式（docker compose）
 #        否则                        → 本机模式（uvicorn --reload + vite dev）
@@ -96,7 +96,7 @@ if ($useDocker) {
     Set-Location $projectRoot
 
     Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "   TutorAgent - Docker 启动" -ForegroundColor Cyan
+    Write-Host "   AI Tutor - Docker 启动" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
     Ok "Docker Engine $dockerVersion 已就绪"
@@ -281,7 +281,7 @@ if ($useDocker) {
 #  本机模式（以下为原逻辑）
 # ==========================================================================
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "   TutorAgent - 一键启动" -ForegroundColor Cyan
+Write-Host "   AI Tutor - 一键启动" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 

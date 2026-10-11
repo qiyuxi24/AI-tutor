@@ -14,7 +14,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="TutorAgent Admin API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="AI Tutor Admin API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

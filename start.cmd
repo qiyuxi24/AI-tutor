@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM  TutorAgent 双击启动入口
+REM  AI Tutor 双击启动入口
 REM
 REM  为什么需要它：本机 .ps1 没有文件关联（assoc .ps1 返回 not found），
 REM  双击 start.ps1 不会执行，右键菜单里也没有「使用 PowerShell 运行」。

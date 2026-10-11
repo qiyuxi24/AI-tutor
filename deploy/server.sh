@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TutorAgent 服务器端运维入口（deploy.ps1 每次部署自动更新本文件）
+# AI Tutor 服务器端运维入口（deploy.ps1 每次部署自动更新本文件）
 # 用法：./server.sh {up|restart|stop|logs|status}    # 不带参数 = status
 #   up      重新构建并启动（改了代码/配置后用）
 #   restart 只重启容器（不重建镜像）
