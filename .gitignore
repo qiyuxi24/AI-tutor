@@ -209,8 +209,44 @@ pytest-of-*/
 # 本次已用 git rm --cached 从索引移出（本地文件保留）
 # ════════════════════════════════════════════
 # 答辩 PPT（根目录，自产二进制；v5/v6 共 ~12.6 MB）
-/AIC答辩PPT_*.pptx
+/AIC答辩PPT_*
 # 答辩/演示截图（figs/ 整目录，约 26 张 PNG）
 /figs/
 # 探针 / 评测 / 实验产物（probe_*.py、raw 文本、测试报告、ponytail A/B 证据）
 /reports/
+
+# ════════════════════════════════════════════
+# 非代码 / 非运行必需内容（2026-10-11 二次整理：仓库只留代码 + 运行必需 + 技术文档）
+# 判定口径：不含源码/测试/脚本/配置，且项目跑起来不需要它 —— 本地保留、不入库
+# ════════════════════════════════════════════
+# A 比赛 / 答辩 / 备赛材料
+/docs/比赛/
+/答辩PPT_*.md
+/截图任务清单.md
+/比赛冲刺计划_*.md
+/.workbuddy/商业计划书大纲提取.md
+# B 个人过程记录（历程复盘、决策归档、演示与待议记录）
+/docs/项目历程_决策与效果记录.md
+/docs/知识沉淀_跨会话决策归档.md
+/docs/架构/演示操作卡.md
+/docs/架构/演示预演记录_*.md
+/docs/架构/待拍板问题_*.md
+/docs/架构/可演示事实清单.md
+/docs/归档/
+# C 调研 / 学习 / 对标类文档（与当前实现无对应的方案/契约者仍保留在 docs/）
+/docs/调研对标/
+/docs/教育资料采集/
+/docs/AgentLoop/AgentLoop_业界调研与学习路线.md
+/docs/RAG/RAG_参考资料与学习路线.md
+/docs/工程实践/Git_多人协作_工作流调研与学习路径.md
+/docs/工程实践/AI编码Skill_ponytail实测与通用Skill选型.md
+/docs/运维部署/Docker_学习路径与工程化部署.md
+/docs/上下文工程/token_consumption_prediction_research.md
+/docs/知识图谱/知识图谱_论文与开源实现调研.md
+# E AI 工具定义与孤立配置（agent 定义；根 package.json 仅 d3，install.ps1 只装 frontend/）
+/.codebuddy/agents/
+/package.json
+/package-lock.json
+# F 评测产物（可重跑重建；评测集 cmrc2018_trial.json / graph_injection_cases.json 保留）
+/backend/eval_data/report_*.json
+/backend/eval_data/graph_injection_report*.json
