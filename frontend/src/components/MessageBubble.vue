@@ -148,7 +148,6 @@ watch(renderedContent, () => {
         <div v-if="hasThinking" class="thinking-panel">
           <button class="thinking-toggle" @click="showThinking = !showThinking">
             <span class="thinking-label">AI 思考过程</span>
-            <span class="thinking-count">{{ message.thinking.length }} 段</span>
             <span class="thinking-arrow" :class="{ expanded: showThinking }">▾</span>
           </button>
           <div v-show="showThinking" class="thinking-content">
@@ -351,43 +350,33 @@ watch(renderedContent, () => {
 
 .retry-btn:hover { background: var(--color-accent-light); }
 
-/* ─── 思考折叠面板 ─── */
+/* ─── 思考折叠面板（无边框：只留收起 / 展开） ─── */
 .thinking-panel {
   margin-bottom: 8px;
-  border-radius: 8px;
-  background: var(--color-bg-tertiary);
-  overflow: hidden;
 }
 
 .thinking-toggle {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
-  padding: 6px 10px;
+  padding: 2px 0;
   background: none;
   border: none;
   cursor: pointer;
   font-size: 12px;
   color: var(--color-text-secondary);
-  transition: background 0.15s;
+  transition: color 0.15s;
 }
 
 .thinking-toggle:hover {
-  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
 }
 
 .thinking-label {
   font-weight: 500;
 }
 
-.thinking-count {
-  font-size: 10px;
-  opacity: 0.6;
-}
-
 .thinking-arrow {
-  margin-left: auto;
   transition: transform 0.2s;
   font-size: 10px;
 }
@@ -397,23 +386,15 @@ watch(renderedContent, () => {
 }
 
 .thinking-content {
-  padding: 8px 12px;
-  border-top: 1px solid var(--color-border);
+  padding: 4px 0 4px 2px;
 }
 
 .thinking-block {
   font-size: 12px;
-  color: var(--color-text-secondary);
+  color: var(--color-text-tertiary);
   line-height: 1.5;
-  padding: 4px 0;
-  border-left: 2px solid var(--color-accent-light);
-  padding-left: 8px;
-  margin-bottom: 4px;
+  padding: 3px 0;
   font-style: italic;
-}
-
-.thinking-block:last-child {
-  margin-bottom: 0;
 }
 
 /* Markdown 渲染样式 */

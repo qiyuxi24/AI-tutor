@@ -54,7 +54,7 @@ async function handleUsageModeChange(value) {
 <template>
   <section class="sc-section">
     <h3>资源与版权</h3>
-    <p class="usage-hint">用于「资源采集」页的授权范围与检索过滤；切换会即时保存到用户画像。</p>
+    <p class="usage-hint">用于对话中资源采集的授权范围（AI 按此模式筛选可采集来源）与知识库检索过滤；切换会即时保存到用户画像。</p>
     <div v-for="opt in MODE_OPTIONS" :key="opt.value" class="sc-row">
       <div class="sc-row-info">
         <div class="sc-row-title">{{ opt.title }}</div>

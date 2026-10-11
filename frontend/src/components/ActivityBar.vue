@@ -3,7 +3,9 @@
  * ActivityBar.vue — 最左侧活动栏（VSCode / ima 风格，沉浸式无顶部栏）
  *
  * 职责：
- *   1. 页面入口图标导航（对话 / 学习进度 / 图谱 / 出题 / 资源采集）
+ *   1. 页面入口图标导航（对话 / 学习进度 / 图谱 / 出题）
+ *      ⚠️ 资源采集已改为后端 AI 工具（`search_resources` / `collect_resources`），
+ *         前端入口整体下线：本导航项已移除，CollectorView.vue 保留但不再挂载。
  *      知识库不是独立页面，它是图谱页右侧可收起的侧栏（见 KbPanel + HomeView 的 .graph-kb）
  *   2. 品牌 logo
  *   3. 底部：主题切换 / 设置 / 用户菜单（含用户画像、切换账号）
@@ -33,7 +35,6 @@ const items = [
   { id: 'dashboard', title: '学习进度', icon: 'dashboard' },
   { id: 'graph', title: '知识图谱', icon: 'graph' },
   { id: 'quiz', title: '出题', icon: 'quiz' },
-  { id: 'resources', title: '资源采集', icon: 'resources' },
 ]
 
 function handleSelect(id) {
@@ -50,8 +51,8 @@ function handleUserMenu(action) {
 <template>
   <aside class="activity-bar">
     <!-- 顶部品牌：像素小星（public/brand-star.svg，自带配色） -->
-    <div class="ab-logo" title="TutorAgent">
-      <img class="ab-logo-img" :src="BRAND_ICON" alt="TutorAgent" />
+    <div class="ab-logo" title="AI Tutor">
+      <img class="ab-logo-img" :src="BRAND_ICON" alt="AI Tutor" />
     </div>
 
     <!-- 中部导航区 -->
@@ -86,18 +87,6 @@ function handleUserMenu(action) {
         <svg v-else-if="item.icon === 'quiz'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M9 11l3 3L22 4" />
           <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-        </svg>
-        <!-- 资源采集图标（下载收集） -->
-        <svg v-else-if="item.icon === 'resources'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-          <polyline points="7 10 12 15 17 10" />
-          <line x1="12" y1="15" x2="12" y2="3" />
-        </svg>
-        <!-- 资源采集图标（下载收集） -->
-        <svg v-else-if="item.icon === 'resources'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-          <polyline points="7 10 12 15 17 10" />
-          <line x1="12" y1="15" x2="12" y2="3" />
         </svg>
       </button>
     </nav>

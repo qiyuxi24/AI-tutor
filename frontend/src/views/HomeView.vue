@@ -2,7 +2,9 @@
 /**
  * HomeView.vue — 主视图（编排层）
  *
- * 布局：左侧活动栏 + 内容区（对话 / 学习进度 / 图谱 / 出题 / 资源采集 / 设置），无顶部栏（沉浸式）。
+ * 布局：左侧活动栏 + 内容区（对话 / 学习进度 / 图谱 / 出题 / 设置），无顶部栏（沉浸式）。
+ * 资源采集已改为后端 AI 工具（`search_resources` / `collect_resources`），前端入口下线：
+ * CollectorView.vue 保留但不再挂载。
  * 知识库不是独立视图：它是图谱页右侧可收起的侧栏（KbPanel，宽度由 --kb-w 驱动）。
  *
  * 职责：
@@ -21,12 +23,15 @@ import { formatError, clientError } from '../utils/errorCodes.js'
 import { notifyError, notifyInfo } from '../utils/feedback'
 import { ballPrefs, loadBallPrefs } from '../utils/floatingBall.js'
 import { loadAvatar } from '../utils/avatar.js'
+import { useGraphLayout } from '../utils/graphLayout.js'
 import FloatingBall from '../components/FloatingBall.vue'
 import { fetchSourceNodes } from '../api/kb.js'
 import ActivityBar from '../components/ActivityBar.vue'
 import ConversationSidebar from '../components/ConversationSidebar.vue'
 import ChatArea from '../components/ChatArea.vue'
 import ForceGraph from '../components/ForceGraph.vue'
+import GraphMindmap from '../components/GraphMindmap.vue'
+import GraphBrace from '../components/GraphBrace.vue'
 import GraphSubjectBar from '../components/GraphSubjectBar.vue'
 import PathBoard from '../components/PathBoard.vue'
 import NodeDetail from '../components/NodeDetail.vue'
@@ -37,13 +42,17 @@ import OnboardingGuide from '../components/OnboardingGuide.vue'
 import LoginDialog from '../components/LoginDialog.vue'
 import KbPanel from '../components/KbPanel.vue'
 import QuizView from './QuizView.vue'
-import CollectorView from './CollectorView.vue'
 import SettingsView from './SettingsView.vue'
 import DashboardView from './DashboardView.vue'
 
 const store = useChatStore()
 const authStore = useAuthStore()
 const viewMode = ref('chat')
+
+// ─── 图谱布局（力导向 / 思维导图 / 大括号）───
+// 真值源 = utils/graphLayout.js 的模块级单例，**唯一切换入口在设置页「知识图谱 · 布局」**。
+// 图谱页只读它、按它挂载对应画法，不再放切换控件（保持"看图"的纯粹）。
+const { layout: graphLayout } = useGraphLayout()
 
 // ─── 三处侧栏（统一走 SidePanel）：折叠态 + 宽度 ───
 // 宽度与折叠态留在父级，是因为它们要参与布局：对话栏折叠后 ChatArea 自动占满，
@@ -531,20 +540,62 @@ const slideTransition = {
                 @select-node="handleGraphSearchSelect"
               />
             </div>
+
+            <!-- 「学习路径」入口收进左侧导航（原来浮在画布底部，既占地方又难看）。
+                 点开 = 右侧弹出学习任务栏（与知识库栏互斥，见 togglePathBoard）。 -->
+            <button
+              class="graph-nav-path"
+              :class="{ active: showPathBoard }"
+              :title="showPathBoard ? '收起学习任务栏' : '打开学习任务栏（分层列出知识点与前置）'"
+              @click="togglePathBoard"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="6" cy="19" r="3" />
+                <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+                <circle cx="18" cy="5" r="3" />
+              </svg>
+              <span class="graph-nav-path-label">学习路径</span>
+            </button>
+
             <GraphSubjectBar class="graph-panel" />
           </SidePanel>
+          <!-- 三种画法共用同一份 store.displayNodes/Edges：只换渲染层，不换数据（方案 §5.1）。
+               ref 三处同名没问题 —— 同一时刻只挂载一个，forceGraphRef 永远指向当前那个，
+               所以「在图谱中定位」/ 搜索聚焦在三种布局下都能用。 -->
           <ForceGraph
+            v-if="graphLayout === 'force'"
             ref="forceGraphRef"
             :nodes="store.displayNodes"
             :edges="store.displayEdges"
             :loading="!store.graphLoaded"
             :error="store.graphError"
             :next-node-id="store.nextToLearn?.node_id || ''"
-            :path-board-open="showPathBoard"
             :source-nodes="sourceNodes"
             @node-dblclick="handleNodeDblClick"
-            @toggle-path-board="togglePathBoard"
             @graph-action="handleGraphAction"
+          />
+          <GraphMindmap
+            v-else-if="graphLayout === 'mindmap'"
+            ref="forceGraphRef"
+            :nodes="store.displayNodes"
+            :edges="store.displayEdges"
+            :loading="!store.graphLoaded"
+            :error="store.graphError"
+            :next-node-id="store.nextToLearn?.node_id || ''"
+            :source-nodes="sourceNodes"
+            :root-label="store.currentSubject || ''"
+            @open-node="handleNodeDblClick"
+          />
+          <GraphBrace
+            v-else
+            ref="forceGraphRef"
+            :nodes="store.displayNodes"
+            :loading="!store.graphLoaded"
+            :error="store.graphError"
+            :next-node-id="store.nextToLearn?.node_id || ''"
+            :source-nodes="sourceNodes"
+            @open-node="handleNodeDblClick"
           />
 
           <!-- 「在图谱中显示」时的来源高亮提示条（可手动取消） -->
@@ -605,9 +656,6 @@ const slideTransition = {
         :initial-subject="quizTarget?.nodeName || ''"
         :focus-question-id="quizTarget?.questionId || null"
       />
-
-      <!-- 资源采集页 -->
-      <CollectorView v-if="viewMode === 'resources'" :key="viewEpoch" />
 
       <!-- 学习进度仪表盘 -->
       <DashboardView
@@ -704,6 +752,30 @@ const slideTransition = {
   padding: 10px 10px 8px;
   border-bottom: 1px solid var(--color-border);
 }
+
+/* ── 侧栏「学习路径」入口（原来浮在画布底部，收进导航更整洁） ── */
+.graph-nav-path {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-bottom: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.graph-nav-path:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
+.graph-nav-path.active { color: var(--color-accent); background: var(--color-accent-light); }
+.graph-nav-path svg { flex-shrink: 0; opacity: 0.6; }
+.graph-nav-path.active svg { opacity: 1; }
+.graph-nav-path-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── 图谱左侧两级导航（学科 + 知识板块）／右侧知识库 ──
    两者都是浮在画布上的卡片：外观与交互（抽屉把手、拖宽热区、折叠动画）统一由

@@ -36,8 +36,6 @@ const props = defineProps({
   // ── 科技树联动（学习进度） ──
   // 下一步推荐节点 id（薄弱点脉冲标记）
   nextNodeId: { type: String, default: '' },
-  // 右侧「学习任务栏」是否打开（仅用于底部按钮的高亮态，图本身不参与路径表达）
-  pathBoardOpen: { type: Boolean, default: false },
   // 来源高亮：命中的节点 id 数组（知识库右键「在图谱中显示」用），非空即加醒目描边
   sourceNodes: { type: Array, default: () => [] },
 })
@@ -49,7 +47,6 @@ const emit = defineEmits([
   'node-click',
   'node-dblclick',
   'graph-action',
-  'toggle-path-board',
 ])
 
 /* ================================================================
@@ -341,21 +338,13 @@ defineExpose({ focusNode })
       <button class="zoom-btn zoom-reset" title="重置视图" @click="zoomReset">↺</button>
     </div>
 
-    <!-- 科技树图例 + 学习路径开关（底部中央） -->
+    <!-- 掌握度图例（左下角）。「学习路径」开关已上收到图谱页左侧「学科导航」栏，
+         三种布局下都有入口，不再只挂在力导向视图里。 -->
     <div v-if="props.nodes.length > 0" class="graph-legend">
       <span class="legend-item"><span class="legend-dot dot-unstarted"></span>未开始</span>
       <span class="legend-item"><span class="legend-dot dot-weak"></span>薄弱</span>
       <span class="legend-item"><span class="legend-dot dot-learning"></span>学习中</span>
       <span class="legend-item"><span class="legend-dot dot-mastered"></span>已掌握</span>
-      <span class="legend-divider"></span>
-      <button
-        class="path-toggle"
-        :class="{ active: pathBoardOpen }"
-        :title="pathBoardOpen ? '收起学习任务栏' : '打开学习任务栏（分层列出知识点与前置）'"
-        @click="emit('toggle-path-board')"
-      >
-        <span class="path-toggle-dot"></span>学习路径
-      </button>
     </div>
 
     <!-- 图谱更新提示 -->
@@ -552,7 +541,7 @@ defineExpose({ focusNode })
 .zoom-level { font-size: 10px; color: var(--color-text-muted); user-select: none; padding: 2px 0; }
 
 /* ================================================================
-   科技树图例 + 学习路径开关（左下角）
+   科技树掌握度图例（左下角）；「学习路径」开关在图谱页左侧导航栏
    ================================================================ */
 .graph-legend {
   position: absolute; bottom: 16px; left: 16px;
@@ -572,27 +561,6 @@ defineExpose({ focusNode })
 .dot-weak { background: var(--color-red); }
 .dot-learning { background: var(--color-yellow); }
 .dot-mastered { background: var(--color-green); }
-
-.legend-divider { width: 1px; height: 14px; background: var(--color-border-subtle); }
-.path-toggle {
-  display: flex; align-items: center; gap: 6px;
-  border: 1px solid var(--color-border-subtle);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--color-text-secondary);
-  font-size: 11px;
-  padding: 3px 8px;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.path-toggle:hover { border-color: var(--color-accent); color: var(--color-text-primary); }
-.path-toggle.active {
-  border-color: var(--color-accent);
-  background: var(--color-accent);
-  color: var(--color-bg-primary);
-}
-.path-toggle-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-graph-edge); }
-.path-toggle.active .path-toggle-dot { background: var(--color-bg-primary); }
 
 /* 薄弱点脉冲环：推荐节点扩散动画 */
 .node-pulse { transform-origin: center; transform-box: fill-box; animation: nodePulse 2.2s ease-out infinite; }

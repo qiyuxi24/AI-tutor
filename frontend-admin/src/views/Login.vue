@@ -3,7 +3,7 @@
     <el-card class="login-card">
       <template #header>
         <div class="card-header">
-          <span>TutorAgent 运维后台</span>
+          <span>AI Tutor 运维后台</span>
         </div>
       </template>
       

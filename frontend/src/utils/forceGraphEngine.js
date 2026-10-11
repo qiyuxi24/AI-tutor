@@ -57,14 +57,14 @@ const RELATION_COLORS = {
  * 掌握度分档：0 未开始 / 1 薄弱(1-29) / 2 学习中(30-69) / 3 已掌握(≥70)
  * 阈值契约 = 后端 graph_middleware.mastery_bucket（唯一真值源）；改这里必须同步改后端。
  */
-function masteryLevel(mastery) {
+export function masteryLevel(mastery) {
   if (mastery == null || mastery === 0) return 0
   if (mastery < 30) return 1
   if (mastery < 70) return 2
   return 3
 }
 
-function nodeFill(mastery) {
+export function nodeFill(mastery) {
   const level = masteryLevel(mastery)
   if (level === 0) return NODE_COLOR_UNSTARTED
   if (level === 1) return NODE_COLOR_WEAK
