@@ -2,7 +2,7 @@
 """MiniMax API 连通性自检（OpenAI 兼容 · 国内站 api.minimaxi.com）。
 
 用途：
-    把 TutorAgent 对话主模型切到 MiniMax 之前，先验证「聊天 / 流式 / 工具调用」
+    把 AI Tutor 对话主模型切到 MiniMax 之前，先验证「聊天 / 流式 / 工具调用」
     三个核心场景在目标 key + 模型下可用，并打印实际接入参数。
 
 配置读取（根 .env，与后端 config.py 同一套变量）：
@@ -58,7 +58,7 @@ async def test_chat(c: AsyncOpenAI, model: str) -> None:
     resp = await c.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": "你是 TutorAgent 的测试助手，回答要简短。"},
+            {"role": "system", "content": "你是 AI Tutor 的测试助手，回答要简短。"},
             {"role": "user", "content": "用一句话自我介绍。"},
         ],
         temperature=0.7,

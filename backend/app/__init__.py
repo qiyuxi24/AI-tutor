@@ -1,4 +1,4 @@
-"""TutorAgent 后端根包。
+"""AI Tutor 后端根包。
 
 **导入即配置日志**（`core/logging_setup.setup_logging()`，幂等）—— 目的是让
 `python scripts/xxx.py` 这类不经 `main.py` 的入口也拿到同一套日志。历史坑：

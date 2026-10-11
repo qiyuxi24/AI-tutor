@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
         _gc_task = None
 
 
-app = FastAPI(title="TutorAgent API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="AI Tutor API", version="0.1.0", lifespan=lifespan)
 
 # ════════════════════════════════════════════
 #  CORS 跨域配置（白名单/方法/头从统一 Settings 读取）

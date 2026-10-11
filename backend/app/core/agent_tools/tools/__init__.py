@@ -24,6 +24,7 @@
 from . import (
     add_edge,
     add_knowledge_node,
+    collect_resources,
     delete_node,
     download_resource,
     fetch_webpage,
@@ -31,6 +32,7 @@ from . import (
     mark_section_understood,
     quiz_generate,
     rag_search,
+    search_resources,
     update_mastery,
     update_node_content,
     update_node_sections,
@@ -49,6 +51,8 @@ NATIVE_SPECS = [
     delete_node.SPEC,
     # 画像 / 资料
     update_user_profile.SPEC,
+    search_resources.SPEC,
+    collect_resources.SPEC,
     fetch_webpage.SPEC,
     download_resource.SPEC,
     rag_search.SPEC,

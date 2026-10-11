@@ -4,7 +4,7 @@
 
     registry.py   ① 注册表中间件：spec 契约 / 注册 / `KG_TOOLS` / 提示词段落生成（零依赖）
     dispatch.py   ② 调用中间件：参数解析 → 错误映射 → 同步/异步双入口执行
-    tools/        ③ 12 个原生工具，**一个工具一个模块**（spec + handler 自包含）→ tools/README.md
+    tools/        ③ 15 个原生工具，**一个工具一个模块**（spec + handler 自包含）→ tools/README.md
     mcp_host.py   ④ MCP 适配器：从 MCP server 的 `tools/list` 取回同构 spec
     net_guard.py  SSRF 防护能力层（URL 类工具共用，唯一实现）
     README.md     机制说明（改架构前必读）
