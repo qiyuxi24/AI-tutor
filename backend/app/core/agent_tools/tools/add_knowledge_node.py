@@ -47,7 +47,7 @@ GUIDANCE = """
 
 
 def handler(args, kg) -> str:
-    return create_node_from_ai(
+    result = create_node_from_ai(
         kg=kg,
         node_id=args["id"],
         node_name=args["name"],
@@ -58,6 +58,15 @@ def handler(args, kg) -> str:
         subject=args.get("subject", ""),
         board=args.get("board", ""),
     )
+    # 建完**立刻可检索**（P0-1）：不等下一轮对话的后台索引 —— 否则模型本轮
+    # rag_search 搜不到自己刚建的节点，下一轮也搜不到（用户感知"建了跟没建一样"）。
+    if kg is not None:
+        try:
+            from app.core.rag.node_indexer import sync_flush
+            sync_flush(kg.user_id, kg)
+        except Exception:  # noqa: BLE001 —— 索引是增强项，失败不改写工具回执
+            pass
+    return result
 
 
 SPEC = _spec("add_knowledge_node", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE)

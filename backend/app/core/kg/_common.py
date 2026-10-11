@@ -13,6 +13,25 @@ from typing import Optional
 logger = logging.getLogger("ai-tutor")
 
 
+def mark_node_dirty(user_id: int, node_id: str) -> None:
+    """把节点登记进 RAG 增量索引队列（唯一收口 = `core/rag/node_indexer`）。
+
+    为什么挂在 `KnowledgeGraph` 的**写出口**而不是各写路径：AGENTS §2 已确立
+    「新建节点只有一个出口」—— 把登记点挂在出口上，第 5 条写路径出现时不会漏。
+
+    惰性导入 + 吞异常：`core/rag` 会牵连 whoosh / LLM 栈，而 `core/kg` 被脚本
+    与测试广泛导入；索引是**增强项**，导入失败不该影响任何写操作。
+    """
+    if not node_id:
+        return
+    try:
+        from app.core.rag.node_indexer import mark_dirty
+    except Exception as e:  # noqa: BLE001 —— 降级语义：不抛
+        logger.debug(f"RAG 增量索引登记跳过（node_indexer 不可用）：{e}")
+        return
+    mark_dirty(user_id, node_id)
+
+
 # 新节点 MD 的「来源标注」唯一真值。
 # 原先「写一个节点 MD」有 4 套内联模板散在 knowledge_writer / kb/graph_generator /
 # api/v1/knowledge.py（create_node、decompose）里，新增写路径就会长出第 5 套 ——
@@ -245,6 +264,7 @@ def render_node_markdown(name: str, summary: str, content: str,
 
 __all__ = [
     "logger",
+    "mark_node_dirty",
     "ORIGIN_NOTES",
     "ORIGIN_DEFAULT",
     "CONTENT_STATUS_SKELETON",

@@ -48,6 +48,22 @@ def test_empty_graph_prompt_injected(kg, monkeypatch):
     assert "不要向学生断言图谱状态" in prompt
 
 
+def test_empty_graph_prompt_unbinds_from_retrieval(kg, monkeypatch):
+    """P0-2：建节点不再被"必须先检索到依据"绑死（新学生没有资料时检索必空）。
+
+    原先第 1 步的字面含义是"先用 rag_search 找依据，再建节点"，对**刚注册、还没上传
+    任何资料**的学生自相矛盾（检索必空 → 读作"没依据就别建"）。
+    """
+    from app.services.chat_service import EMPTY_GRAPH_PROMPT
+
+    assert "没有资料" in EMPTY_GRAPH_PROMPT          # 明确的"无资料"分支
+    assert "不要因此停下来" in EMPTY_GRAPH_PROMPT
+    assert "不等于" in EMPTY_GRAPH_PROMPT
+    # 不得再出现"必须先检索到依据"式的绝对顺序表述
+    assert "必须先" not in EMPTY_GRAPH_PROMPT
+    assert "再调用 `add_knowledge_node` 建立节点（能判断归属" not in EMPTY_GRAPH_PROMPT
+
+
 def test_empty_graph_prompt_not_injected_when_graph_has_nodes(kg, monkeypatch):
     _disable_retrieval(monkeypatch)
     kg.add_node({"id": "rec", "name": "递归", "tags": ["算法"]})

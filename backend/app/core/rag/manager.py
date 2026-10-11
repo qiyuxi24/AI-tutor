@@ -40,6 +40,35 @@ DEFAULT_TOP_K = 5
 MIN_SCORE = 0.25
 # 两路宽召回条数（与 kb_manager.RECALL_TOP_K 对齐），融合后再截断到 top_k
 RECALL_TOP_K = 30
+# BM25 腿的**词面覆盖闸门**（P1-3，2026-10-11）：命中的片段至少要覆盖查询里的
+# N 个词（中文 2-gram / 英文词）。原先 BM25 腿"有词面匹配就放行"—— 实际阈值是 0，
+# 实测 S6 返回过 0.09~0.15 的无关片段，与"宁缺毋滥"的定位相反。
+# N 取"最多 2、且不超过查询本身的词数"：查询只有一个词（"堆栈"）时不设卡，
+# 只有 long query 下"只蹭到一个 bigram"的弱匹配才被挡（那正是噪音的来源）。
+# ⚠ 不能卡死到 ≥2：BM25 存在的意义是嵌入欠费时的兜底（KG-D5），门槛过高会把兜底也砍掉。
+BM25_MIN_TERM_MATCHES = 2
+
+
+def _query_terms(query: str) -> set[str]:
+    """查询词集：中文 2-gram（单字成词时保留单字）+ 英文/数字词（小写）。"""
+    terms: set[str] = set()
+    for run in re.findall(r"[\u4e00-\u9fff]+", query or ""):
+        if len(run) == 1:
+            terms.add(run)
+        else:
+            terms.update(run[i:i + 2] for i in range(len(run) - 1))
+    terms.update(w.lower() for w in re.findall(r"[A-Za-z0-9_]+", query or ""))
+    return terms
+
+
+def _passes_bm25_gate(query: str, hit: dict) -> bool:
+    """该 BM25 命中是否覆盖了足够的查询词（见 BM25_MIN_TERM_MATCHES）。"""
+    terms = _query_terms(query)
+    if not terms:
+        return True
+    text = "".join(str(hit.get(k) or "") for k in ("node_name", "heading", "content")).lower()
+    need = min(BM25_MIN_TERM_MATCHES, len(terms))
+    return sum(1 for t in terms if t in text) >= need
 
 # 数据目录：data/rag（取径的唯一声明处 = core/storage.py）
 _RAG_DIR = storage.rag_dir()
@@ -79,10 +108,32 @@ def _extract_node_content(kg, node) -> str:
 class RagManager:
     """RAG 管理器：按用户隔离，索引知识图谱节点并支持语义检索"""
 
-    def __init__(self, data_dir: Optional[Path] = None):
+    def __init__(self, data_dir: Optional[Path] = None, kg_factory=None):
         self.data_dir = Path(data_dir) if data_dir else _RAG_DIR
         self._stores: dict[int, VectorStore] = {}
         self._sparse: dict[int, SparseIndex] = {}
+        # 兜底检索要读图谱节点本体（nodes 表，与 rag 目录不同根）。
+        # 默认按 user_id 新建 KnowledgeGraph（生产口径）；注入 factory 让
+        # 测试/评测可以用临时库真正覆盖这条兜底（原先写死 data_dir → 测不到）。
+        self._kg_factory = kg_factory
+
+    def _open_kg(self, user_id: int):
+        """打开该用户的 KnowledgeGraph（调用方负责 close）—— 兜底检索/扩跳的唯一出口。"""
+        if self._kg_factory is not None:
+            return self._kg_factory(user_id)
+        from app.core.knowledge_graph import KnowledgeGraph
+        return KnowledgeGraph(user_id=user_id)
+
+    def begin_deferred(self, user_id: int) -> None:
+        """批量索引前进入 BM25 延迟提交模式（攒到 `end_deferred` 一次 commit）。
+
+        用于"一次索引很多节点"（建图 / 重建）：逐个 commit 会反复触发 whoosh 段合并。
+        """
+        self._get_sparse(user_id).begin_deferred()
+
+    def end_deferred(self, user_id: int) -> None:
+        """批量索引后退回即时提交模式；**必须调用**，否则刚才写的文档不可见。"""
+        self._get_sparse(user_id).flush()
 
     def _get_store(self, user_id: int) -> VectorStore:
         """按用户获取（并缓存）向量存储实例"""
@@ -293,6 +344,14 @@ class RagManager:
 
         # ── BM25 腿（宽召回）──
         bm25_results = self._get_sparse(user_id).search(query, top_k=RECALL_TOP_K)
+        # 词面覆盖闸门（P1-3）：挡住"只蹭到一个 bigram"的弱匹配噪音
+        if bm25_results:
+            kept = [r for r in bm25_results if _passes_bm25_gate(query, r)]
+            if len(kept) != len(bm25_results):
+                logger.debug(
+                    f"BM25 词面覆盖闸门：{len(bm25_results)}→{len(kept)} 条"
+                    f"（query={query[:40]!r}）")
+            bm25_results = kept
 
         # ── 融合 ──
         if vec_results or bm25_results:
@@ -339,9 +398,7 @@ class RagManager:
             [{node_id, node_name, heading, content, score}, ...]（与向量路径结构一致）
         """
         q = query.strip().lower()
-        from app.core.knowledge_graph import KnowledgeGraph
-
-        kg = KnowledgeGraph(user_id=user_id)
+        kg = self._open_kg(user_id)
         try:
             name_hits: list[tuple[dict, str, float]] = []
             summary_hits: list[tuple[dict, str, float]] = []
@@ -381,9 +438,7 @@ class RagManager:
         命中分数按 decay^depth 衰减，保证排序仍排在语义初检之后。
         （ponytail: 补充条数上限 = top_k，注入体量最多翻倍；要收紧就改这里。）
         """
-        from app.core.knowledge_graph import KnowledgeGraph
-
-        kg = KnowledgeGraph(user_id=user_id)
+        kg = self._open_kg(user_id)
         try:
             # 反向邻接 to(后继) → [from(前置)]，边语义见 knowledge_graph.get_prerequisites
             parents: dict[str, list[str]] = {}

@@ -39,6 +39,12 @@ def handler(args, kg) -> str:
                 "请改用 update_node_sections 重写该知识点的讲解。")
     op = args.get("op", "replace")
     kg.update_node_content(node_id, args["content"], mode=op, caller="ai")
+    # 改完立刻重索引（P0-1）：否则检索里一直是旧正文
+    try:
+        from app.core.rag.node_indexer import sync_flush
+        sync_flush(kg.user_id, kg)
+    except Exception:  # noqa: BLE001 —— 索引是增强项
+        pass
     return f"已更新节点 {node_id} 的内容（{op}）"
 
 

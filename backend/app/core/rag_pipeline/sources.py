@@ -233,6 +233,8 @@ class GraphStructureSource:
             detailed=bool(ctx.metadata.get("graph_detailed", True)),
             focus_node_id=ctx.metadata.get("focus_node_id") or "",
             max_chars=ctx.metadata.get("graph_max_chars"),
+            # P1-1 选片：本次 query 的焦点节点（None/空 → 退化为全量固定注入）
+            focus_ids=ctx.metadata.get("focus_ids"),
         )
         if not text or not text.strip():
             return []

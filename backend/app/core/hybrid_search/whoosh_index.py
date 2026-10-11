@@ -120,14 +120,24 @@ class SparseIndex:
 
     def _doc_fields(self, chunk_id, node_id, doc_id, chunk_index,
                     heading: str, content: str, node_name: str | None = None) -> dict:
-        """组装待写入字段（node_name 仅在 schema 含该字段时携带，kb 侧 schema 没有）。"""
+        """组装待写入字段（node_name 仅在 schema 含该字段时携带，kb 侧 schema 没有）。
+
+        P0-4（2026-10-11）：**节点名与片段标题并入可检索字段**。
+        原先 `heading` / `node_name` 都是 `STORED`（只存不索引），只有正文参与 BM25
+        —— 实测一个**已入索引**的节点，用它的名字检索返回 0（"学生问某个知识点叫什么"
+        是最常见的检索意图）。这里把「名称 + 标题 + 正文」拼成索引文本写进
+        `content_zh` / `content_en`：**不改字段类型、不做索引迁移**，
+        `content` 字段仍是原文（供融合后返回，展示不受影响）。
+        """
+        node_name = node_name or ""
+        index_text = "\n".join(x for x in (node_name, heading, content) if x)
         fields = dict(
             chunk_id=chunk_id, node_id=node_id, doc_id=doc_id,
             chunk_index=chunk_index, heading=heading, content=content,
-            content_zh=content, content_en=content,
+            content_zh=index_text, content_en=index_text,
         )
-        if node_name is not None and self._has_node_name:
-            fields["node_name"] = node_name or ""
+        if self._has_node_name:
+            fields["node_name"] = node_name
         return fields
 
     def close(self) -> None:

@@ -37,6 +37,30 @@ def _isolate_usage_db(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_rag_index(tmp_path, monkeypatch):
+    """图谱 RAG 索引（P0-1 起写路径会"建完即入索引"）在测试里必须隔离。
+
+    `KnowledgeGraph` 的写出口现在会登记 dirty，端点/服务再调
+    `rag_manager.index_node`（全局单例，data_dir 默认仓库 `data/rag`）——
+    不隔离的话，跑一次测试就会往真实索引库写文档，并触发**真实嵌入网络调用**
+    （与 `_isolate_usage_db` / `_isolate_notices_db` 同一动机）。
+
+    注意只替换**全局实例**并把 `_embed` 挂成**实例属性**：
+    直接 patch `RagManager._embed` 会打穿 `test_embed_texts` 对类方法的断言
+    （那里要求在自建 manager 上验证 `_embed` 是薄委托）。
+    """
+    from app.core.rag import manager as rag_mod
+
+    fresh = rag_mod.RagManager(data_dir=tmp_path / "rag")
+
+    async def _no_embed(texts):        # 隔离网络：嵌入腿判失败，只验证索引是否被写
+        return []
+
+    fresh._embed = _no_embed           # 实例级（类级会打穿自建 manager 的用例）
+    monkeypatch.setattr(rag_mod, "rag_manager", fresh)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_notices_db(monkeypatch):
     """待投递通知（A2-3）与用量同库同根：不隔离就会往开发库塞测试通知。
 

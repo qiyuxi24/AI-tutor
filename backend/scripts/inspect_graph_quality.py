@@ -12,6 +12,7 @@
     python scripts/inspect_graph_quality.py --fix-dupes --apply   # 真正合并
     python scripts/inspect_graph_quality.py --consolidate --user 5 --subject 数据结构
     python scripts/inspect_graph_quality.py --consolidate --user 5 --subject 数据结构 --apply
+    python scripts/inspect_graph_quality.py --index-coverage --user 5   # 图谱 RAG 索引覆盖率（P2-1）
 
 两层去重（先 L1 同名零风险，再语义归拢）：
   --fix-dupes   只合并**同名**（含 `_review`/「（复习）」后缀档），零误判；
@@ -824,6 +825,66 @@ def run_consolidate(args, nodes: list[dict], edges: list[dict],
 
 
 # ════════════════════════════════════════════
+#  图谱 RAG 索引覆盖率（P2-1，只读）
+# ════════════════════════════════════════════
+
+def index_coverage(user_id: int, rag_root: Path, node_ids: list[str]) -> dict:
+    """"某用户的图谱 RAG 索引覆盖率：向量腿 distinct node_id / 覆盖率 / BM25 文档数。
+
+    为什么需要它（P2-1）：图谱写路径原先只有后台分析这一条会索引 → 覆盖率长期是 0
+    且**不报错**，问题能潜伏很久（真实数据：某用户 122 节点只有 5 个可检索）。
+    `core/rag/node_indexer` 落地后，这里就是"它有没有真的生效"的观测口。
+
+    只读：sqlite3 `mode=ro` + whoosh `open_dir`（不构造 RagManager，不建任何目录）。
+    """
+    rag_dir = Path(rag_root) / str(user_id)
+    indexed: set[str] = set()
+    chunks = 0
+    db = rag_dir / "rag.db"
+    if db.exists():
+        conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT node_id, COUNT(*) AS c FROM chunks WHERE user_id = ? GROUP BY node_id",
+                (user_id,)).fetchall()
+            indexed = {r["node_id"] for r in rows}
+            chunks = sum(int(r["c"]) for r in rows)
+        except sqlite3.Error as e:
+            print(f"   （读向量库失败：{e}）")
+        finally:
+            conn.close()
+
+    bm25_docs = 0
+    whoosh_dir = rag_dir / "whoosh_index"
+    if whoosh_dir.exists():
+        try:
+            from whoosh import index as whoosh_index
+            with whoosh_index.open_dir(str(whoosh_dir)).searcher() as searcher:
+                bm25_docs = searcher.doc_count()
+        except Exception as e:                       # noqa: BLE001 —— 观测脚本不因损坏索引崩
+            print(f"   （whoosh 打开失败：{e}）")
+
+    total = len(node_ids)
+    hits = len(indexed & set(node_ids))
+    return {
+        "user_id": user_id, "nodes": total, "indexed_nodes": hits,
+        "coverage": (hits / total) if total else 0.0,
+        "chunks": chunks, "bm25_docs": bm25_docs,
+    }
+
+
+def print_index_coverage(rows: list[dict]) -> None:
+    print("\n── 图谱 RAG 索引覆盖率（节点数 / 已索引 / 覆盖率 / 向量片段 / BM25 文档数）──")
+    for r in rows:
+        flag = "✓" if (r["nodes"] == 0 or r["coverage"] >= 0.95) else "⚠"
+        print(f"  {flag} uid{r['user_id']}: {r['indexed_nodes']}/{r['nodes']} "
+              f"= {r['coverage']:.1%}；向量片段 {r['chunks']}，BM25 文档 {r['bm25_docs']}")
+    print("  口径：已索引 = 向量腿里出现过的 node_id（BM25 腿单列为 bm25_docs）；"
+          "目标 ≥ 95%（P0-1「创建即入索引」生效后）。")
+
+
+# ════════════════════════════════════════════
 #  入口
 # ════════════════════════════════════════════
 
@@ -835,6 +896,8 @@ def main() -> None:
                         help="语义归拢：LLM 判概念族并预览合并方案（默认 dry-run，需 --user）")
     parser.add_argument("--subject", type=str,
                         help="配合 --consolidate：只归拢该学科的节点（如 数据结构）")
+    parser.add_argument("--index-coverage", action="store_true",
+                        help="只看图谱 RAG 索引覆盖率（节点数 / 已索引 / 覆盖率 / BM25 文档数）")
     parser.add_argument("--apply", action="store_true",
                         help="配合 --fix-dupes / --consolidate 真正执行合并")
     args = parser.parse_args()
@@ -852,6 +915,18 @@ def main() -> None:
         edges = [e for e in edges if e["from_node"] in ids and e["to_node"] in ids]
 
     doc_marks = load_doc_node_marks(db_path)     # GQ-21：表未就绪返回 None（降级）
+
+    if args.index_coverage:                      # P2-1：只看索引覆盖率（只读）
+        from app.core.storage import rag_dir     # 取径唯一声明处（含 DATA_ROOT / 旧路径回退）
+        rows = []
+        for uid in ([args.user] if args.user is not None
+                    else sorted({n.get("user_id") for n in nodes},
+                                key=lambda x: (x is None, x))):
+            ids = [n["id"] for n in nodes if n.get("user_id") == uid]
+            rows.append(index_coverage(uid, rag_dir(), ids))
+        print_index_coverage(rows)
+        return
+
     metrics = audit(nodes, edges, nodes_dir, doc_marks)
     title = "全库" if args.user is None else f"user {args.user}"
     print_report(title, metrics)

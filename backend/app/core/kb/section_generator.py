@@ -855,6 +855,12 @@ async def _run_regeneration(user_id: int, node_id: str, *, replace: bool,
         result = await SectionGenerator(user_id).generate(
             kg, node_id, replace=replace, append=append, instruction=instruction)
         logger.info(f"后台小节重写（{node_id}）：{result.get('message', '')}")
+        # P0-1 改正文即重索引：小节正文已在小节 MD 里，立刻让按需检索看到新内容
+        try:
+            from app.core.rag.node_indexer import flush
+            await flush(user_id, kg)
+        except Exception as e:  # noqa: BLE001 —— 索引是增强项，不毁重写结果
+            logger.warning(f"小节重写后 RAG 增量索引失败（已忽略）：{e}")
         return result
     except Exception as e:                              # noqa: BLE001 —— 后台任务不裸抛
         logger.error(f"后台小节重写失败（{node_id}）：{e}")

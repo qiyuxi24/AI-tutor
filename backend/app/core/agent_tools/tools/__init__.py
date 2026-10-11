@@ -30,6 +30,7 @@ from . import (
     fetch_webpage,
     grade_answer,
     mark_section_understood,
+    plan_knowledge_nodes,
     quiz_generate,
     rag_search,
     search_resources,
@@ -44,6 +45,7 @@ from . import (
 NATIVE_SPECS = [
     # 图谱工具
     add_knowledge_node.SPEC,
+    plan_knowledge_nodes.SPEC,
     update_node_content.SPEC,
     update_node_sections.SPEC,
     update_mastery.SPEC,

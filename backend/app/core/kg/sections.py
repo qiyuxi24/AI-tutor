@@ -117,6 +117,9 @@ class _SectionsMixin:
             (target / filename).write_text(content or "", encoding="utf-8")
             self._write_manifest(node_id, manifest)
         self.invalidate_content_cache(node_id)
+        # P0-1 创建即入索引：带正文的小节（小节化节点的正文就在这里）
+        if (content or "").strip():
+            mark_node_dirty(self.user_id, node_id)
         return section_id
 
     def write_section(self, node_id: str, section_id: str, content: str) -> None:
@@ -135,6 +138,9 @@ class _SectionsMixin:
             entry["updated_at"] = datetime.now().isoformat()
             self._write_manifest(node_id, manifest)
         self.invalidate_content_cache(node_id)
+        # P0-1 小节正文变更 → 该节点需重索引
+        if (content or "").strip():
+            mark_node_dirty(self.user_id, node_id)
 
     def set_section_status(self, node_id: str, section_id: str, status: str) -> None:
         """置小节状态（生成管线用 `failed` 标记单节失败，便于单独重试）。

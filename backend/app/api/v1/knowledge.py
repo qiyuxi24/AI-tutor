@@ -50,6 +50,7 @@ from fastapi import APIRouter, HTTPException, Depends, Body, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from app.core.kg_taxonomy import assign_taxonomy
+from app.core.kg.skeleton import create_skeleton_from_plan
 from app.core.knowledge_graph import (
     KnowledgeGraph, LEARN_MARK_BY_USER, LEARN_MARKS, MASTERY_ALL_SECTIONS_PASSED,
     read_learn_state,
@@ -347,6 +348,9 @@ async def fill_pending_graph(subject: str = Query(..., description="课名，如
     try:
         result = await graph_generator.GraphGenerator(user_id=user_id).fill_pending_nodes(kg, subject)
         if result["status"] == "ok" and result["filled"]:
+            # P0-1：补上的正文要立刻可检索（写路径已在出口登记，这里落索引）
+            from app.core.rag.node_indexer import flush
+            await flush(user_id, kg)
             broadcast(GRAPH_UPDATED)
         return result
     finally:
@@ -710,6 +714,10 @@ async def _create_node_via_pipeline(kg: KnowledgeGraph, data: dict) -> tuple[str
     node_data["id"] = real_id
     node_data["file"] = f"nodes/{real_id}.md"
 
+    # P0-1 创建即入索引：手动建的节点也要立刻能被图谱检索命中
+    from app.core.rag.node_indexer import flush
+    await flush(kg.user_id, kg)
+
     broadcast(GRAPH_UPDATED)
     return real_id, node_data
 
@@ -778,6 +786,9 @@ async def update_node(node_id: str, data: dict = Body(...), user_id: int = Depen
                 mode=data.get("op", "replace"),
                 caller="human",
             )
+            # P0-1 改正文即重索引：否则按需检索里一直是旧正文
+            from app.core.rag.node_indexer import flush
+            await flush(user_id, kg)
 
         broadcast(GRAPH_UPDATED)
         return {"status": "ok"}
@@ -940,59 +951,16 @@ async def decompose_question(request: DecomposeRequest,
         if result["target"] is None:
             raise HTTPException(status_code=422, detail="无法解析问题，请尝试更具体地描述")
 
-        # 创建节点（只建骨架，不带内容）
-        created_nodes = []
-        for node in result["nodes"]:
-            node_id = node.get("id", "")
-            node_name = node.get("name", "")
-            if not node_id or not node_name:
-                continue
-
-            # 跳过已存在的节点
-            if kg.get_node(node_id) is not None:
-                continue
-
-            node_data = {
-                "id": node_id,
-                "name": node_name,
-                "file": f"nodes/{node_id}.md",
-                "tags": node.get("tags", []),
-                "summary": node.get("summary", f"学习路径节点：{node_name}"),
-                "mastery": 0,
-                "difficulty": node.get("difficulty", 3),
-                "estimated_minutes": node.get("estimated_minutes", 15),
-                "added_by": "ai",
-                "confidence": node.get("confidence"),
-            }
-            await assign_taxonomy(kg, node_data)  # 未指定学科/板块时自动判定
-            # 建库 + 写空白骨架 MD（模板收口在 KnowledgeGraph）。
-            # 用返回值：同名并轨命中已有节点时落点是已有 ID，回执不能报没建出来的 id。
-            created_nodes.append(
-                kg.create_node_with_content(node_data, origin="decompose")
-            )
-
-        # 创建边
-        created_edges = 0
-        for edge in result["edges"]:
-            from_id = edge.get("from", "")
-            to_id = edge.get("to", "")
-            if not from_id or not to_id:
-                continue
-            if not kg.get_node(from_id) or not kg.get_node(to_id):
-                continue
-            try:
-                kg.add_edge({
-                    "from": from_id,
-                    "to": to_id,
-                    "relation": "prerequisite",
-                    "label": f"学习「{to_id}」前需掌握「{from_id}」",
-                    "added_by": "ai",
-                }, caller="ai")
-                created_edges += 1
-            except (ValueError, PermissionError):
-                pass
+        # 骨架落库（节点 + prerequisite 边）：与 Agent 工具 `plan_knowledge_nodes`
+        # 共用同一份实现（`core/kg/skeleton.py`），不在这里再写一遍。
+        skeleton = await create_skeleton_from_plan(kg, result, taxonomy_fn=assign_taxonomy)
+        created_nodes = skeleton["created_nodes"]
+        created_edges = skeleton["created_edges"]
 
         if created_nodes or created_edges:
+            # P0-1 创建即入索引：骨架节点也登记（摘要行 + 节点名可被检索）
+            from app.core.rag.node_indexer import flush
+            await flush(kg.user_id, kg)
             broadcast(GRAPH_UPDATED)
 
         return {

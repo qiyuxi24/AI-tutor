@@ -1596,6 +1596,13 @@ class GraphGenerator:
                 f"{'、'.join(aggregate['rejected_shallow'][:10])}"
                 "（可 POST /knowledge/node/{id}/sections/generate 逐节重试）"
             )
+        # P0-1 建图即入索引：整批一次性落索引（node_indexer 内部走 BM25 延迟提交，
+        # 避免逐个节点反复 commit —— 80 个概念逐个 commit 会反复触发 whoosh 段合并）。
+        try:
+            from app.core.rag.node_indexer import flush
+            await flush(self.user_id, kg)
+        except Exception as e:  # noqa: BLE001 —— 索引是增强项，不毁建图
+            logger.warning(f"建图后 RAG 增量索引失败（已忽略）：{e}")
         return aggregate
 
     async def _process_book(self, kg, subject: str, book: dict, board: str,

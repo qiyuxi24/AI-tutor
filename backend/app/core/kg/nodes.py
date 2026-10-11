@@ -355,6 +355,10 @@ class _NodesMixin:
 
         (self.nodes_dir / f"{node_id}.md").write_text(md_content, encoding="utf-8")
         self.invalidate_content_cache(node_id)
+        # P0-1 创建即入索引：登记到 RAG 增量队列（flush 由各调用方按场景收口）。
+        # 骨架节点也登记：MD 里带「来源标注 + 摘要」行，配合 chunker 的兜底片段
+        # 让"按知识点名/摘要检索"能命中（P0-4）；正文填充后还会再登记一次。
+        mark_node_dirty(self.user_id, node_id)
         return node_id
 
     def _merge_content_into(self, node_id: str, content: str) -> bool:

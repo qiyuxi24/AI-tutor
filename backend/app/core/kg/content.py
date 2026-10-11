@@ -125,6 +125,9 @@ class _ContentMixin:
                 )
         self.invalidate_content_cache(node_id)
         self._invalidate_cache()
+        # P0-1 改正文即重索引：登记到 RAG 增量队列（检索里不该留旧正文）。
+        if mark:
+            mark_node_dirty(self.user_id, node_id)
 
     def set_content_status(self, node_id: str, status: str, caller: str = "human") -> None:
         """

@@ -220,9 +220,9 @@ cd backend && venv/Scripts/python.exe scripts/inspect_graph_quality.py          
 - [x] **KG-D2** `tags` 不再写难度档（`一级/二级/三级` 只读兼容）✅ 2026-09-23（连带清理工具描述/文档示例里"把难度写进 tags"的诱导文案）
 - [x] **KG-D3** `node_aliases` 表（判重 L1.5 档：零嵌入兜底"栈/堆栈"这类同义不同名）✅ 2026-09-23 —— 直接缓解 §6.1 的欠费困局
 - [x] **KG-D4** `mastery_events` 表 + 掌握度唯一写入点 ✅ 2026-09-23（采纳"只加事件表"：`nodes.mastery` 保留为当前值；唯一写入点收敛到 `update_node_info`，5 条改 mastery 的路径全经它并**同事务**记账；`mastery_reason`/`mastery_evidence` 默认 `manual` → 老调用方零改动；读取 `get_mastery_events()`）—— 与 GQ-8 的 `confidence` 同属"状态类字段要可审计"；**未做**：并轨时按事件重放
-- [x] **KG-D5** 图谱检索关键词兜底（嵌入失败不再等于检索全失效）+ 修 `chunker.chunk_index` 段内重复 ✅ 2026-09-23（兜底查节点本体 name/summary，非 chunks）
+- [x] **KG-D5** 图谱检索关键词兜底（嵌入失败不再等于检索全失效）+ 修 `chunker.chunk_index` 段内重复 ✅ 2026-09-23（兜底查节点本体 name/summary，非 chunks）。**⚠ 2026-10-11 澄清其触发条件**：`_keyword_search` **只在本次 query 两条索引腿都没召回时**才跑（`manager.py` 的 `if vec_results or bm25_results: … else: …`）→ 同一未索引节点"时灵时不灵"；它是**兜底**，**不能当索引缺口的替代品**（根因修法 = KG-D5b 的「创建即入索引」，见 `core/rag/node_indexer.py`）
 - [x] **KG-D6** `edges` 唯一索引 + `created_at`/`updated_at` ✅ 2026-09-23（另有 `nodes.updated_at`，回填 = `created_at`）；存量有重复边时**只告警不阻断启动**（真实库 679 边实测重复组 0 → 索引已建成）。**未做**：无向关系归一化（当前存量无反向重复，且会改数据 → 待拍板）；`weight` 刻意暂缓（无写入方，避免重蹈 `confidence` 覆辙）
-- [ ] **KG-D7~D11**（P1）~~`parent_id/path` 层级~~（**2026-09-27 主题层整体下线，不做层级**）、`sources` 溯源、按 relation 分策略扩跳、跨源 RRF 融合、结构化选片
+- [ ] **KG-D7~D11**（P1）~~`parent_id/path` 层级~~（**2026-09-27 主题层整体下线，不做层级**）、`sources` 溯源、按 relation 分策略扩跳、跨源 RRF 融合、结构化选片。**KG-D11 结构化选片 ✅ 2026-10-11 落地**（原文前提 = `subject` + `path` 前缀 + focus，依赖已作废的 KG-D7 层级 → **按原文不可实现**；改用「全量骨架常驻 + 焦点 ±2 跳邻域带摘要」：`build_graph_context(focus_ids=…)` ← `chat_service._build_system_prompt` 从 `current_node` / 本次 RAG 命中算焦点；参照系契约 v11 §4.2/§5 G1；回归 `tests/test_graph_injection_query_aware.py`）
 - [x] **KG-T1~T4 主题层级**（2026-09-26 落地 → **2026-09-27 整体下线**）：曾实现 `themes`/`node_themes` 两表 + LLM 聚类 + 建图定树 + 前端省/市下钻；因"图谱只保留最小节点与关系边"的产品决策**全量删除**（含两表与存量数据）。设计与真机数据留档 `docs/知识图谱/知识图谱_主题层级_设计与实现方案.md`（已标注废弃）。
 - [ ] **KG-D12~D15**（P2）FTS5、`confidence` 赋能或删列、向量改 BLOB、`quiz.questions.node_id` 改名
 

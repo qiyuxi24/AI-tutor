@@ -135,8 +135,12 @@ EMPTY_GRAPH_PROMPT = """
 ## ⚠️ 当前学生图谱为空（重要，优先于上面的框架约束）
 这个学生还没有任何知识点节点，上面的「框架约束」此刻无节点可依，请按下面顺序处理：
 
-1. **先建图谱**：本次对话涉及某个知识点时，先用 `rag_search` 从已上传资料中找依据，
-   再调用 `add_knowledge_node` 建立节点（能判断归属就一并带上 `subject` / `board`）。
+1. **先建图谱**：本次对话涉及某个知识点时——
+   · **有已上传资料**：就先 `rag_search` 从资料里找依据，再调用 `add_knowledge_node` 建节点；
+   · **没有资料 / 检索不到内容**：**不要因此停下来**。直接基于本次对话把节点建出来
+     （正文先写你已知的要点即可，后续可再用 `update_node_content` 补全）——
+     "没有资料"不等于"不能建图谱"。
+   建节点时能判断归属就一并带上 `subject` / `board`。
 2. **再调用其他图谱工具**：节点建好之后，才用 `add_edge` 补关系、用 `update_mastery` 记掌握度。
    图里不存在的节点调用这两个工具会失败，失败后不要反复重试同一个参数。
 3. **不要向学生断言图谱状态**：不要说"你的图谱是空的 / 没有找到你的记录"这类结论，
@@ -198,7 +202,8 @@ def _last_user_text(messages: list) -> str:
 
 async def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True,
                                focus_node_id: str = "",
-                               max_chars: int | None = None) -> str:
+                               max_chars: int | None = None,
+                               focus_ids: list[str] | None = None) -> str:
     """
     构建知识图谱摘要文本，注入到通用模板的 {knowledge_graph_summary} 占位符。
 
@@ -210,13 +215,18 @@ async def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True,
         detailed:      True=附节点 MD 摘要；False=仅名称+标签
         focus_node_id: 当前教学节点；注入体量超上限时优先保留其邻域
         max_chars:     本次注入字符上限；None=settings.graph_inject_max_chars
+        focus_ids:     P1-1 本次 query 的**焦点节点**（由调用方从 current_node /
+                       本次 RAG 命中里算出）；非空 → 注入切成"全量骨架 + 焦点邻域"。
+                       注意本源仍是 required（与 query 无关、不受节流影响）——
+                       focus 只决定**细节给哪一块**，不改"图谱每次必在"的语义（契约 §8）。
     """
     from app.core.rag_pipeline import pipeline, RagContext
 
     hits = await pipeline.run(RagContext(
         user_id=kg.user_id, query="", sources={"graph_structure"},
         metadata={"kg": kg, "graph_detailed": detailed,
-                  "focus_node_id": focus_node_id, "graph_max_chars": max_chars},
+                  "focus_node_id": focus_node_id, "graph_max_chars": max_chars,
+                  "focus_ids": focus_ids},
     ))
     return "".join(h.content for h in hits if h.source == "graph_structure")
 
@@ -585,8 +595,6 @@ async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
          if (m.role if hasattr(m, 'role') else m['role']) == 'user'),
         ''
     )
-    graph_summary = await _build_graph_summary(kg, detailed=inject_tools, focus_node_id=current_node)
-
     # 加载用户画像（空画像返回 ""，不会把空模板注入提示词）
     profile = UserProfile(user_id=kg.user_id)
     profile_text = profile.get_summary()
@@ -604,8 +612,25 @@ async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
     # 去耦合：检索编排统一走 rag_pipeline，一次 run 按数据源分组生成图谱/知识库两个区块
     # usage_mode 由上面同一个 profile 实例带下来，避免一次请求重复读画像文件
     # 检索块先取一次：下面拼装要用，且降级重建时不重复检索
+    # ⚠ 必须在图谱注入**之前**：P1-1 用本次检索命中的节点当"焦点"（复用已有结果，
+    #   不新增任何检索/LLM 调用）。
+    graph_focus_out: list[str] = []
     retrieval = await _build_retrieval_context(last_user_msg, kg.user_id, kb,
-                                              usage_mode=profile.get_usage_mode())
+                                              usage_mode=profile.get_usage_mode(),
+                                              focus_out=graph_focus_out)
+
+    # P1-1 焦点（query）三档，全部零额外 LLM：
+    #   ① 显式 current_node（"去学习"进来时必有）；
+    #   ② 本次检索命中的图谱节点（取自上面同一次 pipeline.run，不重复检索）；
+    #   ③ 都没有 → 空 → 图谱注入退化为现状全量（不劣化）。
+    focus_ids: list[str] = []
+    if _focus:
+        focus_ids = [_focus["id"]]
+    elif graph_focus_out:
+        focus_ids = graph_focus_out[:2]
+
+    graph_summary = await _build_graph_summary(
+        kg, detailed=inject_tools, focus_node_id=current_node, focus_ids=focus_ids)
 
     # 学习模式上下文（「去学习」进来时）：小节清单 + 学习状态 + 教学规则。
     # 不适用（老节点 / 未选知识点）→ 空串，提示词与改动前完全一致。
@@ -649,7 +674,7 @@ async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
     if fixed_tokens > degrade_line and graph_summary:
         graph_summary = await _build_graph_summary(
             kg, detailed=inject_tools, focus_node_id=current_node,
-            max_chars=max(1, len(graph_summary) // 2),
+            max_chars=max(1, len(graph_summary) // 2), focus_ids=focus_ids,
         )
         shrunk_prompt = _assemble(graph_summary)
         shrunk_tokens = count_tokens(shrunk_prompt)
@@ -686,7 +711,8 @@ async def _build_retrieval_context(student_message: str, user_id: int,
                                    kb: dict | None = None,
                                    usage_mode: str = "personal",
                                    graph_hops: int = 0,
-                                   sources: set[str] | None = None) -> str:
+                                   sources: set[str] | None = None,
+                                   focus_out: list | None = None) -> str:
     """
     通过 RAG 管道检索相关片段，构造注入系统提示词的检索上下文。
 
@@ -699,8 +725,11 @@ async def _build_retrieval_context(student_message: str, user_id: int,
         graph_hops:      图谱扩跳深度（0=纯语义检索，默认）。>0 时沿前置关系
                          额外补出语义不相似的前置知识片段，供 A/B 实验对比。
         sources:         **显式**源选择（None = 全部已注册源）；如 {"graph"} 表示只注入
-                         图谱片段（评测脚本要隔离变量时用）。注意这是"点明要哪些"，
-                         与"漏传参数导致源消失"是两件事。
+                        图谱片段（评测脚本要隔离变量时用）。注意这是"点明要哪些"，
+                        与"漏传参数导致源消失"是两件事。
+        focus_out:       可选出参列表：函数会把**图谱命中的 node_id**（按相关性降序）
+                        追加进去，供调用方做 P1-1 的 S4 选片焦点。**复用同一次检索**，
+                        不新增任何查询。
 
     返回:
         格式化的检索上下文 Markdown 文本（图谱区块 + 知识库区块）；
@@ -723,6 +752,15 @@ async def _build_retrieval_context(student_message: str, user_id: int,
 
     graph_hits = [h for h in hits if h.source == "graph"]
     kb_hits = [h for h in hits if h.source == "kb"]
+
+    # P1-1：把图谱命中节点透出给调用方做 S4 焦点（去重、保序；复用本次检索结果）
+    if focus_out is not None:
+        seen: set[str] = set()
+        for h in graph_hits:
+            nid = h.metadata.get("node_id")
+            if nid and nid not in seen:
+                seen.add(nid)
+                focus_out.append(nid)
 
     # 两源独立截断（B-6）：图谱先截、知识库后截，互不挤占预算
     graph_hits, graph_dropped = _trim_hits(graph_hits, RETRIEVAL_SEGMENT_MAX_TOKENS)
@@ -856,40 +894,20 @@ async def _index_applied_nodes(applied_list: list[dict], user_id: int, kg) -> No
     对图谱分析后实际变更的节点增量更新 RAG 索引。
 
     参数:
-        applied_list: 已应用的建议列表
+        applied_list: 已应用的建议列表（**仅为兼容保留**：写路径已在
+                      `KnowledgeGraph` 出口登记过 dirty，这里不再自行推导 id）
         user_id:      当前用户 ID
         kg:           KnowledgeGraph 实例
 
-    说明:
-        - add_node        → 索引新节点
-        - update_content  → 重新索引该节点
-        - add_edge        → 不涉及内容检索，跳过
-        任一节点索引失败不影响整体流程。
+    P0-1（2026-10-11）：本函数改为**委托** `core/rag/node_indexer.flush` ——
+    原先这里自己遍历 applied_list 推导要索引的 id，是**第二份实现**：
+    只认 `add_node` / `update_content` 两种 action，且与四条写路径各写一套。
+    现在写路径统一在 `create_node_with_content` / `update_node_content` /
+    `write_section` 登记，本函数只负责"把该用户的 dirty 集合落成索引"。
     """
-    from app.core.rag.manager import rag_manager
+    from app.core.rag.node_indexer import flush
 
-    # 收集需要（重新）索引的节点 ID
-    node_ids_to_index: set[str] = set()
-    for s in applied_list:
-        action = s.get("action")
-        if action == "add_node":
-            node = s.get("node", {})
-            nid = node.get("id")
-            if nid:
-                node_ids_to_index.add(nid)
-        elif action == "update_content":
-            nid = s.get("node_id")
-            if nid:
-                node_ids_to_index.add(nid)
-
-    for nid in node_ids_to_index:
-        node = kg.get_node(nid)
-        if node is None:
-            continue
-        try:
-            await rag_manager.index_node(user_id, node, kg)
-        except Exception as e:
-            logger.warning(f"RAG 索引节点 {nid} 失败: {e}")
+    await flush(user_id, kg)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1054,10 +1072,15 @@ async def process_message_stream(
         ensure_section_quiz_scheduled(kg, result)
 
         # 图谱分析（复用现有逻辑）
+        # P2-4（2026-10-11）：改为 **fire-and-forget**（与非流式路径 `:963` 一致）。
+        # 原先这里 `await`：正文早已推完，但"回答结束"的判定被这一次额外 LLM 调用
+        # （`graph_analyze`）拖后 —— 体感是"答完了还在转圈"，且把一次 LLM 成本压在
+        # 每轮请求的尾延迟上。`_analyze_and_apply` 自己创建/关闭 kg（不共享本函数的实例），
+        # 所以放在 `finally: kg.close()` 之后跑也安全。
         user_msgs = [m for m in messages if (m.role if hasattr(m, 'role') else m['role']) == 'user']
         if user_msgs and result.text:
             last_user = user_msgs[-1].content if hasattr(user_msgs[-1], 'content') else user_msgs[-1]['content']
-            await _analyze_and_apply(last_user, result.text, user_id)
+            asyncio.create_task(_analyze_and_apply(last_user, result.text, user_id))
 
         broadcast(GRAPH_UPDATED)
 

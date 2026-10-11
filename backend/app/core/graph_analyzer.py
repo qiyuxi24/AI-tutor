@@ -202,7 +202,8 @@ def _scope_note(preview_dropped: bool, shown_n: int, total_n: int,
 
 def build_graph_context(kg, detailed: bool = False,
                         max_chars: int | None = None,
-                        focus_node_id: str = "") -> str:
+                        focus_node_id: str = "",
+                        focus_ids: list[str] | None = None) -> str:
     """
     构造当前图谱的注入文本（独立函数，无需创建 GraphAnalyzer 实例）。
 
@@ -211,16 +212,29 @@ def build_graph_context(kg, detailed: bool = False,
         detailed:      True=附节点 MD 摘要（对话注入）；False=仅名称+标签（分析 LLM）
         max_chars:     注入文本字符上限。None=settings.graph_inject_max_chars；0=不限制
         focus_node_id: 当前正在教学的节点 ID，限量展示时优先保留其邻域
+        focus_ids:     **本次 query 的焦点节点**（P1-1，2026-10-11）：非空时切成
+                       「全量骨架（定界，无摘要）+ 焦点邻域（带摘要）」两段。
+                       为空 → 完全走旧路径（逐字符不变，保证"判不出焦点就退化为现状"）。
 
     返回:
         格式化的图谱信息字符串（节点列表 + 关系列表，超限时附展示范围说明）
 
     体量控制（2026-09-13）：未超限时输出与旧实现逐字符一致；超限按三档降级取第一档
     能放下的 —— ① 全量含摘要 → ② 全量省摘要 → ③ 限量节点 + 相应边。
+
+    P1-1 选片（contract §5 G1 第 1、2 步）：图谱是教学的**可行域**，每次调用必须定界
+    （L1 不变量 I1-1）—— 所以骨架段**永不按 query 删节点**；按 query 变的只有"细节给哪一块"
+    （S4-b 焦点邻域）。注意这是**选片**，不是"检索命中才注入"（契约 §8）。
     """
     cap = settings.graph_inject_max_chars if max_chars is None else max_chars
     nodes, edges = list(kg.nodes), list(kg.edges)
     mode = "preview" if detailed else "overview"
+
+    if detailed and focus_ids:
+        ids = {n["id"] for n in nodes}
+        focus = [f for f in focus_ids if f in ids]
+        if focus:
+            return _render_focus_blocks(kg, nodes, edges, focus, cap)
 
     text = _render_graph_block(kg, nodes, edges, mode)
     if not nodes or cap <= 0 or len(text) <= cap:
@@ -260,6 +274,157 @@ def build_graph_context(kg, detailed: bool = False,
         f"图谱注入降级: 节点 {best}/{len(nodes)}、"
         f"{len(text)} 字符（上限 {cap}，模式 {mode}）"
     )
+    return text
+
+
+# ── P1-1：按 query 选片（全量骨架常驻 + 焦点邻域给细节）──────────────
+# 契约 G1 第 1、2 步；`focus_ids` 为空时完全走上面的旧路径。
+GRAPH_FOCUS_HOPS = 2            # 焦点邻域半径（±N 跳）
+GRAPH_FOCUS_MAX_NODES = 12      # 焦点邻域最多给多少个节点的摘要（体量闸门）
+
+# 焦点邻域降级阶梯（P1-2）：先砍摘要 → 再砍邻域规模 → 骨架段最后才缩（缩时显式标注）
+_DROP_SUMMARY_NOTE = ("为控制体量，本次只给了**焦点邻域**的节点摘要（不等于其他节点没有内容）；"
+                      "需要其他知识点的详细讲解时调用 rag_search 检索。")
+
+
+def _neighborhood_ids(edges: list, seeds: list[str], radius: int) -> set[str]:
+    """从 seeds 出发沿任意关系的边**双向**扩跳 radius 跳，返回节点 id 集合（含 seeds）。"""
+    near = {s for s in seeds if s}
+    frontier = set(near)
+    for _ in range(max(0, radius)):
+        nxt: set[str] = set()
+        for e in edges:
+            f, t = e.get("from_node"), e.get("to_node")
+            if f in frontier and t:
+                nxt.add(t)
+            if t in frontier and f:
+                nxt.add(f)
+        nxt -= near
+        if not nxt:
+            break
+        near |= nxt
+        frontier = nxt
+    return near
+
+
+def _render_skeleton(kg, nodes: list) -> str:
+    """可行域骨架：学科 → 板块 → `[id] 名称 (掌握度)`（**不含摘要**，随规模只涨名称）。"""
+    groups: dict[tuple[str, str], list] = {}
+    for n in nodes:
+        try:
+            subject = (kg.node_subject(n) or "").strip()
+        except Exception:                       # noqa: BLE001 —— 鸭子类型假对象兜底
+            subject = str(n.get("subject") or "")
+        board = str(n.get("board") or "").strip()
+        groups.setdefault((subject, board), []).append(n)
+
+    lines: list[str] = []
+    for (subject, board), group in groups.items():
+        label = subject or "未分类"
+        if board:
+            label = f"{label} / {board}"
+        lines.append(f"【{label}】")
+        lines.extend(f"  [{n['id']}] {n['name']} (掌握度:{n.get('mastery', 0)})"
+                     for n in group)
+    return "\n".join(lines) if lines else "  (暂无节点)"
+
+
+def _focus_lines(kg, focus_nodes: list, with_summary: bool) -> list[str]:
+    """焦点邻域渲染：`[id] 名称 (掌握度:x)` + 200 字摘要（with_summary=False 则省摘要）。"""
+    lines: list[str] = []
+    for n in focus_nodes:
+        lines.append(f"  [{n['id']}] {n['name']} (掌握度:{n.get('mastery', 0)})")
+        if with_summary:
+            content = kg.get_node_content_preview(n["id"])
+            lines.append(f"    摘要: {content[:200].replace(chr(10), ' ')}")
+    return lines
+
+
+def _render_focus_blocks(kg, nodes: list, edges: list, focus_ids: list[str],
+                         cap: int) -> str:
+    """两段式渲染（P1-1）：S4-a 全量骨架 + S4-b 焦点邻域（带摘要）。
+
+    降级顺序（P1-2）：砍摘要 → 砍邻域规模 → 骨架段最后缩（缩时显式标注展示范围）。
+    骨架段是「教学的唯一边界」（契约 I1-1），能不动就不动。
+    """
+    def _edges_block(visible: list) -> str:
+        lines = "\n".join(
+            f"  {e['from_node']} → {e['to_node']} ({e['relation']}): {e.get('label', '')}"
+            for e in visible) or "  (暂无关系)"
+        return f"### 现有关系（共 {len(visible)} 条）\n{lines}"
+
+    total = len(nodes)
+    skeleton = _render_skeleton(kg, nodes)
+
+    near = _neighborhood_ids(edges, focus_ids, GRAPH_FOCUS_HOPS)
+    focus_set = set(focus_ids)
+    # 焦点本体在前，其余邻域按图谱顺序
+    ordered_focus = ([n for n in nodes if n["id"] in focus_set]
+                     + [n for n in nodes if n["id"] in near and n["id"] not in focus_set])
+    ordered_focus = ordered_focus[:GRAPH_FOCUS_MAX_NODES]
+
+    head = (f"## 当前知识图谱\n\n"
+            f"### 知识可行域（本次参照系：全部知识点骨架，共 {total} 个）")
+
+    def compose(skel_text: str, edge_text: str, focus_nodes: list, with_summary: bool,
+                notes: list[str]) -> str:
+        parts = [head, skel_text, edge_text]
+        if focus_nodes:
+            parts.append("### 本次焦点邻域（与当前问题最相关，含摘要）")
+            parts.extend(_focus_lines(kg, focus_nodes, with_summary))
+        if notes:
+            parts.append("> 说明：" + " ".join(notes))
+        return "\n\n".join(parts)
+
+    def notes_for(shown: int, total_focus: int, with_summary: bool) -> list[str]:
+        notes: list[str] = []
+        if not with_summary and shown:
+            notes.append(_DROP_SUMMARY_NOTE)
+        if not shown:
+            notes.append("本次未给出焦点邻域的细节（体量受限）；需要某个知识点的详细讲解时"
+                         "调用 rag_search 检索。")
+        elif shown < total_focus:
+            notes.append(f"焦点邻域仅展示最相关的 {shown}/{total_focus} 个，"
+                         "未列出的部分并非不存在，需要时可用 rag_search 检索。")
+        return notes
+
+    all_edges_block = _edges_block(edges)
+
+    # 阶梯 ① 全量骨架 + 焦点邻域（含摘要）→ ② 省摘要 → ③ 缩邻域 → ④ 只留焦点本体
+    ladder: list[tuple[list, bool]] = [
+        (ordered_focus, True),
+        (ordered_focus, False),
+        (ordered_focus[:max(1, len(focus_ids))], False),
+        ([], False),
+    ]
+    for focus_nodes, with_summary in ladder:
+        text = compose(skeleton, all_edges_block, focus_nodes, with_summary,
+                       notes_for(len(focus_nodes), len(ordered_focus), with_summary))
+        if cap <= 0 or len(text) <= cap:
+            return text
+
+    # 阶梯 ⑤ 骨架段最后缩（必须显式标注展示范围，否则模型会误判图谱只有这么大）；
+    # 边只保留两端都在展示集内的（与旧路径同一口径）。
+    scope = ("当前展示范围：知识点 {k}/{total} 个（已按学科分组优先保留），"
+             "未列出的部分并非不存在，需要时可用 rag_search 检索；"
+             "本次未给出焦点邻域细节。")
+
+    def shrink_trial(k: int) -> str:
+        shown = nodes[:k]
+        return compose(_render_skeleton(kg, shown),
+                       _edges_block(_visible_edges(shown, edges)), [], False,
+                       [scope.format(k=k, total=total)])
+
+    lo, hi, best = 1, total, 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if cap <= 0 or len(shrink_trial(mid)) <= cap:
+            best, lo = mid, mid + 1
+        else:
+            hi = mid - 1
+    text = shrink_trial(best)
+    logger.info(
+        f"图谱注入降级（选片）: 骨架 {best}/{total} 节点、{len(text)} 字符（上限 {cap}）")
     return text
 
 

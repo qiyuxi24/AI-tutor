@@ -4,9 +4,11 @@
 目的：量化「把知识图谱作为教学参照系注入系统提示词」到底带来多少收益。
 
 实验设计（单变量，每组差异只有图谱）
-    组 off：系统提示词不注入图谱摘要 + 从 RAG 管道注销 graph 源
-            → 模型既看不到图谱，检索也拿不到图谱内容（rag_search 仍可调用，但返回空）
-    组 on ：现状（图谱摘要注入 + graph 源可用）
+    组 off  ：系统提示词不注入图谱摘要 + 从 RAG 管道注销 graph 源
+              → 模型既看不到图谱，检索也拿不到图谱内容（rag_search 仍可调用，但返回空）
+    组 on   ：全量注入（每个节点带 200 字摘要）
+    组 slice：**按 query 选片**（P1-1/P2-3）：全量骨架（只有节点名+掌握度）+ 焦点邻域带摘要；
+              焦点取该用例的期望知识点（焦点已知的上界设定）
     其余完全相同：同一模型、同一温度、同一画像、同一工具集。
 
 问题分两类（见数据集 kind 字段）
@@ -59,7 +61,11 @@ NODE_PREFIX = "ab_"
 
 GROUPS = {
     "off": "关闭图谱",
-    "on": "开启图谱",
+    "on": "开启图谱（全量）",
+    # P2-3（2026-10-11）：第三组 = 按 query 选片（全量骨架 + 焦点邻域给摘要）。
+    # 焦点用该用例的期望知识点（`case["expect"][:2]`）—— 这是**焦点已知**的上界设定，
+    # 用来回答"选片会不会把 token 降下来、同时不丢覆盖"（AC-10）。
+    "slice": "开启图谱（选片）",
 }
 
 # 「说图谱/检索里没有」这类错误断言：关闭组被剥夺图谱后，典型失败模式是反过来
@@ -227,14 +233,20 @@ async def index_graph(user_id: int, embed_mode: str, data: dict) -> dict:
 #  提示词组装（复用生产链路，不改生产代码）
 # ────────────────────────────────────────────
 
-async def build_prompt(kg, question: str, inject_graph: bool) -> str:
-    """按生产口径组装系统提示词；inject_graph=False 时不带任何图谱信息"""
+async def build_prompt(kg, question: str, inject_graph: bool,
+                       focus_ids: list[str] | None = None) -> str:
+    """按生产口径组装系统提示词；inject_graph=False 时不带任何图谱信息。
+
+    focus_ids 非空 → 图谱注入走 P1-1 的**选片**形态（全量骨架 + 焦点邻域带摘要），
+    与 `on` 组（全量含摘要）构成 P2-3 的第三组对照。
+    """
     from app.core.graph_analyzer import build_graph_context
     from app.core.prompt_loader import get_system_prompt
     from app.core.profile import UserProfile
     from app.services.chat_service import TOOL_CAPABILITY_PROMPT, _build_retrieval_context
 
-    graph_summary = build_graph_context(kg, detailed=True) if inject_graph else ""
+    graph_summary = (build_graph_context(kg, detailed=True, focus_ids=focus_ids)
+                     if inject_graph else "")
     profile_text = UserProfile(kg.user_id).get_summary()
 
     prompt = get_system_prompt(student_message=question,
@@ -366,7 +378,11 @@ async def run_group(group: str, kg, cases: list[dict], node_names: dict[str, str
     rows = []
     for case in cases:
         print(f"      · {case['id']} 检索+推理中...", flush=True)
-        prompt = await build_prompt(kg, case["question"], inject_graph=(group == "on"))
+        # slice 组的焦点 = 该用例的期望知识点（焦点已知的上界设定，见 GROUPS 注释）
+        focus_ids = (list(case.get("expect") or [])[:2]) if group == "slice" else None
+        prompt = await build_prompt(kg, case["question"],
+                                    inject_graph=(group in ("on", "slice")),
+                                    focus_ids=focus_ids)
         t0 = time.time()
         result = await run_agent_loop(
             prompt, [{"role": "user", "content": case["question"]}],
@@ -430,6 +446,19 @@ def print_report(report: dict, node_names: dict[str, str]) -> None:
               f"关闭 {off['cited_id_cases']}/{off['cases']} 例"
               f"  →  开启 {on['cited_id_cases']}/{on['cases']} 例")
 
+    # P2-3：第三组（选片）对照 —— AC-10：token 降 ≥ 40% 且 expect_hit / false_empty 不劣化
+    sl = report["groups"].get("slice", {}).get("by_kind", {}).get("ALL")
+    if on and sl:
+        token_cut = (1 - sl["tokens"] / on["tokens"]) if on["tokens"] else 0.0
+        print(f"\n选片 vs 全量（AC-10）：tokens {on['tokens']} → {sl['tokens']}"
+              f"（降 {token_cut:.1%}）｜命中率 {on['hit_rate']:.1%} → {sl['hit_rate']:.1%}"
+              f"｜定位率 {on['located_rate']:.1%} → {sl['located_rate']:.1%}"
+              f"｜误报图谱空 {on['false_empty']} → {sl['false_empty']}")
+        ok = (token_cut >= 0.40 and sl["hit_rate"] >= on["hit_rate"]
+              and sl["false_empty"] <= on["false_empty"])
+        print("  判定：" + ("✅ 达标（token 降 ≥40% 且命中不降、false_empty 不升）"
+                          if ok else "⚠ 未达标 —— 复核焦点选法与降级阶梯"))
+
 
 def rescore_report(report: dict, cases: list[dict], node_names: dict[str, str],
                    node_facts: dict[str, tuple[str, int]]) -> int:
@@ -464,7 +493,8 @@ async def main() -> None:
     ap.add_argument("--data", type=Path, default=DEFAULT_DATA, help="数据集 JSON 路径")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT, help="报告 JSON 输出路径")
     ap.add_argument("--user", type=int, default=None, help="测试用户 ID（默认取数据集内 user_id）")
-    ap.add_argument("--groups", type=str, default="off,on", help="要跑的组，逗号分隔（off,on）")
+    ap.add_argument("--groups", type=str, default="off,on",
+                    help="要跑的组，逗号分隔（off / on / slice）")
     ap.add_argument("--cases", type=int, default=0, help="只跑前 N 个用例（0=全部）")
     ap.add_argument("--embed", choices=["api", "mock"], default="api", help="嵌入方式（api=真实，默认）")
     ap.add_argument("--rebuild", action="store_true", help="先清空测试图谱节点再重建")

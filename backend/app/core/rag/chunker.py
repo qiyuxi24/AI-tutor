@@ -14,7 +14,10 @@ import re
 _HEADING_RE = re.compile(r"^(#{1,4})\s+(.+)$")
 
 # 段落最小/最大字符数
-MIN_CHUNK_CHARS = 50
+# P0-4（2026-10-11）：50 → 20。原先不足 50 字符的段落**整段丢弃**，实测 AI 生成的
+# 短节点/短小节（"## 时间复杂度 / O(2^n)"、"## 常见错误" 这类要点条目）因此永不进索引，
+# 丢的不是零碎片段而是整节知识点。20 只挡纯噪声（单个词/标点），保留短要点。
+MIN_CHUNK_CHARS = 20
 MAX_CHUNK_CHARS = 800
 
 
@@ -85,5 +88,19 @@ def chunk_markdown(node_id: str, node_name: str, markdown: str) -> list[dict]:
 
     # flush 最后一段
     flush()
+
+    if not chunks:
+        # P0-4：正文过短/只有标题的节点（骨架节点、AI 极短节点）至少留一条**可检索片段**，
+        # 内容 = 「节点名 + 原文」—— 让"按知识点名称检索"能命中（原先这类节点
+        # 在 index_node 阶段就被判"分块为空"，永远进不了索引）。
+        fallback = "\n".join(p for p in (node_name.strip(), markdown.strip()) if p).strip()
+        if fallback:
+            chunks.append({
+                "node_id": node_id,
+                "node_name": node_name,
+                "heading": current_heading,
+                "content": fallback[:MAX_CHUNK_CHARS],
+                "chunk_index": 0,
+            })
 
     return chunks

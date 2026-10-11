@@ -21,14 +21,14 @@ _APP_DIR = _REPO / "backend" / "app"
 # 命中「把 nodes_dir 与 .md 拼成 单节点正文路径」的读写法（去注解后判断）
 _MD_CONCAT = re.compile(r"nodes_dir\s*/\s*[^\n=]*\.md")
 
-# 白名单（有意为之，各附理由）。命中清单 = (相对路径, 行号)。
+# 白名单（有意为之，各附理由）。按**代码内容**匹配而不是行号：行号会随无关编辑漂移
+# （2026-10-11 就因此误报过一次 —— 上面加几行 flush 就把它顶走了）。
 _ALLOW = {
-    # api/v1/knowledge.py:376 —— 节点详情元数据端点：小节化节点 content 刻意为空串（前端按节读），
+    # 节点详情元数据端点：小节化节点 content 刻意为空串（前端按节读），
     #   只有老单 MD 节点才回单文件全文（D5 契约，见 test_sectioned_node_metadata_no_body）。
-    ("api/v1/knowledge.py", 376),
-    # core/rag/manager.py:72 —— node_content_text 读失败的降级（logger.debug 后）；且只对缺该方法的
-    #   老假对象生效。
-    ("core/rag/manager.py", 72),
+    "api/v1/knowledge.py": ['file_path = kg.nodes_dir / f"{node_id}.md"'],
+    # node_content_text 读失败的降级（logger.debug 后）；且只对缺该方法的老假对象生效。
+    "core/rag/manager.py": ['md_path = kg.nodes_dir / f"{node_id}.md"'],
 }
 
 
@@ -39,12 +39,12 @@ def _offenders() -> list[str]:
         # 唯一出口实现处：拆分后落在 core/kg/ 包（knowledge_graph.py 只剩转发层）
         if rel == "core/knowledge_graph.py" or rel.startswith("core/kg/"):
             continue
+        allowed = _ALLOW.get(rel, [])
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             code = line.split("#", 1)[0].rstrip()  # 去内联/整行注解，防注释误报
-            if not _MD_CONCAT.search(code):
+            if not _MD_CONCAT.search(code) or code.strip() in allowed:
                 continue
-            if (rel, lineno) not in _ALLOW:
-                hits.append(f"{rel}:{lineno}: {code.strip()}")
+            hits.append(f"{rel}:{lineno}: {code.strip()}")
     return hits
 
 
