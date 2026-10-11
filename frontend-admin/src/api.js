@@ -17,7 +17,8 @@ api.interceptors.response.use(
     if (err.response?.status === 401 && !isLogin) {
       localStorage.removeItem('admin_token')
       localStorage.removeItem('admin_info')
-      window.location.replace('/login')
+      // 子路径部署（/admin/）时登录页在 /admin/login
+      window.location.replace(`${import.meta.env.BASE_URL}login`)
     }
     return Promise.reject(err)
   }

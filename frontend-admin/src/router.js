@@ -21,8 +21,9 @@ const routes = [
   }
 ]
 
+// BASE_URL 由 Vite 的 base 决定：本地 '/'，子路径部署时 '/admin/'
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes
 })
 
