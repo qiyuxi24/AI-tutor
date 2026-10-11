@@ -1,4 +1,4 @@
-# TutorAgent 已完成模块归档（DONE）
+# AI Tutor 已完成模块归档（DONE）
 
 > 用途：`TODO.md` / `TODO_Collector.md` 的**完成侧归档**。待办留在原文件，做完的**搬**到这里（不是复制）。
 >
@@ -30,12 +30,13 @@
 
 ## 1. P0 收尾
 
-### 1.1 文档同步 + 改名 TutorAgent（2026-09-05）
-- README.md 全面重写（去"无 Docker"过时说法；补知识库/出题/采集/混合检索；标题改 TutorAgent）
-- `frontend/index.html` `<title>` → TutorAgent + `lang="zh-CN"`
-- LoginView / ActivityBar / OnboardingGuide / style.css 等 "AI Tutor" 文案 → TutorAgent
-- `backend/app/main.py` `FastAPI(title="TutorAgent API")`；start.ps1 / install.ps1 横幅；deploy/README、error_codes.md、`docs/比赛/AI-Tutor_项目概述.md` 标题与文案
-- **刻意保留**：logger 名 `ai-tutor`（30 处）与 localStorage key `ai_tutor_*` 属内部标识，改名会破坏登录态且零用户价值
+### 1.1 文档同步 + 改名（2026-09-05）
+- README.md 全面重写（去"无 Docker"过时说法；补知识库/出题/采集/混合检索）
+- `frontend/index.html` `<title>` + `lang="zh-CN"`
+- LoginView / ActivityBar / OnboardingGuide / style.css 等品牌文案
+- `backend/app/main.py` `FastAPI(title=...)`；start.ps1 / install.ps1 横幅；deploy/README、error_codes.md、`docs/比赛/AI-Tutor_项目概述.md` 标题与文案
+- **名字沿革**：2026-09-05 由 "AI Tutor" 改为 "TutorAgent"；**2026-10-10 全库改回 "AI Tutor"**（界面标题 / 活动栏 logo / 引导弹窗 / 运维后台 / 两个 FastAPI title / README·CONTRIBUTING·TODO·docs 正文）
+- **刻意保留（功能性标识，改名会破坏运行态或与线上不一致）**：logger 名 `ai-tutor`、localStorage key `ai_tutor_*`、采集 UA `TutorAgent-Collector/0.1` 与 `TutorAgent/1.0`、npm 包名 `tutoragent-admin`、部署路径 `/opt/tutoragent` / systemd 单元 `tutoragent.service` / 防火墙规则名 `TutorAgent LAN`
 
 ### 1.2 真实 LLM 链路验证（2026-09-06 ~ 09-08）
 - MiniMax-M3 chat / 流式 / 工具调用真网全通（`scripts/test_minimax.py` 自检 + `scripts/smoke_agent_loop.py` 冒烟）

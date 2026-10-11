@@ -1,6 +1,6 @@
-# TutorAgent 项目框架文档
+# AI Tutor 项目框架文档
 
-> 本文档由代码 review 自动生成，记录 TutorAgent 项目的完整架构、核心设计决策、API 清单和 Review 报告。
+> 本文档由代码 review 自动生成，记录 AI Tutor 项目的完整架构、核心设计决策、API 清单和 Review 报告。
 >
 > ⚠️ **文档状态（2026-09-20 核对）**：本文档基于 2026 年 8 月中旬的代码快照，此后项目经历多轮重构，**部分内容已与代码不符**。已知漂移（§三数据库 Schema 已按源码校正，其余章节请以权威文档为准）：
 > - 对话主模型现为 **MiniMax-M3**（OpenAI 兼容 + function calling，带主备回退链），不再是「阿里云千问（DashScope）」直连

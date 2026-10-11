@@ -1,7 +1,7 @@
 # 教育类开源 AI / Agent / Skills 调研报告（家教 · 教师 · 教辅方向）
 
 > 创建日期：2026-09-05
-> 调研人：TutorAgent 团队（AI 辅助）
+> 调研人：AI Tutor 团队（AI 辅助）
 > 状态：**已搁置** —— 报告结论已沉淀；未进入代码落地，待备赛后期按需取用
 > 关联文档：`docs/调研对标/标杆项目对标分析.md`（功能矩阵）、`docs/调研对标/OPENMAIC_借鉴方案.md`（已落地借鉴）、`docs/教育资料采集/教育资料采集模块_设计讨论.md`（采集模块设计）
 > Star 数据：GitHub API 查询，2026-09-05
@@ -10,14 +10,14 @@
 
 ## 一、调研目标与方法
 
-用户诉求：找"老师 / 家教 / 教辅"一类、知名且 star 数较高的开源 AI / Agent / Skills，克隆到本地并分析能否用于 TutorAgent。
+用户诉求：找"老师 / 家教 / 教辅"一类、知名且 star 数较高的开源 AI / Agent / Skills，克隆到本地并分析能否用于 AI Tutor。
 
 方法：
 1. 多轮中英文 web 搜索收集候选池（覆盖 AI 家教、多智能体课堂、教师备课/批改、错题/题库、教育 Skills 等细分方向）
 2. GitHub API 核实各仓库真实 star / 语言 / 协议 / 体量，剔除低 star 与无关项目
 3. codeload zip / git shallow clone 落地仓库（github git 协议时通时断，codeload zip 最稳）
 4. 派出 code-explorer 子代理通读源码，输出"模块 - 功能 - 源码路径 - 可移植性"
-5. 结论映射回 TutorAgent 现状（对标 `docs/调研对标/标杆项目对标分析.md` 功能矩阵与 TODO.md）
+5. 结论映射回 AI Tutor 现状（对标 `docs/调研对标/标杆项目对标分析.md` 功能矩阵与 TODO.md）
 
 ---
 
@@ -66,7 +66,7 @@
 | `tools/` | 内置工具集，`builtin_specs.py` 字符串路径懒加载声明 |
 | `multi_user/` | 多用户/家长-学习者账户（guardian/learner） |
 
-### 4.3 最值得 TutorAgent 借鉴的 5 点（按价值/移植成本排序）
+### 4.3 最值得 AI Tutor 借鉴的 5 点（按价值/移植成本排序）
 
 1. **掌握度引擎整体移植** — `deeptutor/learning/mastery.py` + `policy.py` + `models.py`（纯函数零 LLM）：
    recency 加权 0..1 分 + confidence cap；`is_mastered/next_objective` 用 gate 判定"通关"，MEMORY/PROCEDURE ≥0.9，CONCEPT/DESIGN 走 Feynman 定性评估（`mastery_assess`）；`next_objective` 直接返回"下一步动作"枚举。
@@ -120,7 +120,7 @@
 - 教案/学情报告框架（`lesson-planning`、`class-analysis-lite`）
 - Standalone Fallback 设计思想（无平台工具时也给出降级方案）
 
-**绑定 Hermes 运行时、无法直接用的部分**：`requires_tools`（context.load / entitlement.check / workflow.create / plan.generate / memory.write / mistake.query_recent / practice.grade_answers）→ 需替换为 TutorAgent 后端已有的 function-calling 工具；`catalog.json` 的元数据契约、`export_mode/release_channel` 依赖平台，Web 对话 agent 不适用。
+**绑定 Hermes 运行时、无法直接用的部分**：`requires_tools`（context.load / entitlement.check / workflow.create / plan.generate / memory.write / mistake.query_recent / practice.grade_answers）→ 需替换为 AI Tutor 后端已有的 function-calling 工具；`catalog.json` 的元数据契约、`export_mode/release_channel` 依赖平台，Web 对话 agent 不适用。
 
 ### 6.2 flysheep-ai/education-skills（92★，MIT，6 个高考科目 tutor）
 - 结构：`gaokao-science-tutor` / `gaokao-liberal-arts-tutor` / `gaokao-chinese-tutor` / `gaokao-english-tutor` / `gaokao-general-tech-tutor`；每个含 SKILL.md + README + 可选 examples/reference
@@ -131,11 +131,11 @@
 
 ---
 
-## 七、与 TutorAgent 现状映射与落地建议
+## 七、与 AI Tutor 现状映射与落地建议
 
 > 参照 `docs/调研对标/标杆项目对标分析.md` 功能差距表。以下为调研新增/强化的建议，按性价比排序。
 
-| # | 建议 | 来源 | 落点（TutorAgent） | 成本 |
+| # | 建议 | 来源 | 落点（AI Tutor） | 成本 |
 |---|------|------|-------------------|------|
 | 1 | 苏格拉底 + 渐进式教学策略注入自适应引导模式 | flysheep 四原则/五步/情景脚本 + Hermes socratic-tutor | `chat_service._build_system_prompt()` | 1~2 天，纯 prompt |
 | 2 | 分层出题约束（60/30/10 + 质量门） | Hermes homework-generation | `quiz/` 生成 prompt 与质量过滤 | 0.5~1 天 |

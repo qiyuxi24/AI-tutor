@@ -4,7 +4,7 @@
 > 最近整理：2026-09-24（第二十一次：压缩去重，实现细节交还 docs）。
 
 ## 项目概述 / 用户偏好
-- TutorAgent：知识图谱驱动的自适应导学 Agent；Vue3+Vite+D3+Pinia+EP / FastAPI+SQLite+Jinja2+LLM(OpenAI 兼容)。对话/Agent = MiniMax-M3；嵌入固定阿里 text-embedding-v4（独立 key/base，**2026-09-23 已恢复**）。
+- AI Tutor（原 TutorAgent，2026-10-10 全库改回）：知识图谱驱动的自适应导学 Agent；Vue3+Vite+D3+Pinia+EP / FastAPI+SQLite+Jinja2+LLM(OpenAI 兼容)。对话/Agent = MiniMax-M3；嵌入固定阿里 text-embedding-v4（独立 key/base，**2026-09-23 已恢复**）。
 - 比赛材料冻结（2026-09-12 起）：`docs/比赛/` 不主动读/改/同步，仅用户点名才碰。
 - 用户偏好：渐进式改进、清单式推进；重视代码安全与架构一致性。**写代码必加载 `ponytail`**（写文档/讨论豁免）——机制是压缩 diff，固定成本 ~2K token/任务，对外**不得宣称"省 token / 更稳定"**；债务标记 = 代码内 `ponytail:` 注释。
 - 用户重视"用数据说话"：改动要有评测数字 + 实验产物入库。
@@ -13,7 +13,7 @@
 - `origin` = `qiyuxi24/AI-tutor`；`github-desktop-zhuzixuan2007` = 同学仓库（**只读**）。同学两批改动已并入 main（`44d3d84` + `673e008`），**尚未 push**。
 - **并发写入是常态**：提交必须路径限定（禁 `git add -A`），内容与预期不符先查 mtime；**整理/审计类任务不擅自 commit**。
 - ⚠️ 推 GitHub：直连 443 被阻断 → `git -c http.proxy=http://127.0.0.1:7897 push origin main`。装包前 `$env:NO_PROXY="*"`（注册表 `ProxyEnable=1` 残留 → pip `ProxyError`）。
-- 远程服务器：`ssh wojtek@100.90.96.111`（Tailscale 免密）；TutorAgent 跑在 `http://100.90.96.111:8080`（容器 `ai-tutor`）；一键 `deploy/deploy.ps1`。sudo 密码 = 登录密码。
+- 远程服务器：`ssh wojtek@100.90.96.111`（Tailscale 免密）；AI Tutor 跑在 `http://100.90.96.111:8080`（容器 `ai-tutor`）；一键 `deploy/deploy.ps1`。sudo 密码 = 登录密码。
 - `start.ps1` 后端必须独立控制台；清残留 `taskkill /T /F`；部署镜像 = 工作区快照，须 `docker compose up -d --build`。
 
 ## 运维后台（独立服务，2026-09-19）

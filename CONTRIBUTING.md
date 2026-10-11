@@ -1,8 +1,8 @@
-# 贡献指南（Contributing to TutorAgent）
+# 贡献指南（Contributing to AI Tutor）
 
 **简体中文** ｜ [English](CONTRIBUTING.en.md)
 
-感谢你对 TutorAgent 的兴趣 —— 无论你是来报 bug、修文档，还是想加一门学科的知识图谱数据，这份指南的目标只有一个：**让你在 10 分钟内把项目跑起来，并知道改动该怎么提**。
+感谢你对 AI Tutor 的兴趣 —— 无论你是来报 bug、修文档，还是想加一门学科的知识图谱数据，这份指南的目标只有一个：**让你在 10 分钟内把项目跑起来，并知道改动该怎么提**。
 
 ---
 
@@ -219,4 +219,4 @@ venv\Scripts\python.exe scripts/eval_rag.py --embed mock
 
 ---
 
-感谢你为 TutorAgent 花的时间，祝你改得顺手。
+感谢你为 AI Tutor 花的时间，祝你改得顺手。

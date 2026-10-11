@@ -1,6 +1,6 @@
 # Fineweb-Edu-Chinese 作为「资源采集数据源」可行性评估
 
-> 日期：2026-09-26 ｜ 对象：TutorAgent 采集域（`core/collector/`）
+> 日期：2026-09-26 ｜ 对象：AI Tutor 采集域（`core/collector/`）
 > 结论前提：**赛前 9 天窗口（材料期 10/5）+ 嵌入 API 欠费 + 三赛同投**这三条约束下的判断，不代表长期技术判断。
 
 ---

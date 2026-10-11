@@ -1,6 +1,6 @@
 <!-- base: README.md @ c54d571 (2026-09-12). English mirror of the Chinese README — keep both in sync; spec: docs/工程实践/README_编写规范.md §6. -->
 
-# TutorAgent — A Knowledge-Graph-Driven Adaptive Tutoring Agent
+# AI Tutor — A Knowledge-Graph-Driven Adaptive Tutoring Agent
 
 [简体中文](README.md) ｜ **English**
 
@@ -30,9 +30,9 @@
 
 ## Overview
 
-TutorAgent connects **conversational tutoring, a knowledge graph, learner profiles, and learning paths**. Start with a question, add textbooks to your knowledge base, build structured notes as you learn, and check your understanding through quizzes.
+AI Tutor connects **conversational tutoring, a knowledge graph, learner profiles, and learning paths**. Start with a question, add textbooks to your knowledge base, build structured notes as you learn, and check your understanding through quizzes.
 
-| Self-study challenge | How TutorAgent helps |
+| Self-study challenge | How AI Tutor helps |
 | :--- | :--- |
 | Disconnected topics and unclear prerequisites | Visualize knowledge relationships and follow learning paths based on prerequisites |
 | Understanding an explanation without knowing whether you can solve a problem | Use AI quizzes and grading to update mastery and inspect weak areas in the dashboard |
@@ -360,4 +360,4 @@ Bug reports, documentation fixes, tests, and feature improvements are welcome. R
 
 This project is licensed under the [MIT License](LICENSE).
 
-<p align="right"><a href="#tutoragent">Back to top ↑</a></p>
+<p align="right"><a href="#ai-tutor">Back to top ↑</a></p>

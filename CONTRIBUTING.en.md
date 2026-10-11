@@ -1,10 +1,10 @@
 <!-- base: CONTRIBUTING.md @ c54d571 (2026-09-12). English mirror of the Chinese contribution guide — keep both in sync; spec: docs/工程实践/README_编写规范.md §6. -->
 
-# Contributing to TutorAgent
+# Contributing to AI Tutor
 
 [简体中文](CONTRIBUTING.md) ｜ **English**
 
-Thank you for your interest in TutorAgent — whether you are here to report a bug, fix documentation, or contribute knowledge-graph data for a new subject, this guide has one goal: **get you running the project within 10 minutes and show you how to submit your change**.
+Thank you for your interest in AI Tutor — whether you are here to report a bug, fix documentation, or contribute knowledge-graph data for a new subject, this guide has one goal: **get you running the project within 10 minutes and show you how to submit your change**.
 
 ---
 
@@ -221,4 +221,4 @@ Patches generated or rewritten with AI **are welcome**, provided that:
 
 ---
 
-Thanks for the time you spend on TutorAgent — happy hacking.
+Thanks for the time you spend on AI Tutor — happy hacking.
