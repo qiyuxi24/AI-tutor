@@ -13,25 +13,35 @@ class _PathsMixin:
         from_node，再递归取这些 from_node 的 from_node……直到没有更多前置。
 
         返回去重后的祖先节点 ID 列表（顺序不保证）。
+
+        ⚠️ 前置图可能带环（存量脏数据，或绕过 add_edge 的写入口），本查询必须
+        在这种情况下也**有限终止**：递归 CTE 用 UNION 按 node_id 去重，去重即
+        终止条件。2026-10-22 线上事故：这里原是 UNION ALL + depth（每行 depth
+        都不同、去重永不生效）+ 无 visited，环上无限展开 → 单条同步查询占死
+        --workers 1 的唯一事件循环，整个 /api 冻死约 52 小时。
         """
         rows = self._conn.execute("""
-            WITH RECURSIVE prereq_chain AS (
+            WITH RECURSIVE prereq_chain(node_id) AS (
                 -- 基础情况：node_id 的直接前置（所有指向它的边的 from）
-                SELECT from_node, 1 AS depth
+                SELECT from_node
                 FROM edges
                 WHERE to_node = ? AND relation = 'prerequisite' AND user_id = ?
 
-                UNION ALL
+                -- 必须按 node_id 去重：递归 CTE 的终止条件就是"不再产生新行"。
+                -- 别写回 UNION ALL + depth —— 环上每行 depth 都不同，去重永不生效，
+                -- 查询永不返回（见上方事故注释）。
+                UNION
 
                 -- 递归：前置的前置
-                SELECT e.from_node, pc.depth + 1
+                SELECT e.from_node
                 FROM edges e
-                JOIN prereq_chain pc ON e.to_node = pc.from_node
+                JOIN prereq_chain pc ON e.to_node = pc.node_id
                 WHERE e.relation = 'prerequisite' AND e.user_id = ?
             )
-            SELECT DISTINCT from_node AS node_id FROM prereq_chain
-            ORDER BY depth
-        """, (node_id, self.user_id, self.user_id)).fetchall()
+            -- 去掉 node_id 自身：带环的脏数据里节点会成为自己的祖先，
+            -- 但"自己的前置是自己"没有语义（会让"建议先巩固"写出本节点名）
+            SELECT node_id FROM prereq_chain WHERE node_id != ?
+        """, (node_id, self.user_id, self.user_id, node_id)).fetchall()
         return [r["node_id"] for r in rows]
 
     def topological_sort(self) -> list[str]:

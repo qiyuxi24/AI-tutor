@@ -2,6 +2,9 @@
 import sqlite3
 from datetime import datetime
 
+# 边关系类型的唯一枚举（add_edge 与 update_edge_by_id 共用，别各写一份）
+VALID_RELATIONS = {"prerequisite", "related", "confusion", "extension"}
+
 
 class _EdgesMixin:
     def add_edge(self, edge_data: dict, caller: str = "human") -> None:
@@ -31,9 +34,8 @@ class _EdgesMixin:
             raise ValueError(f"不能创建自环边：{from_id} → {to_id}")
 
         # 2. 关系类型必须是合法枚举值
-        valid_relations = {"prerequisite", "related", "confusion", "extension"}
-        if relation not in valid_relations:
-            raise ValueError(f"无效的关系类型：{relation}，合法值：{valid_relations}")
+        if relation not in VALID_RELATIONS:
+            raise ValueError(f"无效的关系类型：{relation}，合法值：{VALID_RELATIONS}")
 
         # 验证节点存在
         node_ids = set(self.get_node_ids())
@@ -134,12 +136,31 @@ class _EdgesMixin:
         """
         updates = {}
         if "relation" in data:
-            updates["relation"] = data["relation"]
+            relation = data["relation"]
+            if relation not in VALID_RELATIONS:
+                raise ValueError(f"无效的关系类型：{relation}，合法值：{VALID_RELATIONS}")
+            updates["relation"] = relation
         if "label" in data:
             updates["label"] = data["label"]
 
         if not updates:
             return
+
+        # ★ 防止循环前置依赖（2026-10-22 线上事故补漏）：本入口原先没有任何环检查
+        #   —— 把一条 related 边改成 prerequisite 就绕过了 add_edge 的 _has_path 防线。
+        #   成环后 get_prerequisites 的递归查询永不终止，占死唯一的事件循环，/api 全挂。
+        if updates.get("relation") == "prerequisite":
+            row = self._conn.execute(
+                "SELECT from_node, to_node, relation FROM edges WHERE id = ? AND user_id = ?",
+                (edge_id, self.user_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"边不存在或不属于当前用户：id={edge_id}")
+            # 本来就是 prerequisite（只改 label / 重复设同一值）不再查，避免误伤存量数据
+            if row["relation"] != "prerequisite" and self._has_path(row["to_node"], row["from_node"]):
+                raise ValueError(
+                    f"不能创建循环前置依赖：{row['from_node']} → {row['to_node']} 会形成环"
+                )
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [datetime.now().isoformat(), edge_id, self.user_id]
