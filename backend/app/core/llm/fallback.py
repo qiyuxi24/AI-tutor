@@ -49,8 +49,12 @@ def _model_store(user_id: int) -> ModelStore:
     return ModelStore(user_id)
 
 
-def _user_candidates(user_id: int | None) -> list | None:
-    """用户自有候选链 [(client, model, model_id)]；无配置 / 读盘失败 → None（回落系统默认档）。"""
+def user_candidates(user_id: int | None) -> list | None:
+    """用户自有候选链 [(client, model, model_id)]；无配置 / 读盘失败 → None（回落系统默认档）。
+
+    公开导出名：语音转写（`llm/transcribe.py`）等其它 LLM 原语共用同一份配置读取，
+    不各自去 new 一个 ModelStore。
+    """
     if not user_id:
         return None
     try:
@@ -79,6 +83,18 @@ def _mark_effective_safe(user_id: int, model_id: str) -> None:
         logger.warning("回写生效模型失败（不影响本次调用）: %s", e)
 
 
+def resolve_candidates(user_id: int | None) -> list[tuple]:
+    """统一的候选链解析：用户自有链（id 非空）→ 系统默认档（id=None）。
+
+    「用户配了模型就用用户的、没配就回落 .env 系统档」这条规则**只能有一份实现**：
+    对话（`chat_create`）与语音转写（`llm/transcribe.py`）都走它。
+    """
+    candidates = user_candidates(user_id)
+    if candidates is None:
+        return [(c, m, None) for c, m in LLM_CANDIDATES]
+    return candidates
+
+
 def should_fallback(e: Exception) -> bool:
     """错误是否值得切下一个候选（而非放弃）。"""
     if isinstance(e, AuthenticationError):
@@ -95,9 +111,7 @@ async def chat_create(*, user_id: int | None = None, **kwargs):
     该用户的自有模型链（没配就回落 .env 系统默认档）。
     全部档失败或错误不可降级时，抛 map_api_error 分类后的 RuntimeError（调用方无需再映射）。
     """
-    candidates = _user_candidates(user_id)
-    if candidates is None:                       # 用户没配模型 → 系统默认档
-        candidates = [(c, m, None) for c, m in LLM_CANDIDATES]
+    candidates = resolve_candidates(user_id)
 
     for idx, (cand_client, cand_model, cand_id) in enumerate(candidates):
         try:
