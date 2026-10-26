@@ -1,0 +1,6 @@
+# 本 bundle 贡献的配置层：profile 的 `dsh.profile.bundles` 列到本包时生效。
+# 行里只写包名，Node 解析到已安装的代码；**不留任何绝对路径**——
+# python 解释器与 backend 目录由 index.js 在激活时探测（见 README「配置」）。
+- insert:
+    - id: ai-tutor
+      name: dsh-ai-tutor

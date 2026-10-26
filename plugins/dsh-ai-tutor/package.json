@@ -1,0 +1,46 @@
+{
+  "name": "dsh-ai-tutor",
+  "version": "0.1.0",
+  "description": "AI-tutor 只读知识库能力（图谱检索 / 资料检索 / 网页抓取）接入 DeepSeek Harness，含知识图谱面板",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsh-ai-tutor-doctor": "bin/doctor.mjs"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md",
+    "bin",
+    "lib",
+    "engine",
+    "runtime"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "mcp",
+    "ai-tutor",
+    "knowledge-graph"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-mcp-client": ">=0.1.5-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  }
+}

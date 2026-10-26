@@ -246,3 +246,14 @@ pytest-of-*/
 # F 评测产物（可重跑重建；评测集 cmrc2018_trial.json / graph_injection_cases.json 保留）
 /backend/eval_data/report_*.json
 /backend/eval_data/graph_injection_report*.json
+
+# ════════════════════════════════════════════
+# DSH 插件构建产物（2026-10-27 追加；`node scripts/build-plugin.mjs` 生成）
+#   engine/  = backend/app 的整包副本（只排 __pycache__/*.pyc）
+#   runtime/ = 便携 CPython 3.13 + 13 个锁定依赖（~135 MB，压缩后 ~46 MB）
+# 二者都是「删目录重跑即可重建」的产物，不入库
+# ════════════════════════════════════════════
+/plugins/dsh-ai-tutor/engine/
+/plugins/dsh-ai-tutor/runtime/
+# 插件首次启动时在数据根生成的主机级密钥（明文，绝不入库）
+/data/secret_key
