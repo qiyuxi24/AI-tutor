@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(dotenv_path=_PROJECT_ROOT / ".env", override=False)
 
+# 仓库默认密钥：源码可见 → 生产必须用 ADMIN_SECRET_KEY 覆盖（见 require_secret_key）。
+DEFAULT_ADMIN_SECRET = "admin-secret-key-change-in-production"
+
 
 @dataclass
 class Settings:
@@ -34,7 +37,7 @@ class Settings:
     profiles_dir: str = str(_PROJECT_ROOT / "data" / "profiles")
 
     # 运维后台独立密钥：与主系统 SECRET_KEY 分开，两边 token 互不通用
-    secret_key: str = "admin-secret-key-change-in-production"
+    secret_key: str = DEFAULT_ADMIN_SECRET
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 8
 
@@ -64,6 +67,18 @@ class Settings:
                 if origin.strip()
             ],
         )
+
+    def require_secret_key(self) -> None:
+        """拒绝用仓库默认密钥启动（默认值公开在源码里 → 任何人可伪造后台 JWT / 拿删号权限）。
+
+        与主系统 `core/auth.py::Settings.require_secret_key` 同一纪律：启动即校验，
+        宁可起不来也不裸奔。
+        """
+        if self.secret_key == DEFAULT_ADMIN_SECRET:
+            raise RuntimeError(
+                "ADMIN_SECRET_KEY 未设置：拒绝使用仓库默认密钥启动运维后台。"
+                "请在根 .env 配置 ADMIN_SECRET_KEY（随机长字符串）后重启。"
+            )
 
 
 settings = Settings.from_env()

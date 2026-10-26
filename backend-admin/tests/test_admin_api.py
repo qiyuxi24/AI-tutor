@@ -62,6 +62,8 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(settings, "db_path", str(db))
     monkeypatch.setattr(settings, "default_admin_password", "admin123")
+    # lifespan 会校验密钥非仓库默认值 → 测试给一个自定义值（真实部署由 ADMIN_SECRET_KEY 提供）
+    monkeypatch.setattr(settings, "secret_key", "test-admin-secret")
     # 数据目录也必须指到 tmp：删号用例会 rmtree 这些路径
     monkeypatch.setattr(settings, "backend_data_dir", str(tmp_path / "backend_data"))
     monkeypatch.setattr(settings, "records_dir", str(tmp_path / "records"))
@@ -128,6 +130,24 @@ def _login(client, username: str, password: str) -> dict:
     )
     assert r.status_code == 200, r.text
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+# ---------- 配置安全 ----------
+
+def test_require_secret_key_rejects_repo_default():
+    """未配置 ADMIN_SECRET_KEY → 拒绝启动（默认密钥公开在源码里，任何人可伪造后台 JWT）。"""
+    from app.core.config import DEFAULT_ADMIN_SECRET, Settings
+
+    s = Settings()
+    assert s.secret_key == DEFAULT_ADMIN_SECRET
+    with pytest.raises(RuntimeError, match="ADMIN_SECRET_KEY"):
+        s.require_secret_key()
+
+
+def test_require_secret_key_accepts_custom():
+    from app.core.config import Settings
+
+    Settings(secret_key="s3cret-value").require_secret_key()   # 不抛
 
 
 # ---------- 基础 ----------

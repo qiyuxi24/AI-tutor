@@ -4,16 +4,17 @@
       <div class="card-header">
         <span>用量与缓存命中</span>
         <span class="sub">数据来自主系统 llm_usage 表（供应商响应里的 usage 真值，非本地估算）</span>
+        <span class="sub live">{{ liveHint }}</span>
       </div>
     </template>
 
     <div class="search-bar">
-      <el-select v-model="sinceHours" style="width: 140px" @change="load">
+      <el-select v-model="sinceHours" style="width: 140px" @change="() => load()">
         <el-option label="近 24 小时" :value="24" />
         <el-option label="近 7 天" :value="168" />
         <el-option label="近 30 天" :value="720" />
       </el-select>
-      <el-select v-model="groupBy" style="width: 140px" @change="load">
+      <el-select v-model="groupBy" style="width: 140px" @change="() => load()">
         <el-option
           v-for="(label, value) in GROUP_LABELS"
           :key="value"
@@ -21,7 +22,7 @@
           :value="value"
         />
       </el-select>
-      <el-button @click="load">
+      <el-button @click="() => load()">
         <el-icon><Refresh /></el-icon>
         刷新
       </el-button>
@@ -63,7 +64,7 @@
       </span>
     </div>
 
-    <el-table :data="groups" v-loading="loading" stripe>
+    <el-table :data="groups" v-loading="loading" stripe row-key="dim">
       <el-table-column :label="GROUP_LABELS[groupBy]" min-width="160">
         <template #default="{ row }">{{ row.dim === null || row.dim === '' ? '(空)' : row.dim }}</template>
       </el-table-column>
@@ -91,14 +92,24 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import api, { errorMessage } from '../api'
 
 const GROUP_LABELS = { kind: '功能', model: '模型', day: '日期', user: '用户' }
 
+// 后台静默轮询间隔：只重拉数据、不显示 loading 遮罩，所以表格不会闪
+const REFRESH_MS = 10000
+
 const loading = ref(false)
+const updatedAt = ref('')
+let timer = null
+let inFlight = false
+
+const liveHint = computed(() =>
+  updatedAt.value ? `自动刷新中 · 最后更新 ${updatedAt.value}` : '加载中…'
+)
 const sinceHours = ref(168)
 const groupBy = ref('kind')
 const groups = ref([])
@@ -122,22 +133,43 @@ const rateColor = (rate) => {
   return '#67c23a'
 }
 
-const load = async () => {
-  loading.value = true
+// silent = 后台轮询：不加遮罩、失败不弹窗（避免看数时被打断/表格闪烁）
+const load = async (silent = false) => {
+  if (inFlight) return // 慢查询/弱网时不堆叠请求
+  inFlight = true
+  if (!silent) loading.value = true
   try {
     const { data } = await api.get('/usage', {
       params: { since_hours: sinceHours.value, group_by: groupBy.value },
     })
     groups.value = data.groups
     total.value = data.total
+    updatedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   } catch (err) {
-    ElMessage.error(errorMessage(err, '加载失败'))
+    if (!silent) ElMessage.error(errorMessage(err, '加载失败'))
   } finally {
-    loading.value = false
+    inFlight = false
+    if (!silent) loading.value = false
   }
 }
 
-onMounted(load)
+// 页面切到后台就停轮询、切回来立刻补一次（省请求 + 回来即最新）
+const onVisible = () => {
+  if (!document.hidden) load(true)
+}
+
+onMounted(() => {
+  load()
+  timer = setInterval(() => {
+    if (!document.hidden) load(true)
+  }, REFRESH_MS)
+  document.addEventListener('visibilitychange', onVisible)
+})
+
+onUnmounted(() => {
+  clearInterval(timer)
+  document.removeEventListener('visibilitychange', onVisible)
+})
 </script>
 
 <style scoped>
@@ -155,6 +187,10 @@ onMounted(load)
 .sub {
   color: #909399;
   font-size: 12px;
+}
+
+.live {
+  margin-left: auto;
 }
 
 .search-bar {

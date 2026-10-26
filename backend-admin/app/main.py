@@ -10,6 +10,8 @@ from app.core.db import init_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 安全：仓库默认密钥公开在源码里 → 未配置 ADMIN_SECRET_KEY 时拒绝启动
+    settings.require_secret_key()
     init_db()
     yield
 
