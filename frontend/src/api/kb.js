@@ -64,6 +64,47 @@ export const getKbContext = (nodeId, maxDepth = null) => {
 /** 知识库索引统计 */
 export const getKbStats = () => apiClient.get('/api/v1/kb/stats')
 
+// ═══ 视频课程导入（链接 → 讲义 → 知识库）═══
+
+/**
+ * 探测导入所需的外部依赖（yt-dlp / ffmpeg / 转写模型名 / B站登录态）
+ * resp: { yt_dlp, ffmpeg, asr_model, cookie, cookie_source, cookie_browser }
+ *   cookie_source ∈ env（手贴）/ file（BILI_COOKIE_FILE）/ saved（扫码落盘）/ browser / ''
+ * 用于提前提示，避免用户白等一个注定失败的任务；**能否提交由后端判定**，这里只展示
+ */
+export const probeLectureImport = () => apiClient.get('/api/v1/kb/import/probe')
+
+// ═══ B 站扫码登录（会员课 / AI 总结字幕需要登录态）═══
+
+/**
+ * 取登录二维码（凭证只留在服务端，这里只拿到图片与轮询键）
+ * resp: { qrcode_key, image }   image = data:image/png;base64,…
+ */
+export const biliLoginQrcode = () => apiClient.get('/api/v1/kb/bili/login/qrcode')
+
+/**
+ * 轮询扫码状态
+ * resp: { status: 'waiting'|'scanned'|'expired'|'success'|'error', message, saved }
+ * success 时凭证已落盘（data/bili/cookies.txt）→ 重新 probe 即可看到「已登录（扫码）」
+ */
+export const biliLoginPoll = (qrcodeKey) =>
+  apiClient.get('/api/v1/kb/bili/login/poll', { params: { qrcode_key: qrcodeKey } })
+
+/**
+ * 导入课程链接为讲义（**后台长任务**，立即返回）
+ * payload: { url, parent_id?, transcript_source?: 'auto'|'subtitle'|'asr', asr_model?, languages? }
+ * resp: { status: 'started', task_id, message }
+ *
+ * 三条 SSE 通知（都在 chatStore 里消费）：
+ *   - `import_progress` { task_id, stage, index?, total? } —— **瞬态**，步骤条用；
+ *     stage ∈ subtitle/download/extract/transcribe/compose，终态 done/failed
+ *   - `kb_updated` { node_id, filename, title } —— 已落库，离线也能补拉
+ *   - `error` { message } —— 已落库
+ * 409 = 已有课程正在导入；400 = 缺 yt-dlp 等前置条件（detail 给原因）
+ */
+export const importLecture = (payload) =>
+  apiClient.post('/api/v1/kb/import/lecture', payload, { timeout: 30000 })
+
 // ═══ 节点小节化：小节正文按需读取 / 生成 / 删除 ═══
 
 /**

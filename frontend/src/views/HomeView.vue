@@ -42,6 +42,7 @@ import OnboardingGuide from '../components/OnboardingGuide.vue'
 import LoginDialog from '../components/LoginDialog.vue'
 import KbPanel from '../components/KbPanel.vue'
 import QuizView from './QuizView.vue'
+import LectureImportView from './LectureImportView.vue'
 import SettingsView from './SettingsView.vue'
 import DashboardView from './DashboardView.vue'
 
@@ -202,6 +203,11 @@ function openAccountSwitch() {
 /** 登录/注册成功：必须重载，否则 store 里还是上一个账号的图谱与对话记录 */
 function handleLoginSuccess() {
   window.location.reload()
+}
+
+/** 视频导入页「去知识库」：知识库面板挂在图谱视图右侧（没有独立的 kb 视图） */
+function handleGoKb() {
+  viewMode.value = 'graph'
 }
 
 function handleActivitySelect(id) {
@@ -648,6 +654,13 @@ const slideTransition = {
           </Transition>
         </div>
       </Transition>
+
+      <!-- 视频课程导入（链接 → 讲义 → 知识库；依赖探测在组件 setup 里，故挂 viewEpoch） -->
+      <LectureImportView
+        v-if="viewMode === 'lecture'"
+        :key="viewEpoch"
+        @go-kb="handleGoKb"
+      />
 
       <!-- 出题页（可从节点详情侧边栏「试题」跳入并聚焦某题；无跳转时行为与原来一致） -->
       <QuizView

@@ -12,6 +12,8 @@
   - agent_done    — Agent 循环结束 {rounds, total_llm_calls}
   - graph_updated — 知识图谱数据变更（向后兼容）
   - quiz_ready    — 对话内出题完成 {ok, questions, node_id, subject}（后台异步）
+  - kb_updated    — 知识库变更完成 {node_id, filename}（后台异步）
+  - import_progress — 视频课程导入进度 {task_id, stage, index?, total?}（**瞬态**，不落库）
   - error         — 后端错误 {code, message, module, detail}
 
 路由模式（A2-1b 起：隐式语义拆成两个**显式**函数）：
@@ -48,6 +50,8 @@ AGENT_START = "agent_start"
 AGENT_DONE = "agent_done"
 GRAPH_UPDATED = "graph_updated"
 QUIZ_READY = "quiz_ready"   # 对话内出题完成（后台异步，约 40s 后到达，见 quiz/chat_quiz.py）
+KB_UPDATED = "kb_updated"   # 知识库变更完成（后台异步：视频课程导入等分钟级任务）
+IMPORT_PROGRESS = "import_progress"  # 视频课程导入进度（瞬态：值只对"正在看的人"有意义）
 ERROR = "error"
 
 # 向后兼容：旧 "token" 事件 → text_delta
@@ -185,13 +189,13 @@ def broadcast(event_type: str, data: dict | None = None) -> None:
 
 
 def notify(user_id: int, event_type: str, data: dict | None = None, *,
-           db_dir=None) -> None:
+           db_dir=None, persist: bool = True) -> None:
     """
     **定向通知**：只投该用户的每一条订阅队列（fan-out：多端各一份）。
 
     服务对象 = "与具体请求无关的通知类事件"：
       - GRAPH_UPDATED（图谱变更）      - QUIZ_READY（对话内出题完成，约 40s 后异步到达）
-      - ERROR（后端错误）
+      - ERROR（后端错误）              - IMPORT_PROGRESS（导入进度，见 persist=False）
 
     A2-3：**先落库再推**（`core/notices.py`）。推送是尽力而为 —— 该用户一条订阅都没有
     就无处可投；落库才是"不丢"的保证，客户端重连后经
@@ -212,12 +216,18 @@ def notify(user_id: int, event_type: str, data: dict | None = None, *,
         event_type: 事件类型（见模块顶部常量）
         data:       可选附加数据
         db_dir:     覆盖落库目录（测试注入 tmp_path 用，与 `store.save_run` 同约定）
+        persist:    False = **瞬态**，只推给当前在线的订阅者，不落库。
+                    仅用于"晚到就没意义"的中间态（导入进度）：把它落库，
+                    用户下次重连会补拉到一串过期步骤，反而显示成"卡在第 3 步"。
+                    **终态**（kb_updated / error）必须 persist=True —— 那才是
+                    "人不在也要知道结果"的数据。
 
     用法：
         notify(1, QUIZ_READY, {"ok": True, "questions": []})
+        notify(1, IMPORT_PROGRESS, {"stage": "transcribe"}, persist=False)
     """
     event = _build_event(event_type, data)
-    notice_id = notices.record(user_id, event_type, data, db_dir=db_dir)
+    notice_id = notices.record(user_id, event_type, data, db_dir=db_dir) if persist else None
 
     qs = _user_queues.get(user_id)
     if not qs:

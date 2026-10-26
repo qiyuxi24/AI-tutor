@@ -14,6 +14,7 @@
 - pdf        : .pdf（PyMuPDF）
 - docx       : .docx（python-docx）
 - pptx       : .pptx（python-pptx）
+- subtitle   : .srt .vtt（视频课程字幕 → 讲义段落，零依赖）
 - image-ocr  : .png .jpg .jpeg .bmp .webp .tiff（RapidOCR，可选依赖，装则启用）
 - legacy     : .doc .ppt .xls（老式 Office，依赖外部工具，探测到才启用）
 - book       : .epub .fb2（零依赖，标准库）+ .mobi .azw .azw3 .djvu（外部能力，装则启用）
@@ -33,6 +34,7 @@ from app.core.kb.parsers.pptx import PptxParser
 from app.core.kb.parsers.image import ImageOcrParser
 from app.core.kb.parsers.legacy import LegacyParser
 from app.core.kb.parsers.book import EpubParser, Fb2Parser, MobiParser, DjvuParser
+from app.core.kb.parsers.subtitle import SubtitleParser
 
 logger = logging.getLogger("ai-tutor")
 
@@ -43,6 +45,9 @@ def _register_builtin(target: ParserRegistry) -> None:
     target.register(PdfParser())
     target.register(DocxParser())
     target.register(PptxParser())
+
+    # 字幕：视频课程转录（SRT/VTT）→ 讲义段落，零依赖
+    target.register(SubtitleParser())
 
     # 电子书：EPUB / FB2 纯标准库实现，始终可用
     target.register(EpubParser())

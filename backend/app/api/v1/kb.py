@@ -10,26 +10,45 @@
   GET    /kb/node/{node_id}/raw      - 读取文件节点原件（预览用，inline）
   GET    /kb/search                  - 在目录范围内语义检索
   POST   /kb/context                 - 收集目录范围内的文件节点（进上下文用）
+  GET    /kb/import/probe            - 视频导入的外部依赖探测（yt-dlp/ffmpeg/ASR 模型）
+  POST   /kb/import/lecture          - 导入视频课程链接为讲义（后台长任务）
+  GET    /kb/bili/login/qrcode       - B 站扫码登录：取二维码（PNG data URL）
+  GET    /kb/bili/login/poll         - B 站扫码登录：轮询状态（成功后凭证落盘）
   GET    /kb/stats                   - 索引统计
 
 说明：
 - 所有接口需要 JWT 认证，按用户隔离
 - 知识库与知识图谱 RAG 完全分离
 """
+import asyncio
 import logging
 import mimetypes
+import shutil
+import tempfile
+import uuid
+from pathlib import Path
 from urllib.parse import quote
 from fastapi import (APIRouter, Depends, HTTPException, Query, UploadFile, File,
                      Body)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
+from app.core import runtime
 from app.core.auth import get_current_user
+from app.core.event_bus import ERROR, IMPORT_PROGRESS, KB_UPDATED, notify
+from app.core.kb.bili import login as bili_login
+from app.core.kb.bili import urls as bili_urls
 from app.core.kb.kb_manager import kb_manager
-from app.core.kb import graph_generator
+from app.core.kb import graph_generator, video_import
 
 logger = logging.getLogger("ai-tutor")
 router = APIRouter()
+
+# 单文件上传体积上限：上传端点会把整个文件读进内存 → 必须设上限防打满内存
+# （同类限额：头像 2MB / download_resource 50MB）。扫描版 PDF 逐页 OCR 是分钟级，
+# 与"体积"是两回事，这里只管大小。
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+_UPLOAD_TOO_LARGE = HTTPException(status_code=413, detail="文件过大（上限 50MB）")
 
 class FolderCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -56,6 +75,20 @@ class ContextRequest(BaseModel):
                                      description="递归深度限制（仅文件夹有效）")
 
 
+class LectureImportRequest(BaseModel):
+    """视频课程导入请求（复刻 course2md 的取词 / 转写参数语义）"""
+    url: str = Field(..., min_length=1, max_length=2000,
+                     description="课程链接（B站 / YouTube 等）")
+    parent_id: Optional[int] = Field(None, description="导入到哪个文件夹（空=根目录）")
+    transcript_source: str = Field(
+        "auto", pattern="^(auto|subtitle|asr)$",
+        description="auto=字幕优先，无字幕才语音转写；subtitle=只要字幕；asr=强制转写")
+    asr_model: str = Field("", max_length=100,
+                           description="转写模型名；留空取 .env 的 ASR_MODEL")
+    languages: List[str] = Field(default_factory=list,
+                                 description="字幕语言优先级；留空用默认（中文优先）")
+
+
 @router.get("/kb/tree")
 async def get_tree(user_id: int = Depends(get_current_user)):
     """获取当前用户的目录树（嵌套结构，供前端渲染）"""
@@ -79,12 +112,18 @@ async def upload_file(file: UploadFile = File(...),
     """
     上传文件并自动解析 + 向量化。
 
-    支持格式: PDF / Word(docx) / PPT(pptx) / Markdown / TXT / 代码文本 / 图片(png,jpg等,需RapidOCR)
+    支持格式: PDF / Word(docx) / PPT(pptx) / Markdown / TXT / 代码文本 / 字幕(srt,vtt)
+             / 图片(png,jpg等,需RapidOCR)
     parent_id 通过 query 参数传入（multipart 无法在 Body 中传整数字段）。
     """
+    # 先按 Starlette 解析出的 size 挡一道（大文件不进内存）；读完再兜底复核
+    if file.size and file.size > MAX_UPLOAD_BYTES:
+        raise _UPLOAD_TOO_LARGE
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="上传文件为空")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise _UPLOAD_TOO_LARGE
 
     try:
         node_id = await kb_manager.upload_and_index(
@@ -99,6 +138,132 @@ async def upload_file(file: UploadFile = File(...),
     except Exception as e:
         logger.error(f"上传文件失败: {e}")
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  视频课程导入（链接 → 讲义 → 知识库）
+# ══════════════════════════════════════════════════════════════════
+
+# 同一用户同时只跑一个导入：下载 + 转写是分钟级长任务，并发会同时打满带宽与 API 额度
+_LECTURE_INFLIGHT: set[int] = set()
+
+
+def _lecture_filename(url: str) -> str:
+    """用归一化后的视频标识当文件名。
+
+    不能再用"URL 尾段"：多 P 视频（`?p=3`）与裸 BV 号都会取错，前者还会让同一稿件的
+    各分 P **互相覆盖**（静默的数据丢失）。归一化的细节见 `kb/bili/urls.py`。
+    """
+    stem = bili_urls.normalize(url).filename_stem or "lecture"
+    return f"课程讲义-{stem}.md"
+
+
+async def _run_lecture_import(user_id: int, task_id: str, url: str,
+                              parent_id: Optional[int],
+                              transcript_source: str, asr_model: Optional[str],
+                              languages: tuple) -> None:
+    """后台导入：取词 → 入库 → 通知。异常转成用户可见提示，不让用户干等。
+
+    进度走 `IMPORT_PROGRESS`（**瞬态**，见 event_bus.notify 的 persist 说明）；
+    终态仍是 `KB_UPDATED` / `ERROR`（落库，用户不在线也能补拉）。
+    """
+    workdir = Path(tempfile.mkdtemp(prefix="kb-lecture-"))
+
+    def progress(stage: str, **info) -> None:
+        notify(user_id, IMPORT_PROGRESS, {"task_id": task_id, "stage": stage, **info},
+               persist=False)
+
+    try:
+        text, meta = await video_import.fetch_lecture(
+            url, workdir, user_id=user_id, transcript_source=transcript_source,
+            asr_model=asr_model, languages=languages, on_progress=progress,
+        )
+        filename = _lecture_filename(url)
+        node_id = await kb_manager.upload_and_index(
+            user_id=user_id, filename=filename,
+            content=text.encode("utf-8"), parent_id=parent_id,
+        )
+        logger.info("课程导入完成 user=%s node=%s source=%s 来自 %s",
+                    user_id, node_id, meta.get("source"), url)
+        progress("done", node_id=node_id, filename=filename,
+                 source=meta.get("source_label") or meta.get("source"),
+                 chars=meta.get("chars", 0), title=meta.get("title", ""))
+        notify(user_id, KB_UPDATED, {"node_id": node_id, "filename": filename,
+                                     "title": meta.get("title", "")})
+    except Exception as e:
+        logger.warning("课程导入失败 user=%s url=%s: %s", user_id, url, e)
+        progress("failed", message=str(e))
+        notify(user_id, ERROR, {"message": f"课程导入失败：{e}"})
+    finally:
+        _LECTURE_INFLIGHT.discard(user_id)
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+@router.get("/kb/import/probe")
+async def import_probe(user_id: int = Depends(get_current_user)):
+    """外部依赖探测（yt-dlp / ffmpeg / 转写模型名），供前端提前提示，避免用户白等"""
+    return video_import.probe()
+
+
+@router.get("/kb/bili/login/qrcode")
+async def bili_login_qrcode(user_id: int = Depends(get_current_user)):
+    """生成 B 站扫码登录二维码（返回 PNG data URL）。
+
+    **凭证只留在服务端**：这里只回二维码与轮询键，cookie 值永不进浏览器。
+    登录态是**服务端级**的采集凭据（与 `BILI_COOKIE` 同一定位），不按用户分区。
+    """
+    try:
+        info = await asyncio.to_thread(bili_login.generate)
+        image = await asyncio.to_thread(bili_login.qr_png_data_url, info["url"])
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"qrcode_key": info["qrcode_key"], "image": image}
+
+
+@router.get("/kb/bili/login/poll")
+async def bili_login_poll(qrcode_key: str,
+                          user_id: int = Depends(get_current_user)):
+    """轮询扫码状态：`waiting` / `scanned` / `expired` / `success` / `error`。
+
+    `success` 时凭证已落盘（`data/bili/cookies.txt`），前端只需刷新 `import/probe`。
+    """
+    try:
+        return await asyncio.to_thread(bili_login.poll, qrcode_key)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001 - 网络/接口异常统一转成可读提示
+        raise HTTPException(status_code=502, detail=f"B 站登录轮询失败：{e}")
+
+
+@router.post("/kb/import/lecture")
+async def import_lecture(req: LectureImportRequest,
+                         user_id: int = Depends(get_current_user)):
+    """
+    导入视频课程链接为讲义并入库（**后台长任务**，立即返回）。
+
+    复刻 course2md 的取词策略：**平台字幕优先**（零 API 成本、不需要 ffmpeg），
+    无字幕才下载音频 → ffmpeg 抽音轨 → 云端语音转写。
+    完成后经 `kb_updated` 通知前端刷新；失败经 `error` 通知并说明原因。
+    """
+    if user_id in _LECTURE_INFLIGHT:
+        raise HTTPException(status_code=409, detail="已有课程正在导入，请等它完成再试")
+    try:
+        # 只查**这条链接这个模式**真正需要的依赖：B 站字幕直取零依赖可跑，
+        # 不该因为没装 yt-dlp 就把能跑的那条路也拒掉
+        video_import.require_available(req.url, req.transcript_source,
+                                       req.asr_model or None)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    _LECTURE_INFLIGHT.add(user_id)
+    task_id = uuid.uuid4().hex[:12]
+    runtime.spawn(_run_lecture_import(
+        user_id=user_id, task_id=task_id, url=req.url, parent_id=req.parent_id,
+        transcript_source=req.transcript_source, asr_model=req.asr_model or None,
+        languages=tuple(req.languages) or video_import.DEFAULT_SUBTITLE_LANGS,
+    ))
+    return {"status": "started", "task_id": task_id,
+            "message": "已开始导入，完成后会通知你"}
 
 
 @router.delete("/kb/node/{node_id}")

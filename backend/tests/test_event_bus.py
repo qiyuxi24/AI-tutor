@@ -18,9 +18,10 @@ import json
 from app.core import event_bus
 from app.core.agent import events as agent_events
 from app.core.agent.events import AgentEventEmitter, NullSink
+from app.core import notices
 from app.core.event_bus import (
     broadcast, notify, subscribe, get_user_queue,
-    GRAPH_UPDATED, ERROR, TOOL_START, TOOL_RESULT,
+    GRAPH_UPDATED, ERROR, TOOL_START, TOOL_RESULT, IMPORT_PROGRESS,
     THINKING, TEXT_DELTA, AGENT_START, AGENT_DONE,
 )
 from app.services.chat_service import _consume_agent_events
@@ -159,6 +160,23 @@ def test_notify_unsubscribed_user_does_not_raise():
     """notify 给未订阅的用户 → 不报错，留库待补拉（A2-3 起不再"静默丢弃"）。"""
     _reset_state()
     notify(888, TOOL_RESULT, {"tool": "rag_search", "ok": True})
+    _reset_state()
+
+
+def test_terminal_notice_is_recoverable_by_reconnect(tmp_path):
+    """终态（如 kb_updated）必须落库：用户关掉页面回来还要能看到结果。"""
+    _reset_state()
+    notify(1, GRAPH_UPDATED, {"node_id": "x"}, db_dir=tmp_path)
+    pending = notices.take_pending(1, db_dir=tmp_path)
+    assert pending and pending[0]["node_id"] == "x"
+    _reset_state()
+
+
+def test_transient_notice_is_not_persisted(tmp_path):
+    """导入进度是瞬态：落库会让重连补拉到一串过期步骤，显示成"卡在第 3 步"。"""
+    _reset_state()
+    notify(1, IMPORT_PROGRESS, {"stage": "transcribe"}, db_dir=tmp_path, persist=False)
+    assert notices.take_pending(1, db_dir=tmp_path) == []
     _reset_state()
 
 

@@ -56,6 +56,24 @@ class Settings:
     fallback_model_name: str = ""
     # 嵌入服务地址（默认阿里云；与对话 base 分离，切换对话模型不影响嵌入）
     embed_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    # 语音转写模型名（视频课程导入用，走 OpenAI 兼容 /audio/transcriptions）：
+    # **与对话模型不是同一个**（把 deepseek-chat 发过去必然 400），故单独一项。
+    # 留空 = 未启用，导入接口会明确要求指定（不猜一个不存在的默认模型名）。
+    # 例：ASR_MODEL=whisper-1（OpenAI/Groq）或 qwen3-asr-flash（阿里 DashScope 兼容模式）
+    asr_model: str = ""
+    # B 站登录态。三种形态，按"显式优先"取第一个有值的：
+    #   BILI_COOKIE              —— 手贴 Cookie 头（`SESSDATA=…; bili_jct=…`）
+    #   BILI_COOKIE_FILE         —— Netscape 文件（yt-dlp 与平台字幕接口共用）
+    #   BILI_COOKIES_FROM_BROWSER —— **自动导入**：直接读本机浏览器登录态，
+    #                               取值 `edge` / `chrome` / `firefox` / `chrome:Profile 1`
+    #                               ⚠️ 该浏览器要**完全退出**：运行中会独占锁住 cookie 库
+    #                               （yt-dlp 复制不出来；Windows 上实测如此）
+    # 留空 = 不带登录态 → 会员课/私享视频下载与 AI 总结字幕会失败（公开课不受影响）。
+    # **只从服务端配置读、绝不接受请求传入**：否则就是一个"按任意路径读文件"的接口，
+    # 以及与"凭证明文只留在服务端"的既有约定冲突。
+    bili_cookie: str = ""
+    bili_cookie_file: str = ""
+    bili_cookies_from_browser: str = ""
 
     # ─── 认证 ───
     secret_key: str = ""
@@ -118,6 +136,10 @@ class Settings:
             embed_base_url=os.getenv(
                 "EMBED_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
             ),
+            asr_model=os.getenv("ASR_MODEL", ""),
+            bili_cookie=os.getenv("BILI_COOKIE", ""),
+            bili_cookie_file=os.getenv("BILI_COOKIE_FILE", ""),
+            bili_cookies_from_browser=os.getenv("BILI_COOKIES_FROM_BROWSER", ""),
             secret_key=os.getenv("SECRET_KEY", ""),
             jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
             access_token_expire_minutes=int(

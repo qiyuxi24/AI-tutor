@@ -34,6 +34,7 @@ const items = [
   { id: 'chat', title: '对话', icon: 'chat' },
   { id: 'dashboard', title: '学习进度', icon: 'dashboard' },
   { id: 'graph', title: '知识图谱', icon: 'graph' },
+  { id: 'lecture', title: '视频导入', icon: 'lecture' },
   { id: 'quiz', title: '出题', icon: 'quiz' },
 ]
 
@@ -82,6 +83,17 @@ function handleUserMenu(action) {
           <line x1="7.5" y1="6.5" x2="15.8" y2="8.4" />
           <line x1="16.5" y1="8.8" x2="13.1" y2="17" />
           <line x1="7.3" y1="7.3" x2="10.7" y2="16.8" />
+        </svg>
+        <!-- 视频导入图标（film） -->
+        <svg v-else-if="item.icon === 'lecture'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
+          <line x1="7" y1="2" x2="7" y2="22" />
+          <line x1="17" y1="2" x2="17" y2="22" />
+          <line x1="2" y1="12" x2="22" y2="12" />
+          <line x1="2" y1="7" x2="7" y2="7" />
+          <line x1="2" y1="17" x2="7" y2="17" />
+          <line x1="17" y1="17" x2="22" y2="17" />
+          <line x1="17" y1="7" x2="22" y2="7" />
         </svg>
         <!-- 出题图标（测验/试题） -->
         <svg v-else-if="item.icon === 'quiz'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -298,7 +310,7 @@ function handleUserMenu(action) {
 }
 
 .ab-user-label {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
 }
 

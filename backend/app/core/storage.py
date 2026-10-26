@@ -80,6 +80,15 @@ def keys_dir() -> Path:
     return DATA_ROOT / "keys"
 
 
+def bili_dir() -> Path:
+    """B 站登录态域根（`bili/cookies.txt`，扫码登录写入）。
+
+    ⚠️ 这是**凭证**（SESSDATA 等）：不进版本库（`.gitignore` 已列 `/data/bili/`），
+    也不随用户分区 —— 它是服务端级的采集凭据，与"每用户模型 Key"不同。
+    """
+    return DATA_ROOT / "bili"
+
+
 def knowledge_dir() -> Path:
     """图谱域根（`knowledge.db` + `nodes/`）"""
     return DATA_ROOT / "knowledge"

@@ -145,6 +145,8 @@ backend/data/
 /data/agent_runs/
 /data/agent_debug/
 /data/keys/
+# B 站扫码登录落盘的 cookie（**凭证**：SESSDATA 等，删掉即退出登录）
+/data/bili/
 
 # 下载缓存（采集/抓取类的哈希名 blob，3.6 MB；本地保留、不入库 —— 提交比赛材料时别把缓存带进仓库）
 data-gym-cache/
@@ -228,21 +230,15 @@ pytest-of-*/
 # B 个人过程记录（历程复盘、决策归档、演示与待议记录）
 /docs/项目历程_决策与效果记录.md
 /docs/知识沉淀_跨会话决策归档.md
-/docs/架构/演示操作卡.md
-/docs/架构/演示预演记录_*.md
-/docs/架构/待拍板问题_*.md
-/docs/架构/可演示事实清单.md
+/docs/架构/演示口径与操作卡.md
 /docs/归档/
 # C 调研 / 学习 / 对标类文档（与当前实现无对应的方案/契约者仍保留在 docs/）
 /docs/调研对标/
 /docs/教育资料采集/
-/docs/AgentLoop/AgentLoop_业界调研与学习路线.md
-/docs/RAG/RAG_参考资料与学习路线.md
-/docs/工程实践/Git_多人协作_工作流调研与学习路径.md
-/docs/工程实践/AI编码Skill_ponytail实测与通用Skill选型.md
+# ⚠ 2026-10-12 文档收敛：AgentLoop_业界调研 / RAG_参考资料 / 工程实践 Git_与 ponytail /
+#    上下文工程 token_consumption / 知识图谱_论文与开源实现调研 已移入 docs/归档/（整目录已忽略）；
+#    Docker_学习路径 仍在 docs/ 下，继续单独列出。
 /docs/运维部署/Docker_学习路径与工程化部署.md
-/docs/上下文工程/token_consumption_prediction_research.md
-/docs/知识图谱/知识图谱_论文与开源实现调研.md
 # E AI 工具定义与孤立配置（agent 定义；根 package.json 仅 d3，install.ps1 只装 frontend/）
 /.codebuddy/agents/
 /package.json

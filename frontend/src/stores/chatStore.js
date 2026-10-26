@@ -27,6 +27,7 @@
 
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import { ElMessage } from 'element-plus'
 import { sendMessageStream, apiClient } from '../api/index.js'
 // 注：空回复文案改用 E-CLIENT-008（`clientError('CHAT_EMPTY')`）——比通用 E-COMM-007
 // 更准确，且直接指向「可重试」；因此不再需要 fmt / ErrorDefs。
@@ -94,6 +95,12 @@ export const useChatStore = defineStore('chat', () => {
   const loading = ref(false)
   // 知识库上下文范围（用户选择放进对话上下文的文件/文件夹）
   const kbContext = ref(null)
+  // 知识库变更序号：视频课程导入等**后台长任务**完成后由 SSE 递增，
+  // 知识库面板 watch 它来重新拉目录树（导入是分钟级任务，请求早已返回，只能靠推送）
+  const kbEpoch = ref(0)
+  // 视频课程导入进度（**瞬态**：后端不落库，晚到就没有意义）→ 导入页 watch 它渲染步骤条。
+  // 只保留最后一条：步骤条是"当前状态"而不是历史。
+  const importProgress = ref(null)
 
   // ─── 知识图谱状态 ───
   const knowledgeNodes = ref([])
@@ -728,8 +735,17 @@ export const useChatStore = defineStore('chat', () => {
           } else if (data.type === 'quiz_ready') {
             // 对话内出题完成（后台任务，约 40s 后到达）→ 追加一条题目消息
             handleQuizReady(data)
+          } else if (data.type === 'kb_updated') {
+            // 知识库变更完成（视频课程导入等分钟级后台任务）→ 通知知识库面板刷新
+            handleKbUpdated(data)
+          } else if (data.type === 'import_progress') {
+            // 导入进度（瞬态）→ 视频导入页的步骤条消费；其余页面不关心
+            importProgress.value = data
           } else if (data.type === 'error') {
             console.warn(`[SSE Error] ${data.code} | ${data.module}: ${data.message}`, data.detail || '')
+            // 后台任务（如课程导入）的失败只能经这条通道到达 → 必须浮出来，
+            // 否则用户点了「导入」后永远等不到任何结果，也无法区分成功与失败
+            if (data.message) ElMessage.error(data.message)
           }
         } catch { /* ignore parse errors */ }
       }
@@ -818,6 +834,17 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * 知识库变更完成（视频课程导入等**分钟级后台任务**）→ 递增 `kbEpoch`。
+   *
+   * 为什么不用请求响应：导入要下载 + 转写，请求早就返回了（返回的只是"已开始"），
+   * 结果只能靠推送。面板 watch `kbEpoch` → 重新拉目录树，无需轮询。
+   */
+  function handleKbUpdated(data) {
+    kbEpoch.value += 1
+    if (data?.filename) ElMessage.success(`已导入知识库：${data.filename}`)
+  }
+
+  /**
    * 补拉离线期间产生的通知（A2-3）。
    *
    * 为什么需要：出题是后台任务（约 40s 才回），这段时间里用户可能关掉页面或断网，
@@ -831,9 +858,11 @@ export const useChatStore = defineStore('chat', () => {
       for (const notice of data?.notices || []) {
         if (notice.type === 'quiz_ready') handleQuizReady(notice)
         else if (notice.type === 'graph_updated') refreshGraph()
+        else if (notice.type === 'kb_updated') handleKbUpdated(notice)
         else if (notice.type === 'error') {
           console.warn(`[SSE Error] ${notice.code} | ${notice.module}: ${notice.message}`,
                        notice.detail || '')
+          if (notice.message) ElMessage.error(notice.message)
         }
       }
     } catch {
@@ -1228,6 +1257,8 @@ export const useChatStore = defineStore('chat', () => {
     currentNode,
     loading,
     kbContext,
+    kbEpoch,
+    importProgress,
     currentConversation,
     currentMessages,
     currentTitle,
