@@ -291,12 +291,15 @@ async def test_trace_persisted_to_agent_runs(tmp_path):
         assert runs[0]["status"] == "ok"
         assert runs[0]["total_llm_calls"] >= 1
 
-        # 详情：evidence 证据序列可合法读取（至少 final_text 一步）
+        # 详情：evidence 证据序列可合法读取（含 final_text 一步）
+        # 注意：收尾还会追加一条 loop_stop（终止原因证据，见 core/agent/loop.py::_finish），
+        # 因此这里断言"存在 final_text"而不是"最后一条是 final_text"——后者是顺序耦合。
         run = run_store.get_run(uid, runs[0]["run_id"], db_dir=tmp_path / "agent_runs")
         assert run is not None
         assert len(run["evidence"]) >= 1
-        assert run["evidence"][-1]["kind"] == "final_text"
-        assert run["evidence"][-1]["text"]
+        finals = [e for e in run["evidence"] if e["kind"] == "final_text"]
+        assert finals, "证据序列里应含 final_text 条目"
+        assert finals[-1]["text"]
         # rounds 摘要仍保留（向后兼容）
         assert run["final_text"] == result.text
         print(f"  [INFO] run={run['run_id']}  rounds={len(run['evidence'])} 步证据")
