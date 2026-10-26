@@ -149,4 +149,7 @@ live 首验（未重启即生效，说明宿主对 bundle 变更会 live 吸收�
 - `node .dsh_local/smoke-plugin-shell.mjs` → **36 通过 / 0 失败**（含上述重载回归）。
 - 修复版 tgz `48,597,811 B` / 4396 files，包内 `index.js` 含注销逻辑（`tar -xOzf … package/index.js | grep 注销` 命中）。
 - 隔离宿主（web2，全新解包修复版）boot → `GET http://127.0.0.1:3080/ai-tutor/graph?limit=1` → **HTTP 200 / 2236 B**，真实 13 学科数据。
+- **live 配置形态已在隔离宿主复刻验证**：新建隔离 profile `liveclone`（拷 web2 的 node_modules，bundles = base + web-app + dsh-ai-tutor，`cordis.patch.yml` 与 live 完全同形：`- id: ai-tutor` / `name: dsh-ai-tutor` / `config:` / `dataRoot: <repo>/data`）→ CLI boot 后 `doctor --host http://127.0.0.1:3080` **10 通过 / 0 失败**，`/ai-tutor/graph` **200**、`nodeCount 22`，且响应里 `dataRoot` 正确回显 `C:\Users\34239\Documents\GitHub\AI-tutor\data` → **patch 配置写法本身没问题，不会造成重复注册**；live 的 502 是"改配置触发插件重载 + 旧路由未注销"。
 - live 55448 上仍是 502（旧进程里的泄漏路由无法从外部摘除）→ **重启宿主后复验**。
+
+**顺带记一条坑**：在 **CLI 宿主**里改 profile 的 `cordis.patch.yml` 会按 `patchReload: live` 重载**整棵插件树**，webserver 二次 listen 撞端口 → `failed to apply loader entry webserver: listen EADDRINUSE 127.0.0.1:3080`（进程退出码 1）。即：CLI profile 里不要用"改 patch 文件"当热重载手段；桌面宿主对同样变更的处理不同（不崩，但会走重载并留下泄漏路由 —— 本次 502 就是这样产生的）。
