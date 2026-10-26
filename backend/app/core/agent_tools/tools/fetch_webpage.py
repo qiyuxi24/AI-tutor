@@ -8,12 +8,13 @@
 给模型看的 `DESCRIPTION` / `GUIDANCE` **保持不变**（对模型而言本工具仍不是"入库后可检索"的
 正规途径，改了反而会让它当 download_resource 用）；只有人手写的注释同步了存档行为。
 
-安全与限额：SSRF 检查走 `..net_guard`（唯一实现）；单次请求 10s 超时；
+安全与限额：SSRF 检查走 `core.net_guard`（唯一实现）；单次请求 10s 超时；
 返回文本截断到 `max_chars`（默认 3000，上限 20000）。
 
 存档（2026-09-22 追加，失败静默）：HTML → Markdown 复用采集模块的
 `collector.adapters.web_page.extract_main_text`（trafilatura → readability，**全库唯一实现**）。
-因 `web_page` 反过来 import 了本包 `net_guard`，此处**必须在函数内惰性 import** 以避开包级环。
+`../web_archive.py` 仍在函数内惰性 import：它连着 `knowledge_writer` 与采集栈，
+工具模块 import 期不必付这个成本（net_guard 上移 `core/` 后已无包级环约束）。
 
 ponytail: 正则剥标签（`_RE_BLOCK` / `_RE_TAG`）不是完整 HTML 解析器 —— 对正文抽取够用，
       引入 readability/bs4 收益不抵一个新依赖；遇到结构特别怪的站点再换。
@@ -27,7 +28,7 @@ import httpx
 
 from app.core.error_codes import ErrorCode, log_error
 
-from ..net_guard import is_blocked_url
+from app.core.net_guard import is_blocked_url
 from ..registry import TIER_FREE, _spec
 
 logger = logging.getLogger("ai-tutor")

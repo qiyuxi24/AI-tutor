@@ -6,8 +6,10 @@
     dispatch.py   ② 调用中间件：参数解析 → 错误映射 → 同步/异步双入口执行
     tools/        ③ 15 个原生工具，**一个工具一个模块**（spec + handler 自包含）→ tools/README.md
     mcp_host.py   ④ MCP 适配器：从 MCP server 的 `tools/list` 取回同构 spec
-    net_guard.py  SSRF 防护能力层（URL 类工具共用，唯一实现）
     README.md     机制说明（改架构前必读）
+
+SSRF 防护（`is_blocked_url`）**不在本目录**：2026-10-26 上移到 `core/net_guard.py` ——
+它被采集适配器 / KB 导入 / `/llm/models` 共用，放在工具包内会让「谁 import 谁」成环。
 
 启动时组装：原生工具（`tools.NATIVE_SPECS`）+ MCP 工具（`mcp_tool_specs()`）。
 MCP 未启用 / 连接失败时 `mcp_tool_specs()` 返回 []，原生工具行为完全不变。

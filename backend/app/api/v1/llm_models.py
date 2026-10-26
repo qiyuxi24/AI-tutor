@@ -10,7 +10,10 @@
 
 安全：API Key 只在服务端保存，任何响应都只回掩码（`api_key_masked`）。
 用户隔离：`user_id` 一律取自 token，不接受请求参数 —— 越权面为零。
+**SSRF**：`base_url` 会被服务端出站请求（探测 / 真实对话）→ 一律过 `net_guard.is_blocked_url`
+（全库唯一 SSRF 防线），拒绝内网/回环/保留地址 —— 否则登录用户可借 base_url 探测内网。
 """
+import asyncio
 import logging
 from typing import Literal
 
@@ -18,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
+from app.core.net_guard import is_blocked_url
 from app.core.auth import get_current_user
 from app.core.config import settings
 from app.core.llm.clients import MODEL_NAME
@@ -58,6 +62,16 @@ def _require(user_id: int, model_id: str) -> None:
         raise HTTPException(404, "模型不存在")
 
 
+async def _validate_base_url(url: str) -> None:
+    """校验用户配置的 base_url 不指向内网（SSRF 防线，唯一实现见 `core/net_guard.py`）。
+
+    DNS 解析会阻塞，放线程里跑；拒绝时把原因回给用户（可自纠正）。
+    """
+    reason = await asyncio.to_thread(is_blocked_url, url)
+    if reason:
+        raise HTTPException(400, f"base_url 不被允许：{reason}")
+
+
 def _snapshot(user_id: int) -> dict:
     """列表响应 = 用户配置 + 系统默认档信息（界面要显示"没配时用的是什么"）。"""
     body = _store(user_id).snapshot()
@@ -73,6 +87,7 @@ async def list_models(user_id: int = Depends(get_current_user)):
 @router.post("/llm/models")
 async def create_model(body: ModelCreateRequest,
                        user_id: int = Depends(get_current_user)):
+    await _validate_base_url(body.base_url)
     return _store(user_id).add(name=body.name, base_url=body.base_url,
                                api_key=body.api_key, model=body.model)
 
@@ -81,6 +96,8 @@ async def create_model(body: ModelCreateRequest,
 async def update_model(model_id: str, body: ModelUpdateRequest,
                        user_id: int = Depends(get_current_user)):
     _require(user_id, model_id)
+    if body.base_url is not None:
+        await _validate_base_url(body.base_url)
     store = _store(user_id)
     fields = body.model_dump(exclude_unset=True, exclude={"status"})
     result = store.update(model_id, **fields) if fields else store.get(model_id)
@@ -122,5 +139,7 @@ async def test_model(model_id: str, user_id: int = Depends(get_current_user)):
     _require(user_id, model_id)
     store = _store(user_id)
     entry = store.secret(model_id)
+    # 存量数据可能早于 SSRF 校验落地 → 真打之前再复核一次
+    await _validate_base_url(entry["base_url"])
     ok, error = await _probe_model(entry["base_url"], entry["api_key"], entry["model"])
     return store.mark_test(model_id, ok, error)

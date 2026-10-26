@@ -27,7 +27,7 @@ app/core/agent_tools/
 │   ├── fetch_webpage.py / download_resource.py / rag_search.py   （资料 3 个）
 │   └── quiz_generate.py / grade_answer.py          （教学检验 2 个）
 ├── mcp_host.py      ④ MCP 适配 —— tools/list → 同构 spec（schema 直通，失败降级为空）
-├── net_guard.py     ⑤ SSRF 防护能力层 —— URL 类工具共用的安全边界（唯一实现）
+├── （SSRF 防护 net_guard 已上移 `core/net_guard.py`，2026-10-26：采集/KB/API 也要用）
 └── README.md        本文（机制层）
 ```
 
@@ -65,7 +65,7 @@ app/core/agent_tools/
 | `dispatch.py` | **调用中间件**：解析参数 → 执行 handler → 异常隔离为文案 | stdlib（`asyncio`/`inspect`/`json`）+ `error_codes`（日志）+ `.registry`（查表） | 不知道注册了哪些工具、不做超时控制 |
 | `tools/` | **工具定义（叶子）**：每个工具一个模块，`DESCRIPTION` / `PARAMETERS` / `GUIDANCE` / `handler` / `SPEC` | `.registry._spec` + 领域模块 | 不做分发、不拼提示词 |
 | `mcp_host.py` | **MCP 适配**：连 server → `tools/list` → 同构 spec | `mcp` SDK + `config` + `error_codes` | 不定义工具、不碰注册表内部 |
-| `net_guard.py` | **SSRF 能力层**：`is_blocked_url` | stdlib（`socket`/`ipaddress`） | 不认识任何工具 |
+| `core/net_guard.py` | **SSRF 能力层**：`is_blocked_url`（2026-10-26 上移出本包） | stdlib（`socket`/`ipaddress`） | 不认识任何工具 |
 | `__init__.py` | **组装与门面**：`register(*NATIVE_SPECS)` + `register(*mcp_tool_specs())` | 上面五者 | 除组装外无逻辑 |
 
 ---
@@ -109,7 +109,7 @@ app/core/agent_tools/
         │  registry  →  dispatch                        │
         │      ↑          ↑                             │
         │   tools/ ───────┘ (只注册，不被 dispatch 感知) │
-        │      │  └→ net_guard (SSRF，URL 类工具共用)    │
+        │      │  └→ core.net_guard (SSRF，URL 入口共用) │
         │  mcp_host.py ──→ register()                   │
         └───────┬──────────────────────────────────────┘
                 │ 单向：tools → 领域模块
@@ -165,7 +165,7 @@ Python 包机制：`import app.core.agent_tools.registry` 会**先执行包的 `
 | 6 | **超时不在本目录**（由 `agent/loop.py` 用 `tool_timeout_secs()` 包住） | 超时变得不可观测（无事件/无证据步骤） |
 | 7 | **MCP 工具无 `guidance` → 回落其 `description`** | 若给 MCP 工具在本目录硬写说明，又变回"宿主维护第二份" |
 | 8 | **提示词只引用已注册的工具名** | 模型会去调不存在的工具（这就是 2026-09-15 修的那个 bug） |
-| 9 | **URL 类工具必须过 `net_guard.is_blocked_url`** | SSRF：模型可诱导服务端请求内网地址 |
+| 9 | **URL 类工具必须过 `core/net_guard.is_blocked_url`** | SSRF：模型可诱导服务端请求内网地址 |
 | 10 | **一个工具一个模块，模块名 = 工具名** | 破坏后"找工具"又要跨文件搜索（这就是 09-15 拆分的动机） |
 
 其中 3、5、8 与"每工具只被记录一次"由 `tests/test_tools_registry.py` 自动看守。

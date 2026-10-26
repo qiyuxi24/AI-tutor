@@ -29,7 +29,8 @@ async def handler(args, kg) -> str:
     urls = {str(u).strip() for u in (args.get("urls") or []) if str(u).strip()}
     mode = get_usage_mode(kg.user_id)
 
-    # 惰性 import：collector 适配器反向依赖本包 net_guard，模块级 import 会成包级环
+    # 惰性 import：collector 栈较重（适配器注册表 + 站点表 + http 客户端），
+    # 只在这个工具真被调用时拉起（net_guard 上移 core 后，这里已无"包级环"约束）
     from app.core.collector.manager import collector_manager
 
     cands = await collector_manager.search(subject, mode)

@@ -20,8 +20,8 @@
 | `add_edge` | `add_edge.py` | 图谱 | `KnowledgeGraph` | 关系不明确**不要**连边（质量 > 数量） |
 | `delete_node` | `delete_node.py` | 图谱 | `KnowledgeGraph` | 人类建的删不掉，别重试 |
 | `update_user_profile` | `update_user_profile.py` | 画像 | `core/profile/` | 结构化字段只填学生**明说**的事实；`goals` 是追加语义 |
-| `fetch_webpage` | `fetch_webpage.py` | 资料 | 本模块 + `core/knowledge_writer.create_node_from_webpage`（+ `../net_guard.py`、`core/open_source.py`） | **只读**返回；抓到的正文同时存档为图谱节点（origin="web"），但**只存档开放许可来源** |
-| `download_resource` | `download_resource.py` | 资料 | 本模块（+ `../net_guard.py`、`core/open_source.py`） | **留存**，入库才能被检索；**只采开放许可来源**（fail-closed） |
+| `fetch_webpage` | `fetch_webpage.py` | 资料 | 本模块 + `core/knowledge_writer.create_node_from_webpage`（+ `core/net_guard.py`、`core/open_source.py`） | **只读**返回；抓到的正文同时存档为图谱节点（origin="web"），但**只存档开放许可来源** |
+| `download_resource` | `download_resource.py` | 资料 | 本模块（+ `core/net_guard.py`、`core/open_source.py`） | **留存**，入库才能被检索；**只采开放许可来源**（fail-closed） |
 | `rag_search` | `rag_search.py` | 资料 | `core/rag_pipeline/` | `hops` 只反向补前置，字面不相似但必须先学 |
 | `quiz_generate` | `quiz_generate.py` | 检验 | `core/quiz/chat_quiz.py` | **`async def`** + 后台任务 + `timeout_secs=90` |
 | `grade_answer` | `grade_answer.py` | 检验 | `core/quiz/chat_quiz.py` | **`async def`**；掌握度**唯一主信号** |
@@ -103,7 +103,7 @@ SPEC = _spec("<工具名>", DESCRIPTION, PARAMETERS, handler, guidance=GUIDANCE,
 
 ---
 
-## 5. SSRF 防护 = `../net_guard.py`（一个能力层，不是三份检查）
+## 5. SSRF 防护 = `core/net_guard.py`（一个能力层，不是三份检查）
 
 所有「按 URL 取内容」的工具（目前 `fetch_webpage` / `download_resource`）都能被模型
 **任意构造 URL** 调用 —— SSRF 是这条路径上唯一的安全防线，所以它单独成模块：
@@ -203,7 +203,7 @@ venv/Scripts/python.exe -c "from app.core.agent_tools import KG_TOOLS, TOOLS_PRO
 | 位置 | 关系 |
 |---|---|
 | `../README.md` | **机制层**：注册表 / 分发 / 不变量 / 三份产物怎么生成 |
-| `../net_guard.py` | 本目录 URL 类工具共用的 SSRF 防御 |
+| `core/net_guard.py` | 所有 URL 类入口共用的 SSRF 防御（2026-10-26 从本包上移） |
 | `../mcp_host.py` · `app/mcp_servers/README.md` | 第 12 个工具（MCP）从哪来 |
 | `AGENTS.md` §2 | 「加工具 = 1 处定义 + 3 份产物自动生成」的契约行 |
 | `docs/项目历程_决策与效果记录.md` | 「为什么掌握度主信号是判分」「为什么要跨调用去重」的历史 |

@@ -4,10 +4,12 @@
 （采集页 web 抓取 / 联网搜索后自动存档 / `fetch_webpage` 存档 / `download_resource` 入库），
 而授权知识（哪些站点开放、页面写了什么许可）只该有一份。
 
-定位同 `agent_tools/net_guard.py`（安全边界的能力层），但**放 core 根**，因为：
+定位：安全 / 合规边界的能力层，**放 core 根**。`core/net_guard.py`（SSRF）2026-10-26
+按同一条理由从 `agent_tools/` 上移到这里，两个能力层现在同族：
 - 放 `agent_tools/` → `collector` 与 `mcp_servers` 都要依赖 `agent_tools` 包；
 - 放 `collector/` → `agent_tools` 顶层 import 会触发 `collector/__init__`（→ manager → adapters），
-  而 `collector/adapters/web_page.py` 反过来 import `agent_tools.net_guard` → **包级环**；
+  而 `collector/adapters/web_page.py` 又 import SSRF 判定 → **包级环**（这正是 `net_guard`
+  长期被迫"函数内惰性 import"的原因）；
 - 所以本模块**只依赖 stdlib**（连 `collector/types.py` 都不 import），
   出口直接用既有 `L0/L1/L2/L3` 字面量（语义见 `collector/types.py`：L3 本就是「版权不明/明确禁止」）。
 

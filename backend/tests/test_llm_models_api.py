@@ -30,6 +30,8 @@ def ctx(tmp_path, monkeypatch):
     """TestClient + 配置落 tmp_path + 可切换登录用户。"""
     state = {"uid": USER}
     monkeypatch.setattr(llm_api, "_store", lambda uid: ModelStore(uid, data_dir=tmp_path))
+    # SSRF 校验会解析 DNS（全离线环境必然失败）→ 默认放行；拒绝语义由专门用例覆盖
+    monkeypatch.setattr(llm_api, "is_blocked_url", lambda url: None)
 
     from app.main import app
     app.dependency_overrides[get_current_user] = lambda: state["uid"]
@@ -69,6 +71,21 @@ def test_create_validates_input(ctx):
     client, _ = ctx
     assert client.post(URL, json=_payload(base_url="not-a-url")).status_code == 422
     assert client.post(URL, json={"name": "x"}).status_code == 422
+
+
+def test_create_rejects_loopback_base_url(ctx, monkeypatch):
+    """base_url 指向回环/内网 → 400（SSRF 防线）。
+
+    用真实 `is_blocked_url`（`ctx` 默认放行是为离线 DNS）；`127.0.0.1` 命中 host 层
+    快速拦截、无需 DNS。否则登录用户可借 base_url 让服务器探测内网 / 云元数据。
+    """
+    from app.core.net_guard import is_blocked_url as real_is_blocked
+
+    monkeypatch.setattr(llm_api, "is_blocked_url", real_is_blocked)
+    client, _ = ctx
+    r = client.post(URL, json=_payload(base_url="http://127.0.0.1:8080/v1"))
+    assert r.status_code == 400
+    assert "不被允许" in r.json()["detail"]
 
 
 def test_probe_marks_available_then_unavailable(ctx, monkeypatch):

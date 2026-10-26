@@ -5,7 +5,8 @@
 - `mcp_host.py`：AI 联网搜索（`mcp__websearch__web_search`）之后，把结果页正文抓下来存档 ——
   否则「搜了」等于什么都没留下（搜索只返回标题/链接/摘要，没有正文，会话结束即丢）。
 
-定位同 `net_guard.py`：不属于任何单个工具，放工具目录之外，被多处复用。
+定位：不属于任何单个工具，放工具目录之外，被多处复用（同族但更底层的
+`net_guard` 2026-10-26 已上移到 `core/net_guard.py`，因为采集/KB 也要用）。
 
 约定（改动请守住）：
 - SSRF 一律过 `net_guard.is_blocked_url`（**唯一实现**，此处不另写校验）；
@@ -29,7 +30,7 @@ import httpx
 from app.core.config import settings
 from app.core.open_source import classify, is_open
 
-from .net_guard import is_blocked_url
+from app.core.net_guard import is_blocked_url
 
 logger = logging.getLogger("ai-tutor")
 
@@ -88,8 +89,8 @@ def page_urls_from_search_text(text: str, limit: Optional[int] = None) -> list[s
 def archive_html(kg, url: str, raw_html: str, title: str = "") -> Optional[str]:
     """HTML → Markdown → 图谱节点（失败/无正文返回 None，只记 warning）。
 
-    Markdown 转换复用采集模块的唯一实现（**惰性 import**：`web_page` 反过来 import 了本包的
-    `net_guard`，顶层 import 会形成包级环）。
+    Markdown 转换复用采集模块的唯一实现（**惰性 import**：`web_page` 拉采集栈、
+    `knowledge_writer` 拉写入栈，工具 import 期不必付这个成本）。
     """
     if kg is None or not (raw_html or "").strip():
         return None

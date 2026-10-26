@@ -7,7 +7,7 @@
                      下载 bytes → 解析 → 分块 → 入知识库（`kb_manager`），
                      之后可被 `rag_search(source="kb")` 检索到。
 
-安全边界（SSRF 沿用 `..net_guard`，唯一实现不重复）：
+安全边界（SSRF 沿用 `core.net_guard`，唯一实现不重复）：
 - 协议限 http/https；拒绝内网/回环/私有 IP
 - **只采开源来源**：许可不明 / 非开放许可一律不下载（判定唯一实现 = `core/open_source.py`）——
   本工具产出的是「长期留存 + 可被 rag_search 检索」的内容，属真正的采集，故 fail-closed
@@ -15,10 +15,8 @@
 - 扩展名白名单 = kb 解析器注册表（`is_supported`），不支持则不入库半成品
 """
 
-import asyncio
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
@@ -29,7 +27,7 @@ from app.core.error_codes import ErrorCode, log_error
 from app.core.kb.parsers import is_supported, supported_label
 from app.core.open_source import is_open
 
-from ..net_guard import is_blocked_url
+from app.core.net_guard import is_blocked_url
 from ..registry import _spec
 
 logger = logging.getLogger("ai-tutor")
@@ -62,23 +60,18 @@ _CT_EXT = {
     "text/plain": ".txt",
     "text/markdown": ".md",
     "text/html": ".html",
+    "application/x-subrip": ".srt",
+    "text/vtt": ".vtt",
 }
 
-# 同步→异步桥：与 rag_search / mcp_host / kg_taxonomy 同一约定（各持单例池互不干扰）
-_POOL = ThreadPoolExecutor(max_workers=1)
-
-
 def _run_async(coro):
-    """在同步上下文里跑协程（当前线程无事件循环则直接 run，否则丢线程池）。
+    """同步→异步桥：复用**主 loop**（`core/runtime.py::run_sync`）。
 
-    ⚠️ 各工具**刻意各持单个例池**（本工具 1 个 worker、`rag_search` 2 个）：
-    合并成一个共享池会让一次慢下载占满池、阻塞检索。见 `../tools/README.md`。
+    旧实现各工具各持一个临时 loop 线程池；但入库要嵌入（AsyncOpenAI 单例）+
+    `kb_manager` 的连接/缓存都绑主 loop，跨 loop 复用会静默降级。现统一走主 loop。
     """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    return _POOL.submit(asyncio.run, coro).result()
+    from app.core import runtime
+    return runtime.run_sync(coro)
 
 
 def _sanitize(name: str, max_len: int = 80) -> str:

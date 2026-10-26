@@ -1,16 +1,27 @@
-"""SSRF 防护能力层 —— 所有「按 URL 取内容」的工具共用的安全边界（全库唯一实现）。
+"""SSRF 防护能力层 —— 所有「按 URL 取内容」的入口共用的安全边界（全库唯一实现）。
 
-为什么单独一个模块：`fetch_webpage` 与 `download_resource` 都能被模型**任意构造 URL** 调用，
-SSRF 是这两条路径上唯一的安全防线。它既不属于任何一个工具（两个工具都要用），
-也不属于注册表/分发中间件（那是机制层）—— 所以放在包内、工具目录之外。
+为什么在 `core` 根、不在 `agent_tools/`
+----------------------------------------
+它既不属于任何一个工具（工具、采集适配器、KB 导入、`/llm/models` 都要用），
+也不属于注册表/分发中间件。原先放在 `agent_tools/net_guard.py`，代价是**包级环**：
+`collector/adapters/web_page.py` 反过来 import 它 → `agent_tools/__init__` 被触发 →
+又 import tools → tools 又 import collector。为绕开这个环，`fetch_webpage` /
+`web_archive` / `search_resources` / `collect_resources` / `video_import` 五处不得不
+写成**函数内惰性 import**，而"为什么必须惰性"这件事只能靠注释口口相传。
+
+2026-10-26 上移到 `core/net_guard.py`（与 `core/open_source.py` 同族：都是"安全/
+合规能力层，位置在能力所在层，不在调用方"），环随之消失，`video_import` 与
+`web_archive` 的 net_guard 引用已改回模块级 import。
 
 两道检查（缺一不可）：
 1. 协议必须 http/https；host 命中 `localhost` / `127.0.0.1` / `::1` / `0.0.0.0` / `169.254.*` → 拒绝
 2. **解析 DNS 之后**再判 IP（`ipaddress`：private / loopback / link-local / reserved / multicast）
    → 防 `attacker.com` 解析到 `10.0.0.1`
 
-调用方：`tools/fetch_webpage.py`、`tools/download_resource.py`。
-新增 URL 类工具时**必须**先过 `is_blocked_url` —— 这是「永不简化」的范畴。
+调用方（改这里之前先数一遍）：`agent_tools/tools/fetch_webpage.py`、
+`tools/download_resource.py`、`agent_tools/web_archive.py`、
+`collector/adapters/web_page.py`、`kb/video_import.py`、`api/v1/llm_models.py`。
+新增 URL 类入口时**必须**先过 `is_blocked_url` —— 这是「永不简化」的范畴。
 """
 
 import socket

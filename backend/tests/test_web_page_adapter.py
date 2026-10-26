@@ -256,3 +256,11 @@ def test_fetch_refuses_ssrf_blocked_url():
             await http.close()
 
     assert _run(go()) == ""
+
+
+def test_ssrf_guard_has_a_single_home():
+    """SSRF 判定只有一份（`core/net_guard.py`）：旧位置别再建 module，否则双实现必然漂移。"""
+    import importlib.util
+
+    assert importlib.util.find_spec("app.core.net_guard") is not None
+    assert importlib.util.find_spec("app.core.agent_tools.net_guard") is None

@@ -1,7 +1,7 @@
 """通用网页正文采集适配器（B3.2，任意网页 → 正文 Markdown）
 
 取正文漏斗（决策 #5，2026-09-05 定）：**trafilatura 主用 → readability-lxml 后备 → 双失败即弃**。
-不做多级复杂兜底（YAGNI，见 docs/教育资料采集模块_设计讨论.md §6.2）。
+不做多级复杂兜底（YAGNI，见 docs/教育资料采集/教育资料采集模块_设计讨论.md §6.2）。
 
 候选来源与其它适配器不同：没有站点级搜索通道（决策 §8「只用开放 API/白名单源，
 不逆向对抗」），候选由用户直接给定 URL（`candidate_from_url`），因此 `search()` 恒返回 []。
@@ -11,7 +11,7 @@
 个人模式可采 L0~L2、商用仅 L0 —— 判定复用 `types.ALLOWED_LICENSE`，不在此重复一份模式规则。
 
 安全：本适配器是唯一「按用户给定 URL 取内容」的采集路径，SSRF 必须过
-`agent_tools.net_guard.is_blocked_url`（全库唯一实现，AGENTS.md「永不简化」项）；
+`core.net_guard.is_blocked_url`（全库唯一实现，AGENTS.md「永不简化」项）；
 `guard` 可注入以便测试免 DNS。
 """
 
@@ -23,7 +23,7 @@ from html import unescape
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
-from app.core.agent_tools.net_guard import is_blocked_url
+from app.core.net_guard import is_blocked_url
 from app.core.collector.adapters.base import BaseAdapter
 from app.core.open_source import SITE_LEVELS
 from app.core.collector.http import CollectorHttp
