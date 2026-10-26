@@ -1,13 +1,13 @@
 # AI Tutor 已完成模块归档（DONE）
 
-> 用途：`TODO.md` / `TODO_Collector.md` 的**完成侧归档**。待办留在原文件，做完的**搬**到这里（不是复制）。
+> 用途：`TODO.md` 的**完成侧归档**。待办留在 `TODO.md`，做完的**搬**到这里（不是复制）。
 >
 > **维护约定**
 > 1. **只追加，不重写**：新完成项追加到对应分节末尾；无对应分节就在文件末尾新建 `## <模块名>`。整文件重写既白烧 token，也有覆盖他人改动的风险。
 > 2. 本文件是**历史台账**，不是契约；实现细节以代码 docstring 与 `docs/*.md` 为准。
 > 3. 迁出时保留日期与关键证据（文件 / 测试名），便于回溯"当时验证到哪一步"。
 >
-> 来源：`TODO.md`（2026-09-13 迁出 P0/P1 已完成项 + 原「✅ 已完成（归档）」节）、`TODO_Collector.md`（B1/B2 已完成项）。
+> 来源：`TODO.md`（2026-09-13 迁出 P0/P1 已完成项 + 原「✅ 已完成（归档）」节）、`TODO_Collector.md`（B1/B2 已完成项；该文件已于 2026-10-11 并入 `TODO.md`）。
 > 上次整理：2026-09-13（最近追加：2026-10-10 §4.5 真流式）
 
 ---
@@ -111,7 +111,7 @@
 
 ### 4.3 图谱生成质量 P0：同名并轨 + 去重不静默 + 可复现体检（2026-09-20，GQ-1~3）
 - 由来：对 user 5 的书籍建图结果全量审计（311 节点 / 659 边 / 23 组同名重复 / 42.5% 空壳），
-  结论与量化目标见 `TODO_Graph_Quality.md`。
+  结论与量化目标见 `TODO.md` §4。
 - **GQ-1 写入层精确同名合并**：`knowledge_graph.normalize_node_name()`（NFKC + 去空白 + 剥
   「（复习）/_extended/小结…」碎片尾缀）与 `KnowledgeGraph.find_node_by_name(name, subject)`
   是判重**唯一实现**，`create_node_with_content` 命中已有节点则并轨（**返回实际落点 ID**，
@@ -125,7 +125,7 @@
 - **GQ-3 质检脚本**：`backend/scripts/inspect_graph_quality.py`（默认只读）：规模/深度、
   L1 同名组 + L2 字符串相似对（不依赖嵌入）、空壳率、结构健康（悬空边/自环/重复边/前置环/
   孤立/连通分量）、tags 分布异常、字段填充、拓扑。**体检基线口径由脚本固化**（与手工审计
-  的差异原因见 `TODO_Graph_Quality.md` §0.1）。
+  的差异原因见 `backend/scripts/inspect_graph_quality.py` 注释）。
 - 证据：`tests/test_node_write_paths.py`（14 例，含建图路径并轨/幂等/学科隔离/去重状态）、
   `tests/test_graph_quality_script.py`（4 例，判重边界 + 合并动作）；全量 `770 passed, 7 deselected`。
 
@@ -266,10 +266,10 @@
 - **口径变更（非回归）**：`test_web_page_adapter.py` 5 处（L2→L3 / 未登记构造不出候选）、`test_collector_adapters_registry.py` 1 处（web_page 兜底等级 L2→L3）。
 - 夹具适配：`test_web_archive.py` / `test_webpage_node_bridge.py` 加 autouse fixture、`test_download_tool.py` 扩 `_install()` —— 把夹具域名列入开放来源，否则 fail-closed 会先拦掉，测不到各自机制本身。
 - 测试：`test_open_source.py` 25 例（判定）+ `test_open_source_paths.py` 6 例（接线）；离线全量 **859 passed, 7 deselected**（新增 31 例，既有 828 例全绿、无转红）。
-- 方案 / 禁区 / 未做项（robots、留痕、搜索侧过滤）：`docs/采集与联网查阅_只采开源来源_计划.md`。
+- 方案 / 禁区 / 未做项（robots、留痕、搜索侧过滤）：`docs/教育资料采集/采集_网页正文与开放来源_实施方案.md` §三。
 
 ### 7.4 正文预览 + 维基正文修复（2026-09-23）
-- **知识库正文预览**（用户："那些 md 看不到内容"）：`GET /kb/node/{node_id}/text` + `kb_manager.get_document_text`（读正文唯一出口）+ `KbTextPreviewDialog.vue`；`KbPanel` 文件节点「查看正文」按钮与**双击文件**两个入口。落点较原方案 §4 改为知识库侧直读（同样覆盖手动上传文件），详见 `docs/采集_网页正文Markdown预览_方案.md` §12。
+- **知识库正文预览**（用户："那些 md 看不到内容"）：`GET /kb/node/{node_id}/text` + `kb_manager.get_document_text`（读正文唯一出口）+ `KbTextPreviewDialog.vue`；`KbPanel` 文件节点「查看正文」按钮与**双击文件**两个入口。落点较原方案 §4 改为知识库侧直读（同样覆盖手动上传文件），详见 `docs/教育资料采集/采集_网页正文与开放来源_实施方案.md` §2.6。
 - **`wikitext_to_md` 修「字有问题」**（真网《贪心算法》原文 `'''贪心算法'''（{{langx|en|greedy algorithm}}）` 被整段丢模板 → 入库成「贪心算法（）」）：内容型模板（`lang*` / `transl` / `nowrap` / `nobr` / `ipa` / `langue` / `rtl-lang`）改取**末个非空参数**，维护型（`{{Expand}}`/`{{NoteTA}}`…）仍整体丢弃；顺带清 `__NOTOC__` 等魔术字、HTML 注释/标签（`<code>` → 行内代码）、图片链接（`[[File:]]`/`[[文件:]]` 整条丢）、空列表项与游离 `[[`/`]]`。
 - 真网前后对比（只读核对）：《贪心算法》`（）` → `（greedy algorithm）`；《树 (数据结构)》`（）` → `（tree）` 且 9471→8376 字（图片说明等噪声被清）；《数据结构与算法术语列表》`__NOTOC__` 消失。
 - 测试：`test_wikipedia_adapter.py` 新增 4 例（内容型模板保留 / 维护型仍丢 / 魔术字与 HTML 残渣 / 图片链接整条丢）。
@@ -298,3 +298,19 @@
 - 两处 `_embed()` 合并统一门面（2026-09-12，`embed_texts` 唯一出口 + 部分返回整批作废，杜绝 chunk/向量错位）
 - 商用过滤 node 白名单语义确认 → 落于 `kb_manager.allowed_node_ids()`
 - 「usage_mode」存取方式确认 → 复用 `PATCH /profile`
+
+## 11. 硬伤修复（2026-10-11，审计驱动）
+
+一次针对「会导致故障 / 数据损坏 / 静默错误」的全库审计后修复。回归：后端全量 **1654 passed**（`-m "not llm_api"`）、`backend-admin` **43 passed**。
+
+- **删除即出 RAG 索引收口**：`KnowledgeGraph.remove_node` / `remove_subject` 内调 `_purge_rag_index_for_nodes`。原先只有 API 层两处显式清，Agent 的 `delete_node` 工具 / AI 建议采纳（`merge_ai_suggestion`）走 kg 直删会留索引 → 已删知识点仍被 S6 按需检索注入。回归 `tests/test_kg_rag_purge.py`（`tests/test_api_delete_subject.py` 相应收窄为只锁 HTTP 契约）。
+- **同步→异步桥统一复用主 loop**（新模块 `core/runtime.py`）：`rag_search` / `download_resource` / `kg_taxonomy` 三处同步桥原先各自 `asyncio.run` 新建临时 loop → 在临时 loop 里复用 `llm/clients.py` 的 AsyncOpenAI 单例会**静默降级**（嵌入返回 `[]` → RAG 退化 BM25-only；归属判定返回 `{}` → 节点落「未分类」）。现 `run_sync` 优先 `run_coroutine_threadsafe` 回主 loop（`main.py` lifespan 注册 / 关闭清除），无主 loop 才退回临时 loop。同模块 `spawn` 统一保后台任务强引用（裸 `asyncio.create_task` 返回值无人持有，任务可能被 GC → `chat_quiz._INFLIGHT` 永不释放 → 该用户永久「已有一道题在生成中」）；接线 `chat_service` ×2 / `chat_quiz` / `section_generator` / `rag_pipeline.sources`。回归 `tests/test_runtime_bridge.py`。
+- **SSRF**：`/llm/models` 的 `base_url` 一律过 `net_guard.is_blocked_url`（新建 / 修改 / 探测三处），拒绝内网 / 回环 / 保留地址。回归 `tests/test_llm_models_api.py::test_create_rejects_loopback_base_url`。
+- **运维后台默认密钥拒绝启动**：`Settings.require_secret_key()` 在 lifespan 校验，未配 `ADMIN_SECRET_KEY` 直接拒启（原默认密钥公开在源码里，任何人可伪造后台 JWT）。回归 `backend-admin/tests/test_admin_api.py`。
+- **断连取消 agent 任务**：`process_message_stream` 的 `finally` 取消仍在跑的 `agent_task` —— 客户端关页后它会继续用已关闭的 kg（sqlite "Cannot operate on a closed database"）并白烧额度。回归 `tests/test_learn_stream_path.py`。
+- **上传体积上限**：`/kb/upload` 加 50MB 上限（原 `await file.read()` 整文件入内存且无限制）。
+
+**未做（明确记录）**：
+- `get_current_user` 不校验 `users.status`（禁用账号旧 token 仍可用至过期）—— 每请求加一次 DB 读、且会波及大量用 `get_current_user_from_token` 的测试；更优解是 token 版本号（新列 + 迁移），另立需求。
+- `index_user_graph` 全量重建「先清空后重建、中途失败无回滚」（可重跑修复，非静默损坏）。
+- 删 KB 文件不回收图谱侧 `doc_node_marks` / `nodes.sources` 引用（ghost 引用，影响较轻）。

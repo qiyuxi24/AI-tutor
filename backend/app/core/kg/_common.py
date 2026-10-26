@@ -177,7 +177,7 @@ def subject_from_tags(tags) -> str:
 
 
 # ── L0 溯源（GQ-18）：节点的 `sources` JSON 数组 ──────────────────────
-# 元素固定五键，唯一真值见 docs/知识图谱/知识图谱_多资料综合维护调研.md §4 L0。
+# 元素固定五键，唯一真值见 docs/知识图谱/知识图谱_外部调研_论文开源与多源融合.md §4 L0。
 # 去重键 = (doc_id, chunk_id, section)：同一资料的同一段落反复抽取只留一条
 # （幂等键的落地形态，供 GQ-19 的「按资料增量」复用）。
 SOURCE_ID_KEY = ("doc_id", "chunk_id", "section")

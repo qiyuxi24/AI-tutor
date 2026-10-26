@@ -29,7 +29,7 @@ from app.core.llm.messages import build_api_messages
 __all__ = ["AgentContext", "assistant_snapshot",
            "TOOL_RESULT_CLEARED", "TOOL_RESULTS_KEEP_BATCHES"]
 
-# S8 Tool Result Clearing（2026-09-15，TODO_Context P1-③，Anthropic「工具结果可重放」）：
+# S8 Tool Result Clearing（2026-09-15，TODO.md P1-③，Anthropic「工具结果可重放」）：
 # 清掉的是正文，模型需要时能重新调用工具取回；保留最近 K 个批次 = 当前推理链。
 TOOL_RESULT_CLEARED = "[已清理的工具结果，需要时请重新调用]"
 TOOL_RESULTS_KEEP_BATCHES = 2

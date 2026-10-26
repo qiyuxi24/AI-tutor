@@ -180,6 +180,6 @@ backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"
 | `docs/上下文工程/上下文工程_预算框架.md` | **配额 SSOT**：九段配额、让位顺序、触发阶梯 |
 | `docs/上下文工程/上下文工程_调研与差距审计.md` | 现状审计 + 业界/学术调研 + 实施记录 |
 | `docs/AgentLoop/AgentLoop_重构设计讨论.md` | loop 的设计决策（路线 A、护栏、事件/记录整合） |
-| `docs/AgentLoop/AgentLoop_业界调研与学习路线.md` | 业界 Agent 模式调研 |
+| `docs/归档/AgentLoop/AgentLoop_业界调研与学习路线.md` | 业界 Agent 模式调研 |
 | `AGENTS.md` §3 | 本包的内部契约与已知耦合（对外索引） |
 | `backend/app/core/agent_tools/README.md` | 上游：工具注册表与执行 |

@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.core.kb import graph_generator as gg  # noqa: E402
 from app.core.kb.kb_manager import chunk_text  # noqa: E402
 
-# 旧实现的基线（2026-09-20 全量审计，见 TODO_Graph_Quality §0）
+# 旧实现的基线（2026-09-20 全量审计，见 TODO.md §4）
 BASELINE_MEDIAN_CHARS = 241
 BASELINE_SHALLOW_RATIO = 0.25
 TARGET_MEDIAN_CHARS = 600

@@ -1,10 +1,10 @@
 <!-- base: CONTRIBUTING.md @ c54d571 (2026-09-12). English mirror of the Chinese contribution guide — keep both in sync; spec: docs/工程实践/README_编写规范.md §6. -->
 
-# Contributing to AI Tutor
+# Contributing to AI-tutor
 
 [简体中文](CONTRIBUTING.md) ｜ **English**
 
-Thank you for your interest in AI Tutor — whether you are here to report a bug, fix documentation, or contribute knowledge-graph data for a new subject, this guide has one goal: **get you running the project within 10 minutes and show you how to submit your change**.
+Thank you for your interest in AI-tutor — whether you are here to report a bug, fix documentation, or contribute knowledge-graph data for a new subject, this guide has one goal: **get you running the project within 10 minutes and show you how to submit your change**.
 
 ---
 
@@ -111,7 +111,7 @@ Guiding principle: **follow the existing style and layering of the repository fi
 | New tools | Create one module per tool under `core/agent_tools/tools/` (copy any module and edit five spots), then add one line to `NATIVE_SPECS` in `tools/__init__.py`. See `core/agent_tools/tools/README.md`. |
 | Comments | Only where the "why" is not obvious; do not narrate what the code does line by line. |
 
-> Changing the architecture (splitting modules, altering contracts, changing table schemas)? Read the architecture contract and the "known couplings and pitfalls" section in [`AGENTS.md`](AGENTS.md) first, then open an issue to discuss.
+> Changing the architecture (splitting modules, altering contracts, changing table schemas)? Read the architecture contract and the "known couplings and pitfalls" section in the relevant package's `README.md` first, then open an issue to discuss.
 
 ---
 
@@ -160,7 +160,7 @@ Requirements:
 - [ ] Manual path: (describe the screens or endpoints you exercised)
 
 ## Impact
-- [ ] Does it change architecture contracts / table schemas / environment variables (if so, update AGENTS.md and .env.example)
+- [ ] Does it change architecture contracts / table schemas / environment variables (if so, update the matching docs and .env.example)
 - [ ] Are both the Chinese and English documents in sync (see section 6)
 ```
 
@@ -221,4 +221,4 @@ Patches generated or rewritten with AI **are welcome**, provided that:
 
 ---
 
-Thanks for the time you spend on AI Tutor — happy hacking.
+Thanks for the time you spend on AI-tutor — happy hacking.

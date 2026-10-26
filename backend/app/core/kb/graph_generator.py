@@ -16,12 +16,12 @@
 学科建模：复用 tags 标签，节点 tags 中第一个非难度标签即学科名
 （如 "数据结构"），实现"每个学科单独一张图"。
 
-设计（**自顶向下三阶段建图**，2026-09-26 重写；见 TODO_Graph_Quality §5.0）：
+设计（**自顶向下三阶段建图**，2026-09-26 重写；见 TODO.md §4）：
 - 数据来源：KbStore.get_document_text(node_id) 读取解析后的纯文本
 - **切分（2026-09-21 重写）**：build_section_tree 按真实标题层级建树 → collect_units
   **递归**把树切成"刚好一个生成单元"大小的切片（下限 1500 / 上限 5000 字符，
   相邻碎块自动合并）。旧实现按固定 3000 字符滑窗切，实测平均仅 570 字符/块
-  → 模型上下文撑不起深度 → 节点正文中位 241 字、25% 不足 200 字（见 TODO_Graph_Quality §1.1）。
+  → 模型上下文撑不起深度 → 节点正文中位 241 字、25% 不足 200 字（见 TODO.md §4）。
 - **阶段 ① · 全局概念树**（`_call_concept_tree_llm` → `_write_concept_tree`）：**一次**看全部
   资料的「目录 + 章节标题 + 摘要片段」（`_render_outline`，**不喂全文** —— 大书会撑爆上下文），
   产出该学科的全局概念树（30~80 个概念），概念本体落为 `content_status='skeleton'`
@@ -141,7 +141,7 @@ GRAPH_JSON_RETRIES = 1
 # 阶段 ① 只看「全部资料的目录 + 标题 + 摘要片段」，**一次**定出全局概念树（板块→概念 + 边）：
 #   结构要**全局一致**，必须一次看全，不能逐单元局部规划（单元边界 ≠ 概念边界）。
 # 阶段 ② **一次一个概念**独立写正文：内容要**局部深度**，注意力与输出预算不被分摊。
-# 两者粒度**刻意不同**：结构粗、内容细（TODO_Graph_Quality §5.0）。
+# 两者粒度**刻意不同**：结构粗、内容细（TODO.md §4）。
 GRAPH_CONCEPT_TREE_SYSTEM_PROMPT = """你是一个「学科知识图谱架构师」。我会给你：①《学科》的**现有概念树**（对账基准，可能为空）；②一份**新资料的目录结构**（章节标题 + 内容摘要片段）。请把这份资料与现有概念树**对账**，定出该学科概念树应如何演进。
 
 **这一步决定知识图谱的粒度，最重要**：概念树里**每一个概念 = 图谱里一个节点**。宁可少而整，绝不多而碎。
@@ -814,7 +814,7 @@ class GraphGenerator:
                 [self._node_signature(n) for n in existing_nodes]
         vectors = embedder.embed(texts)
         if not vectors or len(vectors) != len(texts):
-            # 曾因嵌入欠费静默返回 {} → 18 组重复无人察觉（见 TODO_Graph_Quality §2.1）
+            # 曾因嵌入欠费静默返回 {} → 18 组重复无人察觉（见 TODO.md §4）
             self._dedup_status = "unavailable"
             logger.warning(
                 f"语义去重未生效：嵌入服务不可用（{embedder.name} 返回 "

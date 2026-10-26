@@ -182,3 +182,18 @@ backend\venv\Scripts\python.exe -m pytest backend/tests -q -m "not llm_api"   # 
 ```
 
 评测产物目录 `backend/eval_data/graph_eval/` 与 `kb_eval/` 为临时数据，可用 `--keep-graph` / `--keep-index` 加速二次运行。
+
+---
+
+## 九、未采纳的候选方案（并入自 `RAG_召回与重排优化调研.md`）
+
+> **来源**：原 `docs/RAG/RAG_召回与重排优化调研.md`（2026-08-30，本次并入后**已删除**）。其「宽召回（向量/BM25 各取 Top-30）+ 精排取 Top-5」已落地；其「建议把加权融合升级为 RRF」一节已被本报告 §4.3 实测**推翻**。下列为截至目前的**未采纳项**，摘录保留备查（含被推翻项，标注原因）。
+
+| 方案 | 依据 | 预期收益 | 未采纳原因 |
+|---|---|---|---|
+| **RRF 作为默认融合** | RAG-Fusion，arXiv **2402.03367** | "对权重不敏感、天然支持多路/多查询" | **已被数据推翻**：本报告 §4.3 四个场景加权融合全面优于 RRF。`rrf_fuse` 仅保留给**多查询/多路融合**（只看排名、对分数尺度不敏感时仍有价值，见 KG-D10） |
+| **HyDE**（用"假设答案"的向量检索） | arXiv **2312.04467** | 零样本召回 **+15–25%**，仅 1 次 LLM 调用 | 未做；`call_llm` 即可实现，待"检索层已达标"的基线再评估 |
+| **Query Expansion / Multi-Query + RRF** | RAG-Fusion，arXiv 2402.03367 | 召回 **+10–15%** | 未做；检索次数 ×N，耗时约 1.77× |
+| **Cross-Encoder 精排（Rerank）** | BGE-Reranker / Cohere | 排序质量提升（"最高 ROI 的检索升级"） | 未做：本地 BGE 需 torch（重）；免模型重排（RRF + path 加权）已由宽召回/融合覆盖 |
+
+> HyDE 与精排仍在 `TODO.md` P2（见本报告 §七 第 4 条）。

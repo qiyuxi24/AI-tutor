@@ -11,7 +11,7 @@
   POST   /profile/avatar           - 上传头像（multipart，字段名 file）
   DELETE /profile/avatar           - 恢复默认头像（幂等）
 
-头像刻意**不放进画像 JSON**（见 docs/用户头像_设计与实施方案.md §5.1）：画像是要注入
+头像刻意**不放进画像 JSON**（见 docs/前端小组件_设计与实现.md §2.5）：画像是要注入
 系统提示词的文本，塞二进制既烧 token 又多一份泄漏面；它的"有无"由本组端点的 404 表达。
 """
 

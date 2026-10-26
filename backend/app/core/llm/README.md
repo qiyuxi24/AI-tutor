@@ -168,6 +168,6 @@ venv/Scripts/python.exe -m pytest tests/test_agent_loop_real_api.py -q -m llm_ap
 | 位置 | 关系 |
 |---|---|
 | `../../agent/loop.py` | 带工具的多轮调用方（唯一使用 `chat_create` / `chat_create_stream` 的业务路径） |
-| `docs/AgentLoop/AgentLoop_业界调研与学习路线.md` · `docs/AgentLoop/AgentLoop_重构设计讨论.md` | Agent Loop 侧设计 |
-| `docs/上下文工程/token_consumption_prediction_research.md` | token 计费与预估（`agent/estimator.py` 的依据） |
+| `docs/归档/AgentLoop/AgentLoop_业界调研与学习路线.md` · `docs/AgentLoop/AgentLoop_重构设计讨论.md` | Agent Loop 侧设计 |
+| `docs/归档/上下文工程/token_consumption_prediction_research.md` | token 计费与预估（`agent/estimator.py` 的依据） |
 | `AGENTS.md` §0 | 三段 key / 模型配置的真值位置 |

@@ -1,7 +1,7 @@
 # MCP 网页搜索工具 · 调研与实施方案
 
 > 调研日期：2026-09-12　|　调研人：AI Agent（含本机实测数据）　|　状态：**待拍板后实施**
-> 一句话结论：**用官方 MCP Python SDK v2 写一个薄 MCP server（~200 行），搜索能力复用开源库 `ddgs`（MIT，零 API key）；传输 stdio + Streamable HTTP 双支持；AI Tutor 侧新增 `core/mcp/` 宿主层把它并入现有工具注册表。**
+> 一句话结论：**用官方 MCP Python SDK v2 写一个薄 MCP server（~200 行），搜索能力复用开源库 `ddgs`（MIT，零 API key）；传输 stdio + Streamable HTTP 双支持；AI-tutor 侧新增 `core/mcp/` 宿主层把它并入现有工具注册表。**
 > 关键实测：本机当前网络下，**`ddgs` 走必应后端可正常返回中文结果（1~2 秒/次）**，DuckDuckGo / Brave / Google 全部不可达。
 
 ---
@@ -12,7 +12,7 @@
 |---|---|
 | 协议 | MCP **2026-07-28** 版规范（当前最新），用官方 `mcp` Python SDK **v2.2.0**（MIT，2026-09-07 发布） |
 | 交付物 ① | 独立可跑的 MCP server：`backend/mcp_servers/web_search/`，暴露 1 个工具 `web_search`，stdio / Streamable HTTP 双传输，可被 Claude Desktop / Cursor / 本仓库复用 |
-| 交付物 ② | AI Tutor 内的 **MCP 宿主层** `core/mcp/`：动态连接 MCP server、发现工具、注入 `_TOOL_SPECS`，本轮先接 web_search，未来任何 MCP server 即插即用 |
+| 交付物 ② | AI-tutor 内的 **MCP 宿主层** `core/mcp/`：动态连接 MCP server、发现工具、注入 `_TOOL_SPECS`，本轮先接 web_search，未来任何 MCP server 即插即用 |
 | 搜索后端 | 默认 `ddgs`（MIT，无需 key）；预留 `SearXNG`（AGPL，自托管）与商业 API（博查）适配位 |
 | 不做什么 | 不引入 Tavily/Exa/Brave 等需外网 key 的商业后端为默认；不改动现有 8 个原生工具的语义；不动 `fetch_webpage` |
 | 风险最高点 | ① `mcp` v2 依赖与项目现状的解析兼容（新增 `httpx2` / `sse-starlette>=3` / `opentelemetry-api`）② in-memory MCP 会话在 `asyncio.to_thread` 线程中的可用性 —— 两者都需 **阶段 0 PoC 先验证** |
@@ -27,12 +27,12 @@
 
 | # | 理解 | 说明 | 采用 |
 |---|---|---|---|
-| A | **自研一个 MCP server** 提供网页搜索工具，并让 AI Tutor 作为 MCP 客户端接入 | 既产出可独立分发的开源 MCP server，又让产品具备联网搜索能力 | ✅ |
+| A | **自研一个 MCP server** 提供网页搜索工具，并让 AI-tutor 作为 MCP 客户端接入 | 既产出可独立分发的开源 MCP server，又让产品具备联网搜索能力 | ✅ |
 | B | 只做 MCP server（交给外部宿主用），不接本项目 | 少一半工作量，但项目自身仍不能联网搜索 | 作为阶段 1 中间态 |
 | C | 把网页搜索写成普通工具塞进 `agent_tools._TOOL_SPECS`（不走 MCP） | 最省事，但**不满足「标准 MCP 协议」**要求 | ❌ |
 
 **范围界定**
-- 做：MCP server（标准协议、双传输、开源无 key 后端）+ AI Tutor 宿主层接入 + 测试与错误处理。
+- 做：MCP server（标准协议、双传输、开源无 key 后端）+ AI-tutor 宿主层接入 + 测试与错误处理。
 - 不做（本轮）：搜索结果的 rerank/摘要生成（用 LLM 二次加工会增加 token 与延迟，先不做）；把图谱/RAG 等已有工具全部改造成 MCP 导出（留作后续，宿主层设计已兼容）。
 
 ---
@@ -154,7 +154,7 @@ DDGS().text('Python 教程',   backend='bing,mojeek', …)     → DDGSException
 ### 4.2 推荐架构
 
 ```
-AI Tutor 进程
+AI-tutor 进程
 ├─ core/agent_tools.py  (_TOOL_SPECS 仍是唯一注册入口)
 │     └─ 动态并入 MCP 工具：mcp__websearch__web_search
 │            ▲
@@ -215,7 +215,7 @@ AI Tutor 进程
 | `WEB_SEARCH_PROXY` | 空 | 可选代理（`http://` / `socks5://`），透传给 ddgs |
 | `SEARXNG_URL` | 空 | 配了才启用 searxng 后端 |
 
-### 4.4 AI Tutor 侧接入点（改动清单）
+### 4.4 AI-tutor 侧接入点（改动清单）
 
 | 文件 | 改动 | 量级 |
 |---|---|---|
@@ -245,7 +245,7 @@ AI Tutor 进程
 |---|---|---|---|
 | **0. PoC 排雷** | ① `pip install --dry-run mcp ddgs` 检查依赖解析；② 写 10 行脚本验证 `Client(mcp_obj)` in-memory 在 `asyncio.to_thread` 线程 + `asyncio.run` 新事件循环下能正常 `list_tools/call_tool` | 两个 PoC 都通过 → 走 A1；任一失败 → 退 A2/A3（方案已备） | 0.5 天 |
 | **1. MCP server 独立交付** | `mcp_servers/web_search/`：`web_search` 工具 + ddgs 后端（auto→bing 自建 fallback）+ searxng 适配位 + stdio/http 双传输 + README（含 Claude Desktop 配置示例） | ① `python -m mcp_servers.web_search` 能被 SDK client / MCP Inspector 列出工具并成功调用；② 真实搜索返回中英文结果各一次；③ 后端全挂时返回友好文案不抛异常 | 1 天 |
-| **2. 接入 AI Tutor** | `core/mcp/` 宿主层 + 工具动态注入 + 提示词 + 配置 + 错误码 | ① 对话里问「帮我查一下 XX 最新进展」，agent 自动调用 `mcp__websearch__web_search` 并引用链接；② 行为可回放（`GET /agent/runs/{run_id}` 有该工具 evidence）；③ MCP 关掉后行为与今天完全一致 | 1~1.5 天 |
+| **2. 接入 AI-tutor** | `core/mcp/` 宿主层 + 工具动态注入 + 提示词 + 配置 + 错误码 | ① 对话里问「帮我查一下 XX 最新进展」，agent 自动调用 `mcp__websearch__web_search` 并引用链接；② 行为可回放（`GET /agent/runs/{run_id}` 有该工具 evidence）；③ MCP 关掉后行为与今天完全一致 | 1~1.5 天 |
 | **3. 测试与加固（可选）** | 单测（mock 后端，不联网）+ 联网测试单独标记 + （可选）SearXNG 入 docker-compose + 搜索质量评测脚本 | `pytest -m "not llm_api"` 全绿；联网测试单独 marker 可跳过 | 1 天 |
 
 **测试策略**
@@ -285,7 +285,7 @@ AI Tutor 进程
 ## 8. 待拍板的 3 个决策点
 
 1. **搜索后端**：只用 `ddgs`（零配置、即刻可用，但依赖上游）／还是同时把 **SearXNG** 加进 `docker-compose.yml`（更稳，需要额外服务）？
-2. **交付范围**：阶段 1 只交付「可独立使用的 MCP server」，还是直接连阶段 2 的「接入 AI Tutor」一起做完？
+2. **交付范围**：阶段 1 只交付「可独立使用的 MCP server」，还是直接连阶段 2 的「接入 AI-tutor」一起做完？
 3. **依赖引入**：是否同意给 `backend/requirements.txt` 增加 `mcp>=2,<3` 与 `ddgs>=9.16` 两个依赖（会带来 `httpx2` 等传递依赖）？
 
 ---

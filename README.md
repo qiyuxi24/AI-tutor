@@ -1,5 +1,5 @@
 
-# <center> *AI Tutor* — 知识图谱驱动的自适应导学 Agent </center>
+# <center> *AI-tutor* — 知识图谱驱动的自适应导学 Agent </center>
 
 **简体中文** ｜ [English](README.en.md) 
 
@@ -29,15 +29,15 @@
 
 ## 项目简介
 
-AI Tutor 将 **对话式 AI 家教、知识图谱、学情画像和学习路径** 结合起来。让 AI 从"你问我答"升级为主动导学：它记得你学过什么、看得见知识全貌、能规划下一步学什么，并自动把聊天沉淀成结构化笔记。你可以从一个问题开始学习，把教材放进知识库，在对话中积累结构化笔记，再通过出题自测获得反馈。
+AI-tutor 将 **对话式 AI 家教、知识图谱、学情画像和学习路径** 结合起来。让 AI 从"你问我答"升级为主动导学：它记得你学过什么、看得见知识全貌、能规划下一步学什么，并自动把聊天沉淀成结构化笔记。你可以从一个问题开始学习，把教材放进知识库，在对话中积累结构化笔记，再通过出题自测获得反馈。
 
-| 自学时的困扰 | AI Tutor 的做法 |
+| 自学时的困扰 | AI-tutor 的做法 |
 | :--- | :--- |
 | 知识点零散，不知道先学什么 | 用可视化图谱呈现知识关系，按先修关系推荐学习路径 |
 | 感觉听懂了，却不知道能否独立作答 | 通过 AI 出题与判分更新掌握度，在仪表盘查看薄弱点 |
 | 对话和笔记分散，复习时难以找回 | 将学习内容沉淀为图谱节点和学情画像，供后续教学使用 |
 
-相比通用对话工具（ChatGPT / Kimi）"对话完即忘"、知识管理工具（Notion / Obsidian）"只存不教"、MOOC 平台"千人一面"，AI Tutor 将**对话交互、知识图谱、学情画像、路径推荐**融为一体——它是主动的学习伙伴，不是被动的问答工具。
+相比通用对话工具（ChatGPT / Kimi）"对话完即忘"、知识管理工具（Notion / Obsidian）"只存不教"、MOOC 平台"千人一面"，AI-tutor 将**对话交互、知识图谱、学情画像、路径推荐**融为一体——它是主动的学习伙伴，不是被动的问答工具。
 
 <a id="architecture"></a>
 
@@ -83,7 +83,7 @@ FastAPI -> chat_service -> Agent Loop <-> 对话模型
                      SQLite / Markdown / JSON
 ```
 
-核心入口：[对话编排](backend/app/services/chat_service.py)、[Agent Loop](backend/app/core/agent/loop.py)、[工具注册表](backend/app/core/agent_tools/registry.py)。Agent开发见 [AGENTS.md](AGENTS.md)。
+核心入口：[对话编排](backend/app/services/chat_service.py)、[Agent Loop](backend/app/core/agent/loop.py)、[工具注册表](backend/app/core/agent_tools/registry.py)。各模块的职责与改码约定见对应目录下的 `README.md`。
 
 </details>
 
@@ -292,7 +292,6 @@ AI-tutor/
 ├── .env.example              # 环境配置模板
 ├── docker-compose.yml        # 容器编排
 ├── CONTRIBUTING.md           # 开发、验证与 PR 规范
-└── AGENTS.md                 # 架构契约与开发索引
 ```
 
 图谱、画像、对话和上传资料等运行时数据按用户保存；提交代码时保留提示词模板，排除 `.env`、运行时数据及依赖目录。
@@ -335,13 +334,13 @@ AI-tutor/
 | 你想了解 | 阅读入口 |
 | :--- | :--- |
 | 开发环境、提交约定与贡献流程 | [贡献指南](CONTRIBUTING.md) |
-| 模块职责、工具接入与架构契约 | [开发参考手册](AGENTS.md) |
+| 模块职责、工具接入与架构契约 | 各包目录下的 `README.md` |
 | API 参数与响应 | 启动后访问 [FastAPI /docs](http://localhost:8000/docs) |
 | Agent 设计 | [Agent Loop 重构设计](docs/AgentLoop/AgentLoop_重构设计讨论.md) |
-| 知识库与出题 | [RAG 学习路线](docs/RAG/RAG_参考资料与学习路线.md) · [出题设计](docs/教学模块/QUIZ_出题逻辑调研.md) |
+| 知识库与出题 | [RAG 检索与评测](docs/RAG/RAG_图谱混合检索与真实嵌入评测_报告.md) · [出题设计](docs/教学模块/QUIZ_出题逻辑调研.md) |
 | 联网工具 | [MCP 网页搜索方案](docs/RAG/MCP_网页搜索工具_调研与实施方案.md) |
 | 部署与运营 | [Docker 指南](docs/运维部署/Docker_学习路径与工程化部署.md) · [运维指南](docs/运维部署/运维_生产上线与日常运营指南.md) |
-| Git 协作与双语文档 | [Git 工作流](docs/工程实践/Git_多人协作_工作流调研与学习路径.md) · [README 规范](docs/工程实践/README_编写规范.md) |
+| Git 协作与双语文档 | [Git 工作流](docs/归档/工程实践/Git_多人协作_工作流调研与学习路径.md) · [README 规范](docs/工程实践/README_编写规范.md) |
 | 分模块导读 | [项目 Wiki](https://github.com/qiyuxi24/AI-tutor/wiki) |
 
 遇到问题，请先搜索已有 [Issues](https://github.com/qiyuxi24/AI-tutor/issues)，再提供系统版本、复现步骤、预期结果和去除密钥后的日志。项目由 [qiyuxi24](https://github.com/qiyuxi24) 与[社区贡献者](https://github.com/qiyuxi24/AI-tutor/graphs/contributors)维护，开发讨论见 [Pull requests](https://github.com/qiyuxi24/AI-tutor/pulls)。

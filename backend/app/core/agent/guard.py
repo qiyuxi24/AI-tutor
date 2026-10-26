@@ -7,7 +7,7 @@
 estimated_prompt_tokens 同一口径），超预算则分层压缩并插入省略说明
 ——让模型知道早期内容已归档，而非幻觉式"我记得你很久前说过"。
 
-S8 分层保留（2026-09-15，TODO_Context P1-②，替代原「只丢最旧」）：
+S8 分层保留（2026-09-15，TODO.md P1-②，替代原「只丢最旧」）：
 
     [省略说明 + 被裁轮次要点] + [首条 user 原文（任务锚点）] + [最近 N 轮完整]
 
@@ -36,7 +36,7 @@ from app.core.token_counter import count_messages_tokens
 logger = logging.getLogger("ai-tutor")
 
 # 输出预留：预算框架 §1.2 的 S1 目标（3K）；agent_loop 默认 max_tokens=2000 留有余量
-# （M3 思考与正文共享该预算，见 TODO_Context D-3：是否同步提到 3000 待定）
+# （M3 思考与正文共享该预算，见 TODO.md D-3：是否同步提到 3000 待定）
 OUTPUT_RESERVE = 3000
 
 RECENT_TURNS_KEEP = 3       # 分层保留：完整保留的最近轮数

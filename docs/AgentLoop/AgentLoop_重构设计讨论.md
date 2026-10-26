@@ -1,9 +1,9 @@
 # 对话 Agent 循环（Agent Loop）重构 — 设计讨论
 
-> 状态：**Batch1 已实施（2026-09-06），Batch2+ 待排期**；调研与学习资料见 `docs/AgentLoop/AgentLoop_业界调研与学习路线.md`
+> 状态：**Batch1 已实施（2026-09-06），Batch2+ 待排期**；业界共识骨架见本文 §14（并入自原《AgentLoop_业界调研与学习路线》，原文已归档至 `docs/归档/AgentLoop/`）
 > 创建：2026-09-05
 > 关联：docs/比赛/COMPETITION.md（AIC 技术纵深叙事）、TODO.md、docs/教育资料采集/教育资料采集模块_设计讨论.md（结构范式）
-> 一句话定位：把 AI Tutor 的"两阶段固定脚本"升级为**可观测、有边界、单循环驱动**的真 Agent 循环
+> 一句话定位：把 AI-tutor 的"两阶段固定脚本"升级为**可观测、有边界、单循环驱动**的真 Agent 循环
 
 ---
 
@@ -249,7 +249,7 @@ Agent 循环解决的是"**怎么把一次任务跑对**"，不解决"**这一�
 
 ## 12. 决策记录
 
-- **决策 #1（2026-09-06，范围节奏）**：先调研后实现。产出 `docs/AgentLoop/AgentLoop_业界调研与学习路线.md`（业界共识骨架 + 逐家拆解 + 六事实对照 + Batch1 增量建议）。实施范围选 **Batch1（路线 A）**；Batch3 依赖 qwen 流式 tools 真网验证（DASHSCOPE 403 未恢复）暂缓，Batch2/Batch4 后置。
+- **决策 #1（2026-09-06，范围节奏）**：先调研后实现。产出《AgentLoop_业界调研与学习路线》（业界共识骨架 + 逐家拆解 + 六事实对照 + Batch1 增量建议）——**已并入本文 §14「参照物」，原文归档至 `docs/归档/AgentLoop/`**。实施范围选 **Batch1（路线 A）**；Batch3 依赖 qwen 流式 tools 真网验证（DASHSCOPE 403 未恢复）暂缓，Batch2/Batch4 后置。
 - **决策 #2（循环语义）**：`run_agent_loop` = LLM↔工具多轮串联，二次 tool_calls 不再丢弃。`max_rounds=5`（工具执行轮上限）；达上限**不再执行新工具**，追加"立即停止调用工具"的 user 指令 + 空 tools 强制模型自然收尾（参考 Votek agent_loop）；强制轮空文本/LLM 失败时兜底友好文案。
 - **决策 #3（参数/护栏）**：循环内统一 `temperature=0.3`（放弃旧"后台 0.3/文本 0.7"两档）；单工具 `asyncio.wait_for` 超时 60s（to_thread 执行，不阻塞事件循环）；单工具异常/超时隔离为错误文案回填，循环不炸。
 - **决策 #4（观测/trace）**：rounds 随循环长出（round/tool/args_head/ok/duration_ms/result_head）；`context_tokens` 取各轮 `usage.prompt_tokens` **真值累加**；`save_trace` 落 `backend/data/traces/{user_id}/{run_id}.jsonl`（无工具动作不落盘；落盘失败仅 warning）。
@@ -295,7 +295,7 @@ legacy /chat（兼容旧前端）: process_message() → _build_system_prompt(in
 
 ### 13.3 "loop 够用吗" — 就绪确认表
 
-**业界共识六点（调研文档 §1）全部满足** ✅
+**业界共识六点（见本文 §14）全部满足** ✅
 
 | 业界共性 | 落实位置 |
 |---------|---------|
@@ -324,5 +324,42 @@ legacy /chat（兼容旧前端）: process_message() → _build_system_prompt(in
 | 6 | usage 真值 | trace `context_tokens > 0` |
 
 > 前置：DASHSCOPE 额度/403 需已恢复；否则 1-3 无法验证（4 需先有 3）。
+
+---
+
+## 14. 参照物：业界真 Agent 循环共识骨架
+
+> **并入自** `AgentLoop_业界调研与学习路线.md`（2026-09-06；原文件已移至 `docs/归档/AgentLoop/`）。此处只保留「**业界共识骨架 + 六个共性点 + 各家对照要点**」；逐家拆解细节、一手链接与学习清单见归档原文。
+
+把 OpenAI Agents SDK / Anthropic / LangGraph / smolagents / PydanticAI 的循环实现剥掉外壳后，**收敛到同一张图**：
+
+```text
+messages = [system, *history]          # 共享运行上下文（各家叫 run items / state / session）
+for round in 0..max_turns:             # ← 循环边界是框架级硬约束
+    resp = LLM(messages, tools=tools)  # 每次调用都带 tools —— 增广能力默认在场
+    if resp 无 tool_calls:             # 自然终止：模型决定直接回答
+        return final_text(resp)
+    messages += assistant_snapshot(含 tool_calls)   # 协议顺序：assistant 先回填
+    for tc in resp.tool_calls:
+        out = execute(tc)                            # 环境反馈 = ground truth
+        messages += tool(tool_call_id=tc.id, out)    # 一一对应回填
+        trace.append(round, tc, out_head)            # 观测随循环免费长出
+return 截断提示 / 最后一次结果                    # 兜底终止：达 max_turns
+```
+
+**六个共性设计点**（写进任何自研循环都不该省）：
+
+| # | 共性点 | 各家对应物 | 省掉它的后果 |
+|:-:|------|-----------|------------|
+| 1 | 工具结果回填后**循环内继续请求** | OpenAI SDK run loop；LangGraph 回边；smolagents step | 二次 tool_calls 被丢 = 现状 `call_llm`/`call_llm_tools` 的 P0 病 |
+| 2 | **硬轮数上限**（max_turns / recursion_limit）+ 达限兜底文案 | 各家均有 | 无限循环烧额度 |
+| 3 | 每轮 LLM 调用**都带 tools** | Anthropic「augmented LLM」 | 「先答后做」：答案在没有检索能力下生成 |
+| 4 | 中间产物**可观测**（trace / run items / stream events） | OpenAI Tracing；LangSmith；OTel GenAI | 无技术报告素材、难调试 |
+| 5 | 工具异常**隔离不炸循环** | smolagents monitor；各家 try/except | 一个工具失败整条消息失败 |
+| 6 | 循环是**纯编排**，不含业务 | Anthropic 分层思想 | 业务与循环耦合 → 不可测 |
+
+> Anthropic 强调 **「augmented LLM（LLM+检索+工具+记忆）是默认积木，而非可选项」** —— 即每次循环内 LLM 调用都应具备工具/检索能力。本项目现状恰好相反：阶段1 流式刻意关掉 tools（"先让模型裸答，再偷偷补刀"），属结构性差异，即 §1 非目标外的路线 B/C 要解决的。
+> **一句话**：业界真循环 ≈ **带 max_turns 硬边界的 while + 每次调用都带 tools + 工具结果回填续跑 + trace 随循环长出**，无一需要框架；本文路线 A 方向正确。
+> **各家对照要点**：OpenAI Agents SDK（`Runner` 托管循环 / `max_turns` / run items = trace 前身）；Anthropic《Building Effective Agents》（工具结果是 ground truth、透明优先、eval 闭环、工具即 ACI）；LangGraph（循环 = 图回边、`recursion_limit`、checkpointer —— **只借语义不引框架**）；smolagents（Monitors 护栏内化）；PydanticAI（结构化输出即护栏）；ReAct（thought/action/observation = trace 记录语义）；**自家 Votek `agent_loop`（Rust）**（`tool_timeout_secs=60`、`max_consecutive_tool_rounds=15`、异常隔离 —— 边界参数直接抄，§6.4/决策 #3 的来源）。
 
 ---

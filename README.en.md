@@ -1,6 +1,6 @@
 <!-- base: README.md @ c54d571 (2026-09-12). English mirror of the Chinese README — keep both in sync; spec: docs/工程实践/README_编写规范.md §6. -->
 
-# AI Tutor — A Knowledge-Graph-Driven Adaptive Tutoring Agent
+# AI-tutor — A Knowledge-Graph-Driven Adaptive Tutoring Agent
 
 [简体中文](README.md) ｜ **English**
 
@@ -30,9 +30,9 @@
 
 ## Overview
 
-AI Tutor connects **conversational tutoring, a knowledge graph, learner profiles, and learning paths**. Start with a question, add textbooks to your knowledge base, build structured notes as you learn, and check your understanding through quizzes.
+AI-tutor connects **conversational tutoring, a knowledge graph, learner profiles, and learning paths**. Start with a question, add textbooks to your knowledge base, build structured notes as you learn, and check your understanding through quizzes.
 
-| Self-study challenge | How AI Tutor helps |
+| Self-study challenge | How AI-tutor helps |
 | :--- | :--- |
 | Disconnected topics and unclear prerequisites | Visualize knowledge relationships and follow learning paths based on prerequisites |
 | Understanding an explanation without knowing whether you can solve a problem | Use AI quizzes and grading to update mastery and inspect weak areas in the dashboard |
@@ -84,7 +84,7 @@ FastAPI -> chat_service -> Agent Loop <-> Chat model
                      SQLite / Markdown / JSON
 ```
 
-Entry points: [chat orchestration](backend/app/services/chat_service.py), [Agent Loop](backend/app/core/agent/loop.py), and [tool registry](backend/app/core/agent_tools/registry.py). See [AGENTS.md](AGENTS.md) for internal contracts and coupling constraints.
+Entry points: [chat orchestration](backend/app/services/chat_service.py), [Agent Loop](backend/app/core/agent/loop.py), and [tool registry](backend/app/core/agent_tools/registry.py). Module contracts and coding conventions live in each package's own `README.md`.
 
 </details>
 
@@ -298,7 +298,6 @@ AI-tutor/
 ├── .env.example              # Configuration template
 ├── docker-compose.yml        # Container orchestration
 ├── CONTRIBUTING.md           # Development, validation, and PR conventions
-└── AGENTS.md                 # Architecture contracts and developer index
 ```
 
 Runtime graph, profile, conversation, and uploaded resource data are stored per user. Commit prompt templates while excluding `.env`, runtime data, and dependency directories.
@@ -341,13 +340,13 @@ Use `--embed api` for real embeddings. See [smoke_chat_quiz.py](backend/scripts/
 | What you need | Read next |
 | :--- | :--- |
 | Development setup, commit conventions, and contribution workflow | [Contribution guide](CONTRIBUTING.md) |
-| Module responsibilities, tool integration, and architecture contracts | [Developer handbook](AGENTS.md) |
+| Module responsibilities, tool integration, and architecture contracts | Each package's `README.md` |
 | API parameters and responses | [FastAPI /docs](http://localhost:8000/docs) after starting the backend |
 | Agent design | [Agent Loop design](docs/AgentLoop/AgentLoop_重构设计讨论.md) |
-| Knowledge base and quizzes | [RAG learning path](docs/RAG/RAG_参考资料与学习路线.md) · [Quiz design](docs/教学模块/QUIZ_出题逻辑调研.md) |
+| Knowledge base and quizzes | [RAG retrieval and evaluation](docs/RAG/RAG_图谱混合检索与真实嵌入评测_报告.md) · [Quiz design](docs/教学模块/QUIZ_出题逻辑调研.md) |
 | Web tools | [MCP web search design](docs/RAG/MCP_网页搜索工具_调研与实施方案.md) |
 | Deployment and operations | [Docker guide](docs/运维部署/Docker_学习路径与工程化部署.md) · [Operations guide](docs/运维部署/运维_生产上线与日常运营指南.md) |
-| Git collaboration and bilingual documentation | [Git workflow](docs/工程实践/Git_多人协作_工作流调研与学习路径.md) · [README conventions](docs/工程实践/README_编写规范.md) |
+| Git collaboration and bilingual documentation | [Git workflow](docs/归档/工程实践/Git_多人协作_工作流调研与学习路径.md) · [README conventions](docs/工程实践/README_编写规范.md) |
 | Module-by-module guide | [Project Wiki](https://github.com/qiyuxi24/AI-tutor/wiki) (in Chinese) |
 
 For help, search existing [Issues](https://github.com/qiyuxi24/AI-tutor/issues), then report your OS and runtime versions, reproduction steps, expected results, and logs with secrets removed. The project is maintained by [qiyuxi24](https://github.com/qiyuxi24) and [community contributors](https://github.com/qiyuxi24/AI-tutor/graphs/contributors); see [Pull requests](https://github.com/qiyuxi24/AI-tutor/pulls) for development discussions.

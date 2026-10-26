@@ -1,8 +1,8 @@
-# 贡献指南（Contributing to AI Tutor）
+# 贡献指南（Contributing to AI-tutor）
 
 **简体中文** ｜ [English](CONTRIBUTING.en.md)
 
-感谢你对 AI Tutor 的兴趣 —— 无论你是来报 bug、修文档，还是想加一门学科的知识图谱数据，这份指南的目标只有一个：**让你在 10 分钟内把项目跑起来，并知道改动该怎么提**。
+感谢你对 AI-tutor 的兴趣 —— 无论你是来报 bug、修文档，还是想加一门学科的知识图谱数据，这份指南的目标只有一个：**让你在 10 分钟内把项目跑起来，并知道改动该怎么提**。
 
 ---
 
@@ -109,7 +109,7 @@ venv\Scripts\python.exe scripts/eval_rag.py --embed mock
 | 新增工具 | 在 `core/agent_tools/tools/` 下新建一个模块（**一个工具一个文件**，复制任一模块改五处），再在 `tools/__init__.py` 的 `NATIVE_SPECS` 加一行。规范见 `core/agent_tools/tools/README.md`。 |
 | 注释 | 只在"为什么"不明显时写；不要逐行解释代码在做什么。 |
 
-> 想改架构（拆模块、动契约、改数据表结构）→ 先读根目录 [`AGENTS.md`](AGENTS.md) 的架构契约与"已知耦合与坑"，再开 Issue 讨论。
+> 想改架构（拆模块、动契约、改数据表结构）→ 先读根目录 各包目录下的 `README.md` 的架构契约与"已知耦合与坑"，再开 Issue 讨论。
 
 ---
 
@@ -158,7 +158,7 @@ venv\Scripts\python.exe scripts/eval_rag.py --embed mock
 - [ ] 手动路径：（描述你点过 / 调过的界面或端点）
 
 ## 影响面
-- [ ] 是否改动架构契约 / 数据表结构 / 环境变量（改了请同步 AGENTS.md 与 .env.example）
+- [ ] 是否改动架构契约 / 数据表结构 / 环境变量（改了请同步对应文档与 .env.example）
 - [ ] 是否已同步中英文两份文档（见第 6 节）
 ```
 
@@ -219,4 +219,4 @@ venv\Scripts\python.exe scripts/eval_rag.py --embed mock
 
 ---
 
-感谢你为 AI Tutor 花的时间，祝你改得顺手。
+感谢你为 AI-tutor 花的时间，祝你改得顺手。

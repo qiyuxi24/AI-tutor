@@ -7,7 +7,7 @@
 - usage/model 取末 chunk（`stream_options.include_usage`）；
 - 网关拒绝 `stream_options`（400）→ 去掉该参数重开，不把聊天搞崩；其他错误原样抛。
 
-真机依据（2026-10-10 探针，MiniMax-M3 + NWPU 备用网关）：tool_calls 确以 delta 下发、
+真机依据（2026-10-10 探针，MiniMax-M3 + 备用网关）：tool_calls 确以 delta 下发、
 `stream_options` 被支持、reasoning_details 元素形状与非流式一致 —— 见本文件末注释。
 """
 import asyncio
@@ -183,6 +183,6 @@ def test_non_400_error_propagates_without_retry(monkeypatch):
 
 # 真机探针记录（2026-10-10，.dsh_local/probe_stream*.py）：
 #   · 主模型 MiniMax-M3：首字节 425ms / 首正文 2022ms / 整段 14369ms（非流式整段 52849ms）；
-#   · 备用网关（NWPU daj2e8mko2j9r9q6vh40）：支持 stream + include_usage（chunk=9）；
+#   · 备用网关（与主模型不同的独立账号）：支持 stream + include_usage（chunk=9）；
 #   · tool_calls 以 delta 下发（id/name 仅首片，arguments 分片）；finish_reason="tool_calls"；
 #   · reasoning_details 元素 = {"type":"reasoning.text","id":...,"text":...}（与非流式同形）。

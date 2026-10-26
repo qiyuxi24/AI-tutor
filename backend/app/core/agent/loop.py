@@ -1,6 +1,6 @@
 """Agent 主循环（Agent Loop）—— 替换旧的"两段式固定脚本"
 
-设计依据：docs/AgentLoop/AgentLoop_重构设计讨论.md（路线 A）+ docs/AgentLoop/AgentLoop_业界调研与学习路线.md
+设计依据：docs/AgentLoop/AgentLoop_重构设计讨论.md（路线 A）+ docs/归档/AgentLoop/AgentLoop_业界调研与学习路线.md
 语义（业界共识骨架，见调研文档 §1）：
     LLM(带 tools) → 无 tool_calls → 自然结束
                     → 有 tool_calls → 快照 assistant → 逐个执行工具（超时护栏 + 异常隔离）

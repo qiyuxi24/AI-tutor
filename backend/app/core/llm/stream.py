@@ -5,7 +5,7 @@
   作为一条 `text_delta` 下发 → 长回答首屏等待 = 整段生成时间（2000 token 级 ≈ 40s+ 的
   「AI 思考中…」然后整段蹦出）。本模块让正文**逐 chunk** 流出。
 
-真机依据（2026-10-10 探针 `.dsh_local/probe_stream*.py`，MiniMax-M3 + NWPU 备用网关）：
+真机依据（2026-10-10 探针 `.dsh_local/probe_stream*.py`，MiniMax-M3 + 备用网关）：
   · `stream=True` 逐 chunk 下发正文：首字节 425ms / 首正文 2022ms / 整段 14.4s
     （同问题非流式整段 52.8s）；
   · **tool_calls 以 delta 下发**（`id`/`name` 只在首片、`arguments` 分片拼接，
