@@ -37,6 +37,11 @@ async def lifespan(app: FastAPI):
     """应用生命周期：启动时创建管理员 + 挂载 GC，关闭时取消 GC。"""
     global _gc_task
 
+    # 记录主事件循环：同步工具 handler 的桥（`core/runtime.py`）据此把协程丢回本 loop，
+    # 避免在临时 loop 里复用 AsyncOpenAI 单例 / whoosh writer（跨 loop 静默降级）。
+    from app.core import runtime
+    runtime.set_main_loop(asyncio.get_running_loop())
+
     # ── 启动：确保默认管理员账户存在 ──
     import sqlite3
     from app.core.auth import ensure_user_columns, get_password_hash
@@ -121,6 +126,7 @@ async def lifespan(app: FastAPI):
     if _gc_task is not None:
         _gc_task.cancel()
         _gc_task = None
+    runtime.set_main_loop(None)
 
 
 app = FastAPI(title="AI Tutor API", version="0.1.0", lifespan=lifespan)
