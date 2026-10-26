@@ -180,7 +180,7 @@ function submit(q) {
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
 }
 .qc-idx { font-weight: 600; color: var(--color-text-secondary); }
 .qc-type {
@@ -260,5 +260,5 @@ function submit(q) {
   cursor: pointer;
 }
 .qc-submit:disabled { opacity: 0.5; cursor: not-allowed; }
-.qc-hint { font-size: 11px; color: var(--color-text-tertiary); }
+.qc-hint { font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
 </style>

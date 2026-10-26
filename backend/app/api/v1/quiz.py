@@ -214,8 +214,8 @@ async def quiz_stats(user_id: int = Depends(get_current_user)):
 
 @router.get("/quiz/export")
 async def export_quiz(
-    format: str = Query("docx", pattern="^(docx|pdf|md)$",
-                       description="导出格式：docx（Word）/ pdf / md"),
+    format: str = Query("docx", pattern="^(docx|pdf|md|tsv)$",
+                       description="导出格式：docx（Word）/ pdf / md / tsv（Anki 卡片）"),
     subject: str = Query("", description="按主题导出；空=导出全部题库"),
     ids: str = Query("", description="指定题目 id（逗号分隔），优先于 subject"),
     limit: int = Query(100, ge=1, le=500, description="最多导出题目数"),
@@ -223,11 +223,12 @@ async def export_quiz(
     user_id: int = Depends(get_current_user),
 ):
     """
-    导出试卷为 Word / PDF / Markdown，直接浏览器下载。
+    导出试卷为 Word / PDF / Markdown / Anki 卡片，直接浏览器下载。
 
     - ids 非空：按给定题目 id 顺序导出（刚生成的那套题传它的 question_ids）
     - 否则：按 subject 筛选题库导出（subject 空=全部题库，按出题先后排序）
     - with_answer=false 可导出不带答案的「学生卷」
+    - format=tsv 导出 Anki 卡片：**始终包含答案**（卡片无答案即无复习价值）
     """
     store = quiz_manager._get_store(user_id)
 
@@ -262,7 +263,8 @@ async def export_quiz(
     # 文件名：去非法字符 + 截断。学科名是中文 → HTTP 头只能 latin-1，
     # 必须用 RFC 5987 的 filename* 百分号编码，否则构造响应时就抛 UnicodeEncodeError
     stem = re.sub(r'[\\/:*?"<>|\s]+', "_", (subject or "AI试题").strip())[:40] or "AI试题"
-    suffix = "_试题" if with_answer else "_学生卷"
+    # Anki 卡片强制带答案 → 文件名也不能标「学生卷」，否则与实际内容不符
+    suffix = "_试题" if (with_answer or format == "tsv") else "_学生卷"
     filename = f"{stem}{suffix}_{datetime.now().strftime('%Y%m%d_%H%M')}.{ext}"
 
     return Response(

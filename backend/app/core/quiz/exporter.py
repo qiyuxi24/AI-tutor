@@ -25,6 +25,7 @@
 """
 from datetime import datetime
 import logging
+import re
 from typing import Optional
 
 from app.core.quiz.schema import Question
@@ -430,6 +431,59 @@ def to_pdf(questions: list, meta: dict, with_answer: bool = True) -> bytes:
 
 
 # ══════════════════════════════════════════════════════════════════
+#  Anki（TSV，间隔重复卡片）
+# ══════════════════════════════════════════════════════════════════
+
+def _anki_escape(text: str) -> str:
+    """
+    Anki 字段按 HTML 渲染（#html:true），因此：
+    - 转义 & < >，否则题干里的符号会被当成标签吃掉
+    - 换行转 <br>：字段内的裸换行会切断卡片行
+    - 制表符转空格：它正是列分隔符，留着会串行
+    """
+    text = str(text or "")
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
+    return text.replace("\t", " ")
+
+
+def _anki_tag(text: str) -> str:
+    """标签用空格分隔，故标签内不能有空白（否则会被拆成两个标签）"""
+    return re.sub(r"\s+", "_", str(text or "").strip())
+
+
+def to_anki_tsv(questions: list, meta: dict, with_answer: bool = True) -> str:
+    """
+    导出为 Anki 可导入的 TSV（制表符分隔：正面 / 背面 / 标签）。
+
+    前三行是 Anki 的导入声明（2.1.55+ 自动识别），用户导入时不必手选分隔符、
+    HTML 选项与标签列。**答案永远输出**：卡片没有答案就失去复习意义，
+    因此忽略 with_answer（调用方也不要把文件名标成「学生卷」）。
+    """
+    items = _normalize(questions, True)
+    out = ["#separator:tab", "#html:true", "#tags column:3"]
+
+    for q in items:
+        parts = [_anki_escape(q["question"])]
+        parts += [_anki_escape(f"{o['value']}. {o['label']}") for o in q["options"]]
+        front = "<br>".join(parts)
+
+        answer = "、".join(q["answer"]) if q["answer"] else "（见解析）"
+        back = f"【答案】{_anki_escape(answer)}"
+        if q["analysis"]:
+            back += f"<br><br>【解析】{_anki_escape(q['analysis'])}"
+
+        tags = " ".join(t for t in (
+            _anki_tag(meta.get("subject", "")),
+            _anki_tag(q["knowledge_point"]),
+            _anki_tag(meta.get("difficulty", "")),
+        ) if t)
+        out.append(f"{front}\t{back}\t{tags}")
+
+    return "\n".join(out) + "\n"
+
+
+# ══════════════════════════════════════════════════════════════════
 #  统一入口
 # ══════════════════════════════════════════════════════════════════
 
@@ -438,6 +492,7 @@ FORMATS = {
     "md": ("text/markdown; charset=utf-8", to_markdown),
     "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", to_docx),
     "pdf": ("application/pdf", to_pdf),
+    "tsv": ("text/tab-separated-values; charset=utf-8", to_anki_tsv),
 }
 
 

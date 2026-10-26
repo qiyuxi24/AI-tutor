@@ -2,7 +2,8 @@
 试卷导出接口测试 —— GET /quiz/export
 
 覆盖：
-- 三种格式（docx / pdf / md）都能返回正确媒体类型与非空字节流
+- 四种格式（docx / pdf / md / tsv）都能返回正确媒体类型与非空字节流
+- Anki TSV：导入声明头 + 三列 + 字段内不含裸制表符/换行（否则列会串行）
 - 中文文件名走 RFC 5987 的 filename*=UTF-8'' 编码（HTTP 头只能 latin-1，
   直接写中文会抛 UnicodeEncodeError —— 这是 knowledge 导出踩过的坑）
 - 学生卷（with_answer=false）不含答案与解析
@@ -84,6 +85,7 @@ def _filename(resp) -> str:
         ("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
         ("pdf", "application/pdf", "pdf"),
         ("md", "text/markdown", "md"),
+        ("tsv", "text/tab-separated-values", "tsv"),
     ],
 )
 def test_export_formats(client, fmt, mime, ext):
@@ -140,3 +142,80 @@ def test_export_empty_bank_returns_404(tmp_path, monkeypatch):
 def test_bad_format_rejected(client):
     resp = client.get("/api/v1/quiz/export", params={"format": "xlsx"})
     assert resp.status_code == 422  # Query pattern 校验拦截
+
+
+# ── Anki（TSV）──
+
+def test_anki_tsv_has_import_header_and_three_columns(client):
+    """导入声明头让 Anki 自动识别分隔符/HTML/标签列，用户无需手选。"""
+    resp = client.get("/api/v1/quiz/export", params={"format": "tsv"})
+    lines = resp.content.decode("utf-8").strip().split("\n")
+    assert lines[0] == "#separator:tab"
+    assert lines[1] == "#html:true"
+    assert lines[2] == "#tags column:3"
+
+    cards = lines[3:]
+    assert len(cards) == 2, "两条题目 → 两张卡片"
+    for card in cards:
+        assert card.count("\t") == 2, "必须恰好三列，多一个制表符就会串行"
+
+
+def test_anki_tsv_front_back_and_tags(client):
+    resp = client.get("/api/v1/quiz/export", params={"format": "tsv"})
+    front, back, tags = resp.content.decode("utf-8").strip().split("\n")[3].split("\t")
+    assert "在二叉树的先序遍历中" in front
+    assert "A. 最先访问根结点" in front        # 选项进正面
+    assert "【答案】A" in back
+    assert "【解析】" in back
+    # 标签列用空格分隔多个标签，故每个标签本身不得含空白
+    assert "二叉树遍历" in tags.split(" ")
+    assert "中等" in tags.split(" ")
+
+
+def test_anki_tsv_tag_with_space_collapsed(client, store):
+    """知识点名带空格时必须折叠成下划线，否则会被 Anki 拆成两个标签。"""
+    store.save_questions([{
+        "id": "q4",
+        "type": "judge",
+        "question": "占位题干",
+        "options": [],
+        "answer": ["对"],
+        "analysis": "",
+        "points": 10,
+        "knowledge_point": "二叉树 遍历",
+    }], subject="数据结构")
+    resp = client.get("/api/v1/quiz/export",
+                      params={"format": "tsv", "subject": "数据结构"})
+    tags = resp.content.decode("utf-8").strip().split("\n")[3].split("\t")[2]
+    assert "二叉树_遍历" in tags.split(" ")
+
+
+def test_anki_tsv_ignores_with_answer_flag(client):
+    """
+    卡片没有答案就没有复习价值 —— 即使请求「学生卷」，Anki 导出也必须带答案。
+    文件名同理，不能标成「学生卷」误导用户。
+    """
+    resp = client.get("/api/v1/quiz/export",
+                      params={"format": "tsv", "with_answer": "false"})
+    assert "【答案】" in resp.content.decode("utf-8")
+    assert "学生卷" not in _filename(resp)
+
+
+def test_anki_tsv_escapes_html_and_newlines(client, store):
+    """题干里的 < > & 必须转义，换行转 <br> —— 否则 #html:true 下卡片排版会坏。"""
+    store.save_questions([{
+        "id": "q3",
+        "type": "short_answer",
+        "question": "比较 a<b 与 a>b\n哪一种成立？",
+        "options": [],
+        "answer": ["a & b"],
+        "analysis": "",
+        "points": 10,
+    }], subject="符号")
+    resp = client.get("/api/v1/quiz/export",
+                      params={"format": "tsv", "subject": "符号"})
+    card = resp.content.decode("utf-8").strip().split("\n")[3]
+    assert "a&lt;b" in card and "a&gt;b" in card
+    assert "a &amp; b" in card
+    assert "哪一种成立？" in card
+    assert "\n" not in card, "字段内不能有裸换行"

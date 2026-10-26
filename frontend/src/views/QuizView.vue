@@ -196,11 +196,12 @@ function normalizeAnswer(q, a) {
   return String(a || '')
 }
 
-// ─── 试卷导出（Word / PDF / Markdown）───
+// ─── 试卷导出（Word / PDF / Markdown / Anki）───
 const exportOptions = [
   { fmt: 'docx', label: 'Word', tip: '可继续编辑的 .docx' },
   { fmt: 'pdf', label: 'PDF', tip: '适合打印/打印预览' },
   { fmt: 'md', label: 'Markdown', tip: '纯文本，便于二次加工' },
+  { fmt: 'tsv', label: 'Anki', tip: '导入 Anki 的卡片（正面题干/背面答案解析，始终含答案）' },
 ]
 const exportingFmt = ref('')        // 正在导出的格式，用于按钮 loading
 const withAnswer = ref(true)        // false = 学生卷（不含答案解析）
@@ -540,8 +541,26 @@ onMounted(() => {
 
               <div v-if="results[q.localIdx]" class="q-result" :class="results[q.localIdx].correct ? 'ok' : 'wrong'">
                 <div class="q-result-score">
-                  {{ results[q.localIdx].correct ? '✓' : '✗' }}
-                  {{ results[q.localIdx].score }} / {{ results[q.localIdx].max_score }} 分
+                  <!-- 对错图标：描边 SVG，颜色由 .q-result.ok/.wrong 的 color 决定 -->
+                  <svg
+                    v-if="results[q.localIdx].correct"
+                    class="q-result-icon"
+                    width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M20 6 9 17l-5-5" />
+                  </svg>
+                  <svg
+                    v-else
+                    class="q-result-icon"
+                    width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M18 6 6 18" />
+                    <path d="m6 6 12 12" />
+                  </svg>{{ results[q.localIdx].score }} / {{ results[q.localIdx].max_score }} 分
                   <span class="q-result-comment">{{ results[q.localIdx].comment }}</span>
                 </div>
                 <div v-if="results[q.localIdx].analysis" class="q-result-analysis">
@@ -702,7 +721,7 @@ onMounted(() => {
 }
 .quiz-empty .empty-tip {
   font-size: 12px;
-  color: var(--color-text-quaternary, var(--color-text-tertiary));
+  color: var(--color-text-tertiary);
 }
 
 /* 出题结果统计 */
@@ -729,7 +748,7 @@ onMounted(() => {
   margin-bottom: 16px;
   border: 1px solid var(--color-border);
   border-radius: 10px;
-  background: var(--color-bg-subtle, rgba(127, 127, 127, 0.05));
+  background: var(--color-bg-subtle);
 }
 .quiz-export .export-title {
   font-size: 13px;
@@ -756,7 +775,7 @@ onMounted(() => {
 }
 
 .question-card.has-result {
-  border-color: var(--color-border-strong, var(--color-accent));
+  border-color: var(--color-border-strong);
 }
 
 .q-head {
@@ -775,11 +794,11 @@ onMounted(() => {
   color: var(--color-text-secondary);
 }
 
-.t-single .q-type { color: #2563eb; }
-.t-multiple .q-type { color: #7c3aed; }
-.t-judge .q-type { color: #059669; }
-.t-fill .q-type { color: #d97706; }
-.t-short .q-type { color: #db2777; }
+.t-single .q-type { color: var(--color-info); }
+.t-multiple .q-type { color: var(--color-primary); }
+.t-judge .q-type { color: var(--color-success); }
+.t-fill .q-type { color: var(--color-warning); }
+.t-short .q-type { color: var(--color-danger); }
 
 .q-num {
   font-size: 13px;
@@ -821,8 +840,14 @@ onMounted(() => {
   line-height: 1.6;
 }
 
-.q-result.ok { color: #059669; }
-.q-result.wrong { color: #dc2626; }
+.q-result.ok { color: var(--color-success); }
+.q-result.wrong { color: var(--color-danger); }
+
+/* ✓ / ✗ 用描边 SVG（stroke=currentColor），随 .ok/.wrong 变色 */
+.q-result-icon {
+  margin-right: 4px;
+  vertical-align: -2px;
+}
 
 .q-result-score {
   font-weight: 600;
