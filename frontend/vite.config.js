@@ -13,7 +13,9 @@ export default defineConfig({
     port: 5173, // 前端开发服务器端口
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',  // 转发的目标：后端地址（用 IPv4 避免 localhost→::1 的 426 问题）
+        // 转发的目标：后端地址（用 IPv4 避免 localhost→::1 的 426 问题）。
+        // VITE_API_TARGET 只在 8000 被别的项目占用时用，默认行为不变。
+        target: process.env.VITE_API_TARGET || 'http://127.0.0.1:8000',
         changeOrigin: true,               // 伪装请求来源
         ws: true,                         // 启用 WebSocket 代理（SSE 需要）
         timeout: 300000,                  // 代理等待后端响应超时（ms），LLM调用可能较慢

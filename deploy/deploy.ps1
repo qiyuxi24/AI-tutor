@@ -6,7 +6,7 @@
 #        → 健康检查 → 打印前端访问地址
 #
 #  用法（在仓库根目录）：
-#    .\deploy\deploy.ps1                        # 全流程（默认 wojtek@100.90.96.111）
+#    .\deploy\deploy.ps1 -Server user@host      # 全流程（必须显式指定目标服务器）
 #    .\deploy\deploy.ps1 -SkipBuild             # 只同步代码，不构建
 #    .\deploy\deploy.ps1 -Port 80               # 换宿主机端口（默认 8080）
 #    .\deploy\deploy.ps1 -Server root@1.2.3.4 -RemoteDir /opt/ai-tutor
@@ -20,8 +20,8 @@
 #       需要精确镜像时先 ssh 上去 rm -rf 再重跑
 # ============================================================
 param(
-    [string]$Server    = "wojtek@100.90.96.111",
-    [string]$RemoteDir = "/home/wojtek/ai-tutor",
+    [string]$Server    = "",
+    [string]$RemoteDir = "/opt/ai-tutor",
     [int]   $Port      = 8080,
     [switch]$SkipBuild
 )
@@ -38,6 +38,11 @@ function Info($m) { Write-Host "[信息]  $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "[OK]    $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "[WARN]  $m" -ForegroundColor Yellow }
 function Fail($m) { Write-Host "[ERROR] $m" -ForegroundColor Red; exit 1 }
+
+# 目标服务器只能由调用方显式给出（不在仓库里写死任何主机/账号）
+if (-not $Server) {
+    Fail "必须显式指定目标服务器：.\deploy\deploy.ps1 -Server user@host（例如 -Server deploy@203.0.113.10）"
+}
 
 function Remote([string]$cmd) {
     $out = & $sshExe -o BatchMode=yes -o ConnectTimeout=10 $Server $cmd

@@ -35,6 +35,13 @@ services:
       - SECRET_KEY=${SECRET_KEY:?请在根目录 .env 中配置 SECRET_KEY}
       # CORS（同源部署不需要；直连 8000 才需要放开）
       - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-http://localhost}
+      # 代理信任边界（uvicorn 默认只信 127.0.0.1）：容器 nginx 的上游 peer 是 docker
+      # 网桥地址（默认 172.17.0.1，落在 172.16.0.0/12），不在默认信任集里 → 应用层拿到的
+      # client_ip 恒为网桥地址，所有访客共用一个限流桶（一个人就能把全站挡在门外）。
+      # 补上网桥网段后，uvicorn 才会沿 X-Forwarded-For 从右往左取到真实访客 IP。
+      # ⚠️ 前提：宿主 nginx 必须设 X-Forwarded-For（见 deploy/gateway-nginx.conf）；
+      #    若改过 default-address-pools，这里同步换成实际网段。
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-127.0.0.1,172.16.0.0/12}
       # 管理员初始密码（留空则不自动创建）
       - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-}
 
