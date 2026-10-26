@@ -6,12 +6,17 @@
    `__file__`/`parents[` 与 `"data"` 路径段）—— 这条即 P0-1 的验收线
    （`grep -rn 'parents\[' backend/app | grep -c data` = 0）；
 3. `backend-admin` 的取径是 storage 的镜像（两 app 同名不能 import）→ 断言两边解析结果逐字相同
-   —— 这条专盯 P0-1 的后果 1（后台读 9 月就停更的空库）。
+   —— 这条专盯 P0-1 的后果 1（后台读 9 月就停更的空库）；
+4. 数据根的 env 优先级（DSH 插件用 `AI_TUTOR_DATA_ROOT`，A1b 历史变量 `DATA_ROOT` 次之）
+   —— 纯函数直测 + 子进程真 import，锁住"插件改目录不会写到开发机的 data/"。
 
 迁移背景见 `docs/架构/整体架构_问题清单与重构方案.md` §2 P0-1 / §3 A1a。
 """
 import importlib.util
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import dotenv
@@ -136,3 +141,58 @@ def test_admin_resolves_same_paths_as_storage(monkeypatch):
     assert Path(s.records_dir) == storage.DATA_ROOT
     assert Path(s.conversations_db) == storage.conversations_dir() / "conversations.db"
     assert Path(s.profiles_dir) == storage.profiles_dir()
+
+# ── 数据根 env 优先级（DSH 插件 / 便携运行时，2026-10-26）─────────────────
+
+def test_resolve_data_root_precedence_is_pure():
+    """纯函数直测：`AI_TUTOR_DATA_ROOT` > `DATA_ROOT` > `<repo>/data`，不需要 reload。"""
+    resolve = storage._resolve_data_root
+    assert resolve({}) == _REPO / "data"
+    assert resolve({"DATA_ROOT": str(_REPO / "legacy-root")}) == _REPO / "legacy-root"
+    assert resolve({
+        "AI_TUTOR_DATA_ROOT": str(_REPO / "plugin-root"),
+        "DATA_ROOT": str(_REPO / "legacy-root"),
+    }) == _REPO / "plugin-root"
+    # 空白不当作"设置了"（继续看下一个 key）；否则插件传空串会静默把数据根打回默认
+    assert resolve({"AI_TUTOR_DATA_ROOT": "   ",
+                    "DATA_ROOT": str(_REPO / "legacy-root")}) == _REPO / "legacy-root"
+    assert resolve({"AI_TUTOR_DATA_ROOT": "  "}) == _REPO / "data"
+
+
+def _run_storage_probe(monkeypatch, tmp_path, env_overrides):
+    """在子进程里 import storage 并打印 DATA_ROOT（隔离本进程已算好的模块常量）。"""
+    env = dict(os.environ)
+    env.pop("AI_TUTOR_DATA_ROOT", None)
+    env.pop("DATA_ROOT", None)
+    env.update(env_overrides)
+    env["LOG_DIR"] = str(tmp_path / "logs")     # 别污染开发机 backend/logs
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "from app.core import storage; print(storage.DATA_ROOT)"],
+        cwd=str(_REPO / "backend"), env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def test_env_override_is_visible_to_a_fresh_import(monkeypatch, tmp_path):
+    """真 import：两个变量同时存在时用 `AI_TUTOR_DATA_ROOT`（插件专属名）。"""
+    plugin_root = tmp_path / "plugin-data"
+    legacy_root = tmp_path / "legacy-data"
+    out = _run_storage_probe(monkeypatch, tmp_path, {
+        "AI_TUTOR_DATA_ROOT": str(plugin_root),
+        "DATA_ROOT": str(legacy_root),
+    })
+    assert Path(out) == plugin_root
+
+
+def test_legacy_data_root_env_still_works(monkeypatch, tmp_path):
+    """向后兼容：只给 A1b 历史变量 `DATA_ROOT` 时行为不变（老脚本/运维文档照旧）。"""
+    legacy_root = tmp_path / "legacy-data"
+    out = _run_storage_probe(monkeypatch, tmp_path, {"DATA_ROOT": str(legacy_root)})
+    assert Path(out) == legacy_root
+
+
+def test_no_env_falls_back_to_repo_data(monkeypatch, tmp_path):
+    out = _run_storage_probe(monkeypatch, tmp_path, {})
+    assert Path(out) == _REPO / "data"

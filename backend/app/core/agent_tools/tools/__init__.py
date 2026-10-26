@@ -29,6 +29,7 @@ from . import (
     download_resource,
     fetch_webpage,
     grade_answer,
+    kg_snapshot,
     mark_section_understood,
     plan_knowledge_nodes,
     quiz_generate,
@@ -51,6 +52,7 @@ NATIVE_SPECS = [
     update_mastery.SPEC,
     add_edge.SPEC,
     delete_node.SPEC,
+    kg_snapshot.SPEC,
     # 画像 / 资料
     update_user_profile.SPEC,
     search_resources.SPEC,

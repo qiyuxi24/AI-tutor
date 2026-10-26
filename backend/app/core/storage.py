@@ -9,6 +9,8 @@
 
   单根布局（`migrate_data_root.py` 的 SRC/DST 由本模块的 `LEGACY_*` 与 `DATA_ROOT` 派生）：
      DATA_ROOT          <repo>/data               图谱 / conversations / profiles / prompts / keys
+                         env 覆写优先级：`AI_TUTOR_DATA_ROOT`（插件/便携运行时约定）>
+                         `DATA_ROOT`（A1b 历史变量）> 默认 <repo>/data（见 _resolve_data_root）
                                                         + kb / rag / quiz / collector / llm / agent_runs / agent_debug
      EVAL_DATA_ROOT     <repo>/backend/eval_data  离线评测夹具（非用户数据，不动）
 
@@ -25,8 +27,27 @@ logger = logging.getLogger("ai-tutor")
 # backend/app/core/storage.py → parents[3] = 仓库根
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-# 单一数据根（env `DATA_ROOT` 可覆写；默认 <repo>/data）。**用户数据唯一活点**。
-DATA_ROOT = Path(os.environ.get("DATA_ROOT", REPO_ROOT / "data"))
+
+def _resolve_data_root(env=None) -> Path:
+    """解析单一数据根：`AI_TUTOR_DATA_ROOT` > `DATA_ROOT` > `<repo>/data`。
+
+    为什么多一个 env：便携插件（DSH）把用户数据放自己的目录，用
+    `AI_TUTOR_DATA_ROOT` 这个**插件专属**名字下发；`DATA_ROOT` 是 A1b 的历史变量，
+    保留是为了不破坏运维脚本/测试的既有写法（向后兼容，优先级较低）。
+    纯函数、不建目录：导入期算一次给模块常量，测试可直接传入 dict 断言优先级。
+    """
+    env = os.environ if env is None else env
+    # 逐个 key 判空（而不是 a or b）：AI_TUTOR_DATA_ROOT="  " 时应当继续看 DATA_ROOT，
+    # 而不是"看到了空串就当没配"。空串/全空白一律视为未设置。
+    for key in ("AI_TUTOR_DATA_ROOT", "DATA_ROOT"):
+        raw = (env.get(key) or "").strip()
+        if raw:
+            return Path(raw)
+    return REPO_ROOT / "data"
+
+
+# 单一数据根。**用户数据唯一活点**（env 优先级见 _resolve_data_root）。
+DATA_ROOT = _resolve_data_root()
 
 # A1b 前的旧根（只用于**回退**与 `migrate_data_root.py` 定位 SRC；不再作为主数据根）。
 # ⚠️ 注意：`backend/data/agent_runs`（旧 P0-1 停更库）**不是**迁徙源 —— 主记录库在
