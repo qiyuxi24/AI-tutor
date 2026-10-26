@@ -3,7 +3,7 @@
 数据层行为（口径同源 / 级联 / 用户隔离）在 `test_kg_delete_subject.py`；这里只锁 API：
 - 「未分类」与空学科名一律 400 —— 前者是后端合成的散落节点分组，不提供"整科删除"；
 - 该用户建图进行中 → 409（否则建图后段会把刚删掉的节点写回来）；
-- 正常删除 → 200 + 计数透传，并逐个清掉该学科节点的 RAG 索引；
+- 正常删除 → 200 + 计数透传（RAG 索引清理已收口在 kg 层，见 `test_kg_rag_purge.py`）；
 - 漏传 subject → 422（框架层必填校验），不是"删全库"。
 
 全离线：KnowledgeGraph 与 rag_manager 均被替换为假实现，不碰 `data/`。
@@ -38,16 +38,11 @@ class _FakeKG:
 
 @pytest.fixture
 def isolate(monkeypatch):
-    """假 KG + 假 RAG + 清空模块级互斥锁；返回被清索引的 node_id 列表。"""
-    from app.core.rag.manager import rag_manager
-
+    """假 KG + 清空模块级互斥锁（RAG 清理已收口在 kg 层，此处不再断言）。"""
     graph_generator._GRAPH_INFLIGHT.clear()
     monkeypatch.setattr(knowledge_module, "KnowledgeGraph", _FakeKG)
-    indexed: list[str] = []
-    monkeypatch.setattr(rag_manager, "delete_node_index",
-                        lambda user_id, node_id: indexed.append(node_id))
     try:
-        yield indexed
+        yield
     finally:
         graph_generator._GRAPH_INFLIGHT.clear()
 
@@ -92,7 +87,7 @@ def test_rejects_while_building_graph(client, isolate):
 
 # ── 正常删除 ──────────────────────────────────────────
 
-def test_deletes_and_clears_rag_index(client, isolate):
+def test_deletes_subject_and_returns_counts(client, isolate):
     r = client.delete(URL, params={"subject": "数据结构"})
 
     assert r.status_code == 200
@@ -100,4 +95,3 @@ def test_deletes_and_clears_rag_index(client, isolate):
     assert body["status"] == "ok"
     assert body["subject"] == "数据结构"
     assert (body["deleted_nodes"], body["deleted_edges"]) == (2, 1)
-    assert isolate == ["n1", "n2"], "该学科每个节点的 RAG 索引都要清"

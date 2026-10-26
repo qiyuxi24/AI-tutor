@@ -394,6 +394,28 @@ class _NodesMixin:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"清理孤儿题目失败（user={self.user_id}）: {e}")
 
+    def _purge_rag_index_for_nodes(self, node_ids: list[str]) -> None:
+        """清掉这些节点的 RAG 索引（向量 + BM25 两条腿）。
+
+        收口在此（而非各调用方）：`remove_node` / `remove_subject` 是**所有**删除路径的
+        入口（手动 API / `delete_node` 工具 / `merge_ai_suggestion` 建议采纳 / 建图脚本）。
+        原先只有 API 层两处显式调 `rag_manager.delete_node_index`，工具与建议采纳这两条
+        走 kg 直删的路径漏清 → 已删知识点仍被 S6 按需检索注入上下文（"删了还查得到"）。
+        逐节点 try：单个失败不拖累其余；清理失败只记 warning，绝不阻断删图。
+        """
+        if not node_ids:
+            return
+        try:
+            from app.core.rag.manager import rag_manager
+        except Exception as e:  # noqa: BLE001 —— 索引模块不可用不该毁掉删图
+            logger.warning(f"清理 RAG 索引跳过（模块不可用）：{e}")
+            return
+        for node_id in node_ids:
+            try:
+                rag_manager.delete_node_index(self.user_id, node_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"清理 RAG 索引失败（节点 {node_id}）: {e}")
+
     def remove_node(self, node_id: str, caller: str = "human") -> int:
         """
         删除节点及其 MD 文件，外键级联自动删除关联边；并清掉题库里以它为知识点的题
@@ -439,6 +461,7 @@ class _NodesMixin:
         self._invalidate_cache()
         self.invalidate_content_cache(node_id)
         self._purge_quiz_for_nodes([node_id])
+        self._purge_rag_index_for_nodes([node_id])
         return edge_count
 
     def remove_subject(self, subject: str) -> dict:
@@ -504,6 +527,7 @@ class _NodesMixin:
         self._invalidate_cache()
         self.invalidate_content_cache()
         self._purge_quiz_for_nodes(node_ids)
+        self._purge_rag_index_for_nodes(node_ids)
         return {
             "subject": subj,
             "deleted_nodes": len(node_ids),

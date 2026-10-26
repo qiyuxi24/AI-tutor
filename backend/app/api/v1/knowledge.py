@@ -196,8 +196,8 @@ async def delete_graph(subject: str = Query(..., description="要删除的学科
     建图进行中（GQ-15 互斥，见 `graph_generator.is_graph_building`）拒绝：否则建图后段会把刚删掉的
     节点写回来，出现"删了一半又长出来"的状态。删除本身瞬时，不需要自己占锁。
 
-    RAG 索引按节点逐个清理（与 `DELETE /knowledge/node/{node_id}` 同一口径）；
-    清理失败只记警告不阻断 —— 图谱已删，残留索引会在重建时按节点覆盖。
+    RAG 索引清理已收口在 `KnowledgeGraph.remove_subject`（所有删除路径统一覆盖，
+    见 `test_kg_rag_purge.py`），此处不再重复调用。
     """
     subj = (subject or "").strip()
     if not subj or subj == graph_middleware.SUBJECT_UNCLASSIFIED:
@@ -210,18 +210,9 @@ async def delete_graph(subject: str = Query(..., description="要删除的学科
 
     kg = KnowledgeGraph(user_id=user_id)
     try:
-        node_ids = [n["id"] for n in kg.get_nodes_by_subject(subj)]  # 供清理 RAG 索引
-        result = kg.remove_subject(subj)
+        result = kg.remove_subject(subj)   # 含 RAG 索引清理（收口在 kg 层）
     finally:
         kg.close()
-
-    try:
-        from app.core.rag.manager import rag_manager
-        for node_id in node_ids:
-            rag_manager.delete_node_index(user_id, node_id)
-    except Exception as e:
-        logging.getLogger("ai-tutor").warning(
-            f"清理 RAG 索引失败（学科 {subj}，{len(node_ids)} 个节点）: {e}")
 
     broadcast(GRAPH_UPDATED)
     return {"status": "ok", **result}
@@ -829,13 +820,7 @@ async def delete_node(node_id: str, user_id: int = Depends(get_current_user)):
     """
     kg = KnowledgeGraph(user_id=user_id)
     try:
-        removed_edges = kg.remove_node(node_id)
-        # 同步清理该节点的 RAG 索引
-        try:
-            from app.core.rag.manager import rag_manager
-            rag_manager.delete_node_index(user_id, node_id)
-        except Exception as e:
-            logging.getLogger("ai-tutor").warning(f"清理 RAG 索引失败（节点 {node_id}）: {e}")
+        removed_edges = kg.remove_node(node_id)   # 含 RAG 索引清理（收口在 kg 层）
         broadcast(GRAPH_UPDATED)
         return {"deleted": True, "node_id": node_id, "removed_edges": removed_edges}
     except ValueError as e:
