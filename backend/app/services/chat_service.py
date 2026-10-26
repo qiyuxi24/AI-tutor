@@ -30,6 +30,7 @@ from app.core.agent.events import NullSink
 from app.core.agent_tools import TOOLS_PROMPT  # 注册表生成的「工具调用指南」段落
 from app.core.agent_tools.registry import build_authorization_block
 from app.core.config import settings
+from app.core import runtime
 from app.core.agent.guard import trim_history_to_budget
 from app.core.graph_analyzer import GraphAnalyzer
 from app.core.knowledge_graph import KnowledgeGraph
@@ -978,7 +979,8 @@ async def process_message(user_id: int, messages: list,
 
         # 5. 图谱分析作为后台任务执行，不阻塞对话回复
         #    ★ 传入 user_id 而非 kg 实例，让 _analyze_and_apply 自己管理 kg 生命周期
-        asyncio.create_task(_analyze_and_apply(last_user_msg, reply, user_id))
+        #    ★ runtime.spawn 保强引用（裸 create_task 的返回值没人持有，可能被 GC 掉）
+        runtime.spawn(_analyze_and_apply(last_user_msg, reply, user_id))
 
     except Exception as e:
         error_msg = str(e)
@@ -1022,6 +1024,7 @@ async def process_message_stream(
     向后兼容：旧前端收到 {"token": "..."} 仍正常（text_delta 事件转 token 格式）。
     """
     kg = KnowledgeGraph(user_id=user_id)
+    agent_task: asyncio.Task | None = None
     try:
         # ★ 判分必须**先于**提示词构建（2026-09-30 时序修正）：
         #   判分会改小节状态（通过 / 降级 / attempts），而学习块是从状态**现算**的 ——
@@ -1080,7 +1083,7 @@ async def process_message_stream(
         user_msgs = [m for m in messages if (m.role if hasattr(m, 'role') else m['role']) == 'user']
         if user_msgs and result.text:
             last_user = user_msgs[-1].content if hasattr(user_msgs[-1], 'content') else user_msgs[-1]['content']
-            asyncio.create_task(_analyze_and_apply(last_user, result.text, user_id))
+            runtime.spawn(_analyze_and_apply(last_user, result.text, user_id))
 
         broadcast(GRAPH_UPDATED)
 
@@ -1099,6 +1102,14 @@ async def process_message_stream(
             error_msg = log_error(ErrorCode.CHAT_PROCESS_FAILED, detail=str(e), exception=e)
         yield f"data: {json.dumps({'error': error_msg})}\n\n"
     finally:
+        # 客户端断连（生成器被 aclose）时 agent 任务仍在跑：它会用已关闭的 kg
+        # （sqlite "Cannot operate on a closed database"）并白烧 LLM/工具额度 → 取消并回收。
+        if agent_task is not None and not agent_task.done():
+            agent_task.cancel()
+            try:
+                await agent_task
+            except BaseException:  # noqa: BLE001 —— 吞掉取消/断连异常，保证 kg 一定关闭
+                pass
         kg.close()
 
 

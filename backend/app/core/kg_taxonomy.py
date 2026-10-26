@@ -12,11 +12,9 @@
 失败语义：判定不出来就保持原样（落「未分类」），**永不抛异常**——不能因为归类失败毁掉建节点。
 """
 
-import asyncio
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
 
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.llm.call import call_llm
@@ -25,16 +23,17 @@ logger = logging.getLogger("ai-tutor")
 
 __all__ = ["assign_taxonomy", "assign_taxonomy_sync"]
 
-# 同步→异步桥：调用方（execute_kg_tool → create_node_from_ai）在 asyncio.to_thread
-# 线程里，没有运行中的事件循环。做法与 agent_tools/tools/rag_search._run_async 一致（各持单例池互不干扰）。
-_POOL = ThreadPoolExecutor(max_workers=2)
-
 _SYSTEM_PROMPT = "你是知识图谱归类助手，只输出 JSON，不解释。"
 
 
 def assign_taxonomy_sync(kg: KnowledgeGraph, node_data: dict) -> dict:
-    """assign_taxonomy 的同步入口，供同步写入路径（knowledge_writer）使用。"""
-    return _POOL.submit(asyncio.run, assign_taxonomy(kg, node_data)).result()
+    """assign_taxonomy 的同步入口，供同步写入路径（knowledge_writer）使用。
+
+    复用主 loop（`core/runtime.py::run_sync`）跑协程 —— 归属判定要打 LLM，
+    AsyncOpenAI 单例绑主 loop，跨 loop 复用会静默失败（返回 {} → 节点落「未分类」）。
+    """
+    from app.core import runtime
+    return runtime.run_sync(assign_taxonomy(kg, node_data))
 
 
 async def assign_taxonomy(kg: KnowledgeGraph, node_data: dict) -> dict:

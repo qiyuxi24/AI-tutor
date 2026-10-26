@@ -226,3 +226,39 @@ def test_stream_path_calls_quiz_fallback_with_loop_result(monkeypatch, kg):
     assert called_result.rounds == [{"tool": "quiz_generate"}]
     assert called_kg is cap["kg"]
     assert len(cap["broadcast"]) == 1, "图谱刷新广播在流式路径照常发出（graph_updated）"
+
+
+# ── 4. 客户端断连 → 正在跑的 agent 任务必须被取消 ──────────────────
+
+def test_stream_path_cancels_agent_task_on_client_disconnect(monkeypatch, kg):
+    """客户端中途关页（生成器被 aclose）时，正在跑的 agent 任务必须被取消。
+
+    否则它会继续用已关闭的 kg（sqlite "Cannot operate on a closed database"）
+    并白烧 LLM/工具额度。
+    """
+    seen = {"cancelled": False}
+    _install(monkeypatch, kg)          # 先装其余替身
+
+    async def slow_loop(prompt, messages, *, kg=None, user_id=None, event_queue=None,
+                        event_sink=None, db_dir=None, no_tools=False):
+        if event_queue is not None:
+            event_queue.put_nowait({"type": TEXT_DELTA, "run_id": RUN_ID, "text": "a"})
+        try:
+            await asyncio.sleep(30)    # 长跑，等被断连取消
+        except asyncio.CancelledError:
+            seen["cancelled"] = True
+            raise
+        return SimpleNamespace(text="a", rounds=[])
+
+    monkeypatch.setattr(chat_service, "run_agent_loop", slow_loop)
+
+    async def _go():
+        agen = chat_service.process_message_stream(
+            messages=[{"role": "user", "content": "hi"}], user_id=USER_ID)
+        await agen.__anext__()         # 拿到第一帧
+        await agen.aclose()            # 模拟客户端断连
+        await asyncio.sleep(0.05)      # 给取消传播一点时间
+
+    asyncio.run(_go())
+
+    assert seen["cancelled"] is True, "断连后 agent 任务没被取消（会继续烧额度 / 用已关闭的 kg）"

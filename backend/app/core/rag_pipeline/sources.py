@@ -18,6 +18,7 @@ from typing import Optional, Protocol, runtime_checkable
 
 logger = logging.getLogger("ai-tutor")
 
+from app.core import runtime
 from app.core.rag_pipeline.types import RagContext, RagHit
 
 
@@ -83,10 +84,11 @@ def _bump_reference_stats(user_id: int, node_ids: list) -> None:
     RAG 命中后累计来源引用次数（B3.3）：**有运行中的事件循环 → 后台任务；否则同步写一行**。
 
     为什么分两路：检索既可能跑在长期存活的请求循环（chat_service → pipeline.run），
-    也可能跑在 `rag_search` 同步桥的**临时 loop**（tools/rag_search._run_async →
-    asyncio.run）。临时 loop 关闭时会取消尚未执行的 pending 任务，实测（2026-09-20）：
-    后台协程**写库前有 await 就必丢**，直接写（无 await）能落地 —— 所以
-    `_write_reference_stats_async` 里**不得在写库前 await**。
+    也可能跑在同步桥（tools/rag_search._run_async）。同步桥自 2026-10-11 起优先复用
+    **主 loop**（core/runtime.py），仅无主 loop（脚本/同步测试）时用临时 loop ——
+    临时 loop 关闭会取消尚未执行的 pending 任务，实测（2026-09-20）：后台协程
+    **写库前有 await 就必丢**，直接写（无 await）能落地 —— 所以
+    `_write_reference_stats_async` 里**不得在写库前 await**（对所有 loop 都安全）。
     无 loop 时（脚本/测试直调）同步写一行 UPDATE，本地 sqlite 微秒级，不构成阻塞。
 
     统计是增强而非必需：任何异常都在 _write_reference_stats 内吞掉，绝不影响检索结果。
@@ -95,11 +97,11 @@ def _bump_reference_stats(user_id: int, node_ids: list) -> None:
     if not ids:
         return
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         _write_reference_stats(user_id, ids)
     else:
-        loop.create_task(_write_reference_stats_async(user_id, ids))
+        runtime.spawn(_write_reference_stats_async(user_id, ids))
 
 
 def _write_reference_stats(user_id: int, node_ids: list[int]) -> None:

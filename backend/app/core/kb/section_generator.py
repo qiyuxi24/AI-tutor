@@ -35,6 +35,7 @@ import re
 from difflib import SequenceMatcher
 from typing import Optional
 
+from app.core import runtime
 from app.core.llm import call_llm, extract_json
 
 logger = logging.getLogger("ai-tutor")
@@ -883,6 +884,7 @@ def start_background_regeneration(user_id: int, node_id: str, *, replace: bool =
     if key in _INFLIGHT:
         return False
     _INFLIGHT.add(key)
-    asyncio.create_task(_run_regeneration(
+    # runtime.spawn 保强引用：任务被 GC 掉 mid-run → finally 不执行 → `_INFLIGHT` 永不释放
+    runtime.spawn(_run_regeneration(
         user_id, node_id, replace=replace, append=append, instruction=instruction))
     return True

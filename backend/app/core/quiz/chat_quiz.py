@@ -31,6 +31,7 @@ import asyncio
 import logging
 import time
 
+from app.core import runtime
 from app.core.agent.debug_log import RunLogger
 from app.core.event_bus import QUIZ_READY, notify
 from app.core.knowledge_graph import KnowledgeGraph
@@ -325,5 +326,7 @@ def start_background_generation(user_id: int, *, node_id: str,
     if _INFLIGHT.get(user_id):
         return False
     _INFLIGHT[user_id] = True
-    asyncio.create_task(_run_guarded(user_id, node_id, count, section_id))
+    # runtime.spawn 保强引用：裸 create_task 的返回值没人持有，任务可能被 GC 掉 mid-run
+    # → finally 不执行 → `_INFLIGHT` 永不释放 → 该用户此后永远"已有一道题在生成中"
+    runtime.spawn(_run_guarded(user_id, node_id, count, section_id))
     return True

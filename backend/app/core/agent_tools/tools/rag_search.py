@@ -11,35 +11,24 @@
 已知缺口：**图谱 RAG 未接混合检索**（whoosh 的 `node_id` 是 NUMERIC，与图谱 TEXT id 冲突）。
 """
 
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from ..registry import TIER_FREE, _spec
 
-# 线程池：用于在同步工具执行（execute_kg_tool）里跑 async RAG 检索
-_ASYNC_TOOL_POOL = ThreadPoolExecutor(max_workers=2)
-
 
 def _run_async(coro) -> object:
-    """
-    在同步上下文里运行 async 协程（用于 RAG 检索等 async 操作）。
+    """同步→异步桥：复用**主 loop** 跑协程（`core/runtime.py::run_sync`）。
 
     背景：同步 handler 被 `dispatch.execute_kg_tool_async` 放进 `asyncio.to_thread` 的工作线程，
-    该线程无运行中的事件循环，不能直接 `asyncio.run` / `new_event_loop`。
-    方案：把协程提交到线程池，在新线程里用 `asyncio.run` 创建独立事件循环运行。
-    RAG 检索是独立无共享状态的，跨线程安全。
-
-    ⚠️ 只允许用于不碰 LLM 客户端的 async 调用：`llm/clients.py` 的 AsyncOpenAI 单例
-    跨事件循环复用会报 "Event loop is closed"。
+    该线程**没有运行中的事件循环**。旧做法是在新线程里 `asyncio.run` 新建临时 loop ——
+    但检索要嵌入（`llm/clients.py` 的 AsyncOpenAI 单例）、`node_indexer` 的按用户锁与
+    whoosh writer 都绑定主 loop，跨 loop 复用会**静默降级**
+    （"Event loop is closed" → `embed_texts` 返回 [] → 向量腿整条消失）。
+    现统一把协程丢回主 loop（`run_coroutine_threadsafe`）；无主 loop（脚本/同步测试）
+    才退回临时 loop。
     """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        # 当前线程无运行中的事件循环 → 直接 asyncio.run
-        return asyncio.run(coro)
-    # 当前线程有运行中的事件循环 → 提交到线程池，在新线程独立循环跑
-    return _ASYNC_TOOL_POOL.submit(asyncio.run, coro).result()
+    from app.core import runtime
+    return runtime.run_sync(coro)
 
 
 def rag_search(query: str, source: str = "all",
