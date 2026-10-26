@@ -9,6 +9,38 @@
 
 ---
 
+## [1.1.0] - 2026-10-26
+
+后端行为增量：检索/删除正确性、并发边界、试卷导出、运维后台安全。
+
+### 新增
+
+- **试卷导出四种格式**：docx / pdf / md / tsv（Anki 卡片），`format` 走白名单校验；
+  前端出题页与卡片有导出入口。测试要求"媒体类型正确 + 字节流非空"并覆盖非法取值。
+- **`llm/fallback.user_candidates(user_id)`**：把「用户自配模型 → 系统默认档」的
+  候选链拼装收敛成一处，转写等非对话场景复用同一套主→备降级语义。
+
+### 变更
+
+- **删除即清索引，收口到 kg 层**：`remove_node` / `remove_subject` 内部调
+  `_purge_rag_index_for_nodes`，API 层不再手写清理。原先 Agent `delete_node` 与
+  「采纳 AI 建议」直删会留下索引 → 已删知识点仍被按需检索注入。
+- **同步调用点改走 `core/runtime` 桥**：`rag_search`（顺带删掉自己的线程池与临时
+  loop，−20 行）、`section_generator`、`chat_quiz`、`kg_taxonomy`、`rag_pipeline/sources`；
+  `chat_service` 的后台任务改 `runtime.spawn`（持强引用防 GC），并在客户端断连时
+  取消正在跑的 agent 任务（新增回归 `test_learn_stream_path`）。
+
+### 修复
+
+- **运维后台拒绝弱启动**：`ADMIN_SECRET_KEY` 为空或仍是源码默认值时 **拒绝启动**
+  —— 原先忘配等于把后台公开；用量页统计口径与后端对齐。
+- `test_agent_loop_real_api`：证据断言不再绑定"最后一条"，收尾追加 `loop_stop`
+  不会误报（改为断言"存在且非空"）。
+
+验证：`backend/tests` 1775 passed；`backend-admin/tests` 43 passed（两个套件分开跑）。
+
+---
+
 ## [1.0.1] - 2026-10-26
 
 ### 变更

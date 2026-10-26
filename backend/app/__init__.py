@@ -11,6 +11,6 @@ from app.core.logging_setup import setup_logging
 
 # 版本单一真源：`main.py` 的 FastAPI(version=…) 读它，CHANGELOG / tag 与之对齐。
 # 发版流程 = 改这里 + frontend/package.json → 写 CHANGELOG → `git tag vX.Y.Z`。
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 setup_logging()
