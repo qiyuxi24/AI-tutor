@@ -532,7 +532,7 @@ async function removeNote(noteId) {
 
 .profile-completeness em {
   font-style: normal;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
   white-space: nowrap;
 }
@@ -652,7 +652,7 @@ async function removeNote(noteId) {
 }
 
 .pf-section-sub {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 400;
   color: var(--color-text-muted);
 }
@@ -675,7 +675,7 @@ async function removeNote(noteId) {
 }
 
 .pf-label {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
 }
 
@@ -725,7 +725,7 @@ async function removeNote(noteId) {
 }
 
 .pf-note-time {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   font-family: 'Cascadia Code', 'Consolas', monospace;
 }
@@ -773,7 +773,7 @@ async function removeNote(noteId) {
 }
 
 .pf-input-label {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
 }
 

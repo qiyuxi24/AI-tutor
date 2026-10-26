@@ -81,7 +81,22 @@ watch(
             <polyline points="1 20 1 14 7 14" />
             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
           </svg>
-          <span v-else class="dash-spin">⟳</span>
+          <!-- 加载态：旋转的环形箭头（描边 SVG，继承按钮 currentColor） -->
+          <svg
+            v-else
+            class="dash-spin"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+            <path d="M21 3v5h-5" />
+          </svg>
         </button>
       </div>
     </header>
@@ -100,17 +115,17 @@ watch(
           <span class="dash-stat-value">{{ overall.node_count }}</span>
           <span class="dash-stat-label">知识点总数</span>
         </div>
-        <div class="dash-stat-card dash-stat-green">
+        <div class="dash-stat-card dash-stat-green" title="掌握度 ≥ 70">
           <span class="dash-stat-value">{{ overall.mastered_count }}</span>
-          <span class="dash-stat-label">已掌握 ≥70</span>
+          <span class="dash-stat-label">已掌握</span>
         </div>
-        <div class="dash-stat-card dash-stat-yellow">
+        <div class="dash-stat-card dash-stat-yellow" title="掌握度 30–69">
           <span class="dash-stat-value">{{ overall.learning_count }}</span>
-          <span class="dash-stat-label">学习中 30-69</span>
+          <span class="dash-stat-label">学习中</span>
         </div>
-        <div class="dash-stat-card dash-stat-red">
+        <div class="dash-stat-card dash-stat-red" title="掌握度 1–29">
           <span class="dash-stat-value">{{ overall.weak_count }}</span>
-          <span class="dash-stat-label">薄弱 1-29</span>
+          <span class="dash-stat-label">待巩固</span>
         </div>
         <div class="dash-stat-card dash-stat-muted">
           <span class="dash-stat-value">{{ overall.unstarted_count }}</span>
@@ -180,12 +195,12 @@ watch(
                 <button class="dash-go-btn" @click="emit('go-node', nextToLearn.node_id, nextToLearn.subject)">去图谱学习</button>
               </div>
             </template>
-            <div v-else class="dash-panel-empty">所有知识点已掌握，太棒了！🎉</div>
+            <div v-else class="dash-panel-empty">所有知识点都已掌握，继续保持。</div>
           </section>
 
           <!-- 薄弱点 Top3 -->
           <section class="dash-panel">
-            <h3 class="dash-panel-title">薄弱点 Top{{ weakPoints.length || 3 }}</h3>
+            <h3 class="dash-panel-title">{{ weakPoints.length ? `薄弱点 Top${weakPoints.length}` : '薄弱点' }}</h3>
             <div v-if="weakPoints.length === 0" class="dash-panel-empty">没有薄弱点，继续保持！</div>
             <div
               v-for="(w, i) in weakPoints"
@@ -212,7 +227,8 @@ watch(
 .dashboard-view {
   height: 100%;
   overflow-y: auto;
-  padding: 24px 28px 40px;
+  /* 内容宽度上限 1200px + 居中（左右 padding 吸收剩余空间），与其他页框架对齐 */
+  padding: 28px max(28px, calc((100% - 1200px) / 2)) 40px;
   background: var(--color-bg-primary);
 }
 
@@ -266,9 +282,7 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 4px;
-  transition: border-color 0.2s, transform 0.15s;
 }
-.dash-stat-card:hover { border-color: var(--color-accent); transform: translateY(-1px); }
 .dash-stat-value { font-size: 30px; font-weight: 700; color: var(--color-text-primary); line-height: 1.1; }
 .dash-stat-label { font-size: 12px; color: var(--color-text-tertiary); }
 .dash-stat-green .dash-stat-value { color: var(--color-green); }
@@ -342,7 +356,7 @@ watch(
   border-radius: 4px;
   transition: width 0.5s ease;
 }
-.dash-subject-sub { display: flex; justify-content: space-between; font-size: 11px; color: var(--color-text-tertiary); }
+.dash-subject-sub { display: flex; justify-content: space-between; font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
 
 /* ─── 下一步推荐 ─── */
 .dash-next-card { display: flex; flex-direction: column; gap: 10px; }
@@ -383,7 +397,7 @@ watch(
 }
 .dash-weak-info { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .dash-weak-name { font-size: 13px; color: var(--color-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dash-weak-sub { font-size: 11px; color: var(--color-text-tertiary); }
+.dash-weak-sub { font-size: var(--font-size-xs); color: var(--color-text-tertiary); }
 .dash-weak-arrow { color: var(--color-text-tertiary); font-size: 13px; }
 
 /* ─── 加载/空状态 ─── */

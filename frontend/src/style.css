@@ -31,6 +31,7 @@
   /* 主色派生的浅底 / 聚焦光环：避免各组件手写 rgba 造成同一颜色多处定义 */
   --color-primary-soft:  rgba(139, 92, 246, 0.10);
   --color-primary-ring:  rgba(139, 92, 246, 0.15);
+  --color-primary-subtle: var(--color-primary-soft);
 
   /* ── 辅助色：成功 / 警告 / 错误 / 信息 ── */
   --color-success: #10b981;
@@ -46,13 +47,15 @@
   /* ── 文本色 ── */
   --color-text-primary:     #111827;    /* 标题文字 */
   --color-text-secondary:   #4b5563;    /* 次要说明文字 */
-  --color-text-placeholder: #9ca3af;    /* 占位 / 弱化文字 */
+  --color-text-placeholder: #6b7280;    /* 占位 / 弱化文字 */
+  --color-text-quaternary:  var(--color-text-placeholder);  /* 最弱一级，与占位同色 */
   --color-text-inverse:     #ffffff;    /* 深色背景上的白色文字 */
 
   /* ── 背景色：纯白基调 ── */
   --color-bg-page:     #ffffff;   /* 页面整体背景【纯白】 */
   --color-bg-card:     #ffffff;   /* 卡片 / 面板背景 */
   --color-bg-hover:    #f3f4f6;   /* hover 背景 */
+  --color-bg-subtle:   var(--color-bg-hover);  /* 比卡片更淡一层的底色 */
   --color-bg-disabled: #e5e7eb;   /* 禁用态 / 次级填充（进度槽、胶囊底） */
   --color-bg-overlay:  rgba(0, 0, 0, 0.35);  /* 遮罩层 */
 
@@ -61,6 +64,7 @@
      "可见的浅分隔线"（≈ default），同一个名字不能承载两种含义，见下方别名。 */
   --color-border-default: #e5e7eb;
   --color-border-soft:    #f3f4f6;
+  --color-border-strong:  #d1d5db;   /* 比 default 更明确的分隔 / 描边 */
   --color-border-focus:   #8b5cf6;
 
   /* ── 圆角 ── */
@@ -84,7 +88,7 @@
     'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   --font-mono: Consolas, Monaco, 'Courier New', monospace;
 
-  --font-size-xs:   10px;
+  --font-size-xs:   12px;
   --font-size-sm:   12px;
   --font-size-base: 14px;
   --font-size-md:   16px;
@@ -110,7 +114,7 @@
   --color-bg-surface:   var(--color-bg-disabled);  /* 胶囊 / 次级按钮底 */
 
   --color-text-tertiary: var(--color-text-placeholder);
-  --color-text-muted:    rgba(17, 24, 39, 0.35);
+  --color-text-muted:    #6b7280;   /* 纯色，避免叠在半透明底上再掉对比度 */
 
   --color-border:        var(--color-border-default);
   --color-border-light:  var(--color-border-default);   /* 存量语义：可见的浅分隔线 */
@@ -166,7 +170,7 @@
   --el-text-color-primary:     #111827;
   --el-text-color-regular:     #4b5563;
   --el-text-color-secondary:   #4b5563;
-  --el-text-color-placeholder: #9ca3af;
+  --el-text-color-placeholder: #6b7280;
   --el-text-color-disabled:    #d1d5db;
   --el-border-color:             #e5e7eb;
   --el-border-color-light:       #e5e7eb;
@@ -202,7 +206,7 @@ html.dark {
 
   --color-text-primary:     #e5e7eb;
   --color-text-secondary:   #9ca3af;
-  --color-text-placeholder: #6b7280;
+  --color-text-placeholder: #9ca3af;
   --color-text-inverse:     #ffffff;
 
   --color-bg-page:     #181825;
@@ -213,6 +217,7 @@ html.dark {
 
   --color-border-default: #313244;
   --color-border-soft:    rgba(255, 255, 255, 0.08);
+  --color-border-strong:  #45475a;
   --color-border-focus:   #a78bfa;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.30);
@@ -221,7 +226,7 @@ html.dark {
   --shadow-popup: 0 8px 32px rgba(0, 0, 0, 0.45);
 
   /* 以下取值的别名本体在 :root，这里只覆盖随主题变化的部分 */
-  --color-text-muted: rgba(229, 231, 235, 0.45);
+  --color-text-muted: #9ca3af;
   --color-blue:       #60a5fa;
   --color-blue-hover: #3b82f6;
   --color-blue-light: #89b4fa;
@@ -260,7 +265,7 @@ html.dark {
   --el-text-color-primary:   #e5e7eb;
   --el-text-color-regular:   #9ca3af;
   --el-text-color-secondary: #9ca3af;
-  --el-text-color-placeholder: #6b7280;
+  --el-text-color-placeholder: #9ca3af;
   --el-text-color-disabled:  #6b7280;
   --el-border-color:         #313244;
   --el-border-color-light:   #313244;
@@ -390,4 +395,16 @@ button, input, select, textarea {
 }
 .markdown-body .katex-html {
   max-width: 100%;
+}
+
+/* ═══════════════════════════════════════
+  降动效：系统开启「减弱动态效果」时全局收敛
+  ═══════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

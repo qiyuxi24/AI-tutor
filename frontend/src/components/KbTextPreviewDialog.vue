@@ -397,7 +397,7 @@ function openInNewTab(event) {
 }
 .sheet-truncate {
   margin: 8px 0 0;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
 }
 </style>

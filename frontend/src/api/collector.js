@@ -2,7 +2,7 @@ import { apiClient } from './index.js'
 
 // ═══ 教育资源采集（Collector）═══
 //
-// 与后端契约（对齐 TODO_Collector B1.4，字段 snake_case）：
+// 与后端契约（对齐 TODO.md B1.4，字段 snake_case）：
 //   POST /api/v1/collector/search
 //     body: { subject: "数据结构与算法", mode: "personal"|"commercial" }
 //     resp: { candidates: CollectCandidate[] }

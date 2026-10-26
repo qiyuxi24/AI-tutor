@@ -12,7 +12,7 @@
  * `avatarState` 是**全应用共享的响应式状态**：设置页一改，活动栏与对话里的头像立刻响应，
  * 不需要刷新页面也不需要事件总线（结构对齐 utils/floatingBall.js）。
  *
- * 文档：docs/用户头像_设计与实施方案.md
+ * 文档：docs/前端小组件_设计与实现.md §二
  */
 import { reactive } from 'vue'
 import { deleteAvatar, getAvatarBlob, uploadAvatarFile } from '../api/index.js'

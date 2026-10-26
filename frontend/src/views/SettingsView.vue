@@ -53,11 +53,13 @@ const current = computed(() => TABS.find((t) => t.key === activeKey.value))
     <aside class="settings-nav">
       <div class="sn-title">设置</div>
       <nav class="sn-list">
-        <a
+        <button
           v-for="t in TABS"
           :key="t.key"
+          type="button"
           class="sn-item"
           :class="{ active: activeKey === t.key }"
+          :aria-current="activeKey === t.key ? 'page' : undefined"
           @click="activeKey = t.key"
         >
           <svg
@@ -66,7 +68,7 @@ const current = computed(() => TABS.find((t) => t.key === activeKey.value))
             v-html="t.icon"
           ></svg>
           {{ t.label }}
-        </a>
+        </button>
       </nav>
     </aside>
 
@@ -80,3 +82,23 @@ const current = computed(() => TABS.find((t) => t.key === activeKey.value))
     </main>
   </div>
 </template>
+
+<style scoped>
+/*
+ * .sn-item 的外观在全局 styles/settings.css；这里只补齐 <button> 的浏览器默认样式，
+ * 让按钮与原来的 <a> 视觉一致。
+ * 用 :where() 把优先级压到最低（只高于 UA 默认值），避免与 .sn-item.active /
+ * .sn-item:hover 打平后靠样式注入顺序决胜负（那会让选中态背景被 transparent 覆盖）。
+ */
+:where(.sn-item) {
+  width: 100%;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
+}
+:where(.sn-item):focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+</style>

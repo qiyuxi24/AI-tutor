@@ -349,7 +349,11 @@ watch(() => props.items, () => {
                 <div class="kd-acts">
                   <button class="kd-act pri" @click="emit('learn-node', selected.id)">去学习</button>
                   <button class="kd-act" @click="emit('focus-node', selected.id)">在图谱中定位</button>
-                  <button class="kd-act" @click="emit('edit-node', selected.id)">修改掌握度</button>
+                  <button
+                    class="kd-act"
+                    title="打开这个知识点的详情"
+                    @click="emit('edit-node', selected.id)"
+                  >节点详情</button>
                 </div>
               </div>
             </template>
@@ -395,7 +399,7 @@ watch(() => props.items, () => {
 }
 .pb-sub {
   margin: 3px 0 0;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -436,7 +440,7 @@ watch(() => props.items, () => {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 10px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
   padding: 2px 2px 8px;
 }
@@ -456,7 +460,7 @@ watch(() => props.items, () => {
   padding: 8px 10px;
   margin-bottom: 10px;
 }
-.pb-warn-title { font-size: 11px; font-weight: 600; color: var(--color-red); margin-bottom: 5px; }
+.pb-warn-title { font-size: var(--font-size-xs); font-weight: 600; color: var(--color-red); margin-bottom: 5px; }
 .pb-warn-item {
   display: block;
   width: 100%;
@@ -464,7 +468,7 @@ watch(() => props.items, () => {
   border: none;
   background: transparent;
   color: var(--color-text-secondary);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 1.6;
   padding: 2px 0;
   cursor: pointer;
@@ -479,7 +483,7 @@ watch(() => props.items, () => {
   align-items: center;
   gap: 6px;
   margin: 0 0 6px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   color: var(--color-text-secondary);
   text-transform: none;
@@ -490,10 +494,10 @@ watch(() => props.items, () => {
   font-weight: 400;
   color: var(--color-text-tertiary);
 }
-.pb-note { margin: 0 0 6px; font-size: 11px; color: var(--color-text-muted); }
+.pb-note { margin: 0 0 6px; font-size: var(--font-size-xs); color: var(--color-text-muted); }
 .pb-recs { display: flex; flex-wrap: wrap; gap: 5px; }
 .pb-rec {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   padding: 3px 8px;
   border-radius: 6px;
   border: 1px solid var(--color-border);
@@ -517,7 +521,7 @@ watch(() => props.items, () => {
   align-items: center;
   gap: 5px;
   font-family: inherit;
-  font-size: 11.5px;
+  font-size: var(--font-size-xs);
   font-weight: 500;
   padding: 6px 11px;
   border-radius: 7px;
@@ -530,17 +534,17 @@ watch(() => props.items, () => {
 .pb-gen:hover:not(:disabled) { background: var(--color-bg-hover); }
 .pb-gen:disabled { opacity: 0.5; cursor: not-allowed; }
 .pb-gen-n {
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   padding: 0 5px;
   border-radius: 20px;
   background: var(--color-accent);
   color: var(--color-text-inverse);
 }
-.pb-tools-hint { font-size: 10.5px; color: var(--color-text-muted); }
-.pb-tools-info { margin-right: auto; font-size: 11px; color: var(--color-text-secondary); }
+.pb-tools-hint { font-size: var(--font-size-xs); color: var(--color-text-muted); }
+.pb-tools-info { margin-right: auto; font-size: var(--font-size-xs); color: var(--color-text-secondary); }
 .pb-tool {
   font-family: inherit;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   padding: 4px 9px;
   border-radius: 6px;
   border: 1px solid var(--color-border);
@@ -578,7 +582,7 @@ watch(() => props.items, () => {
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  font-size: 10.5px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   background: var(--color-bg-surface);
   color: var(--color-text-secondary);
@@ -586,10 +590,10 @@ watch(() => props.items, () => {
 .task.first .task-seq { background: var(--color-accent); color: var(--color-text-inverse); }
 .task-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .task-name { font-size: 12.5px; font-weight: 500; line-height: 1.4; }
-.task-meta { font-size: 10.5px; line-height: 1.5; color: var(--color-text-tertiary); }
+.task-meta { font-size: var(--font-size-xs); line-height: 1.5; color: var(--color-text-tertiary); }
 .task-done {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   padding: 1px 6px;
   border-radius: 20px;
   background: var(--color-green);
@@ -626,9 +630,10 @@ watch(() => props.items, () => {
 .kp.locked { border-style: dashed; border-left-style: solid; color: var(--color-text-secondary); }
 
 .kp-top { display: flex; align-items: baseline; gap: 6px; }
-.kp-name { font-size: 12.5px; font-weight: 500; line-height: 1.4; flex: 1; }
+/* min-width:0：字号放大后长名（无空格英文/编号）能收缩换行，不把徽标挤出卡片 */
+.kp-name { font-size: 12.5px; font-weight: 500; line-height: 1.4; flex: 1; min-width: 0; }
 .kp-badge {
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   padding: 1px 5px;
   border-radius: 20px;
   white-space: nowrap;
@@ -636,12 +641,12 @@ watch(() => props.items, () => {
   color: var(--color-text-secondary);
   flex-shrink: 0;
 }
-.kp-hint { font-size: 10.5px; color: var(--color-text-tertiary); line-height: 1.5; }
+.kp-hint { font-size: var(--font-size-xs); color: var(--color-text-tertiary); line-height: 1.5; }
 .kp-pre {
   display: flex;
   align-items: center;
   gap: 3px;
-  font-size: 10.5px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
 }
 .pip { width: 7px; height: 7px; border-radius: 2px; display: inline-block; background: var(--color-graph-node); }
@@ -654,14 +659,14 @@ watch(() => props.items, () => {
   border: 1px solid var(--color-border-subtle);
   background: var(--color-bg-surface);
   color: var(--color-text-secondary);
-  font-size: 10px;
+  font-size: var(--font-size-xs);
   line-height: 1.6;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.rel-more { font-size: 10px; color: var(--color-text-muted); }
-.kd-rel-label { color: var(--color-text-muted); font-size: 10.5px; }
+.rel-more { font-size: var(--font-size-xs); color: var(--color-text-muted); }
+.kd-rel-label { color: var(--color-text-muted); font-size: var(--font-size-xs); }
 
 /* 四档状态：左侧色条 + 徽标底色（与图谱节点四色同源） */
 .kp.st-mastered { border-left-color: var(--color-green); background: var(--color-green-light); }
@@ -686,20 +691,20 @@ watch(() => props.items, () => {
   background: var(--color-bg-secondary);
 }
 .kd-name { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--color-text-primary); }
-.kd-sub { margin: 3px 0 8px; font-size: 11px; line-height: 1.6; color: var(--color-text-tertiary); }
+.kd-sub { margin: 3px 0 8px; font-size: var(--font-size-xs); line-height: 1.6; color: var(--color-text-tertiary); }
 .kd-h4 {
   margin: 10px 0 5px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   color: var(--color-text-secondary);
 }
-.kd-empty { margin: 0; font-size: 11px; color: var(--color-text-muted); }
+.kd-empty { margin: 0; font-size: var(--font-size-xs); color: var(--color-text-muted); }
 .kd-list { list-style: none; margin: 0; padding: 0; }
 .kd-list li {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   padding: 3px 7px;
   border-radius: 6px;
   border-left: 3px solid var(--color-border-light);
@@ -717,14 +722,14 @@ watch(() => props.items, () => {
   border-radius: 8px;
   background: var(--color-accent-light);
   border: 1px solid var(--color-accent);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 1.7;
   color: var(--color-text-secondary);
 }
 .kd-chain {
   margin-top: 4px;
   font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: 10.5px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-primary);
   word-break: break-all;
 }
@@ -733,7 +738,7 @@ watch(() => props.items, () => {
 .kd-acts { display: flex; gap: 6px; margin-top: 10px; }
 .kd-act {
   font-family: inherit;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   padding: 5px 9px;
   border-radius: 6px;
   border: 1px solid var(--color-border);
@@ -750,7 +755,7 @@ watch(() => props.items, () => {
 
 .pb-foot {
   margin: 4px 0 0;
-  font-size: 10.5px;
+  font-size: var(--font-size-xs);
   line-height: 1.7;
   color: var(--color-text-muted);
 }

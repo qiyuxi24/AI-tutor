@@ -189,7 +189,7 @@ defineExpose({ focus: () => inputRef.value?.focus(), close: closeSearch })
 
           <!-- 掌握度指示 -->
           <span v-if="node.mastery" class="result-mastery" :style="{
-            color: node.mastery >= 60 ? 'var(--color-green)' : node.mastery >= 30 ? 'var(--color-orange)' : 'var(--color-text-muted)'
+            color: node.mastery >= 70 ? 'var(--color-success)' : node.mastery >= 30 ? 'var(--color-warning)' : 'var(--color-text-muted)'
           }">
             {{ node.mastery }}%
           </span>
@@ -331,7 +331,7 @@ defineExpose({ focus: () => inputRef.value?.focus(), close: closeSearch })
 }
 
 .result-mastery {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 500;
   flex-shrink: 0;
 }
@@ -344,7 +344,7 @@ defineExpose({ focus: () => inputRef.value?.focus(), close: closeSearch })
 }
 
 .search-hint {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
   display: flex;
   align-items: center;

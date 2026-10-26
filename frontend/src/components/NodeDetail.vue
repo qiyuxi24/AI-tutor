@@ -19,7 +19,7 @@
  *   save-content: ({ nodeId, content }) — 保存节点内容（父组件调用 Store）
  */
 
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { renderMarkdown } from '../utils/markdown.js'
 // ★ 保存操作由父组件通过 Store 处理；此处只读小节正文/试题列表与触发生成（走 kb.js 封装，不裸调 apiClient）
 import { fetchNodeSection, fetchNodeQuizzes, generateSectionQuiz, updateSectionLearn } from '../api/kb.js'
@@ -323,6 +323,14 @@ watch(() => props.sourceDocId, () => {
   if (hit) selectSection(hit.id)
 })
 
+/* Esc 关闭弹窗：window 上挂一次即可（不用 watch(visible) 反复绑/解绑）。
+   只在 visible 为真时响应，弹窗关着时不抢别的组件的 Esc。 */
+function handleKeydown(e) {
+  if (e.key === 'Escape' && props.visible) emit('close')
+}
+onMounted(() => window.addEventListener('keydown', handleKeydown))
+onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
+
 function displayName(id) {
   if (!id) return ''
   return id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
@@ -590,7 +598,7 @@ async function handleSave() {
               v-for="pid in nodeInfo.prerequisites"
               :key="pid"
               class="relation-tag link-btn"
-              title="跳转到「{{ displayName(pid) }}」"
+              :title="`跳转到「${displayName(pid)}」`"
               @click="emit('navigate-to-node', pid)"
             >
               ← {{ displayName(pid) }}
@@ -606,7 +614,7 @@ async function handleSave() {
               v-for="rid in nodeInfo.related_nodes"
               :key="rid"
               class="relation-tag related link-btn"
-              title="跳转到「{{ displayName(rid) }}」"
+              :title="`跳转到「${displayName(rid)}」`"
               @click="emit('navigate-to-node', rid)"
             >
               ↔ {{ displayName(rid) }}
@@ -621,7 +629,7 @@ async function handleSave() {
 <style scoped>
 .modal-overlay {
   position: fixed; inset: 0; z-index: 1000;
-  background: rgba(0,0,0,0.5);
+  background: var(--color-bg-overlay);
   display: flex; align-items: center; justify-content: center;
 }
 
@@ -760,12 +768,12 @@ async function handleSave() {
 .quiz-item.is-source-hit { background: var(--color-green-light); }
 .quiz-item-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .quiz-type-badge {
-  flex-shrink: 0; padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 600;
+  flex-shrink: 0; padding: 1px 6px; border-radius: 8px; font-size: 11px; font-weight: 600;
   background: var(--color-accent-light); color: var(--color-accent);
 }
 .quiz-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.quiz-node-mark { font-size: 10px; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.quiz-doc-mark { font-size: 10px; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quiz-node-mark { font-size: 11px; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quiz-doc-mark { font-size: 11px; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .quiz-empty { display: flex; flex-direction: column; gap: 6px; padding: 4px 2px; font-size: 12px; color: var(--color-text-muted); }
 .quiz-goto-btn {
   align-self: flex-start; padding: 4px 10px; border: 1px solid var(--color-border);
@@ -850,7 +858,7 @@ async function handleSave() {
 .slb-ai-mark { color: var(--color-text-tertiary); }
 .slb-progress {
   margin-left: auto;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
 }
 
@@ -859,7 +867,7 @@ async function handleSave() {
   margin-left: 4px;
   padding: 0 5px;
   border-radius: 9px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 15px;
 }
 .lp-passed { background: var(--color-green-light, rgba(34, 160, 107, 0.15)); color: var(--color-green, #22a06b); }

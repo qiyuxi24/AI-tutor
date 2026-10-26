@@ -7,10 +7,31 @@ const store = useChatStore()
 const text = ref('')
 const textareaRef = ref(null)
 
+/**
+ * textarea 自动增高。
+ * 副作用：直接改 DOM 的 style.height（不走响应式，避免每个字符触发重渲染）。
+ * 先置 auto 才能拿到真实内容高度，否则 scrollHeight 只会等于当前已撑开的高度。
+ * 上限 120px 由 CSS max-height 兜底，超出后内部滚动。
+ */
+function autoGrow() {
+  const el = textareaRef.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px'
+}
+
+/** 清空输入后把高度收回单行（rows="1" 决定 auto 时的基准高度） */
+function resetHeight() {
+  const el = textareaRef.value
+  if (el) el.style.height = 'auto'
+}
+
 async function handleSend() {
   if (!text.value.trim() || store.loading) return
   const msg = text.value
   text.value = ''
+  await nextTick()
+  resetHeight()
   await store.send(msg)
   await nextTick()
   textareaRef.value?.focus()
@@ -34,6 +55,7 @@ function handleKeydown(e) {
         placeholder="输入你的问题..."
         rows="1"
         class="input-textarea"
+        @input="autoGrow"
         @keydown="handleKeydown"
       ></textarea>
       <button
@@ -49,6 +71,9 @@ function handleKeydown(e) {
         </svg>
       </button>
     </div>
+
+    <!-- 快捷键提示：直接挂在 .input-area 下，不额外包容器 -->
+    <p class="input-hint">Enter 发送 · Shift + Enter 换行</p>
   </div>
 </template>
 
@@ -90,6 +115,15 @@ function handleKeydown(e) {
 
 .input-textarea::placeholder {
   color: var(--color-text-tertiary);
+}
+
+/* 快捷键提示（12px，右对齐，与发送按钮右缘对齐） */
+.input-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-text-muted);
+  text-align: right;
 }
 
 /* 发送按钮 */

@@ -308,7 +308,7 @@ async function remove(m) {
 }
 
 .badge {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   padding: 1px 7px;
   border-radius: 999px;
   border: 1px solid var(--color-border);
@@ -350,7 +350,7 @@ async function remove(m) {
 
 .model-error {
   margin-top: 6px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-danger, #e5534b);
   word-break: break-all;
 }

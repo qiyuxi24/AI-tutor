@@ -10,13 +10,16 @@
           </button>
         </el-tooltip>
         <el-tooltip content="上传文件" placement="top">
-          <label class="kb-icon-btn">
+          <label class="kb-icon-btn" :class="{ 'is-busy': uploading }">
             <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
             <input ref="fileInputRef" type="file" hidden multiple :accept="acceptTypes" @change="handleUpload">
           </label>
         </el-tooltip>
       </div>
     </div>
+
+    <!-- 上传进度：串行上传+向量化是分钟级的，必须有常驻提示（ElMessage 3 秒就没了） -->
+    <div v-if="uploading" class="kb-uploading">{{ uploadStatus }}</div>
 
     <!-- 一键生成学科图谱：勾选下方文件 / 文件夹作为书籍来源 -->
     <div class="kb-gen">
@@ -212,7 +215,7 @@
  * 为什么文件操作收在三点菜单里：侧栏窄，逐个平铺按钮既挤压文件名又易误触，
  * 一个常驻三点按钮足够。
  */
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '../utils/feedback'
 import {
@@ -255,6 +258,10 @@ const stats = ref({ files: 0, chunks: 0 })
 const subjectInput = ref('')
 const generating = ref(false)
 
+// 上传状态：uploading 驱动进度行与入口置灰，uploadStatus 显示「正在上传 i/N：文件名」
+const uploading = ref(false)
+const uploadStatus = ref('')
+
 // 条目菜单：由常驻三点按钮触发；targetData = 该目录节点
 const {
   visible: menuVisible,
@@ -278,7 +285,7 @@ const treeProps = {
 }
 
 // 与后端 parsers 包支持的格式保持一致
-const acceptTypes = '.pdf,.docx,.pptx,.md,.markdown,.txt,.png,.jpg,.jpeg,.bmp,.webp,.tiff,.gif,.csv,.json,.log,.py,.js,.ts,.html,.xml,.epub,.fb2,.mobi,.azw,.azw3,.djvu'
+const acceptTypes = '.pdf,.docx,.pptx,.md,.markdown,.txt,.png,.jpg,.jpeg,.bmp,.webp,.tiff,.gif,.csv,.json,.log,.py,.js,.ts,.html,.xml,.epub,.fb2,.mobi,.azw,.azw3,.djvu,.srt,.vtt'
 
 async function loadTree() {
   try {
@@ -432,12 +439,15 @@ function uploadInto(folder) {
 async function handleUpload(event) {
   const files = Array.from(event.target.files || [])
   if (!files.length) return
+  if (uploading.value) return          // 防重复：上一批还没传完（入口同时置灰）
   const parentId = selectedNode.value?.type === 'folder' ? selectedNode.value.id : null
 
-  ElMessage.info(`正在上传 ${files.length} 个文件，解析并向量化中...`)
+  // 串行上传（后端解析 + 向量化，单个文件就可能几十秒）→ 进度必须常驻在面板里
+  uploading.value = true
   try {
-    for (const file of files) {
-      await uploadKbFile(file, parentId)
+    for (let i = 0; i < files.length; i++) {
+      uploadStatus.value = `正在上传 ${i + 1}/${files.length}：${files[i].name}`
+      await uploadKbFile(files[i], parentId)
     }
     ElMessage.success(`成功上传 ${files.length} 个文件`)
     loadTree()
@@ -445,9 +455,17 @@ async function handleUpload(event) {
   } catch (e) {
     ElMessage.error('上传失败：' + (e.response?.data?.detail || e.message))
   } finally {
+    uploading.value = false
+    uploadStatus.value = ''
     event.target.value = ''
   }
 }
+
+// 后台任务完成后由 SSE 递增 `kbEpoch` → 重新拉目录树（导入是分钟级，请求响应早结束了）
+watch(() => store.kbEpoch, () => {
+  loadTree()
+  loadStats()
+})
 
 /** 勾选（含半选）的文件/文件夹 ID —— 文件夹由后端自动展开为其中所有文件 */
 function getCheckedIds() {
@@ -583,6 +601,19 @@ onMounted(() => {
   background: var(--color-bg-hover);
   color: var(--color-text-primary);
 }
+/* 上传中：入口置灰不可点（防反复点击），视觉上也说明"这活儿还在跑" */
+.kb-icon-btn.is-busy {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* 上传进度（常驻，不随 toast 消失） */
+.kb-uploading {
+  padding: 6px 12px;
+  font-size: var(--font-size-xs);
+  color: var(--color-accent);
+  flex-shrink: 0;
+}
 
 /* ── 一键生成区（侧栏顶部） ── */
 .kb-gen {
@@ -600,7 +631,7 @@ onMounted(() => {
 }
 .kb-gen-hint {
   margin: 6px 12px 8px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   line-height: 1.5;
   color: var(--color-text-tertiary);
   flex-shrink: 0;
@@ -725,7 +756,7 @@ onMounted(() => {
 
 .kb-stats {
   padding: 6px 12px 10px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   flex-shrink: 0;
 }

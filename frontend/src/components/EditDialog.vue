@@ -300,7 +300,7 @@ function handleCancel() {
 }
 
 .form-hint {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   margin-top: 2px;
 }

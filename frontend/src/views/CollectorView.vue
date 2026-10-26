@@ -6,7 +6,7 @@
  *    活动栏「资源」入口与 HomeView 的挂载均已移除，本页与 `api/collector.js` 仅供查考。
  *    后端 REST 路由（`/api/v1/collector/*`）仍在，如有需要可再接回。
  *
- * 流程（对齐 TODO_Collector B1.7 / 设计文档 §7）：
+ * 流程（对齐 TODO.md B1.7 / 设计文档 §7）：
  *   选学科 → 搜索候选（license 徽标 / 预览 / 勾选）→ 建任务 → 轮询进度（可取消）→ 覆盖率概览
  *
  * 版权模式：读取用户画像 preferences.usage_mode（个人 / 商用），搜索与勾选均受其约束；

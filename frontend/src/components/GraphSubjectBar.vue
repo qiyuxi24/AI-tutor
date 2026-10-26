@@ -220,7 +220,7 @@ async function handleDelete() {
 }
 
 .subject-bar-count {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
 }
 
@@ -318,7 +318,7 @@ async function handleDelete() {
 }
 
 .subject-total {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   flex-shrink: 0;
 }
@@ -357,7 +357,7 @@ async function handleDelete() {
 }
 
 .subject-empty-hint {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   opacity: 0.85;
 }
 </style>

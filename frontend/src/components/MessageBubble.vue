@@ -174,7 +174,23 @@ watch(renderedContent, () => {
 
         <!-- 失败兜底（后端文本未送达等）：给明确提示 + 一键重试，绝不静默消失 -->
         <div v-if="message.failed" class="failed-actions">
-          <button class="retry-btn" @click="emit('retry')">↻ 重试</button>
+          <button class="retry-btn" @click="emit('retry')">
+            <!-- 旋转箭头（lucide rotate-ccw），替代 ↻ 字符 -->
+            <svg
+              class="retry-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+            </svg>
+            <span>重试</span>
+          </button>
         </div>
       </template>
     </div>
@@ -298,12 +314,13 @@ watch(renderedContent, () => {
   color: var(--color-accent);
 }
 
+/* 语义色走 token，暗色模式下才不会被硬编码深绿/深红吞掉对比度 */
 .tool-done {
-  color: rgb(5, 150, 105);
+  color: var(--color-success);
 }
 
 .tool-error {
-  color: rgb(220, 38, 38);
+  color: var(--color-danger);
 }
 
 .tool-name {
@@ -311,7 +328,7 @@ watch(renderedContent, () => {
 }
 
 .tool-status {
-  font-size: 10px;
+  font-size: 11px;
   opacity: 0.8;
 }
 
@@ -338,6 +355,9 @@ watch(renderedContent, () => {
 }
 
 .retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 4px 12px;
   border: 1px solid var(--color-accent-light);
   border-radius: 6px;
@@ -346,6 +366,12 @@ watch(renderedContent, () => {
   font-size: 13px;
   cursor: pointer;
   transition: all 0.15s;
+}
+
+.retry-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
 }
 
 .retry-btn:hover { background: var(--color-accent-light); }
@@ -378,7 +404,7 @@ watch(renderedContent, () => {
 
 .thinking-arrow {
   transition: transform 0.2s;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .thinking-arrow.expanded {

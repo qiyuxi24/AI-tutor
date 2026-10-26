@@ -325,17 +325,40 @@ defineExpose({ focusNode })
 
     <!-- 空状态 -->
     <div v-else-if="!loading && props.nodes.length === 0 && !error" class="empty-overlay">
-      <div class="empty-icon">◉</div>
+      <div class="empty-icon">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <circle cx="12" cy="12" r="3.5" />
+        </svg>
+      </div>
       <p>知识图谱暂无内容</p>
       <p class="empty-hint">右键空白区域创建第一个节点</p>
     </div>
 
     <!-- 缩放控制 -->
     <div v-if="props.nodes.length > 0" class="zoom-controls">
-      <button class="zoom-btn" title="放大" @click="zoomIn">+</button>
+      <button class="zoom-btn" title="放大" @click="zoomIn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+      </button>
       <span class="zoom-level">{{ currentZoom }}x</span>
-      <button class="zoom-btn" title="缩小" @click="zoomOut">−</button>
-      <button class="zoom-btn zoom-reset" title="重置视图" @click="zoomReset">↺</button>
+      <button class="zoom-btn" title="缩小" @click="zoomOut">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+      </button>
+      <button class="zoom-btn zoom-reset" title="重置视图" @click="zoomReset">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 12a9 9 0 1 0 3-6.7" />
+          <polyline points="3 4 3 9 8 9" />
+        </svg>
+      </button>
     </div>
 
     <!-- 掌握度图例（左下角）。「学习路径」开关已上收到图谱页左侧「学科导航」栏，
@@ -515,7 +538,7 @@ defineExpose({ focusNode })
   align-items: center; justify-content: center;
   color: var(--color-text-secondary); font-size: 14px; gap: 6px; z-index: 10;
 }
-.empty-icon { font-size: 36px; opacity: 0.4; }
+.empty-icon { width: 32px; height: 32px; opacity: 0.4; display: flex; }
 .empty-hint { font-size: 12px; color: var(--color-text-muted); margin-top: 4px; }
 
 /* ================================================================
@@ -531,14 +554,14 @@ defineExpose({ focusNode })
   border-radius: 4px;
   background: var(--color-bg-primary);
   color: var(--color-text-secondary);
-  font-size: 14px; font-weight: 500; line-height: 1;
+  padding: 0;
   cursor: pointer;
   display: flex; align-items: center; justify-content: center;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 .zoom-btn:hover { background: var(--color-bg-surface); color: var(--color-text-primary); border-color: var(--color-border); }
-.zoom-reset { font-size: 12px; margin-top: 4px; border-top: 1px solid var(--color-border-subtle); padding-top: 8px; }
-.zoom-level { font-size: 10px; color: var(--color-text-muted); user-select: none; padding: 2px 0; }
+.zoom-reset { margin-top: 4px; border-top: 1px solid var(--color-border-subtle); padding-top: 8px; }
+.zoom-level { font-size: 11px; color: var(--color-text-muted); user-select: none; padding: 2px 0; }
 
 /* ================================================================
    科技树掌握度图例（左下角）；「学习路径」开关在图谱页左侧导航栏
@@ -550,7 +573,7 @@ defineExpose({ focusNode })
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border-subtle);
   border-radius: 6px;
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   color: var(--color-text-secondary);
   z-index: 20;
   user-select: none;

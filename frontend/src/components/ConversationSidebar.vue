@@ -237,7 +237,7 @@ async function handleDelete() {
 }
 
 .date-label {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 600;
   color: var(--color-text-muted);
   text-transform: uppercase;

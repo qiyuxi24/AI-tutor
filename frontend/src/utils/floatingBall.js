@@ -9,7 +9,7 @@
  * `ballPrefs` 是**全应用共享的响应式状态**：设置页一改，主视图里的悬浮球立刻响应，
  * 不需要刷新页面、也不需要事件总线。
  *
- * 文档：docs/悬浮球小窗_设计与实施方案.md §4.3
+ * 文档：docs/前端小组件_设计与实现.md §1.4
  */
 import { reactive } from 'vue'
 import { getProfile, saveProfileData } from '../api/index.js'
