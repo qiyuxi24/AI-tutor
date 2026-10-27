@@ -217,6 +217,7 @@ live 首验（未重启即生效，说明宿主对 bundle 变更会 live 吸收�
 - 本次做法：停掉 live python 子进程 → 旧包其余文件已被移到 `dsh-ai-tutor.bak-20261027`（8 项，回滚用）→ 用 `tar -xzf … --strip-components=1` 把新包覆盖进 live 目录（被锁 DLL 跳过，版本相同不影响）→ 已校验关键文件：`lib/panel.js`、`panel/index.html`、`engine/app/mcp_servers/panel_server.py`、`runtime/Lib/site-packages/{uvicorn,fitz,jinja2,docx,tiktoken,…}` 全部就位。
 - 因此 live 目录是 **"新包 + 旧 engine/logs 残留"**：功能等价新包；重启后如需绝对干净，可退出 DSH 后 `rm -rf` 整目录再解包一次（此时无句柄占用）。
 - 回滚：删 live 目录 → 把 `dsh-ai-tutor.bak-20261027` 改回原名 → 重启 DSH。
+- **live 目录可用性已直接验证**（绕开宿主路由，手动用 live 的 runtime/engine/panel 起一次）：`python -m app.mcp_servers.panel_server --local-user 1` → `PORT=54220`、`GET /health` 200 `{panelAvailable:true, dataRoot:<repo>/data, localUser:1}`、`GET /` 200 且注入 141 字符 JWT → 说明重启后 iframe 后端具备；只差宿主重启注册 `/ai-tutor/panel` 路由（当前 live 仍 404）。
 
 ### 10.6 未验证 / 已知限制（P6）
 
