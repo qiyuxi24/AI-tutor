@@ -250,10 +250,13 @@ pytest-of-*/
 # ════════════════════════════════════════════
 # DSH 插件构建产物（2026-10-27 追加；`node scripts/build-plugin.mjs` 生成）
 #   engine/  = backend/app 的整包副本（只排 __pycache__/*.pyc）
-#   runtime/ = 便携 CPython 3.13 + 13 个锁定依赖（~135 MB，压缩后 ~46 MB）
-# 二者都是「删目录重跑即可重建」的产物，不入库
+#   runtime/ = 便携 CPython 3.13 + 27 个锁定依赖（~282 MB，压缩后 ~98 MB）
+#   panel/   = frontend 的 vite build 产物（`node scripts/build-panel.mjs` 生成，
+#              由插件 Python 服务在根路径托管、DSH 面板 iframe 打开）
+# 三者都是「删目录重跑即可重建」的产物，不入库
 # ════════════════════════════════════════════
 /plugins/dsh-ai-tutor/engine/
 /plugins/dsh-ai-tutor/runtime/
+/plugins/dsh-ai-tutor/panel/
 # 插件首次启动时在数据根生成的主机级密钥（明文，绝不入库）
 /data/secret_key

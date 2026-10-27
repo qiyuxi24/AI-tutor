@@ -2,7 +2,7 @@
 
 > 对应施工计划：[DSH插件MVP_施工计划.md](DSH插件MVP_施工计划.md)（用户给定，未改动）
 > 结论：**计划 §6「MVP done」6 条全部通过**（两处为代码级+部分真机验证，见 §5）。真机在 DSH Web 宿主（0.1.5-rc.2）里装插件、看 3 个工具、点开右栏「知识图谱」面板出 22 个真实节点，全程零 Python 安装、零 key、零后端部署。
-> 状态（2026-10-27 更新）：已按用户拍板装进 **live profile = `~/.dsh/profiles/desktop`**（当前 GUI 127.0.0.1:55448）——原生安装、不引其它插件、不动其它包（做法见 §8）；改动已按文件族提交。装后**首验发现并修复了一个线上缺陷**（面板路由未注销 → 热重载后永久 502，见 §9），修复版已在隔离宿主复验 200，**待宿主重启后在 live 复验**。
+> 状态（2026-10-27 P6 更新）：除只读工具 + 列表面板外，**完整应用（Vue 可视化图谱 / 上传 / 一键生成图谱 / RAG / 出题 / 对话）已作为 iframe 面板迁入插件**（见 §10）；live profile `~/.dsh/profiles/desktop` 的包目录已替换为 P6 版本（287MB/10281 files），**需重启 DSH 后新面板生效**（当前 GUI 127.0.0.1:59467 仍是旧进程：`/ai-tutor/panel` 404、`/ai-tutor/graph` 200）。改动已按文件族提交。
 
 ## 1. 交付物
 
@@ -153,3 +153,76 @@ live 首验（未重启即生效，说明宿主对 bundle 变更会 live 吸收�
 - live 55448 上仍是 502（旧进程里的泄漏路由无法从外部摘除）→ **重启宿主后复验**。
 
 **顺带记一条坑**：在 **CLI 宿主**里改 profile 的 `cordis.patch.yml` 会按 `patchReload: live` 重载**整棵插件树**，webserver 二次 listen 撞端口 → `failed to apply loader entry webserver: listen EADDRINUSE 127.0.0.1:3080`（进程退出码 1）。即：CLI profile 里不要用"改 patch 文件"当热重载手段；桌面宿主对同样变更的处理不同（不崩，但会走重载并留下泄漏路由 —— 本次 502 就是这样产生的）。
+
+## 10. 完整应用迁移（P6，2026-10-27 续）：Vue 可视化图谱 + 上传 + 图谱生成 + RAG + 出题全部搬进 DSH
+
+### 10.1 结论（先回答"渲染怎么读取的、可视化图谱搬没搬"）
+
+- **旧面板**（§1~§9）的渲染链路是：`client.js`（手写 React）→ 宿主路由 `GET /ai-tutor/graph` → `local_http.py` → `core/graph_snapshot.snapshot()`。它**只有「学科分组 + 掌握度条」列表**，**主仓的 Vue 可视化图谱（ForceGraph / GraphMindmap / GraphBrace）没有迁移**。
+- **P6 之后**：不再是"重写一份可视化"，而是**把主仓整套 Vue 前端 + 完整 FastAPI 后端原样跑起来**，DSH 面板用 **iframe** 内嵌。渲染链路变成：
+
+```
+侧栏「AI 导师」→ client.js 的 main 面板（iframe）
+  → GET /ai-tutor/panel → index.js → lib/panel.js 懒启动
+  → <包内 runtime>/python.exe -m app.mcp_servers.panel_server --local-user 1（cwd=engine，stdin 保持打开）
+  → uvicorn 127.0.0.1:<随机端口> = backend/app/main.py 的完整 app（11 个 /api/v1 路由 + 前端静态托管）
+  → GET / 每次请求签发 JWT 注入 index.html 的 localStorage（ai_tutor_token / ai_tutor_user）→ 免登录
+  → iframe 同源加载 panel/（frontend vite build 产物）→ /api/v1/* 相对路径同源命中
+```
+
+即：**可视化图谱、知识库上传、一键生成图谱、AI 出题、对话、画像、学习路径全部是真身组件，不是仿写**；DSH 只负责"把窗口嵌进来 + 提供 Python/数据"。
+
+### 10.2 P6 新增/改动的交付物
+
+| 文件 | 行数 | 职责 |
+|---|---|---|
+| `backend/app/mcp_servers/panel_server.py` | 440 | 完整应用宿主：stdout 恰一行 `PORT=<n>`；绑 127.0.0.1；`GET /` 注入 JWT 的 index.html；`/health`；`/ai-tutor/graph`（兼容旧面板，复用 graph_snapshot）；静态 mount；缺 SECRET_KEY → FATAL exit 2；缺 panel/ → 200 中文提示页 |
+| `backend/tests/test_panel_server.py` | — | 端口握手 / 注 token / health / 缺产物 / 缺密钥 |
+| `scripts/build-panel.mjs` | — | 零依赖：`npm run build` → 把 frontend/dist 拷成 `plugins/dsh-ai-tutor/panel/`，体积报告，失败非 0 |
+| `plugins/dsh-ai-tutor/lib/panel.js` | 545 | panel server 监督器 + 路由 handler：懒启动、30s 上限、/health 2xx 才 ready、卸载先 kill 再关 stdin、`.env` 候选透传、密钥脱敏 |
+| `plugins/dsh-ai-tutor/index.js` | 301 | 新增 `GET /ai-tutor/panel` → `{url, localUser, panel:{available}}`；保留 `/ai-tutor/graph`；两条路由都随卸载注销（§9 修复的同一模式） |
+| `plugins/dsh-ai-tutor/lib/client.js` | 993 | 第二个侧栏图标「AI 导师」（order 39）+ main 面板 iframe（1160×918）+ 工具条（刷新/在浏览器打开）+ ErrorBoundary；原「知识图谱」面板保留 |
+| `plugins/dsh-ai-tutor/bin/doctor.mjs` | 862 | 新增 3 项（11 panel 产物、12 真 spawn panel server、13 宿主端点/iframe 可达），共 13 项 |
+| `plugins/dsh-ai-tutor/lib/prune-pycache.mjs` | — | prepack 钩子：清 runtime/engine 的 `__pycache__`、`engine/logs`、`engine/data`（否则包破 100MB） |
+| `scripts/build-plugin.mjs` | — | 依赖 13 → **27 个**（uvicorn/Jinja2/PyYAML/openai/PyMuPDF/python-docx/python-pptx/tiktoken/ddgs/trafilatura/readability-lxml/zhconv/yt-dlp/segno + 原 13）；`PACKAGE_SPECS` 锁 `PyMuPDF>=1.24,<2`、`openai>=1,<3`；构建校验新增 `import app.main` 硬断言；裁剪含 `include/`、`pip/setuptools/wheel` |
+
+### 10.3 真机证据（隔离宿主 web2，打包 runtime + 真 data 根）
+
+| 能力 | 结果 | 证据 |
+|---|---|---|
+| 面板内嵌 | ✅ | CDP `Page.getFrameTree` 出现子帧 `http://127.0.0.1:65156/`；iframe 内 `title=AI Tutor`、`localStorage.ai_tutor_token` 长度 141；**DSH frame-src CSP 未拦**（0 条 CSP 日志/0 异常） |
+| 可视化图谱 | ✅ | iframe 内点「知识图谱」→ 15 学科、SVG 51 个节点元素、知识库栏、上传入口（accept 含 pdf/docx/pptx/md/图片）；console error/warn 均 0 |
+| 文件上传 | ✅ | `POST /api/v1/kb/upload` → 200 `{node_id:2, filename:"二分查找.md"}`；`/kb/stats` → files 1 / chunks 4 |
+| RAG 检索 | ✅ | `GET /api/v1/kb/search?q=二分查找 边界 mid 溢出` → 200，4 个 chunk 命中正文 |
+| 一键生成图谱（LLM + 写库） | ✅ | `POST /api/v1/kb/graph/generate` → 200，**97.0s**，`created_nodes:["binary_search"]`、`filled_nodes:["二分查找"]`、`dedup_status:"ok"`、`failed_chunks:0`；图谱路由 nodeCount 22 → **23**，新学科「二分查找验收」出现 |
+| AI 出题（RAG + LLM） | ✅ | `POST /api/v1/quiz/generate` → 200，**26.9s / 32.2s** 两次，`generated=3, materials_used=4`（单选×2 + 判断×1，题干命中上传资料） |
+| 幂等 | ✅ | 同 subject 再生成 → `units:0, skipped_docs:["二分查找.md"]`（已处理的资料不重复烧 LLM） |
+| doctor | ✅ | 打包产物 13 项中 **12 通过 / 0 失败 / 0 跳过**（隔离宿主 `--host` 全绿）；受限沙箱下第 12 项会因系统临时目录不可写报错，已加明确提示（见 §10.4） |
+| 体积 | ✅ | tgz **97,700,608 B = 97.7 MB / unpacked 278.2 MB / 10281 files**（npm 上限 100 MB，**余量仅 ~2.3 MB**） |
+
+截图工件（本机 `.dsh_local/`，未入库）：`cdp-iframe-panel.png`（DSH 侧栏 + iframe 内 AI Tutor 欢迎引导）、`cdp-iframe-graph.png`（iframe 内可视化图谱 + 知识库栏）、`cdp-iframe-home.png`、`cdp-graph-real.png`、`cdp-quiz.png`。
+
+### 10.4 真机缺陷与修复（P6 期间发现）
+
+1. **LLM 配置被环境清洗清掉**（阻断级）：图谱生成 422「全部 1 份资料都未能生成图谱」，engine 日志真因 `Missing credentials...`。根因：DSH 宿主进程 env 里已有非空 `LLM_API_KEY` → panel.js 的 dotenv 合并规则「宿主已有则不覆盖」什么都不写；随后 `paths.js::scrubEnv` 按 `/KEY|PASSWORD|SECRET|TOKEN/i` 把 `LLM_API_KEY`/`DASHSCOPE_API_KEY` 整片清掉（`LLM_BASE_URL` 不含 KEY 所以活着 → 出现"base 有值、key 没有"的诡异组合）。修复：`paths.js` 新增 `TUTOR_ENV_PREFIXES = ["LLM_","FALLBACK_LLM_","DASHSCOPE_","EMBED_"]` + `TUTOR_ENV_KEYS`（MODEL_NAME/ASR_MODEL/BILI_COOKIE*/WEB_SEARCH_ENABLED/SEARXNG_URL/LOG_LEVEL/ACCESS_TOKEN_EXPIRE_MINUTES）+ `pickTutorEnv()`，在 `scrubEnv` **之后**把插件自己的配置补回；MCP 子进程同样合并。验证：`settings.llm_api_key` 125 字符、base=minimax、model=MiniMax-M3；出题/图谱生成恢复。
+2. **doctor 第 12 项在受限沙箱误报**：探测数据根在系统临时目录、python 子进程只能写工作区 → `PermissionError` → uvicorn 退出码 3。修复：失败详情增加明确提示「设 `AI_TUTOR_DOCTOR_PROBE_ROOT=<可写目录>` 后重跑」（doctor 自身无法猜可写目录）。已验证：设该变量后第 12 项通过。
+3. **打包体积**：doctor/panel 真跑会在 runtime 里写 `__pycache__`（19.6MB）+ `engine/logs` → 首包 107.6MB 破 npm 上限。修复：`lib/prune-pycache.mjs` + package.json `prepack`；构建侧删 `include/` 与 pip/setuptools/wheel。
+4. **PyMuPDF 2.x 拖进 onnxruntime**（+140MB）：`PACKAGE_SPECS` 锁 `<2`（1.28.2，与 backend/venv 一致）。
+5. **zhconv 从 sdist 构建失败**（uv 构建缓存在 `%LOCALAPPDATA%`，本会话受限）：构建时 `$env:UV_CACHE_DIR=<repo>/.dsh_local/uv-cache`。
+
+### 10.5 live 安装（desktop profile）与本次的"混合目录"说明
+
+- live 包目录 = `~/.dsh/profiles/desktop/node_modules/dsh-ai-tutor`，从 144MB（旧，只读工具 + 列表面板）升级到 287MB（P6 完整应用 + 27 依赖 runtime）。
+- **Windows 句柄坑**：DSH 宿主会按需重启 MCP 子进程（kg_tools / local_http）并持有 `runtime/*.dll`、`engine/logs/tutor.log`、`engine/` 目录 cwd → **运行中的 live 插件目录无法整删/改名**（`Move-Item`/`Remove-Item` 均报 file in use）。
+- 本次做法：停掉 live python 子进程 → 旧包其余文件已被移到 `dsh-ai-tutor.bak-20261027`（8 项，回滚用）→ 用 `tar -xzf … --strip-components=1` 把新包覆盖进 live 目录（被锁 DLL 跳过，版本相同不影响）→ 已校验关键文件：`lib/panel.js`、`panel/index.html`、`engine/app/mcp_servers/panel_server.py`、`runtime/Lib/site-packages/{uvicorn,fitz,jinja2,docx,tiktoken,…}` 全部就位。
+- 因此 live 目录是 **"新包 + 旧 engine/logs 残留"**：功能等价新包；重启后如需绝对干净，可退出 DSH 后 `rm -rf` 整目录再解包一次（此时无句柄占用）。
+- 回滚：删 live 目录 → 把 `dsh-ai-tutor.bak-20261027` 改回原名 → 重启 DSH。
+
+### 10.6 未验证 / 已知限制（P6）
+
+- **live 重启后复验**：本次装完未重启宿主，live GUI（127.0.0.1:59467）仍是旧代码进程；重启后需验 `GET /ai-tutor/panel` 200 + 侧栏「AI 导师」可开（隔离宿主已验过同构路径）。
+- **数据副作用未清理**：验收在真 data 根留下 1 份上传文档（node_id 2 二分查找.md）、图谱节点 `binary_search` + 学科「二分查找验收」、6 道题与 2 个 quiz batch（user_id=1 testuser999），可在面板里自行删除。
+- **扫描版 PDF / OCR**：刻意不装 rapidocr+onnxruntime（体积），纯图片 PDF 提取不到文字（会走"未能生成图谱"路径），文本层 PDF/Word/PPT/Markdown 正常。
+- **B 站链接导入 / yt-dlp**：依赖 `data/bili/cookies.txt` 登录态，未在插件里验证。
+- **权限观察**：`GET /ai-tutor/panel` 与 panel server 端口都是 **127.0.0.1 回环**，DSH web 根是 401 但该路由不校验 DSH token → 本机任意进程可开面板（用户 id 固定为 1）。属"本地单用户"设计取舍，跨用户机器不要用同一份数据根。
+- **tgz 已接近 npm 100MB 上限**（97.7MB）：再加依赖（如 OCR）必须换分发方式（zip 解包安装 / 分卷）。

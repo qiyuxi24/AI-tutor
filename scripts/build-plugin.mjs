@@ -65,7 +65,18 @@ const ENGINE_DIR = join(PLUGIN_DIR, 'engine')
 const RUNTIME_DIR = join(PLUGIN_DIR, 'runtime')
 const SOURCE_APP_DIR = join(REPO_ROOT, 'backend', 'app')
 
-/** D5 锁死的 13 个包（顺序无关；改这份清单 = 改计划 §4 D5，先讨论）。 */
+/**
+ * 便携 runtime 的锁定依赖（顺序无关）。
+ *
+ * P1 只读网关阶段是 13 个；P6「完整面板」起 runtime 还要把**整个 FastAPI 应用**
+ * 跑起来（app.main + 文件上传解析 + 出题 + 对话），故补入下列 14 个：
+ *   uvicorn（ASGI 服务器，base 版够用：无 WebSocket 路由，SSE 走 h11）/
+ *   Jinja2 + PyYAML（提示词模板 + 配置）/ openai（LLM SDK）/
+ *   PyMuPDF + python-docx + python-pptx（文档解析）/ tiktoken（token 预算）/
+ *   ddgs + trafilatura + readability-lxml + zhconv（网页采集管线）/ yt-dlp（视频导入）/ segno（B 站二维码）。
+ * **刻意不装**：rapidocr-onnxruntime + onnxruntime（扫描件 OCR 可选能力，体积大几十 MB；
+ * 缺它时 parsers 自动降级，不阻断其它格式）。改这份清单要同步 PACKAGE_MODULES 与 README。
+ */
 export const PACKAGES = Object.freeze([
   'numpy',
   'Pillow',
@@ -80,10 +91,39 @@ export const PACKAGES = Object.freeze([
   'pygments',
   'mcp',
   'pydantic',
+  // ── P6 完整面板（app.main 全量启动）所需 ──
+  'uvicorn',
+  'Jinja2',
+  'PyYAML',
+  'openai',
+  'PyMuPDF',
+  'python-docx',
+  'python-pptx',
+  'tiktoken',
+  'ddgs',
+  'trafilatura',
+  'readability-lxml',
+  'zhconv',
+  'yt-dlp',
+  'segno',
 ])
 
-/** PACKAGES 的 import 名。校验时真 import 一次：C 扩展（numpy/Pillow/cryptography/bcrypt）
- *  与 Python 小版本严格绑定，装完不 import 等于没验证（计划 §7 风险表）。 */
+/**
+ * 需要版本区间、不能直接写裸包名的依赖。
+ *
+ * 为什么单列一张表：openai 3.x 移除了本项目用到的废弃 API（主仓 requirements.txt
+ * 就锁 <3），裸 'openai' 会装到不兼容的大版本 —— 而这种坏法要到真调 LLM 才暴露。
+ * 安装时用本表的值，读版本/校验仍用 PACKAGES 里的分发名。
+ */
+const PACKAGE_SPECS = Object.freeze({
+  openai: 'openai>=1.0.0,<3.0.0',
+  // PyMuPDF 2.x 的 wheel 会连带 onnxruntime(43MB)+pymupdf4llm+pymupdf_layout，
+  // 单它一家就 +140MB，tgz 直接顶破 npm 100MB；1.28 与 backend/venv 一致（实测 1.28.2）。
+  PyMuPDF: 'PyMuPDF>=1.24,<2',
+})
+
+/** PACKAGES 的 import 名。校验时真 import 一次：C 扩展（numpy/Pillow/cryptography/bcrypt/
+ *  PyMuPDF）与 Python 小版本严格绑定，装完不 import 等于没验证（计划 §7 风险表）。 */
 const PACKAGE_MODULES = Object.freeze({
   numpy: 'numpy',
   Pillow: 'PIL',
@@ -98,15 +138,33 @@ const PACKAGE_MODULES = Object.freeze({
   pygments: 'pygments',
   mcp: 'mcp',
   pydantic: 'pydantic',
+  // ── P6 完整面板 ──
+  uvicorn: 'uvicorn',
+  Jinja2: 'jinja2',
+  PyYAML: 'yaml',
+  openai: 'openai',
+  PyMuPDF: 'fitz',
+  'python-docx': 'docx',
+  'python-pptx': 'pptx',
+  tiktoken: 'tiktoken',
+  ddgs: 'ddgs',
+  trafilatura: 'trafilatura',
+  'readability-lxml': 'readability',
+  zhconv: 'zhconv',
+  'yt-dlp': 'yt_dlp',
+  segno: 'segno',
 })
 
 /** 计划 §P1/D5 锁定的工具白名单长度（gateway.list_specs() 的期望条数）。 */
 const EXPECTED_TOOL_COUNT = 3
 const DEFAULT_PYTHON = '3.13'
-/** 计划 §P2 验收的体积红线（目录总量；仅告警，不阻断构建）。 */
-const TOTAL_SIZE_WARN_MB = 180
-// Lead 2026-10-27：裁剪后的预算（超出则打印 runtime 顶层目录明细，交给人工判断，不激进删）。
-const SIZE_BUDGET_MB = 150
+/** 计划 §P2 验收的体积红线（目录总量；仅告警，不阻断构建）。
+ *  P6 完整面板把整个后端跑起来，PyMuPDF / trafilatura / yt-dlp 等解析链加入后
+ *  目录总量上限放宽到 240MB；真正的硬红线仍是 npm 单包 100MB（看 tgz）。 */
+const TOTAL_SIZE_WARN_MB = 240
+// 裁剪后的预算（超出则打印 runtime 顶层目录明细，交给人工判断，不激进删）。
+// P6 前是 150（13 个只读网关依赖）；P6 加到 200，超出仍只告警不阻断。
+const SIZE_BUDGET_MB = 200
 
 class BuildError extends Error {}
 
@@ -524,6 +582,8 @@ async function stageRuntimePython(opts) {
 const PRUNE_STDLIB_DIRS = Object.freeze(['test', 'idlelib', 'lib2to3', 'ensurepip', 'turtledemo', 'tkinter'])
 const PRUNE_TCL_TK_DLL = Object.freeze([/^tcl.*\.dll$/i, /^tk.*\.dll$/i])
 const PRUNE_SP_TEST_DIRS = Object.freeze(['tests', 'test'])
+/** site-packages 里运行期不需要的整包（uv 安装完即可删；插件不在运行期装包）。 */
+const PRUNE_SP_PACKAGES = Object.freeze(['pip', 'setuptools', 'wheel'])
 const PRUNE_SP_JUNK_FILE = /\.(pdb|lib|a)$/i
 
 /** runtime 里标准库 / site-packages 的位置（Windows install_only 是 Lib/；POSIX 是 lib/python3.13/）。 */
@@ -621,6 +681,13 @@ function pruneRuntime(runtimeDir) {
       remove(file, relative(runtimeDir, file))
     }
   }
+  // 5) 运行期明确不需要的：C 头文件（只给编译用）、pip/setuptools/wheel（runtime 由 uv
+  //    --system 安装，插件运行期不会再装包）。P6 完整面板让 tgz 逼近 npm 100MB 上限，
+  //    这两个是零风险的一刀（~10MB），别再为了体积动 pymupdf/numpy 这些真依赖。
+  remove(join(runtimeDir, 'include'), 'include/')
+  if (existsSync(layout.sitePackages)) {
+    for (const name of PRUNE_SP_PACKAGES) remove(join(layout.sitePackages, name), 'site-packages/' + name)
+  }
   return { items, bytes: items.reduce((sum, item) => sum + item.bytes, 0), sitePackages: layout.sitePackages }
 }
 
@@ -661,18 +728,20 @@ function measureTgz(tmpRoot) {
 // ────────────────────────────── runtime：13 个依赖 ──────────────────────────────
 
 function installDeps(pythonExe) {
-  log(`安装 ${PACKAGES.length} 个锁定依赖：${PACKAGES.join(' ')}`)
+  // 安装规格 = PACKAGE_SPECS 覆盖后的列表（裸包名与版本区间混排，pip/uv 都接受）。
+  const specs = PACKAGES.map((name) => PACKAGE_SPECS[name] ?? name)
+  log(`安装 ${PACKAGES.length} 个锁定依赖：${specs.join(' ')}`)
   const uv = uvAvailable()
   if (uv) {
     log(`用 uv pip install --python <runtime>/python.exe --system（${uv}）`)
     // runtime 不是 venv（是 install_only 的裸解释器）→ 必须 --system 才允许写入。
-    run('uv', ['pip', 'install', '--python', pythonExe, '--system', ...PACKAGES], { env: childEnv() })
+    run('uv', ['pip', 'install', '--python', pythonExe, '--system', ...specs], { env: childEnv() })
   } else {
     log('uv 不可用 → 回落 runtime/python.exe -m pip install')
     // --break-system-packages：万一来源是"pip 认作系统 Python"的安装，PEP 668 也会挡写入。
     run(
       pythonExe,
-      ['-m', 'pip', 'install', '--no-input', '--disable-pip-version-check', '--break-system-packages', ...PACKAGES],
+      ['-m', 'pip', 'install', '--no-input', '--disable-pip-version-check', '--break-system-packages', ...specs],
       { env: childEnv() },
     )
   }
@@ -748,9 +817,14 @@ function validate(pythonExe, tmpRoot) {
     'from app.core.agent_tools import gateway',
     'names = [s["name"] for s in gateway.list_specs()]',
     'print("LIST_SPECS=" + json.dumps(names, ensure_ascii=False))',
-    // 13 个锁定依赖一次性真 import（含 C 扩展）—— 任何 ABI 不匹配都会在这里炸。
+    // 锁定依赖一次性真 import（含 C 扩展）—— 任何 ABI 不匹配都会在这里炸。
     'import ' + Object.values(PACKAGE_MODULES).join(', '),
     'print("IMPORTS=OK")',
+    // P6：完整面板要跑整个 FastAPI 应用，只 import 网关不足以证明依赖齐 —— 这里真 import
+    // app.main（会连带 api/v1/* 与 services 的全部模块级导入）。导入期需要 SECRET_KEY，
+    // 由下面的占位重试兜住（与 gateway 的 SECRET_KEY 处理同一条路径）。
+    'import app.main',
+    'print("APP_MAIN_OK")',
   ].join('\n')
 
   log('运行校验：cd ' + relative(REPO_ROOT, PLUGIN_DIR) + ' && runtime/python.exe -c "<import gateway; list_specs()>"')
@@ -781,7 +855,10 @@ function validate(pythonExe, tmpRoot) {
   if (!stdout.includes('IMPORTS=OK')) {
     fail('校验失败：' + PACKAGES.length + ' 个锁定依赖没能全部 import（stderr 见上）')
   }
-  log('13 个锁定依赖全部 import 成功。')
+  if (!stdout.includes('APP_MAIN_OK')) {
+    fail('校验失败：app.main 没能 import（完整面板起不来；缺包见 stderr）')
+  }
+  log(PACKAGES.length + ' 个锁定依赖全部 import 成功，app.main 可导入。')
 
   const warnings = []
   if (names.length !== EXPECTED_TOOL_COUNT) {
@@ -861,6 +938,16 @@ async function main(argv) {
   log(`临时目录：${opts.tmpRoot}`)
   if (!existsSync(PLUGIN_DIR)) fail(`插件目录不存在：${PLUGIN_DIR}`)
   if (!existsSync(SOURCE_APP_DIR)) fail(`backend/app 不存在：${SOURCE_APP_DIR}`)
+
+  // 面板产物（前端 dist 镜像）：不在这里构建（= node scripts/build-panel.mjs），
+  // 但必须让构建日志明确它有没有被带进包 —— 缺了它完整面板只剩提示页。
+  const PANEL_DIR = join(PLUGIN_DIR, 'panel')
+  if (!existsSync(join(PANEL_DIR, 'index.html'))) {
+    log('⚠️ plugins/dsh-ai-tutor/panel/index.html 不存在：完整面板只能显示降级提示页。')
+    log('   先跑 node scripts/build-panel.mjs（前端构建产物），再重跑本脚本。')
+  } else {
+    log(`panel：${formatMb(dirSizeBytes(PANEL_DIR))}（${countFiles(PANEL_DIR)} 个文件）`)
+  }
 
   const totalSteps = (opts.skipEngine ? 0 : 1) + (opts.skipRuntime ? 0 : 1) + (opts.skipDeps ? 0 : 1) + 3
   let stepNo = 0
@@ -950,6 +1037,9 @@ async function main(argv) {
   log('')
   log('════════════════ 体积报告 ════════════════')
   log(`engine  ${formatMb(engineBytes).padStart(9)}  （${engine.files} 个文件）`)
+  if (existsSync(join(PLUGIN_DIR, 'panel', 'index.html'))) {
+    log(`panel   ${formatMb(dirSizeBytes(join(PLUGIN_DIR, 'panel'))).padStart(9)}  （前端构建产物，iframe 完整面板用）`)
+  }
   log(`runtime ${formatMb(runtimeBytes).padStart(9)}  （Python 本体 ${formatMb(runtimeBytes - sitePackagesBytes)} + site-packages ${formatMb(sitePackagesBytes)}）`)
   log(`裁剪    ${formatMb(pruned.bytes).padStart(9)}  （${pruned.items.length} 项已从 runtime 删除）`)
   log(`总计    ${formatMb(totalBytes).padStart(9)}  （来源：${runtimeSource}）`)
