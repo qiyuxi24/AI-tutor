@@ -42,6 +42,15 @@
  * 501 + 可操作文案，启动/转发失败返回 502，进程在 dispose 时 kill；
  * 这条链路坏掉不影响 MCP 工具（工具走 stdio，不经过它）。
  *
+ * ## 完整面板（P6，本地/自托管都注册）
+ * 注册宿主路由 GET /ai-tutor/panel → 懒启动 engine/app/mcp_servers/panel_server.py
+ * （完整 FastAPI 应用 + 托管 <PLUGIN_ROOT>/panel 前端；127.0.0.1 随机端口，stdout
+ * 打印 PORT=<n>，GET /health 通过才算就绪）→ 客户端在 iframe 里打开它。缺
+ * panel_server.py / panel/index.html 返回 501 + 可操作文案，启动/健康检查失败返回
+ * 502，进程在 dispose 时 kill。完整应用要 LLM key 等配置，所以这条链路会把
+ * .env 透传给子进程（只透传 KEY=VALUE，**绝不打印值**，SECRET_KEY 用本地 secret）。
+ * 同上：这条链路坏掉不影响 MCP 工具与「知识图谱」面板。
+ *
  * @module dsh-ai-tutor
  */
 
@@ -50,11 +59,14 @@ import { mkdirSync } from 'node:fs'
 import * as mcpClient from '@deepseek-ai/dsh-mcp-client'
 
 import { createGraphHandler, createLocalHttpProxy } from './lib/local-http.js'
+import { createPanelHandler, createPanelSupervisor } from './lib/panel.js'
 import {
   dataEnv,
   defaultDataRoot,
   isLocalMode,
   localModeEnv,
+  pickTutorEnv,
+  PLUGIN_ROOT,
   resolveDataRoot,
   resolveEngineDir,
   resolveLocalUserId,
@@ -75,6 +87,9 @@ const SERVER_ARGS = ['-m', 'app.mcp_servers.kg_tools']
 
 /** 图谱面板端点（面板 lib/client.js 里 fetch 同一路径）。 */
 const GRAPH_ROUTE = '/ai-tutor/graph'
+
+/** 完整面板端点：200 返回 iframe 要打开的本机 URL（客户端第二个侧栏图标用它）。 */
+const PANEL_ROUTE = '/ai-tutor/panel'
 
 /** 与主仓 agent loop 的单工具超时同量级：rag_search 要打嵌入 API。 */
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 90_000
@@ -160,6 +175,51 @@ function registerGraphRoute(ctx, engineDir, options) {
 }
 
 /**
+ * 注册完整面板路由（本地/自托管都注册）。
+ *
+ * 与 registerGraphRoute 同构的两条 scope.effect：清 supervisor、注销路由。
+ * 路由同样必须随插件卸载注销（漏掉时宿主热重载会留下旧 handler —— 旧 supervisor
+ * 已 stop，新实例注册又因 duplicate 抛错被吞掉，面板就一直 502，只有重启宿主能恢复）。
+ *
+ * @param {object} ctx - 插件上下文。
+ * @param {string} engineDir - engine 绝对路径。
+ * @param {object} options - { python, dataRoot, localUserId, pluginRoot, envFile, secretKey }。
+ */
+function registerPanelRoute(ctx, engineDir, options) {
+  try {
+    const supervisor = createPanelSupervisor({
+      engineDir,
+      python: options.python,
+      dataRoot: options.dataRoot,
+      localUserId: options.localUserId,
+      pluginRoot: options.pluginRoot,
+      envFile: options.envFile,
+      secretKey: options.secretKey,
+    })
+    const handler = createPanelHandler(supervisor, engineDir, options.pluginRoot)
+    ctx.inject(['webServer'], (scope) => {
+      // 先挂清理再注册：即使 register 抛错（重复路径），已创建的 supervisor 也能被回收
+      scope.effect(() => () => supervisor.stop())
+      scope.effect(() => {
+        try {
+          return scope.webServer.register({
+            kind: 'exact',
+            path: PANEL_ROUTE,
+            handler,
+          })
+        } catch (error) {
+          console.error('[ai-tutor] 完整面板路由注册失败（不影响 MCP 工具）：', error)
+          return () => {}
+        }
+      })
+    })
+  } catch (error) {
+    // 面板是附加能力：注册失败只记日志，绝不让 MCP 工具跟着失败
+    console.error('[ai-tutor] 完整面板路由注册失败（不影响 MCP 工具）：', error)
+  }
+}
+
+/**
  * 插件入口：解析安装差异 → 交给 MCP client 去连。
  *
  * 会阻塞到「连上并同步完工具列表」，所以激活完成时模型侧已能看到引擎暴露的工具；
@@ -189,14 +249,19 @@ export async function apply(ctx, config = {}) {
   // 所有 python 子进程都必须 PYTHONDONTWRITEBYTECODE=1：否则 import 会在**插件包内**写
   // __pycache__（engine 越长越大，还会被打进发布包）。本地模式再读/建 <dataRoot>/secret_key
   // 作为 SECRET_KEY（engine 的 auth.py 导入期要求非空；每台机器一份随机值，不覆盖用户显式配置）。
+  // pickTutorEnv：scrub 会清掉 *KEY*，但本地模式要 engine 自己的 LLM/嵌入配置（见 paths.js）。
   const env = localMode
-    ? Object.assign(dataEnv(dataRoot), localModeEnv(dataRoot, process.env, config.secretKey))
+    ? Object.assign(dataEnv(dataRoot), localModeEnv(dataRoot, process.env, config.secretKey), pickTutorEnv(process.env))
     : Object.assign({ PYTHONDONTWRITEBYTECODE: '1' }, dataEnv(configuredDataRoot))
   const args = [...SERVER_ARGS]
 
+  // 完整面板始终以本地单用户身份起（两种模式都注册；自托管模式的工具仍走 token）。
+  const localUserId = resolveLocalUserId(config, readEnvVar)
+  // .env 显式候选：行 config.envFile → 环境变量 AI_TUTOR_ENV_FILE（开发/自定义安装用）
+  const envFile = config.envFile || readEnvVar('AI_TUTOR_ENV_FILE')
+
   if (localMode) {
     // 包内引擎 = 本地单用户：没有账号体系，用固定 user_id（默认 1），不传 token
-    const localUserId = resolveLocalUserId(config, readEnvVar)
     args.push('--local-user', String(localUserId))
     registerGraphRoute(ctx, engineDir, { python, dataRoot, localUserId })
   } else {
@@ -213,6 +278,16 @@ export async function apply(ctx, config = {}) {
     }
     env.AI_TUTOR_TOKEN = token
   }
+
+  // 完整面板路由：自己懒启动，缺产物/起不来只在面板内降级（不影响 MCP 工具）。
+  registerPanelRoute(ctx, engineDir, {
+    python,
+    dataRoot,
+    localUserId,
+    pluginRoot: PLUGIN_ROOT,
+    envFile,
+    secretKey: config.secretKey,
+  })
 
   await mcpClient.apply(ctx, {
     transport: 'stdio',

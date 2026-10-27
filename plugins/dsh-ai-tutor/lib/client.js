@@ -1,19 +1,25 @@
 /**
- * 知识图谱面板（DSH Web 客户端插件，纯 JS + React.createElement，零构建）。
+ * AI-tutor 的 DSH Web 客户端插件（纯 JS + React.createElement，零构建）。
  *
  * 加载方式：DSH 的客户端插件不是 ESM import，而是宿主注入的 window.__ModuleLoader__
  * 主动 load 一份 factory（先例：dsh-context / modlens 的 lib/client.js 都是手写的）。
  * 所以本文件没有 import/export 语句，只依赖 factory 参数里的 require('react')。
  *
- * 两个 slot（契约来自 DSH 源码 packages/client/ui-sidebar/.../contract/slots.ts）：
- *   main             keyed 面板：真正的面板体（key = PANEL_ID，与侧栏图标 id 对应）
+ * 两个面板，每个面板一对注册（契约来自 DSH 源码
+ * packages/client/ui-sidebar/.../contract/slots.ts）：
+ *   main             keyed 面板：真正的面板体（key = 面板 id，与侧栏图标 id 一致）
  *   sidebar.panellist 侧栏图标列表：owner props = { size, active }，只负责画图标
  * 计划原文只注册了 panellist 并把面板体当图标传进去 —— 那样点开是空的；这里按
  * dsh-context 的真实写法拆成两处。
  *
- * 数据：同源 GET /ai-tutor/graph（index.js 注册的宿主路由 → 本地 Python），
- * 15 秒轮询 + 手动刷新；出错只显示在面板内（含 501/502 的可操作文案），
- * 绝不让渲染错误把宿主一起带崩（ErrorBoundary 兜底）。
+ *   「知识图谱」ai-tutor-graph（只读摘要）：同源 GET /ai-tutor/graph
+ *     （index.js 注册的宿主路由 → 本地 Python），15 秒轮询 + 手动刷新。
+ *   「AI 导师」ai-tutor-app（完整应用）：同源 GET /ai-tutor/panel 拿到本机 URL
+ *     （127.0.0.1 随机端口）后，用全屏 iframe 打开完整面板 —— 可视化图谱、文件上传、
+ *     图谱生成、RAG、出题、对话都在 iframe 里；工具条提供刷新与「在浏览器打开」。
+ *
+ * 出错只显示在面板内（含 501/502 的可操作文案），绝不让渲染错误把宿主一起带崩
+ * （ErrorBoundary 兜底）。
  */
 
 window.__ModuleLoader__.load({
@@ -30,6 +36,13 @@ window.__ModuleLoader__.load({
     var PANEL_LABEL = '知识图谱'
     var PANEL_ORDER = 40
     var GRAPH_ENDPOINT = '/ai-tutor/graph'
+    /** 完整面板：宿主路由返回 iframe 要打开的本机 URL。 */
+    var APP_PANEL_ID = 'ai-tutor-app'
+    var APP_PANEL_LABEL = 'AI 导师'
+    var APP_PANEL_ORDER = 39
+    var APP_ENDPOINT = '/ai-tutor/panel'
+    /** 完整应用冷启动要 import FastAPI 全家桶，首屏给足时间（服务端启动上限 30s）。 */
+    var APP_REQUEST_TIMEOUT_MS = 45000
     var POLL_INTERVAL_MS = 15000
     var REQUEST_TIMEOUT_MS = 20000
     var MAX_SUBJECTS = 20
@@ -95,6 +108,19 @@ window.__ModuleLoader__.load({
       if (value < 40) return COLOR.low
       if (value < 70) return COLOR.mid
       return COLOR.high
+    }
+
+    /**
+     * 只接受**本机回环**地址再放进 iframe：url 来自宿主路由，但客户端不该把任意
+     * 远端地址 iframe 进来（防被其他插件/配置劫持）。
+     */
+    function normalizePanelUrl(value) {
+      var text = typeof value === 'string' ? value.trim() : ''
+      var matched = /^http:\/\/(127\.0\.0\.1|localhost):(\d{1,5})\/?$/.exec(text)
+      if (!matched) return ''
+      var port = Number(matched[2])
+      if (!(port > 0 && port < 65536)) return ''
+      return 'http://' + matched[1] + ':' + port
     }
 
     // ------------------------------------------------------- 数据形状归一化
@@ -206,6 +232,31 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 「AI 导师」侧栏图标：一块面板 + 一颗星（与图谱图标区分）。 */
+    function AppIcon(props) {
+      var size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 16
+      var active = Boolean(props && props.active)
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          style: { opacity: active ? 1 : 0.78, display: 'block' },
+          'aria-hidden': 'true',
+        },
+        h('rect', { x: 3.5, y: 4.5, width: 17, height: 15, rx: 2.6 }),
+        h('path', { d: 'M7.4 9.4h5.4' }),
+        h('path', { d: 'M7.4 12.6h3.6' }),
+        h('path', { d: 'M15.9 9.2l.9 2 2 .9-2 .9-.9 2-.9-2-2-.9 2-.9z' }),
+      )
+    }
+
     // ------------------------------------------------------------ 错误兜底
 
     /** 渲染错误只毁这个面板，不冒泡到宿主（React 错误边界）。 */
@@ -219,10 +270,12 @@ window.__ModuleLoader__.load({
       return { error: error }
     }
     PanelErrorBoundary.prototype.componentDidCatch = function (error, info) {
-      console.error('[ai-tutor] 图谱面板渲染失败：', error, info)
+      console.error('[ai-tutor] 面板渲染失败：', error, info)
     }
     PanelErrorBoundary.prototype.render = function () {
       if (this.state.error) {
+        // props.renderError：不同面板用各自的错误文案（完整面板 / 图谱面板）
+        if (typeof this.props.renderError === 'function') return this.props.renderError(this.state.error)
         return renderError({
           message: '面板渲染失败：' + (this.state.error && this.state.error.message ? this.state.error.message : String(this.state.error)),
           hint: '这是前端渲染错误，不影响模型侧工具。把浏览器控制台里的报错贴出来即可定位。',
@@ -561,6 +614,273 @@ window.__ModuleLoader__.load({
       return renderPanel(state, load)
     }
 
+    // -------------------------------------------------- 完整应用（iframe）
+
+    /**
+     * 「AI 导师」面板的错误视图：不是塌掉整块，而是给出**可操作**的中文提示
+     * （完整面板缺产物 → 501 / 起不来 → 502 都走这里）。
+     */
+    function renderAppError(error) {
+      var statusText = error && error.status ? '（HTTP ' + error.status + '）' : ''
+      var message = error && error.message ? String(error.message) : '未知错误'
+      var hint = error && error.hint ? String(error.hint) : ''
+      return h(
+        'div',
+        {
+          role: 'alert',
+          style: {
+            maxWidth: 760,
+            padding: '12px 14px',
+            border: '1px solid ' + COLOR.errorBorder,
+            borderRadius: 10,
+            background: COLOR.errorBg,
+          },
+        },
+        h('div', { style: { fontSize: 13, fontWeight: 600, marginBottom: 6 } }, APP_PANEL_LABEL + '面板打不开' + statusText),
+        h('div', { style: { fontSize: 12, lineHeight: 1.6, wordBreak: 'break-word' } }, message),
+        hint ? h('div', { style: mutedTextStyle({ marginTop: 6, wordBreak: 'break-word' }) }, hint) : null,
+        h(
+          'div',
+          { style: mutedTextStyle({ marginTop: 8, wordBreak: 'break-word' }) },
+          '完整面板是一个只在本机运行的应用（在 iframe 内打开）。排查：在插件目录运行 node bin/doctor.mjs（第 11、12 项）；确认 panel/ 已构建、本机端口没有被安全软件拦截。',
+        ),
+        h('div', { style: mutedTextStyle({ marginTop: 4 }) }, '模型侧工具与「知识图谱」面板不受影响。'),
+      )
+    }
+
+    /** 顶部小工具条：标题 + 本机地址 + 刷新 / 在浏览器打开。 */
+    function renderAppToolbar(state, onRefresh, onOpen) {
+      var busy = state.status === 'loading' || state.status === 'refreshing'
+      var meta = state.url
+        ? '本机服务 ' + state.url.replace(/^http:\/\//, '') + (state.localUser ? ' · 用户 ' + state.localUser : '')
+        : '正在连接本机服务…'
+      return h(
+        'div',
+        {
+          style: {
+            flex: '0 0 auto',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '8px 12px',
+            borderBottom: '1px solid ' + COLOR.line,
+            minWidth: 0,
+          },
+        },
+        h(
+          'div',
+          { style: { flex: '1 1 auto', minWidth: 0, display: 'flex', alignItems: 'baseline', gap: 8 } },
+          h('div', { style: { fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' } }, APP_PANEL_LABEL),
+          h('div', { style: mutedTextStyle({ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }) }, meta),
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            title: '重新连接本机面板并刷新',
+            onClick: busy ? undefined : onRefresh,
+            disabled: busy,
+            style: buttonStyle(busy),
+          },
+          busy ? '连接中…' : '刷新',
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            title: '在系统浏览器里打开完整面板',
+            onClick: state.url ? onOpen : undefined,
+            disabled: !state.url,
+            style: buttonStyle(!state.url),
+          },
+          '在浏览器打开',
+        ),
+      )
+    }
+
+    function renderAppPanel(state, onRefresh, onOpen) {
+      var children = [renderAppToolbar(state, onRefresh, onOpen)]
+      // 刷新失败但旧 iframe 还能用：只在顶部提示一条，不把已有界面拆掉
+      if (state.error && state.url) {
+        children.push(
+          h(
+            'div',
+            {
+              role: 'status',
+              style: {
+                flex: '0 0 auto',
+                padding: '5px 12px',
+                fontSize: 11,
+                lineHeight: 1.5,
+                wordBreak: 'break-word',
+                background: COLOR.errorBg,
+                borderBottom: '1px solid ' + COLOR.errorBorder,
+              },
+            },
+            '刷新失败：' + String(state.error.message || state.error),
+          ),
+        )
+      }
+
+      var body
+      if (state.url) {
+        // key 带 rev：点「刷新」时强制重挂 iframe，等于重新加载完整应用
+        body = h('iframe', {
+          key: APP_PANEL_ID + '-frame-' + state.rev,
+          src: state.url + '/',
+          title: APP_PANEL_LABEL,
+          allow: 'clipboard-read; clipboard-write',
+          referrerPolicy: 'no-referrer',
+          style: { flex: '1 1 auto', width: '100%', height: '100%', border: 0, display: 'block', minHeight: 0, background: 'transparent' },
+        })
+      } else if (state.error) {
+        body = h('div', { style: { flex: '1 1 auto', overflowY: 'auto', padding: '14px 16px 20px' } }, renderAppError(state.error))
+      } else {
+        body = h(
+          'div',
+          { style: mutedTextStyle({ flex: '1 1 auto', padding: '18px 16px' }) },
+          '正在启动本机完整面板（首次启动要几秒，之后秒开）…',
+        )
+      }
+      children.push(body)
+
+      return h(
+        'div',
+        {
+          role: 'region',
+          'aria-label': APP_PANEL_LABEL,
+          style: {
+            height: '100%',
+            width: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+            boxSizing: 'border-box',
+            overflow: 'hidden',
+            color: 'inherit',
+            fontFamily: 'inherit',
+            fontSize: 13,
+          },
+        },
+        children,
+      )
+    }
+
+    /**
+     * 完整应用面板：GET /ai-tutor/panel 拿本机 URL（宿主懒启动 Python 服务），
+     * 然后用 iframe 铺满面板。失败只在面板内提示，不抛给宿主。
+     */
+    function AppPanel() {
+      var stateTuple = React.useState({ status: 'loading', url: '', localUser: 0, error: null, rev: 0 })
+      var state = stateTuple[0]
+      var setState = stateTuple[1]
+      var mountedRef = React.useRef(true)
+
+      var load = React.useCallback(function () {
+        if (!mountedRef.current) return
+        if (typeof fetch !== 'function') {
+          setState(function (prev) {
+            return Object.assign({}, prev, {
+              status: prev.url ? 'ready' : 'error',
+              error: { message: '宿主浏览器不支持 fetch，完整面板无法打开。', hint: '', status: 0 },
+            })
+          })
+          return
+        }
+        var controller = null
+        try {
+          if (typeof AbortController === 'function') controller = new AbortController()
+        } catch (error) {
+          controller = null
+        }
+        var timer = controller ? setTimeout(function () {
+          try { controller.abort() } catch (error) { /* 已结束 */ }
+        }, APP_REQUEST_TIMEOUT_MS) : null
+        var finish = function () { if (timer) { clearTimeout(timer); timer = null } }
+
+        setState(function (prev) {
+          return Object.assign({}, prev, { status: prev.url ? 'refreshing' : 'loading', error: null })
+        })
+
+        fetch(APP_ENDPOINT, {
+          method: 'GET',
+          headers: { accept: 'application/json' },
+          cache: 'no-store',
+          signal: controller ? controller.signal : undefined,
+        })
+          .then(function (response) {
+            return response.text().then(function (text) {
+              var payload = null
+              try { payload = text ? JSON.parse(text) : null } catch (error) { payload = null }
+              if (!response.ok) {
+                var detail = payload && typeof payload === 'object'
+                  ? String(payload.error || payload.detail || payload.message || ('HTTP ' + response.status))
+                  : 'HTTP ' + response.status
+                var failure = new Error(detail)
+                failure.status = response.status
+                failure.hint = payload && typeof payload === 'object' && payload.hint ? String(payload.hint) : ''
+                throw failure
+              }
+              return payload
+            })
+          })
+          .then(function (payload) {
+            finish()
+            if (!mountedRef.current) return
+            var url = normalizePanelUrl(payload && payload.url)
+            if (!url) {
+              var invalid = new Error('宿主返回的面板地址不合法：' + String((payload && payload.url) || '空'))
+              invalid.status = 0
+              throw invalid
+            }
+            setState(function (prev) {
+              return {
+                status: 'ready',
+                url: url,
+                localUser: toNumber(payload && payload.localUser) || 0,
+                error: null,
+                rev: prev.rev + 1,
+              }
+            })
+          })
+          .catch(function (error) {
+            finish()
+            if (!mountedRef.current) return
+            var aborted = error && error.name === 'AbortError'
+            setState(function (prev) {
+              return Object.assign({}, prev, {
+                status: prev.url ? 'ready' : 'error',
+                error: {
+                  message: aborted
+                    ? '请求超时（超过 ' + Math.round(APP_REQUEST_TIMEOUT_MS / 1000) + ' 秒没有响应；首次启动可能要更久）'
+                    : (error && error.message ? error.message : String(error)),
+                  hint: error && error.hint ? error.hint : '',
+                  status: error && error.status ? error.status : 0,
+                },
+              })
+            })
+          })
+      }, [])
+
+      React.useEffect(function () {
+        mountedRef.current = true
+        load()
+        return function () { mountedRef.current = false }
+      }, [load])
+
+      var openInBrowser = React.useCallback(function () {
+        if (!state.url) return
+        try {
+          if (typeof window !== 'undefined' && typeof window.open === 'function') {
+            window.open(state.url + '/', '_blank', 'noopener,noreferrer')
+          }
+        } catch (error) {
+          console.warn('[ai-tutor] 打开系统浏览器失败：', error)
+        }
+      }, [state.url])
+
+      return renderAppPanel(state, load, openInBrowser)
+    }
+
     // --------------------------------------------------------------- 注册
 
     /**
@@ -570,7 +890,7 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       try {
         if (!ctx || !ctx.slots || typeof ctx.slots.inject !== 'function' || typeof ctx.slots.register !== 'function') {
-          console.warn('[ai-tutor] 宿主没有可用的 slots 服务，知识图谱面板未注册（模型侧工具不受影响）')
+          console.warn('[ai-tutor] 宿主没有可用的 slots 服务，AI-tutor 面板未注册（模型侧工具不受影响）')
           return
         }
         var disposers = []
@@ -613,7 +933,34 @@ window.__ModuleLoader__.load({
           })
         })
 
-        // 宿主卸载插件时回收这两处注册（ctx.effect 的执行函数返回 disposer）
+        // 3) 完整应用的面板体：key 与下面的侧栏图标 id 一致
+        registerSafely('main 完整面板', function () {
+          return ctx.slots.inject('main', function () {
+            return ctx.slots.register({ name: 'main', key: APP_PANEL_ID }, function AppPanelView() {
+              // 完整面板的渲染错误用 renderAppError（比图谱面板多一条「在浏览器打开」的兜底建议）
+              return h(PanelErrorBoundary, { renderError: renderAppError }, h(AppPanel))
+            })
+          })
+        })
+
+        // 4) 完整应用的侧栏图标
+        registerSafely('sidebar.panellist 完整面板图标', function () {
+          return ctx.slots.inject('sidebar.panellist', function () {
+            return ctx.slots.register(
+              {
+                name: 'sidebar.panellist',
+                id: APP_PANEL_ID,
+                order: APP_PANEL_ORDER,
+                label: function () { return APP_PANEL_LABEL },
+              },
+              function AppIconSlot(props) {
+                return h(AppIcon, { size: props && typeof props.size === 'number' ? props.size : undefined, active: Boolean(props && props.active) })
+              },
+            )
+          })
+        })
+
+        // 宿主卸载插件时回收这四处注册（ctx.effect 的执行函数返回 disposer）
         if (typeof ctx.effect === 'function' && disposers.length > 0) {
           try {
             ctx.effect(function () {

@@ -1,20 +1,23 @@
 #!/usr/bin/env node
 /**
- * dsh-ai-tutor doctor —— 装完/升级后跑一次的自检（§P3 的 8 项 + 客户端 2 项）。
+ * dsh-ai-tutor doctor —— 装完/升级后跑一次的自检（§P3 的 8 项 + 客户端 2 项 + 完整面板 3 项）。
  *
  * 设计取向：
- *   - **离线优先**：第 1~9 项不需要 DSH 在运行；第 10 项没有宿主时明确标 SKIP。
+ *   - **离线优先**：第 1~9、11、12 项不需要 DSH 在运行（12 会真的 spawn 一次 panel server）；
+ *     第 10、13 项没有宿主时明确标 SKIP。
  *   - **只读**：除 --fix 创建数据根目录外不改任何东西；探测用的 DATA_ROOT/LOG_DIR
- *     指向系统临时目录，绝不碰真实 data/。
+ *     指向系统临时目录，绝不碰真实 data/（panel server 也用这份临时环境）。
  *   - **不崩**：每一项自己 try/catch；runtime/engine 半成品时输出明确的 ❌ + 修法，
  *     而不是抛栈。
  *
  * 用法（在插件目录）：
  *   node bin/doctor.mjs
  *   node bin/doctor.mjs --fix                     # 只创建缺失的数据根目录（安全操作）
- *   node bin/doctor.mjs --host http://127.0.0.1:55448   # 额外检查 /ai-tutor/graph 可达
- *   node bin/doctor.mjs --local-user 1            # 第 6 项用的 user_id（默认 1）
- * 环境变量：DSH_WEB_URL（等价 --host）、AI_TUTOR_DATA_ROOT、AI_TUTOR_LOCAL_USER。
+ *   node bin/doctor.mjs --host http://127.0.0.1:55448   # 额外检查 /ai-tutor/graph 与 /ai-tutor/panel 可达
+ *   node bin/doctor.mjs --local-user 1            # 第 6/12 项用的 user_id（默认 1）
+ * 环境变量：DSH_WEB_URL（等价 --host）、AI_TUTOR_DATA_ROOT、AI_TUTOR_LOCAL_USER、
+ * AI_TUTOR_DOCTOR_PROBE_ROOT（探测临时目录根，默认系统临时目录；在受限沙箱里
+ * python 只能写工作区时，把它指到一个可写目录才能跑第 12 项）。
  *
  * 退出码：有 ❌ → 1；全部通过或有 SKIP → 0。
  */
@@ -48,6 +51,12 @@ import {
   resolveDataRoot,
   scrubEnv,
 } from '../lib/paths.js'
+import {
+  PANEL_ENTRY_REL,
+  createPanelSupervisor,
+  findPanelInstallIssues,
+  panelDir,
+} from '../lib/panel.js'
 
 const VERSION = '0.1.0'
 const MIN_FREE_BYTES = 500 * 1024 * 1024
@@ -108,8 +117,8 @@ function usage() {
   console.log('用法：node bin/doctor.mjs [--fix] [--host <url>] [--local-user <n>]')
   console.log('')
   console.log('  --fix            只创建缺失的数据根目录（安全操作；不动已有数据）')
-  console.log('  --host <url>     额外检查面板端点（例如 http://127.0.0.1:55448）；也可用 DSH_WEB_URL')
-  console.log('  --local-user <n> 第 6 项 spawn 时用的 user_id（默认 ' + DEFAULT_LOCAL_USER_ID + '）')
+  console.log('  --host <url>     额外检查面板端点（/ai-tutor/graph 与 /ai-tutor/panel，例如 http://127.0.0.1:55448）；也可用 DSH_WEB_URL')
+  console.log('  --local-user <n> 第 6/12 项 spawn 时用的 user_id（默认 ' + DEFAULT_LOCAL_USER_ID + '）')
   console.log('')
   console.log('检查项：')
   console.log('  01 包内 Python（runtime/）可执行')
@@ -122,6 +131,9 @@ function usage() {
   console.log('  08 磁盘剩余空间 >= 500MB')
   console.log('  09 lib/client.js 语法与加载标记（离线检查）')
   console.log('  10 宿主端点 /ai-tutor/graph 可达（无宿主时 SKIP）')
+  console.log('  11 完整面板静态产物 panel/index.html 存在')
+  console.log('  12 完整面板后端能 spawn 且 /health 返回 200（离线）')
+  console.log('  13 宿主端点 /ai-tutor/panel 可达且返回的 url 能访问（无宿主时 SKIP）')
   console.log('')
 }
 
@@ -161,9 +173,16 @@ function parseArgs(argv) {
   return options
 }
 
-/** 探测用临时目录：DATA_ROOT/LOG_DIR 都指这里，绝不碰真实 data/。 */
+/**
+ * 探测用临时目录：DATA_ROOT/LOG_DIR 都指这里，绝不碰真实 data/。
+ *
+ * 默认落在系统临时目录；AI_TUTOR_DOCTOR_PROBE_ROOT 可覆盖（受限沙箱里 python
+ * 只被允许写工作区时，第 12 项需要它）。
+ */
 function createProbeDirs() {
-  const root = join(tmpdir(), 'dsh-ai-tutor-doctor-' + process.pid)
+  const override = readProcessEnv('AI_TUTOR_DOCTOR_PROBE_ROOT').trim()
+  const baseRoot = override ? resolve(override) : tmpdir()
+  const root = join(baseRoot, 'dsh-ai-tutor-doctor-' + process.pid)
   const dataRoot = join(root, 'data')
   const logDir = join(root, 'logs')
   mkdirSync(dataRoot, { recursive: true })
@@ -642,6 +661,183 @@ async function main() {
       } catch (error) {
         fail('10', '宿主端点 /ai-tutor/graph 可达', ['无法连接 ' + options.host + '：' + error.message], [
           '确认 DSH 正在运行，--host 用它的 Web 地址（GUI 地址栏里的 http://127.0.0.1:<port>）',
+        ])
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- 11
+  const panelRoot = panelDir(PLUGIN_ROOT)
+  const panelIndexPath = join(panelRoot, 'index.html')
+  if (!existsSync(panelIndexPath)) {
+    const panelIssues = findPanelInstallIssues(ENGINE_DIR, PLUGIN_ROOT)
+    fail('11', '完整面板静态产物 panel/index.html', [
+      '未找到：' + panelIndexPath,
+      existsSync(panelRoot) ? 'panel/ 目录存在但缺 index.html（构建半成品）' : 'panel/ 目录不存在：' + panelRoot,
+      panelIssues.length > 0 ? '当前缺失：' + panelIssues.join('；') : '',
+    ].filter(Boolean), [
+      '从仓库根运行 node scripts/build-panel.mjs 生成 panel/（构建 frontend 后拷进插件包）',
+      '发布包应自带 panel/；缺它时「AI 导师」面板返回 501，MCP 工具与「知识图谱」面板不受影响',
+    ])
+  } else {
+    let indexBytes = 0
+    try {
+      indexBytes = statSync(panelIndexPath).size
+    } catch (error) {
+      indexBytes = 0
+    }
+    pass('11', '完整面板静态产物 panel/index.html', [
+      panelIndexPath + '（' + Math.max(1, Math.round(indexBytes / 1024)) + 'KB）',
+    ])
+  }
+
+  // ---------------------------------------------------------------- 12
+  const panelEntry = join(ENGINE_DIR, PANEL_ENTRY_REL)
+  if (!bundledPython) {
+    skip('12', '完整面板后端能 spawn 且 /health 返回 200', ['缺包内 Python（先修 01）'])
+  } else if (!existsSync(panelEntry)) {
+    fail('12', '完整面板后端能 spawn 且 /health 返回 200', [
+      '未找到：' + panelEntry,
+      existsSync(ENGINE_DIR) ? 'engine 目录存在但缺 panel_server.py（engine 落后）' : 'engine 目录不存在：' + ENGINE_DIR,
+    ], [
+      '从仓库根运行 node scripts/build-plugin.mjs 重新构建 engine（app/mcp_servers/panel_server.py 会一起拷进去）',
+    ])
+  } else {
+    const panelSupervisor = createPanelSupervisor({
+      engineDir: ENGINE_DIR,
+      python: bundledPython,
+      dataRoot: probe.dataRoot,
+      localUserId: options.localUserId,
+      pluginRoot: PLUGIN_ROOT,
+      // 探测用临时环境（DATA_ROOT/LOG_DIR 都是 temp），绝不碰真实 data/
+      baseEnv: probe.env,
+      startTimeoutMs: 45_000,
+      healthTimeoutMs: 15_000,
+    })
+    try {
+      const started = await panelSupervisor.ensureRunning()
+      pass('12', '完整面板后端能 spawn 且 /health 返回 200', [
+        '--local-user ' + options.localUserId + ' 启动成功：GET ' + started.url + '/health → 200',
+        existsSync(panelIndexPath)
+          ? 'panel/index.html 就绪，iframe 可加载'
+          : '注意：panel/index.html 缺失 → iframe 首页会 404（先修 11）',
+      ])
+    } catch (error) {
+      const spawnMessage = error && error.message ? error.message : String(error)
+      // 受限沙箱（python 子进程只能写工作区）会让探测根在系统临时目录时直接 PermissionError。
+      // doctor 自身无法猜出"哪个目录可写"，只能明确把覆盖变量告诉用户（2026-10-27 实测）。
+      // stderr 尾部常常只剩一行 traceback（真实 PermissionError 在上文），所以 code=3 也提醒一次。
+      const probeDenied = !readProcessEnv('AI_TUTOR_DOCTOR_PROBE_ROOT').trim() &&
+        (/PermissionError|WinError 5|拒绝访问|EACCES|EPERM/.test(spawnMessage) ||
+          /启动即退出（code=3/.test(spawnMessage))
+      fail('12', '完整面板后端能 spawn 且 /health 返回 200', [
+        '启动失败：' + spawnMessage,
+        error && error.code === 'PANEL_MISSING' ? '缺产物：panel_server.py 或 panel/index.html —— 见第 11 项与 README「完整面板」' : '',
+        probeDenied ? '探测根在系统临时目录且子进程无权写入 → 设 AI_TUTOR_DOCTOR_PROBE_ROOT=<可写目录> 后重跑（受限沙箱/受控终端常见）' : '',
+      ].filter(Boolean), [
+        '先修 01/02（runtime 解释器与依赖）与 11（panel/ 产物）',
+        'engine 与 runtime 不同批次时重新构建：node scripts/build-plugin.mjs',
+        'MCP 工具与「知识图谱」面板不受影响；只有「AI 导师」完整面板打不开',
+      ])
+    } finally {
+      panelSupervisor.stop()
+    }
+  }
+
+  // ---------------------------------------------------------------- 13
+  if (!options.host) {
+    skip('13', '宿主端点 /ai-tutor/panel 可达且 url 能访问', [
+      '未指定宿主地址（--host http://127.0.0.1:<port> 或 DSH_WEB_URL）',
+      existsSync(panelEntry) && existsSync(panelIndexPath)
+        ? 'engine 与 panel/ 都在：装上插件并启动 DSH 后，可用 --host 复检完整面板端点'
+        : '注意：panel_server.py 或 panel/index.html 缺失 → 即使装了插件也会返回 501',
+    ])
+  } else {
+    let hostPanelUrl = ''
+    try {
+      hostPanelUrl = new URL('/ai-tutor/panel', options.host).toString()
+    } catch (error) {
+      hostPanelUrl = ''
+    }
+    if (!hostPanelUrl) {
+      fail('13', '宿主端点 /ai-tutor/panel 可达且 url 能访问', ['宿主地址不合法：' + options.host], ['用 --host http://127.0.0.1:<port> 指定 DSH 的 Web 地址'])
+    } else {
+      try {
+        const response = await fetch(hostPanelUrl, {
+          headers: { accept: 'application/json' },
+          signal: AbortSignal.timeout(45_000),
+        })
+        const text = await response.text()
+        let payload = null
+        try { payload = text ? JSON.parse(text) : null } catch (error) { payload = null }
+        if (response.status === 200) {
+          const panelUrl = payload && typeof payload.url === 'string' ? payload.url : ''
+          if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(panelUrl)) {
+            fail('13', '宿主端点 /ai-tutor/panel 可达且 url 能访问', [
+              'GET ' + hostPanelUrl + ' → 200，但返回的 url 不是本机回环地址：' + JSON.stringify(panelUrl),
+              text ? tail(text, 300) : '',
+            ].filter(Boolean), ['index.js 的 registerPanelRoute 组装返回体出错（这是插件 bug，把上面输出贴给维护者）'])
+          } else {
+            let pageStatus = 0
+            let pageError = ''
+            try {
+              const page = await fetch(panelUrl.replace(/\/+$/, '') + '/', {
+                headers: { accept: 'text/html' },
+                signal: AbortSignal.timeout(15_000),
+              })
+              pageStatus = page.status
+              await page.text()
+            } catch (error) {
+              pageError = error.message
+            }
+            if (pageStatus === 200) {
+              pass('13', '宿主端点 /ai-tutor/panel 可达且 url 能访问', [
+                'GET ' + hostPanelUrl + ' → 200（url=' + panelUrl + '）',
+                'GET ' + panelUrl + '/ → 200（iframe 首页可加载）',
+              ])
+            } else {
+              fail('13', '宿主端点 /ai-tutor/panel 可达且 url 能访问', [
+                'GET ' + hostPanelUrl + ' → 200（url=' + panelUrl + '），但 iframe 首页访问失败',
+                pageError ? '错误：' + pageError : 'HTTP ' + pageStatus,
+              ], [
+                '确认端口没有被防火墙/安全软件拦截；' + panelUrl + ' 是临时端口，重启后可能变化',
+                '先修第 11 项（panel/index.html 缺失会让首页 404）',
+              ])
+            }
+          }
+        } else if (response.status === 501) {
+          fail('13', '宿主端点 /ai-tutor/panel 可达且 url 能访问', [
+            'GET ' + hostPanelUrl + ' → 501（插件在，但完整面板产物没就绪）',
+            payload && payload.detail ? String(payload.detail) : '',
+            payload && payload.hint ? String(payload.hint) : '',
+          ].filter(Boolean), [
+            'engine 缺 app/mcp_servers/panel_server.py 或 plugins/dsh-ai-tutor/panel/index.html → 先修 11/12',
+            'MCP 工具与「知识图谱」面板不受影响',
+          ])
+        } else if (response.status === 502) {
+          fail('13', '宿主端点 /ai-tutor/panel 可达且 url 能访问', [
+            'GET ' + hostPanelUrl + ' → 502（本地面板服务启动失败）',
+            payload && payload.detail ? String(payload.detail) : '',
+            payload && payload.hint ? String(payload.hint) : '',
+          ].filter(Boolean), [
+            '重跑本命令的第 01/04/06/12 项定位 python、依赖与 panel_server.py 问题',
+            'DSH 控制台里看 [ai-tutor] 开头的报错（stderr 会带 traceback 尾部）',
+          ])
+        } else if (response.status === 404) {
+          fail('13', '宿主端点 /ai-tutor/panel 可达且 url 能访问', ['GET ' + hostPanelUrl + ' → 404（宿主没有这条路由）'], [
+            '插件没装/没启用，或装完没重启 DSH',
+            '安装：dsh plugin add ' + PLUGIN_ROOT + '（或把包名列进 profile 的 dsh.profile.bundles）',
+          ])
+        } else {
+          fail('13', '宿主端点 /ai-tutor/panel 可达且 url 能访问', [
+            'GET ' + hostPanelUrl + ' → ' + response.status,
+            text ? tail(text, 300) : '',
+          ].filter(Boolean), ['看 DSH 控制台日志里 [ai-tutor] 开头的报错'])
+        }
+      } catch (error) {
+        fail('13', '宿主端点 /ai-tutor/panel 可达且 url 能访问', ['无法连接 ' + options.host + '：' + error.message], [
+          '确认 DSH 正在运行，--host 用它的 Web 地址（GUI 地址栏里的 http://127.0.0.1:<port>）',
+          '首次请求会懒启动本地面板服务，慢是正常的（最多约 30 秒）',
         ])
       }
     }

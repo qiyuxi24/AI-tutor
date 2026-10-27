@@ -19,7 +19,8 @@
     "bin",
     "lib",
     "engine",
-    "runtime"
+    "runtime",
+    "panel"
   ],
   "keywords": [
     "dsh-plugin",
@@ -28,6 +29,9 @@
     "ai-tutor",
     "knowledge-graph"
   ],
+  "scripts": {
+    "prepack": "node ./lib/prune-pycache.mjs"
+  },
   "engines": {
     "node": ">=22"
   },

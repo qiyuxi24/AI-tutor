@@ -159,13 +159,56 @@ engine 探测顺序：`config.backendDir` → `config.repoRoot/backend` → 包�
 
 ---
 
+## 完整面板（AI 导师，iframe）
+
+除了只读的「知识图谱」摘要，插件还托管**主仓的完整前端**：DSH 面板里用 iframe 打开
+`http://127.0.0.1:<随机端口>`，可视化图谱 / 文件上传 / 图谱生成 / RAG / 出题 / 对话都在里面。
+
+依赖两样东西（都在发布包里；缺了只在面板内降级，不影响模型工具）：
+
+| 需要 | 位置 | 说明 |
+|---|---|---|
+| 后端 | `engine/app/mcp_servers/panel_server.py` | 完整 FastAPI 应用（`app.main:app`）的本地托管入口 |
+| 前端构建产物 | `plugins/dsh-ai-tutor/panel/`（`index.html` + `assets/`） | 由 `node scripts/build-panel.mjs` 从 `frontend/` 构建，**不进 git** |
+
+进程模型（与 MCP 工具**完全独立**）：
+
+- 宿主路由 `GET /ai-tutor/panel` → 200
+  `{ "url": "http://127.0.0.1:<port>", "localUser": 1, "panel": { "available": true } }`；
+  客户端拿到 `url` 后全屏 iframe，顶部工具条提供「刷新」与「在浏览器打开」。
+- **第一次请求才懒启动**：`<python> -m app.mcp_servers.panel_server --local-user N`
+  （cwd = `engine/`，只监听 `127.0.0.1` 的随机端口）；stdout 唯一一行 `PORT=<n>`，
+  日志走 stderr；随后轮询 `GET /health` 返回 2xx 才判定就绪（启动上限 30s）。
+  并发请求共用同一次启动，不会起两个进程。
+- 子进程环境 = 本地模式环境 + `AI_TUTOR_PANEL_DIR=<插件>/panel` + `SECRET_KEY`
+  （`<数据根>/secret_key`，不出本机）+ `.env` 透传（候选：`config.envFile` →
+  `<数据根父目录>/.env` → `<engine 父目录>/.env`；KEY=VALUE 解析、**不覆盖已有环境变量、
+  跳过 SECRET_KEY、绝不打印值**）+ `PYTHONDONTWRITEBYTECODE=1` / `PYTHONIOENCODING=utf-8`。
+- 卸载 / 重载：先 kill 子进程再关 stdin（stdin EOF 是 panel_server 的优雅退出信号），
+  不留孤儿进程。插件自己也**从不**接管真实端口之外的资源。
+
+失败语义（**永不抛给宿主**；错误只显示在面板内，中文可操作、带 doctor 指引）：
+
+| 情况 | HTTP | 响应体 |
+|---|---|---|
+| 正常 | 200 | `{ url, localUser, panel }` |
+| 非 GET | 405 | `{ error, method } ` |
+| 缺 `panel_server.py` 或 `panel/index.html` | 501 | `{ error, detail, hint }`，hint 指向 `scripts/build-panel.mjs` 与 doctor 第 11/12 项 |
+| 启动 / 健康检查失败 | 502 | `{ error, detail, hint }`，detail 是脱敏后的 stderr 尾部 |
+
+> 端口是随机的、进程重启后会变；「在浏览器打开」用的就是当前 `url`。
+> 如果宿主对自身页面设了 `frame-src` 之类 CSP，iframe 可能被拦 —— 面板内会显示错误，
+> 此时「在浏览器打开」仍可用。
+
+---
+
 ## 自检：`node bin/doctor.mjs`
 
 ```sh
-node bin/doctor.mjs                    # 10 项，逐项 ✅ / ❌ / SKIP + 修复建议
+node bin/doctor.mjs                    # 13 项，逐项 ✅ / ❌ / SKIP + 修复建议
 node bin/doctor.mjs --fix              # 额外做安全的创建类操作（只建数据根目录）
-node bin/doctor.mjs --host http://127.0.0.1:55448   # 加测宿主的 /ai-tutor/graph
-node bin/doctor.mjs --local-user 2     # 指定本地 user_id
+node bin/doctor.mjs --host http://127.0.0.1:55448   # 加测宿主 /ai-tutor/graph 与 /ai-tutor/panel
+node bin/doctor.mjs --local-user 2     # 指定本地 user_id（第 6/12 项用）
 ```
 
 | # | 检查 |
@@ -180,9 +223,14 @@ node bin/doctor.mjs --local-user 2     # 指定本地 user_id
 | 08 | 插件所在分区剩余空间 ≥ 500 MB |
 | 09 | `lib/client.js` 语法可解析（`new Function`）且含加载标记 |
 | 10 | 宿主 `/ai-tutor/graph` 可达（需要 `--host`；没给就 SKIP） |
+| 11 | 完整面板静态产物 `panel/index.html` 存在 |
+| 12 | 完整面板后端能 spawn 且 `/health` 返回 200（离线；会用临时数据根真起一次再停） |
+| 13 | 宿主 `/ai-tutor/panel` 可达，且返回的 `url` 能访问到 iframe 首页（需要 `--host`） |
 
 退出码：任一项 ❌ → 1；否则 0。**有 ❌ 按「修复建议」处理后再跑一次**，不要跳过。
-探测过程用临时 `DATA_ROOT`/`LOG_DIR`，不会碰真实数据。
+探测过程用临时 `DATA_ROOT`/`LOG_DIR`（包括第 12 项起的那次 panel server），不会碰真实数据。
+若在受限沙箱里 python 只被允许写工作区，第 12 项会因临时目录不可写而失败 ——
+用 `AI_TUTOR_DOCTOR_PROBE_ROOT=<可写目录>` 指一个可写位置再跑。
 
 ---
 
@@ -209,6 +257,7 @@ node bin/doctor.mjs --local-user 2     # 指定本地 user_id
 |---|---|
 | `kg_snapshot`（图谱摘要） | ✅ 完全本地 |
 | 知识图谱面板 | ✅ 完全本地（同源请求 127.0.0.1） |
+| 完整面板（iframe） | ✅ 界面与图谱/资料全本地；出题、对话等模型功能需联网 |
 | `rag_search` | ⚠️ 空库返回友好提示；**有内容时**需要联网调用嵌入 API |
 | `fetch_webpage` | ❌ 必须联网 |
 
@@ -259,6 +308,9 @@ cd <仓库根> && node .dsh_local/smoke-plugin-shell.mjs
 
 # 构建发布产物（engine = backend/app 整包复制；runtime = 便携 Python + 13 个依赖）
 node scripts/build-plugin.mjs
+
+# 完整面板的前端产物（Vite 构建 frontend → 拷到 plugins/dsh-ai-tutor/panel/）
+node scripts/build-panel.mjs
 ```
 
 - `engine/` 与 `runtime/` 是**构建产物、不进 git**；源码改动后必须重新构建才会进包。

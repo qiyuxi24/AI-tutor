@@ -384,3 +384,54 @@ export function scrubEnv(base = process.env, extra = {}) {
   }
   return Object.assign(out, extra)
 }
+
+/**
+ * engine 自己需要的配置项（本地单用户运行时配置，**不是**宿主/第三方凭证）。
+ *
+ * 为什么需要白名单：`scrubEnv` 按名字整片清掉 KEY/PASSWORD/SECRET/TOKEN，
+ * 而 engine 的配置恰好是 `LLM_API_KEY` / `DASHSCOPE_API_KEY` 这种名字 ——
+ * 本地模式漏传它们会让完整面板「对话正常但图谱生成/出题/嵌入全空」，报
+ * `Missing credentials`（2026-10-27 真机踩到：dotenv 解析到了值却在最后一步被清掉）。
+ * 所以清洗之后，再把这些**明确属于 AI-tutor 自己**的配置补回来。
+ *
+ * 不含 SECRET_KEY / TOKEN：那两个由本地 <dataRoot>/secret_key 与 self-hosted token 专项处理。
+ */
+export const TUTOR_ENV_PREFIXES = Object.freeze(['LLM_', 'FALLBACK_LLM_', 'DASHSCOPE_', 'EMBED_'])
+export const TUTOR_ENV_KEYS = Object.freeze([
+  'MODEL_NAME',
+  'ASR_MODEL',
+  'BILI_COOKIE',
+  'BILI_COOKIE_FILE',
+  'WEB_SEARCH_ENABLED',
+  'SEARXNG_URL',
+  'LOG_LEVEL',
+  'ACCESS_TOKEN_EXPIRE_MINUTES',
+])
+
+/** 这个环境变量名是不是 engine 自己的配置（见 TUTOR_ENV_PREFIXES/KEYS）。 */
+export function isTutorEnvKey(key) {
+  return TUTOR_ENV_KEYS.includes(key) || TUTOR_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))
+}
+
+/**
+ * 从基础环境 + .env 值里挑出 engine 配置项（基础环境优先，与其它环境变量口径一致）。
+ *
+ * @param {Record<string, string|undefined>} [baseEnv] - 宿主环境。
+ * @param {Record<string, string|undefined>} [dotenv] - .env 解析结果。
+ * @returns {Record<string, string>} 只含 allowlist 内的键。
+ */
+export function pickTutorEnv(baseEnv = process.env, dotenv = {}) {
+  const out = {}
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (value === undefined || value === '') continue
+    if (!isTutorEnvKey(key)) continue
+    out[key] = value
+  }
+  for (const [key, value] of Object.entries(dotenv)) {
+    if (value === undefined || value === '') continue
+    if (!isTutorEnvKey(key)) continue
+    if (out[key] !== undefined) continue
+    out[key] = value
+  }
+  return out
+}
