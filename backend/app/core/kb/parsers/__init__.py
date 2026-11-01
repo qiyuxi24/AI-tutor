@@ -27,20 +27,36 @@ from typing import Optional
 
 from app.core.kb.parsers.base import BaseParser, ParseResult
 from app.core.kb.parsers.registry import ParserRegistry, registry
-from app.core.kb.parsers.text import TextParser
-from app.core.kb.parsers.pdf import PdfParser
-from app.core.kb.parsers.docx import DocxParser
-from app.core.kb.parsers.pptx import PptxParser
-from app.core.kb.parsers.image import ImageOcrParser
-from app.core.kb.parsers.legacy import LegacyParser
-from app.core.kb.parsers.book import EpubParser, Fb2Parser, MobiParser, DjvuParser
-from app.core.kb.parsers.subtitle import SubtitleParser
 
 logger = logging.getLogger("ai-tutor")
+
+# 内置解析器**惰性注册**（2026-10-26，P2-4 冷启动）：本包导入期实测 0.96s，
+# 大头是可选的图片 OCR（rapidocr + onnxruntime ≈0.7s）。而调用方可能只是想问
+# 「.pdf 支持吗」，或根本走的是不解析文档的只读工具（MCP / DSH 宿主）。
+# 首次真正用到（parse_document / is_supported / supported_* / get_registry）时注册一次。
+_registered = False
+
+
+def _ensure_builtin() -> None:
+    """幂等注册内置解析器（首次调用付 0.7–1s，之后为 no-op）。"""
+    global _registered
+    if _registered:
+        return
+    _registered = True
+    _register_builtin(registry)
 
 
 def _register_builtin(target: ParserRegistry) -> None:
     """注册所有内置解析器（可选依赖解析器做能力探测）"""
+    from app.core.kb.parsers.book import DjvuParser, EpubParser, Fb2Parser, MobiParser
+    from app.core.kb.parsers.docx import DocxParser
+    from app.core.kb.parsers.image import ImageOcrParser
+    from app.core.kb.parsers.legacy import LegacyParser
+    from app.core.kb.parsers.pdf import PdfParser
+    from app.core.kb.parsers.pptx import PptxParser
+    from app.core.kb.parsers.subtitle import SubtitleParser
+    from app.core.kb.parsers.text import TextParser
+
     target.register(TextParser())
     target.register(PdfParser())
     target.register(DocxParser())
@@ -83,8 +99,7 @@ def _register_builtin(target: ParserRegistry) -> None:
         logger.info("老式 Office 解析器未启用：未检测到 textract/LibreOffice/antiword 等工具")
 
 
-# 注册内置解析器（模块导入时执行一次）
-_register_builtin(registry)
+# 注册发生在首次调用门面函数时（见 _ensure_builtin）
 
 
 def parse_document(filename: str, content: bytes,
@@ -105,6 +120,7 @@ def parse_document(filename: str, content: bytes,
         verbose=True  → ParseResult（ok=False 时 text 为空、error 为原因）
     """
     from pathlib import Path
+    _ensure_builtin()
     ext = Path(filename).suffix.lower()
     result = registry.parse(filename, content)
     if verbose:
@@ -119,21 +135,25 @@ def parse_document(filename: str, content: bytes,
 
 def is_supported(filename: str) -> bool:
     """判断扩展名是否已注册解析器"""
+    _ensure_builtin()
     return registry.is_supported(filename)
 
 
 def supported_extensions() -> list[str]:
     """所有受支持扩展名（带点），供前端提示"""
+    _ensure_builtin()
     return registry.supported_extensions()
 
 
 def supported_label() -> str:
     """扩展名标签，如 '.pdf,.docx,.pptx,.png,...'"""
+    _ensure_builtin()
     return registry.supported_label()
 
 
 def get_registry() -> ParserRegistry:
-    """获取全局注册表实例（供需要自定义注册的调用方）"""
+    """获取全局注册表实例（供需要自定义注册的调用方；返回时已注册内置解析器）"""
+    _ensure_builtin()
     return registry
 
 

@@ -167,14 +167,26 @@ def cue_paragraphs(content: bytes) -> list[tuple[float, str]]:
     return to_paragraphs(dedupe_rolling(parse_cues(_decode(content))))
 
 
-def format_paragraphs(paras: list[tuple[float, str]]) -> str:
+def format_paragraphs(paras: list[tuple[float, str]],
+                      images: list[tuple[float, str]] = ()) -> str:
     """把段落渲染成讲义正文：`[hh:mm:ss] 正文`，段间空行。
 
     公开给**两条字幕路共用** —— yt-dlp 拉到的字幕文件（走本模块的 `parse_cues`）
     与 B 站平台字幕（走 `kb/bili/subtitle.py`，它直接给 cues）。让两条路产出同一种
     形态，用户与下游（分块、建图）不需要区分来源。
+
+    `images` = `[(秒, Markdown 图片)]`（幻灯片截图）。插在**时间上紧随其后**的段落
+    之前 —— 图片是"这一段讲解对应的那页 PPT"，跟着段落走比堆在文末有用。
+    它不带 `[hh:mm:ss]` 前缀：图片本身已有 alt 文案，再加锚点是重复。
     """
-    return "\n\n".join(f"[{_hhmmss(s)}] {t}" for s, t in paras)
+    pending = sorted(images)
+    out: list[str] = []
+    for start, text in paras:
+        while pending and pending[0][0] <= start:
+            out.append(pending.pop(0)[1])
+        out.append(f"[{_hhmmss(start)}] {text}")
+    out.extend(markup for _, markup in pending)  # 末尾的图（讲解已结束）
+    return "\n\n".join(out)
 
 
 def to_sections(paras: list[tuple[float, str]],
@@ -190,14 +202,18 @@ def to_sections(paras: list[tuple[float, str]],
 
 
 def compose_lecture(paras: list[tuple[float, str]], *, title: str = "",
-                    source: str = "", uploader: str = "") -> str:
-    """把段落组装成**讲义正文**（标题 + 来源行 + 章节）。
+                    source: str = "", uploader: str = "",
+                    images: list[tuple[float, str]] = ()) -> str:
+    """把段落组装成**讲义正文**（标题 + 来源行 + 章节 + 可选插图）。
 
     为什么要有骨架：纯 `[hh:mm:ss] 正文` 平铺进知识库后，标题只存在于文件名，
     图谱/出题拿到的正文完全不知道"这是谁的什么课"。章节只是**导航**（按 10 分钟），
     不做 LLM 命名 —— 命名要额外一次调用，且引入"标题对不对"的新失败面。
 
     单章时不渲染 `##` 标题：只有一个章节的"分章"是噪音。
+
+    `images` 先按章节**分桶**再交给 `format_paragraphs`：否则后一节末尾的图会被
+    排到前一节去（分桶边界 = 下一节首段的时间）。
     """
     blocks: list[str] = [f"# {title.strip() or '课程讲义'}"]
     meta = [f"{label}：{value.strip()}"
@@ -206,10 +222,16 @@ def compose_lecture(paras: list[tuple[float, str]], *, title: str = "",
         blocks.append("> " + "｜".join(meta))
 
     sections = to_sections(paras)
-    for section in sections:
+    ordered = sorted(images)
+    for idx, section in enumerate(sections):
         if len(sections) > 1:
             blocks.append(f"## [{_hhmmss(section[0][0])}]")
-        blocks.append(format_paragraphs(section))
+        lo = section[0][0]
+        hi = sections[idx + 1][0][0] if idx + 1 < len(sections) else float("inf")
+        # 首节也要收下"第一段之前"的图（开场页常在第 1 条字幕之前截到）
+        blocks.append(format_paragraphs(
+            section, [(s, m) for s, m in ordered
+                      if (idx == 0 or s >= lo) and s < hi]))
     return "\n\n".join(b for b in blocks if b) + "\n"
 
 

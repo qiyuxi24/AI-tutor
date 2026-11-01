@@ -42,6 +42,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { renderMarkdown } from '../utils/markdown.js'
 import { previewKindOf } from '../utils/filePreview.js'
+import { apiClient } from '../api'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -80,7 +81,10 @@ function revoke() {
   }
 }
 
-onBeforeUnmount(revoke)
+onBeforeUnmount(() => {
+  revoke()
+  revokeAssets()
+})
 
 /** Word：docx-preview 把 docx 直接转成 DOM 插进容器（不经过后端转换） */
 async function renderDocx() {
@@ -157,11 +161,50 @@ async function renderXlsx() {
   })
 }
 
+/* ── 讲义插图（幻灯片截图）──
+ * 正文里的 `![](/api/v1/kb/slides/{key}/{n}.jpg)` 是**需要鉴权**的接口，而 `<img>`
+ * 发不出 Authorization 头（JWT 只在 axios 拦截器里）。所以渲染后统一用 axios 取
+ * blob 再换 objectURL；取不到就保留 alt 文案，不让整篇正文挂掉。
+ */
+const mdRef = ref(null)
+const assetUrls = []
+
+function revokeAssets() {
+  while (assetUrls.length) URL.revokeObjectURL(assetUrls.pop())
+}
+
+async function hydrateImages() {
+  const host = mdRef.value
+  if (!host) return
+  const imgs = Array.from(host.querySelectorAll('img')).filter((img) =>
+    (img.getAttribute('src') || '').startsWith('/api/v1/kb/slides/'))
+  for (const img of imgs) {
+    const src = img.getAttribute('src')
+    try {
+      const { data } = await apiClient.get(src, { responseType: 'blob' })
+      const url = URL.createObjectURL(data)
+      assetUrls.push(url)
+      img.src = url
+    } catch {
+      img.alt = img.alt || '截图加载失败'
+    }
+  }
+}
+
+// 同时盯 `loading`：正文可能在弹窗打开后才到（父组件异步取 text），
+// 只盯 html 会错过"先空后到"的那一次渲染
+watch([html, () => props.loading], async () => {
+  revokeAssets()
+  await nextTick()
+  hydrateImages()
+})
+
 /** 打开（或换文件）时按 kind 准备渲染物；关闭时释放 objectURL。 */
 watch(
   () => [props.visible, props.rawBlob],
   async ([visible]) => {
     revoke()
+    revokeAssets()
     renderError.value = ''
     if (!visible || !props.rawBlob) return
 
@@ -235,7 +278,7 @@ function openInNewTab(event) {
             <p v-if="truncated" class="truncate-tip">
               正文过长，仅显示前 {{ chars.toLocaleString() }} 字（共 {{ totalChars.toLocaleString() }} 字）。
             </p>
-            <div class="markdown-body" v-html="html" @click="openInNewTab"></div>
+            <div ref="mdRef" class="markdown-body" v-html="html" @click="openInNewTab"></div>
           </template>
         </div>
       </div>

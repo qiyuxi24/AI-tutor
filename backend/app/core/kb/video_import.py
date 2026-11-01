@@ -43,10 +43,21 @@ yt-dlp 拿到的就是**同一条字幕轨**，而我们已经把"字幕轨 + AI
 段落拼接与讲义骨架统一在 `parsers/subtitle.py`（`to_paragraphs` / `compose_lecture`），
 两条取词路只负责"拿到 cues 或段落"，不再各自拼字符串。
 
-**有意不做（不是遗漏）**：不抽帧、不做"幻灯片截图 ↔ 字幕"对齐。course2md 的核心
-卖点是带截图的讲义，但截图进入我们这条「正文 → 建图 → 出题」的链路后对 LLM 是
-**盲的**（`parsers/text.py` 只是解码字节，`![](x.png)` 原样保留、没有任何多模态
-处理），收益与实现成本（视频解码 + 图像相似度）不成比例。留待接入多模态后再加。
+合集与队列（2026-10-30）
+------------------------
+一个链接可能对应**一组**视频（多 P / ugc_season），发现分集在 `bili/collection.py`，
+排队与重试在 `kb/import_queue.py`；本模块只负责"把一条 URL 取成一集讲义"。
+批量语义靠**逐集调用本模块**实现，所以这里保持单集、无状态。
+
+幻灯片截图（对齐 course2md 的画面变化抽帧）
+------------------------------------------
+`capture_slides=True` 时下载视频（≤720p）→ ffmpeg 按 `SLIDE_FPS` 抽帧 →
+相邻帧灰度平均绝对差 ≥ `SLIDE_DIFF_THRESHOLD` 才留一张（画面没变就不重复截）→
+按时间锚点插到讲义对应段落前。图片落在**调用方给的目录**（KB 的 slides 目录），
+正文里只写 URL —— 不把图片编码进 Markdown：base64 会让讲义暴涨一个数量级，
+还会进 embedding/分块，污染检索。
+
+截图是**可选增强**：不开时一条下载都不做（字幕路径仍旧零成本）。
 """
 from __future__ import annotations
 
@@ -59,6 +70,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.core.config import settings
+from app.core.kb.bili import collection as bili_collection
 from app.core.kb.bili import login as bili_login
 from app.core.kb.bili import subtitle as bili_subtitle
 from app.core.kb.bili import urls as bili_urls
@@ -78,7 +90,16 @@ DEFAULT_SUBTITLE_LANGS = ("zh-Hans", "zh-CN", "zh", "en")
 
 # 单次媒体下载体积上限（yt-dlp 会在超限时放弃，避免一条链接吃掉整块磁盘/带宽）
 MAX_MEDIA_BYTES = 300 * 1024 * 1024
+# 幻灯片截图要下载整段视频，比音轨大得多；720p 一小时约 500MB，取 2GB 兜住长课
+MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
 _FFMPEG_TIMEOUT = 900.0
+
+# ── 幻灯片截图 ──
+SLIDE_FPS = 0.5            # 每 2 秒一帧：PPT 翻页间隔远大于此
+SLIDE_WIDTH = 960          # 抽帧宽度（够看清幻灯片文字，jpg ≈ 60KB）
+SLIDE_DIFF_THRESHOLD = 6.0  # 相邻帧灰度平均绝对差（0-255）；低于它视为同一页
+SLIDE_MIN_GAP_SECS = 3.0   # 两张截图的最小间隔，挡住转场/鼠标动画
+SLIDE_MAX_COUNT = 300      # 单集上限：再长也够用了，防止异常素材抽几万张
 
 # 转写分段长度（秒）：120s @16kHz 单声道 ≈ 0.5MB，远低于单请求上限；
 # 2 分钟一个时间锚点，对"回视频定位"足够细，也不会把一次导入变成上百个请求。
@@ -319,7 +340,8 @@ _DEP_HINTS = {
 
 
 def missing_requirements(url: str = "", transcript_source: str = "auto",
-                         asr_model: str | None = None) -> list[str]:
+                         asr_model: str | None = None,
+                         capture_slides: bool = False) -> list[str]:
     """按**这条链接实际会走的路径**列出缺失依赖（空列表 = 可以开始）。
 
     为什么按路径而不是一刀切（本机实测的教训）：B 站平台字幕直取只发 HTTP 请求 ——
@@ -328,15 +350,23 @@ def missing_requirements(url: str = "", transcript_source: str = "auto",
 
     刻意**不预判 auto 的降级**：非 B 站 auto 先试 yt-dlp 字幕，确实没字幕才需要
     ffmpeg / ASR —— 那时 `fetch_lecture` 自己会先查后下（不会先下一遍音频再报错）。
+
+    `capture_slides=True` 是另一条硬路径（要下视频 + 抽帧），与取词方式无关。
     """
     if transcript_source not in TRANSCRIPT_SOURCES:
         return []  # 取值非法由 fetch_lecture 抛（避免同一规则两处判定、两处文案）
     text = (url or "").strip()
     ref = bili_urls.normalize(text) if text else None
+    missing: list[str] = []
+    if capture_slides:
+        if _ytdlp() is None:
+            missing.append("yt-dlp")
+        if _ffmpeg() is None:
+            missing.append("ffmpeg")
+        return missing
     if ref is not None and ref.is_bilibili and transcript_source != "asr":
         return []  # 平台字幕直取：只要 httpx
 
-    missing: list[str] = []
     if _ytdlp() is None:
         missing.append("yt-dlp")
     if transcript_source == "asr":
@@ -348,9 +378,10 @@ def missing_requirements(url: str = "", transcript_source: str = "auto",
 
 
 def require_available(url: str = "", transcript_source: str = "auto",
-                      asr_model: str | None = None) -> None:
+                      asr_model: str | None = None,
+                      capture_slides: bool = False) -> None:
     """导入前的快速失败：这条路径缺依赖时立刻给提示，而不是起一个注定失败的长任务。"""
-    missing = missing_requirements(url, transcript_source, asr_model)
+    missing = missing_requirements(url, transcript_source, asr_model, capture_slides)
     if missing:
         raise RuntimeError("；".join(_DEP_HINTS[m] for m in missing))
 
@@ -431,6 +462,100 @@ def _extract_audio(src: Path, dst: Path) -> Path:
         detail = proc.stderr.decode("utf-8", errors="ignore")[-300:]
         raise RuntimeError(f"ffmpeg 提取音轨失败：{detail}")
     return dst
+
+
+def _download_video(url: str, workdir: Path) -> Path:
+    """下载整段视频（仅截图需要）。优先 ≤720p，够看清幻灯片又不至于几十 GB。
+
+    格式串是**降级链**：B 站未登录时 720p 拿不到，自动退到 480p / 任意 best。
+    """
+    yt_dlp = _ytdlp()
+    if yt_dlp is None:
+        raise RuntimeError("未安装 yt-dlp（pip install yt-dlp）")
+    opts = {
+        **_base_opts(workdir),
+        "format": "bv*[height<=720]+ba/b[height<=720]/b[height<=480]/b",
+        "max_filesize": MAX_VIDEO_BYTES,
+        "outtmpl": str(workdir / "video.%(ext)s"),
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+    files = [p for p in sorted(workdir.glob("video.*")) if p.is_file()]
+    if not files:
+        raise RuntimeError("视频下载失败：链接可能已失效、需要登录，或超出体积上限")
+    return files[0]
+
+
+def _pick_slide_frames(frames: list[Path], fps: float = SLIDE_FPS,
+                       threshold: float = SLIDE_DIFF_THRESHOLD,
+                       min_gap: float = SLIDE_MIN_GAP_SECS,
+                       limit: int = SLIDE_MAX_COUNT) -> list[tuple[float, Path]]:
+    """按"画面变了"挑选关键帧，返回 `[(秒, 帧路径)]`。
+
+    为什么用灰度平均绝对差而不是 SSIM：差值是纯 numpy 三行代码、对小图足够灵敏，
+    而 SSIM 要额外依赖（scikit-image）。对"PPT 翻页"这种大块变化，两者结论一致。
+    """
+    import numpy as np
+    from PIL import Image
+
+    kept: list[tuple[float, Path]] = []
+    prev = None
+    for index, path in enumerate(frames):
+        sec = index / fps
+        try:
+            with Image.open(path) as img:
+                cur = np.asarray(img.convert("L").resize((96, 54)), dtype=np.int16)
+        except OSError:
+            continue  # 半截帧（ffmpeg 被杀）直接跳过，不因一帧废掉整集
+        changed = prev is None or float(np.abs(cur - prev).mean()) >= threshold
+        if changed and (not kept or sec - kept[-1][0] >= min_gap):
+            kept.append((sec, path))
+            prev = cur
+            if len(kept) >= limit:
+                break
+    return kept
+
+
+def _extract_slides(video: Path, workdir: Path) -> list[tuple[float, Path]]:
+    """ffmpeg 抽帧 → 去重 → 返回关键帧。
+
+    先整段抽到 `workdir/frames`（2 秒一帧、960 宽）：**一次性抽完再比**比"逐帧
+    调 ffmpeg seek"快一个量级；代价是临时磁盘峰值（3 小时课 ≈ 160MB），
+    `workdir` 在导入结束时整目录删除。
+    """
+    ffmpeg = _ffmpeg()
+    if ffmpeg is None:
+        raise RuntimeError("未检测到 ffmpeg：抽帧需要它（可设置 FFMPEG_BIN）")
+    out_dir = workdir / "frames"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [ffmpeg, "-y", "-i", str(video), "-vf",
+         f"fps={SLIDE_FPS},scale={SLIDE_WIDTH}:-2", "-q:v", "4",
+         str(out_dir / "f%05d.jpg")],
+        capture_output=True, timeout=_FFMPEG_TIMEOUT,
+    )
+    frames = sorted(out_dir.glob("f*.jpg"))
+    if proc.returncode != 0 or not frames:
+        detail = proc.stderr.decode("utf-8", errors="ignore")[-300:]
+        raise RuntimeError(f"ffmpeg 抽帧失败：{detail}")
+    return _pick_slide_frames(frames)
+
+
+def _hhmmss(sec: float) -> str:
+    total = int(sec)
+    return f"{total // 3600:02d}:{total % 3600 // 60:02d}:{total % 60:02d}"
+
+
+async def _make_slides(url: str, workdir: Path, slide_dir: Path | None,
+                       url_prefix: str) -> list[tuple[float, str]]:
+    """下载视频 → 抽关键帧 → 落地成图片文件，返回 `[(秒, Markdown 图片)]`。
+
+    图片文件名用序号（`0001.jpg`）而不是时间戳：同一个目录在一集内唯一即可，
+    换集换目录（KB 侧按 asset_key 分目录）。
+    """
+    video = await asyncio.to_thread(_download_video, url, workdir)
+    return await asyncio.to_thread(
+        _slides_from_video, video, workdir, slide_dir, url_prefix)
 
 
 def _platform_paragraphs(ref: bili_urls.VideoRef, cookie: str
@@ -531,13 +656,20 @@ async def fetch_lecture(url: str, workdir: Path, *, user_id: int | None = None,
                         transcript_source: str = "auto",
                         languages=DEFAULT_SUBTITLE_LANGS,
                         asr_model: str | None = None,
+                        capture_slides: bool = False,
+                        slide_dir: Path | None = None,
+                        slide_url_prefix: str = "",
                         on_progress: ProgressFn | None = None) -> tuple[str, dict]:
     """把课程链接取成讲义正文。
 
-    返回 `(正文, meta)`；meta = `{"source", "source_label", "title", "file", "chars"}`。
+    返回 `(正文, meta)`；meta = `{"source", "source_label", "title", "file", "chars",
+    "slides"}`（slides = 截图张数）。
     失败一律抛异常（由调用方转成用户可见提示），不返回半成品。
 
     参数:
+        capture_slides: 是否抽幻灯片截图（要下载整段视频，见模块 docstring）。
+        slide_dir / slide_url_prefix: 图片落点与正文里的 URL 前缀；不传则落到
+            `workdir/slides`、正文只写文件名（单测用）。
         on_progress: 可选进度回调，签名 `(stage=..., **info)`；stage 取值见 `STAGE_*`。
             回调在**事件循环线程**上同步调用，必须是非阻塞的（生产实现 = `notify`）。
     """
@@ -564,13 +696,16 @@ async def fetch_lecture(url: str, workdir: Path, *, user_id: int | None = None,
             picked = await asyncio.to_thread(_file_paragraphs, ref, workdir, languages)
         if picked is not None:
             paras, source, title, uploader = picked
+            slides = []
+            if capture_slides:
+                slides = await _make_slides(ref.url, workdir, slide_dir, slide_url_prefix)
             _report(on_progress, STAGE_COMPOSE)
             text = compose_lecture(paras, title=title or ref.filename_stem,
                                    source=SOURCE_LABELS.get(source, source),
-                                   uploader=uploader)
+                                   uploader=uploader, images=slides)
             return text, {"source": source, "source_label": SOURCE_LABELS.get(source, source),
                           "title": title or ref.filename_stem, "file": "",
-                          "chars": len(text)}
+                          "chars": len(text), "slides": len(slides)}
         if transcript_source == "subtitle":
             raise RuntimeError("该链接没有可用字幕（可改用 transcript_source=asr 走语音转写）")
 
@@ -587,7 +722,14 @@ async def fetch_lecture(url: str, workdir: Path, *, user_id: int | None = None,
             "（提取音轨需要它，可设置 FFMPEG_BIN 指向可执行文件）"
         )
     _report(on_progress, STAGE_DOWNLOAD)
-    media = await asyncio.to_thread(_download_audio, ref.url, workdir)
+    if capture_slides:
+        # 既然要下视频，音轨就从同一份视频里抽 —— 少下一遍整段音频
+        media = await asyncio.to_thread(_download_video, ref.url, workdir)
+        slides = await asyncio.to_thread(
+            lambda: _slides_from_video(media, workdir, slide_dir, slide_url_prefix))
+    else:
+        media = await asyncio.to_thread(_download_audio, ref.url, workdir)
+        slides = []
     _report(on_progress, STAGE_EXTRACT)
     audio = await asyncio.to_thread(_extract_audio, media, workdir / "audio.mp3")
     parts = await asyncio.to_thread(_split_audio, audio, workdir)
@@ -595,6 +737,44 @@ async def fetch_lecture(url: str, workdir: Path, *, user_id: int | None = None,
                                     on_progress=on_progress)
     _report(on_progress, STAGE_COMPOSE)
     title = ref.filename_stem or "课程讲义"
-    text = compose_lecture(paras, title=title, source=SOURCE_LABELS["asr"])
+    text = compose_lecture(paras, title=title, source=SOURCE_LABELS["asr"], images=slides)
     return text, {"source": "asr", "source_label": SOURCE_LABELS["asr"],
-                  "title": title, "file": audio.name, "chars": len(text)}
+                  "title": title, "file": audio.name, "chars": len(text),
+                  "slides": len(slides)}
+
+
+def _slides_from_video(video: Path, workdir: Path, slide_dir: Path | None,
+                       url_prefix: str) -> list[tuple[float, str]]:
+    """已下载视频 → `[(秒, Markdown 图片)]`（与 `_make_slides` 同形，省一次下载）。"""
+    target = slide_dir or (workdir / "slides")
+    target.mkdir(parents=True, exist_ok=True)
+    slides: list[tuple[float, str]] = []
+    for index, (sec, path) in enumerate(_extract_slides(video, workdir), start=1):
+        name = f"{index:04d}.jpg"
+        try:
+            shutil.move(str(path), str(target / name))
+        except OSError:
+            (target / name).write_bytes(path.read_bytes())
+        slides.append((sec, f"![截图 {_hhmmss(sec)}]({url_prefix}{name})"))
+    return slides
+
+
+def expand(url: str, *, cookie: str | None = None
+           ) -> tuple[str, list[tuple[str, str]]]:
+    """链接 → `(合集标题, [(分集 URL, 分集标题)])`；非 B 站/单集就是一条。
+
+    只认 B 站：多 P 与 ugc_season 有稳定公开接口；YouTube 等播放列表要 yt-dlp
+    `extract_flat`，会在**入队时**就联网下载元信息 —— 队列的失败重试语义会被提前
+    消耗掉，所以播放列表展开放到"逐个提交多条链接"由用户决定（见模块 docstring）。
+    """
+    ref = bili_urls.normalize(url)
+    if not ref.is_bilibili or ref.page > 1:
+        return "", [(ref.url, ref.filename_stem)]
+    problems: list[str] = []
+    coll = bili_collection.expand(
+        ref.bvid or f"av{ref.aid}", page=ref.page,
+        cookie=_cookie_header() if cookie is None else cookie, problems=problems,
+    )
+    if problems:
+        logger.info("合集展开降级为单集（%s）：%s", ref.raw, "；".join(problems))
+    return coll.title, [(ep.url, ep.title or ep.bvid) for ep in coll.items]

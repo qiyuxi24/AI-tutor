@@ -13,12 +13,14 @@
  * 状态只有一份：`store.importProgress`（chatStore 的 SSE 分支写入），本页 watch 它。
  * 不在本页自建 EventSource —— 全局只有一条长连接。
  */
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useChatStore } from '../stores/chatStore'
 import {
-  biliLoginPoll, biliLoginQrcode, getKbNodeText, importLecture, probeLectureImport,
+  biliLoginPoll, biliLoginQrcode, getKbNodeText, importLecture, lectureTaskAction,
+  listLectureTasks, probeLectureImport, reorderLectureItem,
 } from '../api/kb.js'
+import { subtitleLanguages, useLectureSettings } from '../utils/lectureSettings.js'
 import KbTextPreviewDialog from '../components/KbTextPreviewDialog.vue'
 
 const emit = defineEmits(['go-kb'])
@@ -35,13 +37,98 @@ const STEPS = [
 ]
 
 const url = ref('')
-const source = ref('auto')
-const showAdvanced = ref(false)
-const langInput = ref('')
-const asrModelInput = ref('')
 const deps = ref(null)
 const submitting = ref(false)
 const elapsed = ref(0)
+
+// 取词方式 / 合集展开 / 幻灯片截图 / 字幕语言 / 转写模型都在「设置 → 视频导入」
+// （本机偏好，见 utils/lectureSettings.js）—— 导入页只贴链接，不再逐个问
+const settings = useLectureSettings()
+
+/** 队列（后端 GET /kb/import/tasks）：一个任务 = 一次提交，可含 N 集 */
+const queue = ref([])
+let queueTimer = null
+
+const OPEN_STATES = ['pending', 'running', 'paused']
+const hasOpenTasks = computed(() => queue.value.some((t) => OPEN_STATES.includes(t.status)))
+
+const STATUS_TEXT = {
+  pending: '排队中', running: '导入中', paused: '已暂停',
+  done: '完成', failed: '失败', canceled: '已取消',
+}
+const statusText = (status) => STATUS_TEXT[status] || status
+
+function progressPercent(task) {
+  const total = task.total || task.items?.length || 0
+  if (!total) return 0
+  return Math.round(((task.done + task.failed) / total) * 100)
+}
+
+/** 拉一次队列快照；有未完成任务时保持 2.5s 轮询，全部结束后停掉 */
+async function refreshQueue() {
+  try {
+    const { data } = await listLectureTasks()
+    queue.value = data.tasks || []
+  } catch {
+    // 轮询失败不弹错（网络抖动），下一轮会再来
+  }
+  syncLocalTask()
+  if (hasOpenTasks.value) startQueueTimer()
+  else stopQueueTimer()
+}
+
+/** 队列里的终态回写本地任务卡（批次完成后步骤条/结果区跟着收尾） */
+function syncLocalTask() {
+  const t = task.value
+  if (!t || t.phase !== 'running') return
+  const mine = queue.value.find((item) => item.id === t.id)
+  if (!mine || !['done', 'failed', 'canceled'].includes(mine.status)) return
+  const successful = (mine.items || []).filter((item) => item.status === 'done')
+  t.phase = mine.status === 'done' ? 'done' : 'failed'
+  t.stage = 'compose'
+  t.error = mine.status === 'done'
+    ? ''
+    : (mine.error || '部分分集失败，展开队列查看原因')
+  t.result = t.batch > 1 && mine.status === 'done'
+    ? {
+        nodeId: successful[0]?.node_id,
+        filename: `${successful.length} 集已入库`,
+        title: mine.title || '课程合集',
+        source: '', chars: successful.reduce((sum, i) => sum + (i.chars || 0), 0),
+      }
+    : null
+  stopClock()
+}
+
+onMounted(refreshQueue)
+
+function startQueueTimer() {
+  if (queueTimer) return
+  queueTimer = setInterval(refreshQueue, 2500)
+}
+
+function stopQueueTimer() {
+  if (queueTimer) clearInterval(queueTimer)
+  queueTimer = null
+}
+
+async function actTask(taskId, action) {
+  try {
+    await lectureTaskAction(taskId, action)
+    await refreshQueue()
+  } catch (e) {
+    ElMessage.error('操作失败：' + (e.response?.data?.detail || e.message))
+  }
+}
+
+async function moveItem(task, item, delta) {
+  try {
+    await reorderLectureItem(task.id, item.id, delta)
+    await refreshQueue()
+  } catch (e) {
+    ElMessage.error('调整顺序失败：' + (e.response?.data?.detail || e.message))
+  }
+}
 
 /** task = { id, url, stage, phase: running|done|failed, visited[], index, total, error, result } */
 const task = ref(null)
@@ -191,6 +278,11 @@ watch(() => store.importProgress, (p) => {
   if (!p || !task.value || (p.task_id && p.task_id !== task.value.id)) return
   const t = task.value
   if (p.stage === 'done') {
+    if (t.batch > 1) {
+      // 批次里单集完成≠任务结束：步骤条留着当前集，任务收尾交给队列轮询
+      t.completed = (t.completed || 0) + 1
+      return
+    }
     t.phase = 'done'
     t.result = {
       nodeId: p.node_id, filename: p.filename || '',
@@ -203,6 +295,11 @@ watch(() => store.importProgress, (p) => {
     return
   }
   if (p.stage === 'failed') {
+    if (t.batch > 1) {
+      // 单集失败不终止整批（后端会继续跑下一集），失败明细看队列面板
+      t.completed = (t.completed || 0) + 1
+      return
+    }
     // 保持 t.stage 不变：失败点就是"当时正在跑的那一步"，步骤条据此标红
     t.phase = 'failed'
     t.error = p.message || '导入失败'
@@ -216,8 +313,9 @@ watch(() => store.importProgress, (p) => {
 })
 
 async function submit() {
-  const link = url.value.trim()
-  if (!link || submitting.value || running.value) return
+  // 一行一条：批量提交与合集展开都在后端（expand），前端不做链接解析
+  const links = url.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  if (!links.length || submitting.value) return
 
   submitting.value = true
   try {
@@ -225,18 +323,27 @@ async function submit() {
     // 这个模式逐条查）。前端这里曾复制一份 `!d.yt_dlp` 硬拦，结果是双源漂移 ——
     // B 站平台字幕直取本来零依赖就能跑，却被判成不可用。真缺东西时后端返 400，
     // detail 由下面的 catch 弹出来。
-    const payload = { url: link, transcript_source: source.value }
-    const langs = langInput.value.split(/[,，\s]+/).filter(Boolean)
+    const payload = {
+      urls: links, transcript_source: settings.transcriptSource,
+      expand: settings.expand, slides: settings.slides,
+    }
+    const langs = subtitleLanguages()
     if (langs.length) payload.languages = langs
-    if (asrModelInput.value.trim()) payload.asr_model = asrModelInput.value.trim()
+    if (settings.asrModel.trim()) payload.asr_model = settings.asrModel.trim()
 
     const { data } = await importLecture(payload)
-    const startStage = source.value === 'asr' ? 'download' : 'subtitle'
+    const startStage = settings.transcriptSource === 'asr' ? 'download' : 'subtitle'
     task.value = {
-      id: data?.task_id || '', url: link, stage: startStage, phase: 'running',
+      id: data?.task_id || '',
+      url: data?.items > 1 ? `${links.length} 条链接 → ${data.items} 集` : links[0],
+      links, batch: data?.items || 1, completed: 0,
+      stage: startStage, phase: 'running',
       visited: [startStage], index: 0, total: 0, error: '', result: null,
     }
     startClock()
+    url.value = ''
+    await refreshQueue()
+    startQueueTimer()
   } catch (e) {
     ElMessage.error('导入失败：' + (e.response?.data?.detail || e.message))
   } finally {
@@ -245,11 +352,11 @@ async function submit() {
 }
 
 function retry() {
-  const link = task.value?.url
+  const links = task.value?.links || (task.value?.url ? [task.value.url] : [])
   task.value = null
   elapsed.value = 0
-  if (link) {
-    url.value = link
+  if (links.length) {
+    url.value = links.join('\n')
     submit()
   }
 }
@@ -284,15 +391,16 @@ async function openPreview() {
 onBeforeUnmount(() => {
   stopClock()
   stopQrTimer()
+  stopQueueTimer()
 })
 probe()
 </script>
 
 <template>
-  <div class="lecture-layout">
-    <main class="lecture-inner">
+  <div class="page-scroll">
+    <main class="lecture-inner page-inner page-inner--narrow">
       <header class="lc-header">
-        <h1>视频课程导入</h1>
+        <h1 class="page-title">视频课程导入</h1>
       </header>
 
       <!-- ── 依赖自检 ── -->
@@ -302,7 +410,7 @@ probe()
             <i class="dot" />yt-dlp {{ deps.yt_dlp ? '就绪' : '缺失' }}
           </span>
           <span class="lc-dep" :class="deps.ffmpeg ? 'ok' : 'warn'">
-            <i class="dot" />ffmpeg {{ deps.ffmpeg ? '就绪' : '缺失（仅转写需要）' }}
+            <i class="dot" />ffmpeg {{ deps.ffmpeg ? '就绪' : '缺失（转写 / 截图需要）' }}
           </span>
           <span class="lc-dep" :class="deps.asr_model ? 'ok' : 'warn'">
             <i class="dot" />ASR {{ deps.asr_model || '未配置' }}
@@ -320,8 +428,8 @@ probe()
             无字幕课程需要：<code>.env</code> 里设 <code>ASR_MODEL</code>
           </span>
           <span v-else-if="!deps.cookie" class="lc-fix">
-            B 站会员课 / AI 总结字幕需要登录态：<code>.env</code> 设
-            <code>BILI_COOKIES_FROM_BROWSER=edge</code>（自动读浏览器）或 <code>BILI_COOKIE</code>
+            B 站会员课 / AI 总结字幕需要登录态：点右侧「扫码登录 B 站」即可
+            （写入 <code>data/bili/cookies.txt</code>；浏览器 Cookie 因系统加密已不可读）
           </span>
         </template>
         <span v-else class="lc-dep warn"><i class="dot" />依赖状态获取失败（不影响提交）</span>
@@ -333,59 +441,29 @@ probe()
 
       <!-- ── 导入 ── -->
       <section class="lc-card">
-        <div class="lc-row">
-          <el-input
-            v-model="url"
-            placeholder="粘贴课程链接（B站 / YouTube / b23.tv）"
-            maxlength="2000"
-            clearable
-            size="large"
-            :disabled="running"
-            @keyup.enter="submit"
-          />
+        <el-input
+          v-model="url"
+          type="textarea"
+          :rows="3"
+          resize="vertical"
+          placeholder="粘贴课程链接，一行一条（B站 / YouTube）"
+          maxlength="6000"
+        />
+        <div class="lc-row lc-row--submit">
+          <span class="lc-row-hint">
+            共 {{ url.split(/\r?\n/).filter((line) => line.trim()).length }} 条链接 ·
+            取词方式与合集 / 截图开关在 设置 → 视频导入
+          </span>
           <el-button
             type="primary"
             size="large"
             :loading="submitting"
-            :disabled="!url.trim() || running"
+            :disabled="!url.trim()"
             @click="submit"
           >
-            {{ running ? '导入中' : '开始导入' }}
+            加入队列
           </el-button>
         </div>
-
-        <div class="lc-sources">
-          <button
-            v-for="opt in [
-              { key: 'auto', title: '自动', desc: '字幕优先，没有才转写' },
-              { key: 'subtitle', title: '仅字幕', desc: '没有字幕就报错，不花额度' },
-              { key: 'asr', title: '语音转写', desc: '跳过字幕，直接从音频转写' },
-            ]"
-            :key="opt.key"
-            type="button"
-            class="lc-source"
-            :class="{ active: source === opt.key }"
-            :disabled="running"
-            @click="source = opt.key"
-          >
-            <span class="lc-source-title">{{ opt.title }}</span>
-            <span class="lc-source-desc">{{ opt.desc }}</span>
-          </button>
-        </div>
-
-        <details class="lc-advanced" :open="showAdvanced" @toggle="showAdvanced = $event.target.open">
-          <summary>高级选项</summary>
-          <div class="lc-adv-row">
-            <label>
-              字幕语言优先级
-              <el-input v-model="langInput" size="small" placeholder="留空＝中文优先（zh-Hans, zh-CN, zh, en）" />
-            </label>
-            <label>
-              转写模型
-              <el-input v-model="asrModelInput" size="small" placeholder="留空＝.env 的 ASR_MODEL" />
-            </label>
-          </div>
-        </details>
       </section>
 
       <!-- ── 任务进度 ── -->
@@ -437,16 +515,59 @@ probe()
         </div>
       </section>
 
-      <!-- ── 策略说明 ── -->
-      <section class="lc-notes">
-        <h3>它会怎么取词</h3>
-        <ul>
-          <li><b>B 站</b>：直取平台字幕轨；轨为空时再查「AI 总结字幕」（实测经常只有后者有内容）—— 都不下载、不花额度。</li>
-          <li><b>其他站点</b>：yt-dlp 拉字幕文件（自动字幕会去掉滚动重复的碎片）。</li>
-          <li><b>都没有</b>：下载音频 → ffmpeg 转 16kHz → 按 2 分钟切段 → 逐段转写，每段留 <code>[hh:mm:ss]</code> 锚点。</li>
-          <li>讲义统一带标题、来源与 10 分钟章节，方便回视频定位。</li>
-        </ul>
+      <!-- ── 导入队列（持久化：刷新/重启后仍在）── -->
+      <section v-if="queue.length" class="lc-card lc-queue">
+        <header class="lc-queue-head">
+          <h3>导入队列</h3>
+          <span class="lc-queue-hint">同一时间只跑一集；可暂停、取消、调整顺序</span>
+        </header>
+
+        <div v-for="t in queue" :key="t.id" class="lc-qtask" :class="t.status">
+          <div class="lc-qtask-head">
+            <span class="lc-qtag">{{ statusText(t.status) }}</span>
+            <span class="lc-qtitle" :title="t.title">{{ t.title || '未命名导入' }}</span>
+            <span class="lc-qcount">{{ t.done + t.failed }} / {{ t.total }}</span>
+            <span class="lc-qactions">
+              <button
+                v-if="t.status === 'running' || t.status === 'pending'"
+                type="button" @click="actTask(t.id, 'pause')"
+              >暂停</button>
+              <button
+                v-if="t.status === 'paused'"
+                type="button" @click="actTask(t.id, 'resume')"
+              >继续</button>
+              <button
+                v-if="t.failed"
+                type="button" @click="actTask(t.id, 'retry')"
+              >重试失败</button>
+              <button
+                v-if="!['done', 'failed', 'canceled'].includes(t.status)"
+                type="button" class="danger" @click="actTask(t.id, 'cancel')"
+              >取消</button>
+            </span>
+          </div>
+
+          <div class="lc-qbar">
+            <i :style="{ width: progressPercent(t) + '%' }" />
+          </div>
+
+          <ul class="lc-qitems">
+            <li v-for="(it, i) in t.items" :key="it.id" :class="it.status">
+              <span class="lc-qdot" />
+              <span class="lc-qitem-title" :title="it.url">{{ it.title || it.url }}</span>
+              <span class="lc-qitem-state">{{ statusText(it.status) }}</span>
+              <span v-if="it.error" class="lc-qitem-err" :title="it.error">{{ it.error }}</span>
+              <span v-if="it.status === 'pending'" class="lc-qmove">
+                <button type="button" :disabled="i === 0"
+                        @click="moveItem(t, it, -1)">↑</button>
+                <button type="button" :disabled="i === t.items.length - 1"
+                        @click="moveItem(t, it, 1)">↓</button>
+              </span>
+            </li>
+          </ul>
+        </div>
       </section>
+
     </main>
 
     <!-- B 站扫码登录：凭证只落服务端，前端只拿二维码与状态 -->
@@ -485,34 +606,11 @@ probe()
 </template>
 
 <style scoped>
-.lecture-layout {
-  flex: 1;
-  height: 100%;
-  min-width: 0;
-  overflow-y: auto;
-}
-
+/* 页面骨架（滚动 / 限宽 / 留白）全在 styles/page.css，本页只保留纵向排布 */
 .lecture-inner {
-  max-width: 780px;
-  margin: 0 auto;
-  padding: 28px 32px 60px;
   display: flex;
   flex-direction: column;
   gap: 16px;
-}
-
-.lc-header h2 {
-  margin: 0 0 6px;
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.lc-subtitle {
-  margin: 0;
-  font-size: 13px;
-  color: var(--color-text-tertiary);
-  line-height: 1.6;
 }
 
 /* ── 依赖自检 ── */
@@ -630,55 +728,120 @@ probe()
 }
 .lc-row :deep(.el-input) { flex: 1; min-width: 0; }
 
-.lc-sources {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-  margin-top: 14px;
-}
+/* 批量输入：多行文本框 + 右下角提交 */
+.lc-row--submit { justify-content: flex-end; margin-top: 10px; }
+.lc-row-hint { font-size: 12px; color: var(--color-text-tertiary); }
 
-.lc-source {
+/* ── 导入队列 ── */
+.lc-queue-head {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 10px 12px;
-  text-align: left;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--color-text-secondary);
-  font-family: inherit;
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
 }
-.lc-source:hover:not(:disabled) { border-color: var(--color-border-strong); }
-.lc-source.active {
-  border-color: var(--color-primary);
-  background: var(--color-primary-subtle);
+.lc-queue-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
   color: var(--color-text-primary);
 }
-.lc-source:disabled { cursor: not-allowed; opacity: 0.6; }
+.lc-queue-hint { font-size: 12px; color: var(--color-text-tertiary); }
 
-.lc-source-title { font-size: 13px; font-weight: 600; }
-.lc-source-desc { font-size: 11px; color: var(--color-text-tertiary); line-height: 1.4; }
-
-.lc-advanced {
-  margin-top: 12px;
+.lc-qtask + .lc-qtask {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-border);
+}
+.lc-qtask-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.lc-qtag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+.lc-qtask.running .lc-qtag { color: var(--color-primary); }
+.lc-qtask.failed .lc-qtag { color: var(--color-danger, #d9534f); }
+.lc-qtitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-primary);
+}
+.lc-qcount { font-size: 12px; color: var(--color-text-tertiary); flex-shrink: 0; }
+.lc-qactions { display: inline-flex; gap: 4px; flex-shrink: 0; }
+.lc-qactions button,
+.lc-qmove button {
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
   font-size: 12px;
-  color: var(--color-text-tertiary);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
 }
-.lc-advanced summary { cursor: pointer; width: fit-content; }
-.lc-adv-row {
-  display: flex;
-  gap: 12px;
-  margin-top: 10px;
-  flex-wrap: wrap;
+.lc-qactions button:hover:not(:disabled),
+.lc-qmove button:hover:not(:disabled) { background: var(--color-bg-hover); color: var(--color-text-primary); }
+.lc-qactions button.danger:hover { color: var(--color-danger, #d9534f); }
+.lc-qmove button:disabled { opacity: 0.35; cursor: default; }
+
+.lc-qbar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-bg-surface);
+  margin: 8px 0;
+  overflow: hidden;
 }
-.lc-adv-row label {
-  flex: 1 1 240px;
+.lc-qbar i {
+  display: block;
+  height: 100%;
+  background: var(--color-primary);
+  transition: width 0.3s ease;
+}
+.lc-qtask.failed .lc-qbar i { background: var(--color-danger, #d9534f); }
+
+.lc-qitems { list-style: none; margin: 0; padding: 0; }
+.lc-qitems li {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.lc-qdot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-border);
+  flex-shrink: 0;
+}
+.lc-qitems li.done .lc-qdot { background: #3aa675; }
+.lc-qitems li.failed .lc-qdot { background: var(--color-danger, #d9534f); }
+.lc-qitems li.running .lc-qdot { background: var(--color-primary); }
+.lc-qitem-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lc-qitem-state { flex-shrink: 0; color: var(--color-text-tertiary); }
+.lc-qitem-err {
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-danger, #d9534f);
 }
 
 /* ── 任务 ── */
@@ -826,28 +989,4 @@ probe()
 
 .lc-result-actions { display: flex; gap: 8px; align-items: center; }
 
-/* ── 说明 ── */
-.lc-notes {
-  padding: 14px 16px;
-  border-radius: 12px;
-  background: var(--color-bg-subtle);
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  line-height: 1.7;
-}
-
-.lc-notes h3 {
-  margin: 0 0 6px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.lc-notes ul { margin: 0; padding-left: 18px; }
-.lc-notes code {
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: var(--color-bg-surface);
-  font-size: 11px;
-}
 </style>

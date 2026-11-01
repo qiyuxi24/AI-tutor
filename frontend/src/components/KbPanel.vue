@@ -65,15 +65,7 @@
               <svg v-else viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
             </span>
             <span class="kb-node-name">{{ data.name }}</span>
-            <button
-              class="item-more"
-              title="更多操作"
-              @click.stop="openMenuAt($event.currentTarget, 'kb', data)"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <circle cx="12" cy="5" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="12" cy="19" r="1.7" />
-              </svg>
-            </button>
+            <ItemMoreButton title="更多操作" @click="openMenuAt($event, 'kb', data)" />
           </div>
         </template>
       </el-tree>
@@ -230,6 +222,7 @@ import {
 } from '../api/kb.js'
 import KbTextPreviewDialog from './KbTextPreviewDialog.vue'
 import ContextMenu from './ContextMenu.vue'
+import ItemMoreButton from './ItemMoreButton.vue'
 import { useContextMenu } from '../utils/contextMenu.js'
 import { previewKindOf } from '../utils/filePreview.js'
 import { useChatStore } from '../stores/chatStore.js'
@@ -656,7 +649,12 @@ onMounted(() => {
   padding: 4px 6px;
   border-radius: 6px;
   cursor: pointer;
-  width: 100%;
+  /* ⚠️ 不能写 width:100%：el-tree 的 __content 里还有缩进 / 展开箭头 / 复选框，
+     它按 content 的 100% 计算就会比可用宽度多出一截，长文件名时把右侧 ⋯ 按钮
+     顶出可视区（表现为"三点被盖住、点不到"）。flex:1 + min-width:0 才是
+     "占满剩余宽度、超长时收缩省略"的正确写法。 */
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .kb-node:hover {
   background: var(--color-bg-hover);
@@ -683,28 +681,7 @@ onMounted(() => {
   text-overflow: ellipsis;
 }
 
-/* 三点按钮：常驻，点击弹条目菜单；长文件名收缩让位，按钮压在文字之上 */
-.item-more {
-  flex-shrink: 0;
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.item-more:hover {
-  background: var(--color-bg-hover);
-  color: var(--color-text-primary);
-}
+/* 三点按钮样式已收进 ItemMoreButton.vue（与学科栏 / 对话列表共用一份） */
 
 .kb-empty {
   flex: 1 1 auto;
@@ -769,6 +746,9 @@ onMounted(() => {
 }
 .kb-panel :deep(.el-tree-node__content) {
   height: 32px;
+  /* 允许行内容收缩：默认 min-width:auto 会按「文件名全文」撑开，行宽就溢出 */
+  min-width: 0;
+  padding-right: 2px;
 }
 .kb-panel :deep(.el-tree-node__expand-icon) {
   color: var(--color-text-tertiary);

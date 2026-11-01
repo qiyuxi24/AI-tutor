@@ -23,23 +23,16 @@
 import asyncio
 import logging
 import mimetypes
-import shutil
-import tempfile
-import uuid
-from pathlib import Path
 from urllib.parse import quote
 from fastapi import (APIRouter, Depends, HTTPException, Query, UploadFile, File,
                      Body)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
-from app.core import runtime
 from app.core.auth import get_current_user
-from app.core.event_bus import ERROR, IMPORT_PROGRESS, KB_UPDATED, notify
 from app.core.kb.bili import login as bili_login
-from app.core.kb.bili import urls as bili_urls
 from app.core.kb.kb_manager import kb_manager
-from app.core.kb import graph_generator, video_import
+from app.core.kb import graph_generator, import_queue, video_import
 
 logger = logging.getLogger("ai-tutor")
 router = APIRouter()
@@ -76,9 +69,10 @@ class ContextRequest(BaseModel):
 
 
 class LectureImportRequest(BaseModel):
-    """视频课程导入请求（复刻 course2md 的取词 / 转写参数语义）"""
-    url: str = Field(..., min_length=1, max_length=2000,
-                     description="课程链接（B站 / YouTube 等）")
+    """视频课程导入请求（对齐 course2md 的取词/截图参数；支持批量与合集展开）"""
+    url: str = Field("", max_length=2000, description="单条课程链接（B站 / YouTube 等）")
+    urls: List[str] = Field(default_factory=list, max_length=200,
+                            description="批量链接（与 url 合并去重；一行一条）")
     parent_id: Optional[int] = Field(None, description="导入到哪个文件夹（空=根目录）")
     transcript_source: str = Field(
         "auto", pattern="^(auto|subtitle|asr)$",
@@ -87,6 +81,13 @@ class LectureImportRequest(BaseModel):
                            description="转写模型名；留空取 .env 的 ASR_MODEL")
     languages: List[str] = Field(default_factory=list,
                                  description="字幕语言优先级；留空用默认（中文优先）")
+    expand: bool = Field(True, description="展开 B 站多 P / 合集（一个链接导入全部集）")
+    slides: bool = Field(False, description="抽幻灯片截图（要下载视频，慢一些）")
+
+
+class ReorderRequest(BaseModel):
+    item_id: int
+    delta: int = Field(..., ge=-1, le=1, description="-1 上移 / +1 下移")
 
 
 @router.get("/kb/tree")
@@ -141,62 +142,11 @@ async def upload_file(file: UploadFile = File(...),
 
 
 # ══════════════════════════════════════════════════════════════════
-#  视频课程导入（链接 → 讲义 → 知识库）
+#  视频课程导入（链接 → 讲义 → 知识库）：批量 + 合集展开 + 持久化队列
 # ══════════════════════════════════════════════════════════════════
-
-# 同一用户同时只跑一个导入：下载 + 转写是分钟级长任务，并发会同时打满带宽与 API 额度
-_LECTURE_INFLIGHT: set[int] = set()
-
-
-def _lecture_filename(url: str) -> str:
-    """用归一化后的视频标识当文件名。
-
-    不能再用"URL 尾段"：多 P 视频（`?p=3`）与裸 BV 号都会取错，前者还会让同一稿件的
-    各分 P **互相覆盖**（静默的数据丢失）。归一化的细节见 `kb/bili/urls.py`。
-    """
-    stem = bili_urls.normalize(url).filename_stem or "lecture"
-    return f"课程讲义-{stem}.md"
-
-
-async def _run_lecture_import(user_id: int, task_id: str, url: str,
-                              parent_id: Optional[int],
-                              transcript_source: str, asr_model: Optional[str],
-                              languages: tuple) -> None:
-    """后台导入：取词 → 入库 → 通知。异常转成用户可见提示，不让用户干等。
-
-    进度走 `IMPORT_PROGRESS`（**瞬态**，见 event_bus.notify 的 persist 说明）；
-    终态仍是 `KB_UPDATED` / `ERROR`（落库，用户不在线也能补拉）。
-    """
-    workdir = Path(tempfile.mkdtemp(prefix="kb-lecture-"))
-
-    def progress(stage: str, **info) -> None:
-        notify(user_id, IMPORT_PROGRESS, {"task_id": task_id, "stage": stage, **info},
-               persist=False)
-
-    try:
-        text, meta = await video_import.fetch_lecture(
-            url, workdir, user_id=user_id, transcript_source=transcript_source,
-            asr_model=asr_model, languages=languages, on_progress=progress,
-        )
-        filename = _lecture_filename(url)
-        node_id = await kb_manager.upload_and_index(
-            user_id=user_id, filename=filename,
-            content=text.encode("utf-8"), parent_id=parent_id,
-        )
-        logger.info("课程导入完成 user=%s node=%s source=%s 来自 %s",
-                    user_id, node_id, meta.get("source"), url)
-        progress("done", node_id=node_id, filename=filename,
-                 source=meta.get("source_label") or meta.get("source"),
-                 chars=meta.get("chars", 0), title=meta.get("title", ""))
-        notify(user_id, KB_UPDATED, {"node_id": node_id, "filename": filename,
-                                     "title": meta.get("title", "")})
-    except Exception as e:
-        logger.warning("课程导入失败 user=%s url=%s: %s", user_id, url, e)
-        progress("failed", message=str(e))
-        notify(user_id, ERROR, {"message": f"课程导入失败：{e}"})
-    finally:
-        _LECTURE_INFLIGHT.discard(user_id)
-        shutil.rmtree(workdir, ignore_errors=True)
+#
+# 队列语义在 `core/kb/import_queue.py`：一次提交 = 一个任务 = N 集，串行跑、
+# 可暂停/恢复/取消/重排，进程重启后自动续跑（状态在每用户的 kb.db 里）。
 
 
 @router.get("/kb/import/probe")
@@ -239,31 +189,94 @@ async def bili_login_poll(qrcode_key: str,
 async def import_lecture(req: LectureImportRequest,
                          user_id: int = Depends(get_current_user)):
     """
-    导入视频课程链接为讲义并入库（**后台长任务**，立即返回）。
+    导入视频课程链接（批量 / 合集全量）为讲义并入库（**入队即返回**）。
 
     复刻 course2md 的取词策略：**平台字幕优先**（零 API 成本、不需要 ffmpeg），
-    无字幕才下载音频 → ffmpeg 抽音轨 → 云端语音转写。
-    完成后经 `kb_updated` 通知前端刷新；失败经 `error` 通知并说明原因。
-    """
-    if user_id in _LECTURE_INFLIGHT:
-        raise HTTPException(status_code=409, detail="已有课程正在导入，请等它完成再试")
-    try:
-        # 只查**这条链接这个模式**真正需要的依赖：B 站字幕直取零依赖可跑，
-        # 不该因为没装 yt-dlp 就把能跑的那条路也拒掉
-        video_import.require_available(req.url, req.transcript_source,
-                                       req.asr_model or None)
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    无字幕才下载音频 → ffmpeg 抽音轨 → 云端语音转写；`slides=True` 时额外抽帧。
+    `expand=True` 时 B 站多 P / 合集会展开成全部集数，落进以合集命名的文件夹。
 
-    _LECTURE_INFLIGHT.add(user_id)
-    task_id = uuid.uuid4().hex[:12]
-    runtime.spawn(_run_lecture_import(
-        user_id=user_id, task_id=task_id, url=req.url, parent_id=req.parent_id,
-        transcript_source=req.transcript_source, asr_model=req.asr_model or None,
-        languages=tuple(req.languages) or video_import.DEFAULT_SUBTITLE_LANGS,
-    ))
-    return {"status": "started", "task_id": task_id,
-            "message": "已开始导入，完成后会通知你"}
+    进度经 `import_progress`（瞬态）逐集上报，终态经 `kb_updated` / `error`（落库）。
+    """
+    links = [req.url] + list(req.urls)
+    links = [link.strip() for link in links if link and link.strip()]
+    if not links:
+        raise HTTPException(status_code=400, detail="请填写至少一条课程链接")
+
+    for link in links:
+        try:
+            # 只查**这条链接这个模式**真正需要的依赖：B 站字幕直取零依赖可跑，
+            # 不该因为没装 yt-dlp 就把能跑的那条路也拒掉
+            video_import.require_available(link, req.transcript_source,
+                                           req.asr_model or None, req.slides)
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        result = await import_queue.submit(
+            user_id, links, parent_id=req.parent_id,
+            transcript_source=req.transcript_source,
+            asr_model=req.asr_model or None, slides=req.slides, expand=req.expand,
+            languages=tuple(req.languages) or video_import.DEFAULT_SUBTITLE_LANGS,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    result["status"] = "queued"
+    result["message"] = f"已加入队列（{result['items']} 集），完成后会通知你"
+    return result
+
+
+@router.get("/kb/import/tasks")
+async def list_import_tasks(limit: int = Query(20, ge=1, le=100),
+                            user_id: int = Depends(get_current_user)):
+    """导入队列（最近的任务 + 各自分集状态），前端定时轮询。"""
+    return {"tasks": import_queue.list_tasks(user_id, limit)}
+
+
+@router.post("/kb/import/tasks/{task_id}/{action}")
+async def import_task_action(task_id: str, action: str,
+                             user_id: int = Depends(get_current_user)):
+    """队列操作：`pause` / `resume` / `cancel` / `retry`。"""
+    handlers = {
+        "pause": import_queue.pause,
+        "resume": import_queue.resume,
+        "cancel": import_queue.cancel,
+        "retry": import_queue.retry,
+    }
+    handler = handlers.get(action)
+    if handler is None:
+        raise HTTPException(status_code=404,
+                            detail=f"不支持的操作 {action}（可用：{'/'.join(handlers)}）")
+    try:
+        result = handler(user_id, task_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok", "action": action, "result": result}
+
+
+@router.post("/kb/import/tasks/{task_id}/reorder")
+async def import_task_reorder(task_id: str, req: ReorderRequest,
+                              user_id: int = Depends(get_current_user)):
+    """调整待办分集的顺序（上移/下移一格）。"""
+    try:
+        import_queue.reorder(user_id, task_id, req.item_id, req.delta)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok"}
+
+
+@router.get("/kb/slides/{asset_key}/{name}")
+async def get_slide(asset_key: str, name: str,
+                    user_id: int = Depends(get_current_user)):
+    """讲义插图（幻灯片截图）。
+
+    路径由 (user_id, asset_key, name) 完全推导且只在本用户目录下 —— 别人的
+    asset_key 即使被猜到也读不到。`<img>` 发不了 Authorization 头，所以前端
+    走 axios 取 blob 再换 objectURL（见 `KbTextPreviewDialog.vue`）。
+    """
+    path = kb_manager.get_slide_path(user_id, asset_key, name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="截图不存在")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @router.delete("/kb/node/{node_id}")

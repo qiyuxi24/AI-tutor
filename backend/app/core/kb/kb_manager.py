@@ -22,6 +22,7 @@
 import asyncio
 import logging
 import re
+import shutil
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -211,6 +212,10 @@ class KbManager:
             self._stores[user_id] = KbStore(self.data_dir / str(user_id))
         return self._stores[user_id]
 
+    def store(self, user_id: int) -> KbStore:
+        """公开的存储句柄（导入队列等编排层用；读写仍走 KbStore）。"""
+        return self._get_store(user_id)
+
     def _get_vec_store(self, user_id: int) -> DocVectorStore:
         if user_id not in self._vec_stores:
             self._vec_stores[user_id] = DocVectorStore(self.data_dir / str(user_id))
@@ -242,7 +247,7 @@ class KbManager:
 
     async def upload_and_index(self, user_id: int, filename: str, content: bytes,
                                 parent_id: Optional[int],
-                                vectorize: bool = True) -> int:
+                                vectorize: bool = True, asset_key: str = "") -> int:
         """
         上传文件并完成解析 + 向量化索引。
 
@@ -297,6 +302,7 @@ class KbManager:
             file_type=ext,
             extract_text=text,
             file_size=len(content),
+            asset_key=asset_key,
         )
 
         # 分块 + 向量化 + 入库
@@ -428,18 +434,43 @@ class KbManager:
     #  删除
     # ────────────────────────────────────────────
 
+    def slides_dir(self, user_id: int, asset_key: str) -> Path:
+        """讲义截图目录：`data/kb/{uid}/slides/{asset_key}/`。
+
+        asset_key 由导入方生成（uuid），与节点 ID 解耦 —— 因为 Markdown 正文要在
+        `add_file` **之前**写定图片 URL，那时还没有 node_id。
+        """
+        return self.data_dir / str(user_id) / "slides" / asset_key
+
+    def get_slide_path(self, user_id: int, asset_key: str, name: str) -> Optional[Path]:
+        """取讲义里的一张截图；非法键/越界/不存在返回 None。
+
+        asset_key 与 name 都来自 URL，必须**白名单校验**后再拼路径：
+        只接受 32 位十六进制的 key 与 `NNNN.jpg` 的文件名，杜绝 `../` 穿越。
+        """
+        import re as _re
+
+        if not _re.fullmatch(r"[0-9a-f]{32}", asset_key or ""):
+            return None
+        if not _re.fullmatch(r"\d{4}\.jpg", name or ""):
+            return None
+        path = self.slides_dir(user_id, asset_key) / name
+        return path if path.is_file() else None
+
     def delete_node(self, user_id: int, node_id: int) -> dict:
         """
-        删除节点（文件夹递归删子节点）。同时清理向量、稀疏索引与原件。
+        删除节点（文件夹递归删子节点）。同时清理向量、稀疏索引与原件（含讲义截图）。
 
         返回: {"deleted_nodes": [...], "deleted_chunks": n}
         """
         store = self._get_store(user_id)
         # 删除前先收集该节点下所有文件节点 ID（删除后节点记录已不存在，无法再查类型），
-        # 原件路径同样必须在删库前推导（ext 来自 documents.file_type）
+        # 原件路径同样必须在删库前推导（ext / asset_key 来自 documents）
         file_node_ids = store.collect_descendant_files(user_id, node_id)
-        raw_files = [(nid, (store.get_document(nid) or {}).get("file_type") or "")
-                     for nid in file_node_ids]
+        docs = [(store.get_document(nid) or {}) for nid in file_node_ids]
+        raw_files = [(nid, (doc.get("file_type") or ""))
+                     for nid, doc in zip(file_node_ids, docs)]
+        asset_keys = [doc.get("asset_key") or "" for doc in docs]
 
         deleted_nodes = store.delete_node_recursive(user_id, node_id)
 
@@ -450,6 +481,9 @@ class KbManager:
         for nid, ext in raw_files:
             if ext:
                 self._raw_path(user_id, nid, ext).unlink(missing_ok=True)
+        for key in asset_keys:
+            if key:
+                shutil.rmtree(self.slides_dir(user_id, key), ignore_errors=True)
         return {"deleted_nodes": deleted_nodes, "deleted_chunks": deleted_chunks}
 
     # ────────────────────────────────────────────

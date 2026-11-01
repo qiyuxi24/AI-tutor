@@ -121,6 +121,10 @@ async def lifespan(app: FastAPI):
     _prune_once("启动")
     _gc_task = asyncio.create_task(_daily_prune())
 
+    # ── 课程导入队列跨重启续跑（状态在每用户 kb.db 的 import_tasks 里）──
+    from app.core.kb import import_queue
+    import_queue.resume_all()
+
     yield
 
     # ── 关闭：取消 GC 任务 ──

@@ -91,19 +91,34 @@ export const biliLoginPoll = (qrcodeKey) =>
   apiClient.get('/api/v1/kb/bili/login/poll', { params: { qrcode_key: qrcodeKey } })
 
 /**
- * 导入课程链接为讲义（**后台长任务**，立即返回）
- * payload: { url, parent_id?, transcript_source?: 'auto'|'subtitle'|'asr', asr_model?, languages? }
- * resp: { status: 'started', task_id, message }
+ * 导入课程链接为讲义（**入队即返回**，队列串行处理）
+ * payload: { url?, urls?: string[], parent_id?, transcript_source?, asr_model?,
+ *            languages?, expand?, slides? }
+ * resp: { status: 'queued', task_id, items, title, parent_id, message }
  *
  * 三条 SSE 通知（都在 chatStore 里消费）：
- *   - `import_progress` { task_id, stage, index?, total? } —— **瞬态**，步骤条用；
- *     stage ∈ subtitle/download/extract/transcribe/compose，终态 done/failed
+ *   - `import_progress` { task_id, item_id, item_index, item_total, stage, index?, total? }
+ *     —— **瞬态**，步骤条用；stage ∈ subtitle/download/extract/transcribe/compose，
+ *     终态 done/failed
  *   - `kb_updated` { node_id, filename, title } —— 已落库，离线也能补拉
  *   - `error` { message } —— 已落库
- * 409 = 已有课程正在导入；400 = 缺 yt-dlp 等前置条件（detail 给原因）
+ * 400 = 缺 yt-dlp 等前置条件 / 没有链接（detail 给原因）
  */
 export const importLecture = (payload) =>
-  apiClient.post('/api/v1/kb/import/lecture', payload, { timeout: 30000 })
+  apiClient.post('/api/v1/kb/import/lecture', payload, { timeout: 60000 })
+
+/** 导入队列：最近任务 + 各自分集状态 resp: { tasks: [...] } */
+export const listLectureTasks = (limit = 20) =>
+  apiClient.get('/api/v1/kb/import/tasks', { params: { limit } })
+
+/** 队列操作：pause / resume / cancel / retry */
+export const lectureTaskAction = (taskId, action) =>
+  apiClient.post(`/api/v1/kb/import/tasks/${taskId}/${action}`)
+
+/** 调整待办分集顺序（delta: -1 上移 / +1 下移） */
+export const reorderLectureItem = (taskId, itemId, delta) =>
+  apiClient.post(`/api/v1/kb/import/tasks/${taskId}/reorder`,
+    { item_id: itemId, delta })
 
 // ═══ 节点小节化：小节正文按需读取 / 生成 / 删除 ═══
 

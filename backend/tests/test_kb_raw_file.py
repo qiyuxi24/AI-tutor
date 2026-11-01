@@ -145,6 +145,57 @@ def test_delete_folder_removes_raw_recursively(api):
     assert not path.exists()
 
 
+# ── 讲义截图（幻灯片）────────────────────────────────────────
+
+SLIDE_KEY = "0123456789abcdef0123456789abcdef"   # 导入方用 uuid4().hex（32 位十六进制）
+
+
+def _make_slide(api, user_id: int, key: str = SLIDE_KEY, name: str = "0001.jpg"):
+    path = api["root"] / str(user_id) / "slides" / key / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xd8\xff\xd9")   # 最小 JPEG 头尾，内容不重要
+    return path
+
+
+def test_slide_served_with_auth(api):
+    _make_slide(api, USER)
+    resp = api["client"].get(f"/api/v1/kb/slides/{SLIDE_KEY}/0001.jpg")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/jpeg"
+
+
+def test_slide_not_readable_across_users(api):
+    """截图按 uid 分目录：别人的 key 即使猜中，读到的也是自己目录（不存在）→ 404。"""
+    _make_slide(api, OTHER)
+    assert api["client"].get(
+        f"/api/v1/kb/slides/{SLIDE_KEY}/0001.jpg").status_code == 404
+
+
+@pytest.mark.parametrize("key,name", [
+    ("../" + SLIDE_KEY, "0001.jpg"),       # key 带穿越
+    (SLIDE_KEY, "../secret.jpg"),          # 文件名带穿越
+    (SLIDE_KEY, "0001.png"),               # 非白名单文件名
+])
+def test_slide_path_traversal_rejected(api, key, name):
+    _make_slide(api, USER)
+    assert api["client"].get(
+        f"/api/v1/kb/slides/{key}/{name}").status_code == 404
+
+
+def test_delete_node_removes_slides(api):
+    import asyncio
+
+    km = api["km"]
+    node = asyncio.run(km.upload_and_index(
+        user_id=USER, filename="课程讲义-x.md", content=BODY.encode("utf-8"),
+        parent_id=None, vectorize=False, asset_key=SLIDE_KEY,
+    ))
+    path = _make_slide(api, USER)
+
+    assert api["client"].delete(f"/api/v1/kb/node/{node}").status_code == 200
+    assert not path.exists(), "删讲义必须连截图目录一起删，不留孤儿字节"
+
+
 # ── 回滚 ─────────────────────────────────────────────────────
 
 def test_parse_failure_leaves_no_raw(api, monkeypatch):

@@ -11,6 +11,7 @@ import { ref, computed } from 'vue'
 import AccountPane from '../components/settings/AccountPane.vue'
 import AppearancePane from '../components/settings/AppearancePane.vue'
 import ModelsPane from '../components/settings/ModelsPane.vue'
+import LecturePane from '../components/settings/LecturePane.vue'
 import GraphPane from '../components/settings/GraphPane.vue'
 import NodeDetailPane from '../components/settings/NodeDetailPane.vue'
 import GuidePane from '../components/settings/GuidePane.vue'
@@ -19,7 +20,7 @@ import FloatingBallPane from '../components/settings/FloatingBallPane.vue'
 
 const emit = defineEmits(['replay-onboarding', 'switch-account'])
 
-// icon 是硬编码的 SVG 内容串（非用户输入），用 v-html 注入避免九个手写 <a> 重复
+// icon 是硬编码的 SVG 内容串（非用户输入），用 v-html 注入避免每个 tab 手写一遍 <svg>
 const TABS = [
   { key: 'account', label: '账号', comp: AccountPane, icon:
     '<circle cx="12" cy="8" r="4"/><path d="M5 20c1.5-3.5 4-5 7-5s5.5 1.5 7 5"/>' },
@@ -28,6 +29,8 @@ const TABS = [
   { key: 'models', label: '模型', comp: ModelsPane, icon:
     '<rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/>' +
     '<line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/>' },
+  { key: 'lecture', label: '视频导入', comp: LecturePane, icon:
+    '<polygon points="5 3 19 12 5 21 5 3"/>' },
   { key: 'graph', label: '知识图谱', comp: GraphPane, icon:
     '<circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/>' +
     '<line x1="8.6" y1="7.6" x2="10.6" y2="15.5"/><line x1="15.4" y1="7.6" x2="13.4" y2="15.5"/>' },
