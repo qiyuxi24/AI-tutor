@@ -18,29 +18,39 @@
 """
 import logging
 
-from openai import (
-    APIStatusError, APITimeoutError, APIConnectionError, AuthenticationError, AsyncOpenAI,
-)
-
 from app.core.config import settings
-from app.core.llm.clients import MODEL_NAME, client, fallback_client
+from app.core.llm import clients as _clients
 from app.core.llm.retry import map_api_error, with_retry
 from app.core.llm.user_models import ModelStore
 
 logger = logging.getLogger("ai-tutor")
 
 # 调用候选（主 → 备用），按序尝试。备用未配置=单候选，行为与旧版一致。
-LLM_CANDIDATES = [(client, MODEL_NAME)]
-if fallback_client:
-    LLM_CANDIDATES.append((fallback_client, settings.fallback_model_name))
+# **惰性构建**（2026-10-26，P2-4）：模块顶层取值会立刻构造 AsyncOpenAI（~0.7s/个），
+# 而外部宿主的只读工具大多不碰 LLM。测试直接 monkeypatch 本名字为 list 即可生效。
+LLM_CANDIDATES: list[tuple] | None = None
 # ponytail: 单级备用已覆盖"主模型挂掉"；将来需多供应商多级链时加长本表即可
+
+
+def default_candidates() -> list[tuple]:
+    """系统默认档 `[(client, model)]`：首次调用时构建并缓存（只此一处）。"""
+    global LLM_CANDIDATES
+    if LLM_CANDIDATES is None:
+        cands = [(_clients.client, _clients.MODEL_NAME)]
+        fallback = _clients.fallback_client
+        if fallback:
+            cands.append((fallback, settings.fallback_model_name))
+        LLM_CANDIDATES = cands
+    return LLM_CANDIDATES
 
 # 用户自定义模型客户端缓存：(base_url, api_key) → AsyncOpenAI。
 # 每次调用都新建 client 会不断泄漏连接池，而模型配置极少变动，缓存即够。
-_CLIENT_CACHE: dict[tuple, AsyncOpenAI] = {}
+_CLIENT_CACHE: dict[tuple, object] = {}
 
 
-def _build_client(base_url: str, api_key: str) -> AsyncOpenAI:
+def _build_client(base_url: str, api_key: str):
+    """按用户配置建一个 AsyncOpenAI（openai 包在此处才导入，见 clients.py）。"""
+    from openai import AsyncOpenAI
     return AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=settings.llm_timeout)
 
 
@@ -91,12 +101,16 @@ def resolve_candidates(user_id: int | None) -> list[tuple]:
     """
     candidates = user_candidates(user_id)
     if candidates is None:
-        return [(c, m, None) for c, m in LLM_CANDIDATES]
+        return [(c, m, None) for c, m in default_candidates()]
     return candidates
 
 
 def should_fallback(e: Exception) -> bool:
     """错误是否值得切下一个候选（而非放弃）。"""
+    # 惰性导入：`import openai` ~1.0s，只在真出错时才需要这些类（P2-4 冷启动）
+    from openai import (
+        APIStatusError, APITimeoutError, APIConnectionError, AuthenticationError,
+    )
     if isinstance(e, AuthenticationError):
         return True
     if isinstance(e, APIStatusError):

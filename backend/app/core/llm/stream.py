@@ -24,8 +24,6 @@
 """
 from types import SimpleNamespace
 
-from openai import APIStatusError
-
 from app.core.llm.fallback import chat_create
 
 __all__ = ["chat_create_stream", "STREAM_OPTIONS"]
@@ -130,6 +128,7 @@ async def chat_create_stream(*, user_id: int | None = None, on_delta=None, **kwa
         stream = await chat_create(user_id=user_id,
                                    stream_options=dict(STREAM_OPTIONS), **call_kwargs)
     except Exception as e:
+        from openai import APIStatusError  # 惰性：只有"建流失败"这条路径才需要（P2-4 冷启动）
         cause = e.__cause__
         if not (isinstance(cause, APIStatusError) and cause.status_code in (400, 422)):
             raise

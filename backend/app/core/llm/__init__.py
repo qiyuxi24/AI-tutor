@@ -19,7 +19,7 @@
 新增任何 LLM 调用都应复用 chat_create。
 """
 from app.core.llm.call import call_llm
-from app.core.llm.clients import MODEL_NAME, client, embed_client, fallback_client
+from app.core.llm.clients import MODEL_NAME
 from app.core.llm.embed import EMBED_BATCH_SIZE, EMBEDDING_MODEL, MAX_EMBED_CHARS, embed_texts
 from app.core.llm.fallback import chat_create
 from app.core.llm.json_extract import extract_json
@@ -36,3 +36,15 @@ __all__ = [
     "build_api_messages", "chat_create", "chat_create_stream", "call_llm", "extract_json",
     "with_retry", "map_api_error",
 ]
+
+
+def __getattr__(name: str):
+    """`client` / `embed_client` / `fallback_client` 透传到 `clients`（同样惰性，2026-10-26）。
+
+    本包顶层**不** from-import 这三个单例：from-import 会立刻构造 AsyncOpenAI，
+    把 2 秒冷启动代价带给只读宿主（见 `clients.py` 模块 docstring）。
+    """
+    if name in ("client", "embed_client", "fallback_client"):
+        from app.core.llm import clients
+        return getattr(clients, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -7,14 +7,22 @@ import asyncio
 import logging
 import random
 
-from openai import (
-    APIStatusError, APITimeoutError, APIConnectionError,
-    AuthenticationError, RateLimitError,
-)
-
 from app.core.error_codes import ErrorCode, log_error
 
 logger = logging.getLogger("ai-tutor")
+
+
+def _openai_exc():
+    """openai 异常类（**惰性导入**，2026-10-26 P2-4）。
+
+    `import openai` 实测 ~1.0s，而只读宿主（MCP / DSH worker）大多不调 LLM；
+    这些类只在"真出错"时才需要，放在函数里对错误路径没有额外代价。
+    """
+    from openai import (
+        APIStatusError, APITimeoutError, APIConnectionError,
+        AuthenticationError, RateLimitError,
+    )
+    return APIStatusError, APITimeoutError, APIConnectionError, AuthenticationError, RateLimitError
 
 # 最大重试次数（最多尝试 1 + RETRY_MAX 次）
 RETRY_MAX = 3
@@ -38,6 +46,7 @@ def is_retryable(e: Exception) -> bool:
     - AuthenticationError  认证失败（API Key 配置错误，重试无意义）
     - 其他业务类错误
     """
+    APIStatusError, APITimeoutError, APIConnectionError, _Auth, RateLimitError = _openai_exc()
     if isinstance(e, (APITimeoutError, APIConnectionError, RateLimitError)):
         return True
     if isinstance(e, APIStatusError):
@@ -47,6 +56,7 @@ def is_retryable(e: Exception) -> bool:
 
 def map_api_error(e: Exception, prefix: str = "") -> RuntimeError:
     """统一分类 LLM API 异常 → RuntimeError（带错误码）。"""
+    APIStatusError, APITimeoutError, APIConnectionError, AuthenticationError, RateLimitError = _openai_exc()
     if isinstance(e, APITimeoutError):
         user_msg = log_error(ErrorCode.LLM_API_TIMEOUT, detail=f"{prefix}{str(e)}" if prefix else str(e), exception=e)
     elif isinstance(e, RateLimitError):

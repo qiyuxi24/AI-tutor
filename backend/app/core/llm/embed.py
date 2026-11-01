@@ -20,7 +20,7 @@
 """
 import logging
 
-from app.core.llm.clients import embed_client
+from app.core.llm import clients as _clients  # 惰性单例：调用时取，别在顶层 from-import
 from app.core.llm.usage import record as record_llm_usage
 from app.core.token_counter import TokenUsage
 
@@ -31,6 +31,18 @@ EMBEDDING_MODEL = "text-embedding-v4"
 MAX_EMBED_CHARS = 6000
 # 单次请求最多条数（DashScope 限制 10 条，2026-09-14 踩坑：超限报 400）
 EMBED_BATCH_SIZE = 10
+
+
+# 打桩点（**仅供测试替换**，运行期恒为 None）。单测
+# `monkeypatch.setattr(embed_mod, "embed_client", fake)` 零网络验证「按 index 归位 /
+# 条数不齐整批作废」等契约；留一个值为 None 的真属性，是为了让 monkeypatch 能读到旧值
+# （属性不存在时它直接 AttributeError），同时不提前构造真的 AsyncOpenAI。
+embed_client = None
+
+
+def _embed_client():
+    """取嵌入客户端：被测试替换时用替换值，否则走 `clients` 的惰性单例。"""
+    return embed_client if embed_client is not None else _clients.embed_client
 
 
 def _record_usage(resp) -> None:
@@ -63,7 +75,7 @@ async def embed_texts(texts: list[str],
         vectors: list[list[float] | None] = [None] * len(texts)
         for start in range(0, len(texts), EMBED_BATCH_SIZE):
             batch = [t[:max_chars] for t in texts[start:start + EMBED_BATCH_SIZE]]
-            resp = await embed_client.embeddings.create(
+            resp = await _embed_client().embeddings.create(
                 model=EMBEDDING_MODEL,
                 input=batch,
             )
