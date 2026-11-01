@@ -16,6 +16,8 @@ import './style.css'
 import './styles/components.css'
 // 设置页样式（容器 + 各设置面板共用）：面板是子组件，样式必须全局生效
 import './styles/settings.css'
+// 内容页骨架（滚动容器 / 限宽内容区 / 页头）：各 view 共用，别再各写一份
+import './styles/page.css'
 import App from './App.vue'
 
 // 全局指令：点击外部关闭

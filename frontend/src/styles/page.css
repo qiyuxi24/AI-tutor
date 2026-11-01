@@ -1,0 +1,60 @@
+/* ═══════════════════════════════════════
+   内容页骨架：滚动容器 + 限宽内容区 + 页头
+
+   全局唯一出处 —— 各 view 不再各写一份 padding / max-width / 标题字号。
+   宽度三档与留白取值见 style.css 的 --page-* Token。
+
+   用法：
+     <div class="page-scroll">
+       <div class="page-inner page-inner--wide">
+         <header class="page-head">
+           <div><h2 class="page-title">标题</h2><p class="page-sub">副标题</p></div>
+           <div>本页自己的工具按钮</div>
+         </header>
+         …
+       </div>
+     </div>
+
+   ⚠️ 不适用于 chat / graph：那是全屏画布 + 侧栏（HomeView 的 absolute 布局），没有页面外壳。
+   ═══════════════════════════════════════ */
+
+/* 滚动容器：内容页根节点 */
+.page-scroll {
+  height: 100%;
+  overflow-y: auto;
+  background: var(--color-bg-page);
+}
+
+/* 限宽内容区：默认 base 档，按内容形态选修饰符 */
+.page-inner {
+  max-width: var(--page-w-base);
+  margin: 0 auto;
+  min-height: 100%;
+  padding: var(--page-pad-y) var(--page-pad-x) var(--page-pad-bottom);
+}
+.page-inner--wide   { max-width: var(--page-w-wide); }
+.page-inner--narrow { max-width: var(--page-w-narrow); }
+
+/* 页头：标题在左、本页工具在右（没有工具的页不必套，自己控制间距） */
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.page-title {
+  margin: 0;
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  line-height: var(--line-height-sm);
+  color: var(--color-text-primary);
+}
+
+.page-sub {
+  margin: 4px 0 0;
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
+  color: var(--color-text-tertiary);
+}

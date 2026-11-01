@@ -71,9 +71,6 @@ function handleKeydown(e) {
         </svg>
       </button>
     </div>
-
-    <!-- 快捷键提示：直接挂在 .input-area 下，不额外包容器 -->
-    <p class="input-hint">Enter 发送 · Shift + Enter 换行</p>
   </div>
 </template>
 

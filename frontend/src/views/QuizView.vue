@@ -344,13 +344,13 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="quiz-layout">
+  <div class="page-scroll">
     <main class="quiz-content">
-      <div class="quiz-inner">
-        <header class="qc-header">
+      <div class="page-inner">
+        <header class="page-head">
           <div class="qc-header-main">
-            <h2>AI 出题</h2>
-            <p class="qc-subtitle">
+            <h2 class="page-title">AI 出题</h2>
+            <p class="page-sub">
               AI 基于你上传的教材 / 例题 / 真题（知识库）出题，只依据真实材料，避免凭空乱出。支持单选 / 多选 / 判断 / 填空 / 简答，自动判分并给出解析。
             </p>
           </div>
@@ -604,30 +604,11 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.quiz-layout {
-  flex: 1;
-  height: 100%;
-  min-width: 0;
-  overflow-y: auto;
-}
+/* 页面骨架（滚动 / 限宽 / 页头 / 标题字号）全在 styles/page.css，本页只剩内容类 */
 
+/* 撑满，好让 .page-inner 的 min-height:100% 有百分比基准 */
 .quiz-content {
   height: 100%;
-}
-
-.quiz-inner {
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 28px 32px 60px;
-  height: 100%;
-}
-
-.qc-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
 }
 
 .qc-header-main {
@@ -648,20 +629,6 @@ onMounted(() => {
   margin-left: 5px;
   font-size: 11px;
   color: var(--color-text-tertiary);
-}
-
-.qc-header h2 {
-  margin: 0 0 6px;
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.qc-subtitle {
-  margin: 0;
-  font-size: 13px;
-  color: var(--color-text-tertiary);
-  line-height: 1.6;
 }
 
 /* 配置区 */

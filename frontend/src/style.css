@@ -107,6 +107,16 @@
   --space-xl:  24px;
   --space-2xl: 32px;
 
+  /* ── 页面骨架（内容页统一留白 + 宽度档位）──
+     三档宽度是语义不是巧合：wide = 卡片网格 / base = 列表题目 / narrow = 表单长文（≈65ch）。
+     消费方唯一在 src/styles/page.css。 */
+  --page-w-wide:    1200px;
+  --page-w-base:     960px;
+  --page-w-narrow:   780px;
+  --page-pad-x:       32px;
+  --page-pad-y:       28px;
+  --page-pad-bottom:  40px;
+
   /* ═══ ③ 兼容别名：旧组件仍在引用的名字（新代码请忽略本节） ═══ */
   --color-bg-primary:   var(--color-bg-page);
   --color-bg-secondary: var(--color-bg-card);

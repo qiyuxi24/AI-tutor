@@ -118,7 +118,7 @@ export const apiClient = axios.create({ timeout: 300000 })
 |----|------|----------|
 | `ai_tutor_token` | JWT token | `authStore`, `apiClient` |
 | `ai_tutor_user` | 用户信息 JSON | `authStore`, `chatStore`（取 user_id） |
-| `ai_tutor_conversations_{uid}` | 对话历史 | `chatStore` |
+| `ai_tutor_conversations_{uid}` | 对话**离线缓存**（真相在服务端 `conversations.db`；P0-1 起只写不上行） | `chatStore` |
 | `ai_tutor_current_{uid}` | 当前对话 ID | `chatStore` |
 
 ### 5.3 路由

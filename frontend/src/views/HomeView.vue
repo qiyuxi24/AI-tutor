@@ -2,10 +2,11 @@
 /**
  * HomeView.vue — 主视图（编排层）
  *
- * 布局：左侧活动栏 + 内容区（对话 / 学习进度 / 图谱 / 出题 / 设置），无顶部栏（沉浸式）。
+ * 布局：左侧活动栏 + 内容区（对话 / 学习进度 / 图谱 / 知识库 / 视频导入 / 出题 / 设置），无顶部栏（沉浸式）。
  * 资源采集已改为后端 AI 工具（`search_resources` / `collect_resources`），前端入口下线：
  * CollectorView.vue 保留但不再挂载。
- * 知识库不是独立视图：它是图谱页右侧可收起的侧栏（KbPanel，宽度由 --kb-w 驱动）。
+ * 知识库有两个入口、同一个组件 KbPanel：独立页（KbView）与图谱页右侧可收起的侧栏
+ * （宽度由 --kb-w 驱动）。两处功能重复是有意的 —— 侧栏窄，只够边看图边挑资料。
  *
  * 职责：
  *   1. 页面切换，由左侧活动栏驱动
@@ -42,6 +43,7 @@ import OnboardingGuide from '../components/OnboardingGuide.vue'
 import LoginDialog from '../components/LoginDialog.vue'
 import KbPanel from '../components/KbPanel.vue'
 import QuizView from './QuizView.vue'
+import KbView from './KbView.vue'
 import LectureImportView from './LectureImportView.vue'
 import SettingsView from './SettingsView.vue'
 import DashboardView from './DashboardView.vue'
@@ -206,8 +208,9 @@ function handleLoginSuccess() {
 }
 
 /** 视频导入页「去知识库」：知识库面板挂在图谱视图右侧（没有独立的 kb 视图） */
+/** 视频导入页「去知识库」→ 独立知识库页（不再绕回图谱页） */
 function handleGoKb() {
-  viewMode.value = 'graph'
+  viewMode.value = 'kb'
 }
 
 function handleActivitySelect(id) {
@@ -360,7 +363,10 @@ async function handleShowInGraph({ docId, docName }) {
     const ids = nodes.filter(n => !subject || n.subject === subject).map(n => n.id)
     sourceHighlight.value = { docId, docName, nodeIds: ids, subject, total: nodes.length }
 
-    if (viewMode.value !== 'graph') viewMode.value = 'graph'
+    if (viewMode.value !== 'graph') {
+      viewMode.value = 'graph'
+      await new Promise(r => setTimeout(r, 450))   // 从知识库页跳过来：等图谱挂载完再聚焦
+    }
     if (subject && subject !== store.currentSubject) {
       await store.setSubject(subject)
       await new Promise(r => setTimeout(r, 450))   // 等新学科的力导向图渲染完（同 switchSubjectAndFocus）
@@ -654,6 +660,14 @@ const slideTransition = {
           </Transition>
         </div>
       </Transition>
+
+      <!-- 知识库独立页：与图谱页右侧栏挂同一个 KbPanel（两处功能重复是有意的，
+           侧栏窄、只够边看图边挑资料；集中管理走这个宽页） -->
+      <KbView
+        v-if="viewMode === 'kb'"
+        :key="viewEpoch"
+        @show-in-graph="handleShowInGraph"
+      />
 
       <!-- 视频课程导入（链接 → 讲义 → 知识库；依赖探测在组件 setup 里，故挂 viewEpoch） -->
       <LectureImportView

@@ -64,11 +64,12 @@ watch(
 </script>
 
 <template>
-  <div class="dashboard-view" data-view="dashboard">
+  <div class="page-scroll" data-view="dashboard">
+    <div class="page-inner page-inner--wide">
     <!-- ═══ 顶部：标题 + 学科筛选 + 刷新 ═══ -->
-    <header class="dash-header">
+    <header class="page-head">
       <div class="dash-title-wrap">
-        <h2 class="dash-title">学习进度</h2>
+        <h2 class="page-title">学习进度</h2>
       </div>
       <div class="dash-tools">
         <select v-model="subjectFilter" class="dash-subject-select" title="筛选学科">
@@ -220,28 +221,13 @@ watch(
         </div>
       </div>
     </template>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.dashboard-view {
-  height: 100%;
-  overflow-y: auto;
-  /* 内容宽度上限 1200px + 居中（左右 padding 吸收剩余空间），与其他页框架对齐 */
-  padding: 28px max(28px, calc((100% - 1200px) / 2)) 40px;
-  background: var(--color-bg-primary);
-}
-
-/* ─── 顶部 ─── */
-.dash-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 20px;
-}
+/* 页面骨架（滚动 / 限宽 / 页头 / 标题字号）全在 styles/page.css，本页只剩内容类 */
 .dash-title-wrap { display: flex; flex-direction: column; gap: 2px; }
-.dash-title { font-size: 20px; font-weight: 600; color: var(--color-text-primary); margin: 0; }
-.dash-subtitle { font-size: 12px; color: var(--color-text-tertiary); }
 .dash-tools { display: flex; align-items: center; gap: 8px; }
 .dash-subject-select {
   background: var(--color-bg-secondary);

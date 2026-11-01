@@ -27,6 +27,7 @@ import { confirmAction } from '../utils/feedback'
 import { useChatStore } from '../stores/chatStore'
 import { useContextMenu } from '../utils/contextMenu'
 import ContextMenu from './ContextMenu.vue'
+import ItemMoreButton from './ItemMoreButton.vue'
 
 const store = useChatStore()
 const { subjectSummaries, currentSubject } = storeToRefs(store)
@@ -137,15 +138,10 @@ async function handleDelete() {
           </span>
         </span>
 
-        <button
-          class="item-more"
+        <ItemMoreButton
           title="重命名 / 删除"
-          @click.stop="openMenuAt($event.currentTarget, 'subject', s)"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-            <circle cx="12" cy="5" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="12" cy="19" r="1.7" />
-          </svg>
-        </button>
+          @click="openMenuAt($event, 'subject', s)"
+        />
       </div>
 
       <p v-if="!subjectSummaries.length" class="subject-empty">
@@ -270,29 +266,7 @@ async function handleDelete() {
   color: var(--color-accent);
 }
 
-/* 三点按钮：常驻，点击弹条目菜单；长学科名收缩让位，按钮压在文字之上 */
-.item-more {
-  flex-shrink: 0;
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.item-more:hover {
-  background: var(--color-bg-hover);
-  color: var(--color-text-primary);
-}
+/* 三点按钮样式已收进 ItemMoreButton.vue（与知识库树 / 对话列表共用一份） */
 
 .subject-body {
   display: flex;
@@ -310,6 +284,9 @@ async function handleDelete() {
 }
 
 .subject-name {
+  /* 长学科名收缩省略，别把右侧计数挤出条目（同 .kb-node 那类 min-width:auto 的坑） */
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 13px;
   color: var(--color-text-primary);
   overflow: hidden;

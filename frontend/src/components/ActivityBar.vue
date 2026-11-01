@@ -6,7 +6,8 @@
  *   1. 页面入口图标导航（对话 / 学习进度 / 图谱 / 出题）
  *      ⚠️ 资源采集已改为后端 AI 工具（`search_resources` / `collect_resources`），
  *         前端入口整体下线：本导航项已移除，CollectorView.vue 保留但不再挂载。
- *      知识库不是独立页面，它是图谱页右侧可收起的侧栏（见 KbPanel + HomeView 的 .graph-kb）
+ *      知识库有两个入口、同一个组件（KbPanel）：独立页（KbView）+ 图谱页右侧可收起的侧栏
+ *      （HomeView 的 .graph-kb）。功能重复是有意的，取舍见 KbView.vue 顶部说明。
  *   2. 品牌 logo
  *   3. 底部：主题切换 / 设置 / 用户菜单（含用户画像、切换账号）
  *
@@ -34,6 +35,7 @@ const items = [
   { id: 'chat', title: '对话', icon: 'chat' },
   { id: 'dashboard', title: '学习进度', icon: 'dashboard' },
   { id: 'graph', title: '知识图谱', icon: 'graph' },
+  { id: 'kb', title: '知识库', icon: 'kb' },
   { id: 'lecture', title: '视频导入', icon: 'lecture' },
   { id: 'quiz', title: '出题', icon: 'quiz' },
 ]
@@ -83,6 +85,12 @@ function handleUserMenu(action) {
           <line x1="7.5" y1="6.5" x2="15.8" y2="8.4" />
           <line x1="16.5" y1="8.8" x2="13.1" y2="17" />
           <line x1="7.3" y1="7.3" x2="10.7" y2="16.8" />
+        </svg>
+        <!-- 知识库图标（database） -->
+        <svg v-else-if="item.icon === 'kb'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="9" ry="3" />
+          <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+          <path d="M3 12a9 3 0 0 0 18 0" />
         </svg>
         <!-- 视频导入图标（film） -->
         <svg v-else-if="item.icon === 'lecture'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
