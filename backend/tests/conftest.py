@@ -61,6 +61,27 @@ def _isolate_rag_index(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_conversations_db(tmp_path, monkeypatch):
+    """对话库（P0-1 起由 `chat_service` 在回合结束时写）必须隔离。
+
+    默认落 `DATA_ROOT/conversations/conversations.db` = 真实开发库；不隔离的话
+    跑一次测试就往里写一堆假对话（与 `_isolate_usage_db` / `_isolate_notices_db`
+    同一动机）。显式传 `data_dir=tmp_path` 的用例（test_conversation_store）不受影响。
+
+    ⚠️ 替换的是 `ConversationStore` 的**默认 data_dir**，不是 `storage.conversations_dir()`
+    本身 —— 后者被 `test_storage_paths.py` 用来断言"单根布局"，改它会误伤真值校验。
+    """
+    from app.core.conversation_store import ConversationStore
+
+    real_init = ConversationStore.__init__
+
+    def isolated_init(self, user_id, data_dir=None):
+        real_init(self, user_id, data_dir or tmp_path / "conversations")
+
+    monkeypatch.setattr(ConversationStore, "__init__", isolated_init)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_notices_db(monkeypatch):
     """待投递通知（A2-3）与用量同库同根：不隔离就会往开发库塞测试通知。
 

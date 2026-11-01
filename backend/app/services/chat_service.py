@@ -28,10 +28,12 @@ from app.core.prompt_loader import get_system_prompt
 from app.core.agent.loop import run_agent_loop
 from app.core.agent.events import NullSink
 from app.core.agent_tools import TOOLS_PROMPT  # 注册表生成的「工具调用指南」段落
-from app.core.agent_tools.registry import build_authorization_block
+from app.core.agent.plan import plan_for_learn, specs_for_plan
+from app.core.agent_tools.registry import build_authorization_block, build_tools_prompt
 from app.core.config import settings
 from app.core import runtime
 from app.core.agent.guard import trim_history_to_budget
+from app.core.conversation_store import ConversationStore
 from app.core.graph_analyzer import GraphAnalyzer
 from app.core.knowledge_graph import KnowledgeGraph
 from app.core.profile import UserProfile
@@ -126,6 +128,25 @@ TOOL_POLICY_PROMPT = (_TOOL_POLICY_TEMPLATE
 TOOL_CAPABILITY_PROMPT = TOOLS_PROMPT + TOOL_POLICY_PROMPT
 
 
+def _tool_capability_prompt(specs: list[dict] | None) -> str:
+    """按本轮实际发给模型的工具**重新生成**这段说明（2026-10-31）。
+
+    为什么必须与 `tools=` 同源：指南里写着一个模型根本拿不到的工具，就是在教它去调不存在的
+    函数（2026-09-15 MCP 双源漂移踩过同一个坑）。`specs` 与 loop 的 `plan` 由同一个
+    `TurnPlan` 派生，两边不可能分叉。
+
+    specs=None → 全量常量（逐字节等于改动前）；[]（本轮禁工具）→ 空串。
+    """
+    if specs is None:
+        return TOOL_CAPABILITY_PROMPT
+    if not specs:
+        return ""
+    free, ask = build_authorization_block(specs)
+    return build_tools_prompt(specs) + (_TOOL_POLICY_TEMPLATE
+                                        .replace("{free_tools}", free)
+                                        .replace("{ask_tools}", ask))
+
+
 # ══════════════════════════════════════════════════════════════════
 #  图谱为空时的行动顺序（始终注入）
 # ══════════════════════════════════════════════════════════════════
@@ -199,6 +220,110 @@ def _last_user_text(messages: list) -> str:
             content = m.get("content") if isinstance(m, dict) else getattr(m, "content", "")
             return (content or "").strip()
     return ""
+
+
+# ══════════════════════════════════════════════════════════════════
+#  对话历史归属：服务端权威（2026-10-31，P0-1 / C3a）
+#
+#  曾经 `/chat*` 直接用请求体里的 messages，conversations.db 只是镜像 →
+#  换设备/清缓存 = 教学上下文归零；上下文压缩压的是**客户端**给的历史。
+#  现在：有 conv_id 就从库里组装，客户端那份只贡献"本轮提问"一条。
+#  无 conv_id（老前端 / 脚本 / 测试）→ 原样透传，逐字节不变。
+# ══════════════════════════════════════════════════════════════════
+
+def _as_plain(m) -> dict:
+    """ChatMessage / dict → 纯 dict（落库与拼接的唯一转换出口）"""
+    if isinstance(m, dict):
+        return dict(m)
+    if hasattr(m, "model_dump"):
+        return m.model_dump()
+    return {"role": getattr(m, "role", ""), "content": getattr(m, "content", "")}
+
+
+def _last_user_message(messages: list) -> dict | None:
+    for m in reversed(messages or []):
+        d = _as_plain(m)
+        if d.get("role") == "user" and (d.get("content") or "").strip():
+            return {"role": "user", "content": d["content"]}
+    return None
+
+
+def _resolve_history(user_id: int, conv_id: str | None, messages: list) -> list:
+    """本轮要发给模型的历史。
+
+    - 无 `conv_id` → 原样返回（兼容契约）
+    - 服务端没有该对话 → **一次性 bootstrap**（用客户端这份落库，老用户迁移入口）
+    - 服务端有 → 库里历史 + 客户端最后一条 user（伪造的中间消息一律丢弃）
+    """
+    if not conv_id:
+        return messages
+
+    plain = [_as_plain(m) for m in messages]
+
+    # bootstrap 只落**历史**：末尾那条是本轮提问，由 `_persist_turn` 在回合结束后落
+    # （两边都落 = 一条提问变成两条）。没有历史可迁 → 不建空对话，交给 append_turn。
+    cut = len(plain)
+    for i in range(len(plain) - 1, -1, -1):
+        if plain[i].get("role") == "user":
+            cut = i
+            break
+
+    store = ConversationStore(user_id=user_id)
+    try:
+        if cut > 0 and store.ensure_conversation(conv_id, plain[:cut]):
+            return messages
+        conv = store.get_conversation(conv_id)
+        if conv is None:          # 墓碑（已删对话）：不复活，按无历史处理
+            return messages
+        history = [{k: v for k, v in m.items() if k in ("role", "content", "tools")}
+                   for m in conv["messages"]]
+    finally:
+        store.close()
+
+    last_user = _last_user_message(messages)
+    return history + ([last_user] if last_user else [])
+
+
+def _tools_summary(result) -> list[dict]:
+    """工具摘要（前端工具卡片渲染用）。字段与 `tool_start`/`tool_result` 事件同形，
+    所以前端组件无需改动；thinking 不落（体积大、刷新后本就不重放）。"""
+    out = []
+    for r in (getattr(result, "rounds", None) or []):
+        tool = r.get("tool")
+        if not tool:
+            continue
+        out.append({
+            "tool": tool,
+            "args_head": r.get("args_head", ""),
+            "round": r.get("round", 0),
+            "status": "done" if r.get("ok") else "error",
+            "result": {
+                "tool": tool, "ok": bool(r.get("ok")),
+                "summary": r.get("result_head", ""),
+                "duration_ms": r.get("duration_ms", 0),
+                "round": r.get("round", 0),
+            },
+        })
+    return out
+
+
+def _persist_turn(user_id: int, conv_id: str | None, user_text: str, result) -> None:
+    """回合结束由**服务端**落库（不依赖前端 sync）。
+
+    静默失败：回复已经生成，落库出错不该让用户看不到答案。代价是这一轮不进历史
+    （下一轮上下文少一条），由日志暴露。
+    """
+    if not conv_id or not user_text:
+        return
+    try:
+        store = ConversationStore(user_id=user_id)
+        try:
+            store.append_turn(conv_id, user_text, getattr(result, "text", "") or "",
+                              tools=_tools_summary(result))
+        finally:
+            store.close()
+    except Exception as e:      # noqa: BLE001 —— 落库失败不阻断对话
+        logger.warning(f"对话回合落库失败（不阻断回复）：conv={conv_id} {e}")
 
 
 async def _build_graph_summary(kg: KnowledgeGraph, detailed: bool = True,
@@ -517,7 +642,8 @@ def _has_pending_quiz(user_id: int, store=None) -> bool:
         return False
 
 
-def _stash_learn_target(kg: KnowledgeGraph, focus_node: dict | None) -> "learning.LearnTurn | None":
+def _stash_learn_target(kg: KnowledgeGraph, focus_node: dict | None,
+                        target: dict | None = None) -> "learning.LearnTurn | None":
     """
     把"本轮该处理的小节"绑进学习会话（`core/learning/session.py`），供**工具层**硬校验
     （B2：越级记账直接拒）。
@@ -525,8 +651,12 @@ def _stash_learn_target(kg: KnowledgeGraph, focus_node: dict | None) -> "learnin
     为什么走这个渠道：工具 handler 只拿得到 `(args, kg)` —— 没有会话上下文。
     本轮判定挂在 kg 的 `_learn_turn` 上，**唯一读写方是 learning 模块**
     （有静态守卫测试防回退）；`kg` 每请求新建，不会跨请求串味。
+
+    `target` 可由调用方传入（已算好的 `learn_target_section` 结果）—— 建 TurnPlan 时
+    反正要算一次，别为一个字典重读两遍图谱。
     """
-    return learning.bind_target(kg, learn_target_section(kg, focus_node))
+    return learning.bind_target(kg, target if target is not None
+                                else learn_target_section(kg, focus_node))
 
 
 def ensure_section_quiz_scheduled(kg: KnowledgeGraph, result, *, store=None) -> bool:
@@ -577,7 +707,8 @@ def ensure_section_quiz_scheduled(kg: KnowledgeGraph, result, *, store=None) -> 
 
 async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
                               inject_tools: bool = False, current_node: str = "",
-                              kb: dict | None = None) -> tuple[str, str]:
+                              kb: dict | None = None,
+                              tool_specs: list[dict] | None = None) -> tuple[str, str]:
     """
     构建系统提示词（合并原 _build_stream_prompt / _build_chat_prompt）。
     
@@ -588,6 +719,8 @@ async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
         current_node: 当前教学位置的知识点 ID（可选；不存在时位置段写「未指定」）
         kb: 知识库上下文范围 {node_ids: [...], name: str}，可选；
             传入后在所选目录范围内检索文档片段注入提示词
+        tool_specs: 本轮实际发给模型的工具 spec（由 `specs_for_plan(plan)` 给出）。
+            None=全量（逐字节等于改动前）；[]=本轮禁工具 → 不注入指南。
     返回: (system_prompt, last_user_message)
     """
     last_user_msg = next(
@@ -658,7 +791,7 @@ async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
         if learn_block:
             prompt += learn_block
         if inject_tools:
-            prompt += TOOL_CAPABILITY_PROMPT
+            prompt += _tool_capability_prompt(tool_specs)
         # 图谱为空：放最后（最新指令优先级最高），覆盖退化的「框架约束」
         if not kg.nodes:
             prompt += EMPTY_GRAPH_PROMPT
@@ -917,14 +1050,17 @@ async def _index_applied_nodes(applied_list: list[dict], user_id: int, kg) -> No
 
 async def process_message(user_id: int, messages: list,
                         current_node: str = "",
-                        kb: dict | None = None) -> tuple[str, dict]:
+                        kb: dict | None = None,
+                        conv_id: str | None = None) -> tuple[str, dict]:
     """
     处理一条学生消息。
 
     参数:
         user_id:      数据库用户 ID（从 JWT 解析）
-        messages:     完整对话历史（Pydantic ChatMessage 列表）
+        messages:     对话历史。**有 `conv_id` 时只取最后一条 user**，其余从库里读
+                      （服务端权威，见 `_resolve_history`）；无 `conv_id` 才整份采信
         current_node: 当前教学位置的知识点 ID
+        conv_id:      前端对话 ID（服务端据此读历史 + 落库 + 关联 agent_runs）
 
     返回:
         (AI回复文本, 图谱分析结果)
@@ -936,46 +1072,64 @@ async def process_message(user_id: int, messages: list,
     kg = KnowledgeGraph(user_id=user_id)
 
     try:
+        # 0. 历史归属（P0-1）：服务端权威，客户端只贡献"本轮提问"这一条
+        messages = _resolve_history(user_id, conv_id, messages)
+
         # 1. 判分（与 /chat/stream **同序**，2026-09-30 对齐）：
         #    判分先跑（会改小节状态：通过 / 降级 / attempts），再建提示词，
         #    这样学习块里的清单/起点反映的是**判分后**的最新状态。
         auto_grade_note = await auto_grade_pending(kg, _last_user_text(messages))
 
-        # 2. 构建系统提示词（含图谱上下文 + RAG + 工具能力）
-        system_prompt, last_user_msg = await _build_system_prompt(
-            messages, kg, inject_tools=True, current_node=current_node, kb=kb
+        # 2. 回合计划（2026-10-31，架构审查 §4）：学习模式 → 工具子集 / 禁调 / 收尾形态。
+        #    **必须先算 plan 再建提示词**：提示词里的「工具调用指南」要按同一份子集裁，
+        #    否则又变成"提示词教它调一个它拿不到的工具"（2026-09-15 MCP 双源漂移同款）。
+        focus_node = kg.get_node(current_node) if current_node else None
+        learn_kind = learn_mode_kind(kg, focus_node, messages)
+        learn_target = (learn_target_section(kg, focus_node)
+                        if learn_kind == "normal" else None)
+        plan = plan_for_learn(learn_kind, (learn_target or {}).get("action", ""))
+
+        # 3. 构建系统提示词（含图谱上下文 + RAG + 工具能力）
+        #    本轮提问自己取（不依赖提示词组装的返回值）：落库与图谱分析用的是
+        #    **同一份** resolve 后的历史，而不是某个内部函数的附带产物。
+        system_prompt, _ = await _build_system_prompt(
+            messages, kg, inject_tools=True, current_node=current_node, kb=kb,
+            tool_specs=specs_for_plan(plan),
         )
+        last_user_msg = _last_user_text(messages)
         if auto_grade_note:
             system_prompt = f"{system_prompt}\n\n{auto_grade_note}"
 
-        # 3. 发送前守卫：清理较早工具结果 + 历史超预算时分层压缩（统计由守卫内部记日志）
+        # 4. 发送前守卫：清理较早工具结果 + 历史超预算时分层压缩（统计由守卫内部记日志）
         messages, _ = trim_history_to_budget(system_prompt, messages)
 
-        # 4. Agent 主循环：LLM ↔ 工具 多轮串联，直到自然给出最终回复
+        # 5. Agent 主循环：LLM ↔ 工具 多轮串联，直到自然给出最终回复
         #    ★ 传 user_id：即使无 SSE 订阅，运行记录也写入 agent_runs（默认可观测）
         #    ★ 传 NullSink（A2-2）：本路径不消费事件 → **显式**声明"不推"，
         #      而不是塞一个没人消费的 Queue（半吊子写法）。请求内事件**不得**走
         #      event_bus 的 per-user 广播队列 —— 常驻长连接 /knowledge/events 会抢走
         #      并丢弃它们，还会污染通知流（见 core/agent/events.py）。
         #      事件数经 emitter 记入 agent_runs.events_written（"回复送到前端没有"的观测口径）。
-        #    ★ 学习模式开场轮 → no_tools：第一轮只允许输出开场说明（硬保证，见 loop.py）
-        focus_node = kg.get_node(current_node) if current_node else None
-        learn_kind = learn_mode_kind(kg, focus_node, messages)
+        #    ★ 学习模式开场轮 → plan 里已经"一个工具都不发"，no_tools 保留同义
         # B2：把"本轮该处理的小节"绑进学习会话，工具层据此**硬拒越级记账**
         if learn_kind == "normal":
-            _stash_learn_target(kg, focus_node)
+            _stash_learn_target(kg, focus_node, target=learn_target)
         # 出题同意（2026-09-30）：学生没明确同意时，`quiz_generate` 会被服务端拒掉
         _stash_quiz_consent(kg, messages)
         result = await run_agent_loop(
             system_prompt, messages, kg=kg, user_id=user_id,
             event_sink=NullSink(),
             no_tools=learn_kind == "opener",
+            plan=plan, conv_id=conv_id,
         )
         reply = result.text
 
         # B1 出题兜底（2026-09-30）：学习模式后续轮，模型没调 quiz_generate 就由后端补一道
         # —— 学生不必因为模型的手滑而干等（真机：连着两轮口头承诺，一次工具都没调）
         ensure_section_quiz_scheduled(kg, result)
+
+        # 回合落库（P0-1）：服务端权威 → 历史由这一处写，前端 sync 不再是写入口
+        _persist_turn(user_id, conv_id, last_user_msg, result)
 
         # 5. 图谱分析作为后台任务执行，不阻塞对话回复
         #    ★ 传入 user_id 而非 kg 实例，让 _analyze_and_apply 自己管理 kg 生命周期
@@ -1005,6 +1159,7 @@ async def process_message_stream(
     user_id: int,
     current_node: str = "",
     kb: dict | None = None,
+    conv_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     统一 SSE 流（方案 B）：run_agent_loop 为主答案生成器，
@@ -1026,16 +1181,30 @@ async def process_message_stream(
     kg = KnowledgeGraph(user_id=user_id)
     agent_task: asyncio.Task | None = None
     try:
+        # 0. 历史归属（P0-1）：服务端权威，客户端只贡献"本轮提问"这一条
+        messages = _resolve_history(user_id, conv_id, messages)
+
         # ★ 判分必须**先于**提示词构建（2026-09-30 时序修正）：
         #   判分会改小节状态（通过 / 降级 / attempts），而学习块是从状态**现算**的 ——
         #   原先"先建提示词再判分"会让同一轮里的清单是**旧状态**（刚降级的节还写着
         #   "已懂（待出题验证）"），与"状态权威：只看上面的清单"自相矛盾。
         auto_grade_note = await auto_grade_pending(kg, _last_user_text(messages))
 
+        # 回合计划（与非流式路径同序同源，见 process_message 步骤 2）：
+        # plan 的 `specs` 决定提示词里的工具指南，`tools` 决定循环发哪些工具。
+        focus_node = kg.get_node(current_node) if current_node else None
+        learn_kind = learn_mode_kind(kg, focus_node, messages)
+        learn_target = (learn_target_section(kg, focus_node)
+                        if learn_kind == "normal" else None)
+        plan = plan_for_learn(learn_kind, (learn_target or {}).get("action", ""))
+
         tool_prompt, _ = await _build_system_prompt(
             messages, kg, inject_tools=True,
-            current_node=current_node, kb=kb
+            current_node=current_node, kb=kb,
+            tool_specs=specs_for_plan(plan),
         )
+        # 本轮提问自己取（理由同非流式路径）：落库与图谱分析共用同一份 resolve 结果
+        last_user_msg = _last_user_text(messages)
 
         # 判分结果作为**后置**块注入：它描述的是"本轮刚发生的事"，放最后最醒目
         # （同时规避老接口对多条 system 消息支持不确定的问题）。
@@ -1048,18 +1217,16 @@ async def process_message_stream(
         # 本请求私有事件队列：先建队列再起 agent，agent 的第一个事件不会丢；
         # 且不占用 per-user 广播队列（否则常驻长连接会抢走 text_delta）
         event_queue: asyncio.Queue = asyncio.Queue()
-        # 学习模式开场轮 → no_tools：第一轮只允许输出开场说明（硬保证，见 loop.py）
-        focus_node = kg.get_node(current_node) if current_node else None
-        learn_kind = learn_mode_kind(kg, focus_node, messages)
         # B2：把"本轮该处理的小节"绑进学习会话，工具层据此**硬拒越级记账**
         if learn_kind == "normal":
-            _stash_learn_target(kg, focus_node)
+            _stash_learn_target(kg, focus_node, target=learn_target)
         # 出题同意（2026-09-30）：学生没明确同意时，`quiz_generate` 会被服务端拒掉
         _stash_quiz_consent(kg, messages)
         agent_task = asyncio.create_task(
             run_agent_loop(
                 tool_prompt, messages, kg=kg, user_id=user_id, event_queue=event_queue,
                 no_tools=learn_kind == "opener",
+                plan=plan, conv_id=conv_id,
             )
         )
 
@@ -1074,16 +1241,17 @@ async def process_message_stream(
         # —— 学生不必因为模型的手滑而干等（真机：连着两轮口头承诺，一次工具都没调）
         ensure_section_quiz_scheduled(kg, result)
 
+        # 回合落库（P0-1）：服务端权威 → 历史由这一处写，前端 sync 不再是写入口
+        _persist_turn(user_id, conv_id, last_user_msg, result)
+
         # 图谱分析（复用现有逻辑）
         # P2-4（2026-10-11）：改为 **fire-and-forget**（与非流式路径 `:963` 一致）。
         # 原先这里 `await`：正文早已推完，但"回答结束"的判定被这一次额外 LLM 调用
         # （`graph_analyze`）拖后 —— 体感是"答完了还在转圈"，且把一次 LLM 成本压在
         # 每轮请求的尾延迟上。`_analyze_and_apply` 自己创建/关闭 kg（不共享本函数的实例），
         # 所以放在 `finally: kg.close()` 之后跑也安全。
-        user_msgs = [m for m in messages if (m.role if hasattr(m, 'role') else m['role']) == 'user']
-        if user_msgs and result.text:
-            last_user = user_msgs[-1].content if hasattr(user_msgs[-1], 'content') else user_msgs[-1]['content']
-            runtime.spawn(_analyze_and_apply(last_user, result.text, user_id))
+        if last_user_msg and result.text:
+            runtime.spawn(_analyze_and_apply(last_user_msg, result.text, user_id))
 
         broadcast(GRAPH_UPDATED)
 

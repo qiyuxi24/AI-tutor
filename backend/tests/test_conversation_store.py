@@ -1,4 +1,4 @@
-"""对话持久化存储（ConversationStore）：全量同步的时间戳语义回归。
+"""对话持久化存储（ConversationStore）：**迁移同步**的时间戳语义回归。
 
 背景（2026-09-26 排查对话功能时发现）：
   前端 `syncToBackend` 只上传 {id, title, messages, createdAt}，**不传 updatedAt**；
@@ -7,10 +7,15 @@
   `POST /conversations` 更糟：`conversations.py` 传 `updated_at=0`，
   键存在但值为 0 → 直接落库 0。
 
+2026-10-31（P0-1）视角校正：前端 `persist()` 已不再全量上行，`sync` 只剩
+"老用户迁移 / 离线补写"一条用途 —— 但**这些不变量一条都没作废**：
+迁移同样会把老快照整批送上来，若允许旧快照覆盖，新设备首次登录就能把云端历史盖回去。
+日常写入（`append_turn`）另在 `test_conversation_authority.py`。
+
 本文件锁死三条不变量：
   1. updated_at 缺省（或为 0）→ 必须取**服务端当前时间**，不得回退成 created_at；
-  2. 全量同步反复上传**同一份内容**时**不得推进** updated_at ——
-     否则每次 persist 都把全部对话刷成同一时刻，排序同样失去意义；
+  2. 同一份内容反复上传时**不得推进** updated_at ——
+     否则一次迁移就把全部对话刷成同一时刻，排序同样失去意义；
   3. 客户端显式给出的 updated_at 优先（单条保存接口的语义不变）。
 """
 import time
@@ -73,7 +78,7 @@ def test_explicit_updated_at_from_client_wins(tmp_path):
 # ══════════════════════════════════════════════════════════════════
 # 多端登录防覆盖（2026-10-07）
 #
-# 背景：localStorage 为主 + 全量 sync 的旧策略是"同 id 直接覆盖"。
+# 背景：旧策略（localStorage 为主 + 每次 persist 全量 sync）是"同 id 直接覆盖"。
 # 同一账户在 A/B 两端登录时，B 的 localStorage 是旧快照，它照样全量上传
 # → 把 A 刚聊出来的新消息整段盖回去（数据丢失，且无任何报错）。
 #

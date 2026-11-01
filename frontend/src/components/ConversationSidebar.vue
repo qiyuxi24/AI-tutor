@@ -12,6 +12,7 @@ import { confirmAction } from '../utils/feedback'
 import { useChatStore } from '../stores/chatStore'
 import { useContextMenu } from '../utils/contextMenu'
 import ContextMenu from './ContextMenu.vue'
+import ItemMoreButton from './ItemMoreButton.vue'
 
 const store = useChatStore()
 
@@ -45,8 +46,10 @@ function setEditInput(el) {
 }
 
 /**
- * 进入内联编辑（条目菜单「重命名对话」入口）。标题本就在「localStorage 为主 + 后端全量
- * 同步」的契约里，改完 persist() 会自动把新标题同步过去，不需要额外请求。
+ * 进入内联编辑（条目菜单「重命名对话」入口）。
+ *
+ * 提交走 `chatStore.renameConversation` → `PATCH /conversations/{id}`：
+ * P0-1（2026-10-31）后 `persist()` **不再上行**，改名没有"顺带的同步"可用。
  */
 async function startRename(conv) {
   editingId.value = conv.id
@@ -128,16 +131,11 @@ async function handleDelete() {
             @blur="commitRename"
           />
           <span v-else class="item-title">{{ conv.title }}</span>
-          <button
+          <ItemMoreButton
             v-if="editingId !== conv.id"
-            class="item-more"
             title="重命名 / 删除"
-            @click.stop="openMenuAt($event.currentTarget, 'conversation', conv)"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-              <circle cx="12" cy="5" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="12" cy="19" r="1.7" />
-            </svg>
-          </button>
+            @click="openMenuAt($event, 'conversation', conv)"
+          />
         </div>
       </template>
       <div v-if="!store.hasConversations" class="empty-hint">暂无历史对话</div>
@@ -274,28 +272,7 @@ async function handleDelete() {
   line-height: 1.3;
 }
 
-/* 三点按钮：常驻，点击弹条目菜单；长标题收缩让位，按钮压在文字之上 */
-.item-more {
-  flex-shrink: 0;
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.item-more:hover {
-  background: var(--color-bg-hover);
-  color: var(--color-text-primary);
-}
+/* 三点按钮样式已收进 ItemMoreButton.vue（与知识库树 / 学科栏共用一份） */
 
 /* 内联重命名输入框：就地替换标题，不弹窗 */
 .rename-input {

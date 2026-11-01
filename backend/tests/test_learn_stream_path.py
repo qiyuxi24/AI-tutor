@@ -84,8 +84,10 @@ def _install(monkeypatch, kg, *, events=(), text="你好", rounds=None):
         await asyncio.sleep(0)
 
     async def fake_loop(prompt, messages, *, kg=None, user_id=None, event_queue=None,
-                        event_sink=None, db_dir=None, no_tools=False):
-        cap["loop"].append({"no_tools": no_tools, "user_id": user_id})
+                        event_sink=None, db_dir=None, no_tools=False, conv_id=None,
+                        plan=None):
+        cap["loop"].append({"no_tools": no_tools, "user_id": user_id, "conv_id": conv_id,
+                            "plan": plan})
         if event_queue is not None:
             for evt in events:
                 event_queue.put_nowait(evt)
@@ -240,7 +242,8 @@ def test_stream_path_cancels_agent_task_on_client_disconnect(monkeypatch, kg):
     _install(monkeypatch, kg)          # 先装其余替身
 
     async def slow_loop(prompt, messages, *, kg=None, user_id=None, event_queue=None,
-                        event_sink=None, db_dir=None, no_tools=False):
+                        event_sink=None, db_dir=None, no_tools=False, conv_id=None,
+                        plan=None):
         if event_queue is not None:
             event_queue.put_nowait({"type": TEXT_DELTA, "run_id": RUN_ID, "text": "a"})
         try:

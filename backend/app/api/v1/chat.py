@@ -81,6 +81,7 @@ async def handle_chat(request: ChatRequest, raw_request: Request,
             messages=request.messages,
             current_node=request.current_node,
             kb=kb,
+            conv_id=request.conv_id,
         )
     return ChatResponse(reply=reply, graph_analysis=graph_analysis)
 
@@ -107,6 +108,7 @@ async def handle_chat_stream(request: ChatRequest, raw_request: Request,
                 user_id=user_id,
                 current_node=request.current_node,
                 kb=kb,
+                conv_id=request.conv_id,
             ):
                 yield sse_chunk
 

@@ -5,7 +5,19 @@
 - 独立数据库 data/conversations/conversations.db，不与 knowledge.db 混合
 - messages 字段以 JSON 字符串存储（SQLite 不支持数组类型）
 - 每个用户一个表行，upsert 模式（同一对话 ID 覆盖更新）
-- 前端双写：localStorage 为主 + 后端同步；如果前端 localStorage 为空则从后端拉取
+
+**真相归属 = 服务端（2026-10-31，架构审查 P0-1 / C3a）**
+------------------------------------------------------
+曾经这里是"前端双写：localStorage 为主 + 后端镜像"。后果：换设备/清缓存 =
+教学上下文归零；`agent_runs` 与会话无关联键；上下文压缩压的是客户端给的历史。
+现在的契约：
+
+- **`/chat*` 按 `conv_id` 从本库组装历史**，客户端 `messages` 只提供"本轮提问"；
+- 回合结束由 **`chat_service` 调 `append_turn` 落库**（user + assistant + 工具摘要），
+  不依赖前端 sync；
+- 客户端 `localStorage` 降级为离线缓存，`sync` 只用于**首次迁移/bootstrapping**；
+- 删除是**墓碑**（`deleted_at`）：`sync` 不得把已删对话写回来，否则 A 端删除、
+  B 端同步 = 复活。
 """
 
 import json
@@ -16,6 +28,14 @@ from pathlib import Path
 from typing import Optional
 
 from app.core import storage
+
+# 老库补列清单：新增列必须写在这里（`CREATE TABLE IF NOT EXISTS` 不给老表加字段）
+_COLUMN_MIGRATIONS = {
+    "deleted_at": "REAL",      # 墓碑：非空 = 已删（跨端传播用，不物理删）
+}
+
+# 未删除的行（所有读路径的唯一过滤条件，别再各写一份）
+_LIVE = "deleted_at IS NULL"
 
 
 class ConversationStore:
@@ -42,7 +62,12 @@ class ConversationStore:
         self._create_table()
 
     def _create_table(self) -> None:
-        """创建 conversations 表（如果不存在）"""
+        """创建 conversations 表（如果不存在），并补列。
+
+        ⚠️ `CREATE TABLE IF NOT EXISTS` **不会给老表加字段** —— 新增列必须写进
+        `_COLUMN_MIGRATIONS`，由 `_ensure_columns` 就地 ALTER（与 `kb_store` 同款；
+        本模块没有 `_auto_migrate`）。
+        """
         with self._conn:
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -52,9 +77,19 @@ class ConversationStore:
                     messages    TEXT NOT NULL DEFAULT '[]',
                     created_at  REAL NOT NULL,
                     updated_at  REAL NOT NULL,
+                    deleted_at  REAL,
                     PRIMARY KEY (id, user_id)
                 )
             """)
+        self._ensure_columns()
+
+    def _ensure_columns(self) -> None:
+        """老库补列（新建库已含 deleted_at，这里对它是 no-op）"""
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(conversations)")}
+        with self._conn:
+            for name, ddl in _COLUMN_MIGRATIONS.items():
+                if name not in have:
+                    self._conn.execute(f"ALTER TABLE conversations ADD COLUMN {name} {ddl}")
 
     def close(self) -> None:
         """关闭数据库连接"""
@@ -83,10 +118,10 @@ class ConversationStore:
             self._conn.commit()
 
     def _all_conversations(self) -> list[dict]:
-        """读取当前用户全部对话（含 messages），按 updated_at 倒序。"""
+        """读取当前用户全部**未删除**对话（含 messages），按 updated_at 倒序。"""
         rows = self._conn.execute(
             "SELECT id, title, messages, created_at, updated_at "
-            "FROM conversations WHERE user_id = ? "
+            f"FROM conversations WHERE user_id = ? AND {_LIVE} "
             "ORDER BY updated_at DESC",
             (self.user_id,),
         ).fetchall()
@@ -112,7 +147,7 @@ class ConversationStore:
         """
         rows = self._conn.execute(
             "SELECT id, title, messages, created_at, updated_at "
-            "FROM conversations WHERE user_id = ? "
+            f"FROM conversations WHERE user_id = ? AND {_LIVE} "
             "ORDER BY updated_at DESC",
             (self.user_id,),
         ).fetchall()
@@ -135,7 +170,7 @@ class ConversationStore:
         """
         row = self._conn.execute(
             "SELECT id, title, messages, created_at, updated_at "
-            "FROM conversations WHERE id = ? AND user_id = ?",
+            f"FROM conversations WHERE id = ? AND user_id = ? AND {_LIVE}",
             (conv_id, self.user_id),
         ).fetchone()
         if row is None:
@@ -150,11 +185,14 @@ class ConversationStore:
 
     def save_conversation(self, conv: dict) -> float:
         """
-        保存/更新对话（upsert：相同 id+user_id 则覆盖）
+        客户端快照 upsert（**迁移/离线补写专用**，不是日常写入口）
+
+        日常写入 = `append_turn`（服务端按回合追加）。本方法只在两种场景被调用：
+        `sync_from_client`（老用户首次迁移、离线补写）与 `POST /conversations`（单条补写）。
 
         :param conv: 对话对象 {id, title, messages, created_at, updated_at?}
                       messages 为 list[dict] 格式
-        :return: 实际落库的 updated_at（供全量同步回填排序键 —— 默认值只在**这一处**定义，
+        :return: 实际落库的 updated_at（供迁移同步回填排序键 —— 默认值只在**这一处**定义，
                  避免调用方各写一份、写出 0 或 created_at）
 
         多端防覆盖（2026-10-07）：
@@ -162,11 +200,12 @@ class ConversationStore:
           （updated_at 更大）**拒绝被它覆盖**，原样返回库里版本 —— 否则在另一端登录的
           旧设备全量上传时，会把新消息整段盖回去（静默数据丢失）。
         - 未给出 updated_at（老前端 / 单条保存不传）→ 维持原有语义：服务端当前时间。
+        - **已删对话（墓碑）一律拒绝写入**：它是"删了还会复活"的唯一防线。
 
         时间戳语义（2026-09-26 修）：
         - 缺省或为 0（api/v1/conversations.py 传的就是 0）→ 服务端当前时间。
           **不得退化成 created_at**：那会让"刚聊过的老对话"排序键仍是创建时刻、在列表里沉底。
-        - messages 内容没变 → 不推进 updated_at：全量同步每次 persist 都会重传所有对话，
+        - messages 内容没变 → 不推进 updated_at：迁移同步会一次性重传所有对话，
           无条件刷新会把它们刷成同一时刻，排序同样失效。
         """
         now = time.time()
@@ -174,9 +213,14 @@ class ConversationStore:
 
         with self._write_txn():
             current = self._conn.execute(
-                "SELECT updated_at FROM conversations WHERE id = ? AND user_id = ?",
+                "SELECT updated_at, deleted_at FROM conversations WHERE id = ? AND user_id = ?",
                 (conv["id"], self.user_id),
             ).fetchone()
+
+            # 墓碑优先：已删对话**拒绝任何写入** —— 否则 A 端删除、B 端下次全量 sync
+            # 就把它写回来（"删了又活"）。墓碑只能由 soft_delete 置位，不在这里清。
+            if current is not None and current["deleted_at"] is not None:
+                return float(current["updated_at"] or 0)
 
             # 多端防覆盖：显式给了 updated_at，但没库里的新 → 拒绝写入
             if (current is not None and incoming_updated > 0
@@ -204,22 +248,121 @@ class ConversationStore:
             ).fetchone()
         return row["updated_at"] if row else now
 
-    def delete_conversation(self, conv_id: str) -> bool:
+    # ════════════════════════════════════════════
+    #  服务端权威写入口（2026-10-31，P0-1/C3a）
+    # ════════════════════════════════════════════
+
+    def append_turn(self, conv_id: str, user_content: str, assistant_content: str,
+                    tools: list[dict] | None = None) -> None:
+        """落一个完整回合（user + assistant）。对话不存在则一并创建。
+
+        :param tools: 工具调用摘要（`[{tool, status, result}]`，前端气泡渲染用）；
+                      thinking **不落**（体积大、刷新后本就不该重放）
+        幂等：同内容重复追加（客户端重试 / 请求重放）不写第二份。
         """
-        删除对话
-        :param conv_id: 对话 ID
-        :return: 是否成功删除（对话不存在返回 False）
+        now = time.time()
+        title = user_content if len(user_content) <= 20 else user_content[:20] + "…"
+
+        with self._write_txn():
+            row = self._conn.execute(
+                "SELECT messages, deleted_at FROM conversations WHERE id = ? AND user_id = ?",
+                (conv_id, self.user_id),
+            ).fetchone()
+
+            # 已删对话：不复活也不写幽灵数据（客户端删完后不会再带这个 conv_id，
+            # 走到这里说明是竞态/重放 —— 丢弃比写成用户看不见的行好）
+            if row is not None and row["deleted_at"] is not None:
+                return
+
+            msgs = json.loads(row["messages"] or "[]") if row else []
+
+            # ponytail: 只比对末尾一组 (user, assistant)。连续两轮问完全相同的话 +
+            # 完全相同答案时会被吞一次 —— 无害且概率极低，升级路径是加 turn_id。
+            if (len(msgs) >= 2
+                    and msgs[-2].get("role") == "user" and msgs[-2].get("content") == user_content
+                    and msgs[-1].get("role") == "assistant"
+                    and msgs[-1].get("content") == assistant_content):
+                return
+
+            msgs.append({"role": "user", "content": user_content})
+            assistant = {"role": "assistant", "content": assistant_content}
+            if tools:
+                assistant["tools"] = tools
+            msgs.append(assistant)
+
+            self._conn.execute(
+                """INSERT INTO conversations (id, user_id, title, messages, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id, user_id) DO UPDATE SET
+                       messages = excluded.messages,
+                       updated_at = excluded.updated_at""",
+                (conv_id, self.user_id, title,
+                 json.dumps(msgs, ensure_ascii=False), now, now),
+            )
+
+    def ensure_conversation(self, conv_id: str, messages: list[dict]) -> bool:
+        """服务端没有该对话时，用客户端上行历史做**一次性 bootstrap**（老用户迁移入口）。
+
+        :return: True = 本次做了 bootstrap；False = 服务端已有（含墓碑），未改动
+        已有历史**绝不**被客户端快照覆盖 —— 服务端权威的前提是"客户端只能补空缺"。
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM conversations WHERE id = ? AND user_id = ?",
+            (conv_id, self.user_id),
+        ).fetchone()
+        if row is not None:
+            return False
+
+        clean = [{k: v for k, v in m.items() if k != "failed"}
+                 for m in messages if m.get("content")]
+        first_user = next((m["content"] for m in clean if m.get("role") == "user"), "新对话")
+        self.save_conversation({
+            "id": conv_id,
+            "title": first_user if len(first_user) <= 20 else first_user[:20] + "…",
+            "messages": clean,
+            "created_at": 0,
+            "updated_at": 0,
+        })
+        return True
+
+    def rename(self, conv_id: str, title: str) -> bool:
+        """只改标题（标题是元数据，不进历史真相）。
+
+        为什么需要它：`persist()` 不再全量上行后，客户端改名没有别的通道 ——
+        以前靠 sync 顺带把 title 带上去，现在 sync 只用于迁移。
         """
         with self._conn:
-            cursor = self._conn.execute(
-                "DELETE FROM conversations WHERE id = ? AND user_id = ?",
-                (conv_id, self.user_id),
+            cur = self._conn.execute(
+                f"UPDATE conversations SET title = ?, updated_at = ? "
+                f"WHERE id = ? AND user_id = ? AND {_LIVE}",
+                (title, time.time(), conv_id, self.user_id),
             )
-            return cursor.rowcount > 0
+            return cur.rowcount > 0
+
+    def soft_delete(self, conv_id: str) -> bool:
+        """墓碑删除（幂等）：详情/列表立刻不可见，但行还在 → 对端能收到墓碑并删本地。"""
+        with self._conn:
+            cur = self._conn.execute(
+                f"UPDATE conversations SET deleted_at = ? "
+                f"WHERE id = ? AND user_id = ? AND {_LIVE}",
+                (time.time(), conv_id, self.user_id),
+            )
+            return cur.rowcount > 0
+
+    def tombstones(self) -> list[str]:
+        """已删对话 id 列表（客户端据此删掉本地副本，避免下次 sync 复活）。"""
+        rows = self._conn.execute(
+            "SELECT id FROM conversations WHERE user_id = ? AND deleted_at IS NOT NULL",
+            (self.user_id,),
+        ).fetchall()
+        return [r["id"] for r in rows]
 
     def sync_from_client(self, conversations: list[dict]) -> dict:
         """
-        全量同步：前端传来的对话列表与后端合并。
+        **迁移同步**（非日常写入口）：前端上传本地副本，与库合并后返回库里真值。
+
+        2026-10-31（P0-1）起前端 `persist()` 不再全量上行，本方法只剩两个用途：
+        老用户首次运行新版的上行迁移、离线期间的补写。
         策略（2026-10-07 改）：
         - 前端传来的逐条写入，防覆盖规则由 `save_conversation` 统一把关（旧快照写不进）；
         - 返回值 = **库里的真实状态**（而不是前端传的那份），所以"你这份被拒了"这件事
@@ -227,7 +370,8 @@ class ConversationStore:
 
         :param conversations: 前端当前所有对话 [{id, title, messages, createdAt, updatedAt}, ...]
                               updatedAt = 本地最后修改时刻（缺失则不参与防覆盖，向后兼容）
-        :return: {conversations: [...库里全部对话，按 updatedAt 倒序...]}
+        :return: {conversations: [...库里全部对话，按 updatedAt 倒序...],
+                  tombstones: [...已删 id，客户端据此删本地...]}
         """
         for conv in conversations:
             conv_id = conv.get("id")
@@ -240,4 +384,5 @@ class ConversationStore:
                 "created_at": conv.get("createdAt") or conv.get("created_at") or 0,
                 "updated_at": conv.get("updatedAt") or conv.get("updated_at") or 0,
             })
-        return {"conversations": self._all_conversations()}
+        return {"conversations": self._all_conversations(),
+                "tombstones": self.tombstones()}

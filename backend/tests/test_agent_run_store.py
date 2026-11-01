@@ -153,6 +153,40 @@ def test_legacy_db_gets_events_written_column(tmp_path):
     assert store.get_run(1, "old", db_dir=tmp_path)["token_estimate"] == {}
 
 
+def test_conv_id_roundtrip(tmp_path):
+    """会话关联键（P0-1/S4）：run 能查到属于哪个对话；未给 → None（脚本/直调）。"""
+    store.save_run({
+        "run_id": "c1", "user_id": 8, "started_at": 1.0,
+        "conv_id": "conv-abc", "evidence": [],
+    }, db_dir=tmp_path)
+    _seed(tmp_path, "c2", user_id=8)      # 未传 conv_id → NULL
+
+    assert store.get_run(8, "c1", db_dir=tmp_path)["conv_id"] == "conv-abc"
+    assert store.get_run(8, "c2", db_dir=tmp_path)["conv_id"] is None
+
+
+def test_legacy_db_gets_conv_id_column(tmp_path):
+    """老库（建表时无 conv_id 列）打开时自动补列 —— 不补的话读 `SELECT *` 直接 KeyError。"""
+    import sqlite3
+    db = tmp_path / "agent_runs.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("""
+        CREATE TABLE agent_runs (
+            run_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ok', started_at REAL NOT NULL, ended_at REAL,
+            total_llm_calls INTEGER NOT NULL DEFAULT 0,
+            context_tokens INTEGER NOT NULL DEFAULT 0,
+            token_usage TEXT NOT NULL DEFAULT '{}',
+            estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            final_text TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '[]')
+    """)
+    conn.execute("INSERT INTO agent_runs (run_id, user_id, started_at) VALUES ('old', 1, 1.0)")
+    conn.commit()
+    conn.close()
+
+    assert store.get_run(1, "old", db_dir=tmp_path)["conv_id"] is None
+
+
 # ═══════════════ 清理 / 删除 / 统计（2026-09-08 治理面） ═══════════════
 
 def test_prune_layered_retention(tmp_path):

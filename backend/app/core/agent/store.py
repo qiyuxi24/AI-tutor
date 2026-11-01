@@ -52,6 +52,9 @@ _COLUMN_MIGRATIONS = {
     "token_estimate": "TEXT NOT NULL DEFAULT '{}'",
     # 写出事件数（A2-2）：可空 —— 仅当投递目标可计数时才有值（NULL = 未知，如队列目标）
     "events_written": "INTEGER",
+    # 会话关联键（P0-1 / S4，2026-10-31）：可空 —— 脚本/测试/无会话的直调没有 conv_id。
+    # 有了它，"这一轮到底发生了什么"才能按对话回放（此前 agent_runs 与会话无关联键）。
+    "conv_id": "TEXT",
 }
 
 # 单条 tool 结果/参数存库上限（防御失控工具写爆 DB；正常工具结果远小于此。
@@ -75,6 +78,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0,
     token_estimate TEXT NOT NULL DEFAULT '{}',
     events_written INTEGER,
+    conv_id     TEXT,
     final_text  TEXT NOT NULL DEFAULT '',
     evidence    TEXT NOT NULL DEFAULT '[]'
 );
@@ -114,8 +118,8 @@ def save_run(run: dict, db_dir: Path | None = None) -> None:
                        run_id, user_id, status, started_at, ended_at,
                        total_llm_calls, context_tokens, token_usage,
                        estimated_prompt_tokens, token_estimate, events_written,
-                       final_text, evidence)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       conv_id, final_text, evidence)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(run_id) DO UPDATE SET
                        status = excluded.status,
                        ended_at = excluded.ended_at,
@@ -125,6 +129,7 @@ def save_run(run: dict, db_dir: Path | None = None) -> None:
                        estimated_prompt_tokens = excluded.estimated_prompt_tokens,
                        token_estimate = excluded.token_estimate,
                        events_written = excluded.events_written,
+                       conv_id = excluded.conv_id,
                        final_text = excluded.final_text,
                        evidence = excluded.evidence""",
                 (
@@ -135,6 +140,7 @@ def save_run(run: dict, db_dir: Path | None = None) -> None:
                     run.get("estimated_prompt_tokens", 0),
                     json.dumps(run.get("token_estimate", {}), ensure_ascii=False),
                     run.get("events_written"),
+                    run.get("conv_id"),
                     run.get("final_text", ""),
                     json.dumps(run.get("evidence", []), ensure_ascii=False),
                 ),
@@ -160,6 +166,7 @@ def _row_to_run(row: sqlite3.Row) -> dict:
         "estimated_prompt_tokens": row["estimated_prompt_tokens"],
         "token_estimate": json.loads(row["token_estimate"] or "{}"),
         "events_written": row["events_written"],
+        "conv_id": row["conv_id"],
         "final_text": row["final_text"],
         "evidence": json.loads(row["evidence"] or "[]"),
     }

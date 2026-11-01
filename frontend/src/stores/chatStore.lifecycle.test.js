@@ -18,6 +18,7 @@ vi.mock('../api/index.js', () => ({
     get: vi.fn(() => Promise.resolve({ data: {} })),
     post: vi.fn(() => Promise.resolve({ data: {} })),
     put: vi.fn(() => Promise.resolve({ data: {} })),
+    patch: vi.fn(() => Promise.resolve({ data: {} })),
     delete: vi.fn(() => Promise.resolve({ data: {} })),
   },
 }))
@@ -157,7 +158,14 @@ describe('dispose 清定时器（A3-3）', () => {
     await store.init()
     expect(vi.getTimerCount()).toBe(0)
 
-    await store.send('你好')          // → 同步防抖 500ms
+    // 流式节流落盘（P0-1 后已无"同步防抖 500ms"这个来源）：
+    // 第一次 token 立即落盘，窗口内的第二次才挂 setTimeout。
+    sendMessageStream.mockImplementation((_msgs, cb) => {
+      cb?.onToken?.('半')
+      cb?.onToken?.('句')
+      return { abort: vi.fn() }
+    })
+    await store.send('你好')
     expect(vi.getTimerCount()).toBe(1)
 
     await store.refreshGraph(true)    // → SSE 抑制 3s
@@ -264,11 +272,35 @@ describe('对话持久化与流式收口（缺陷 A/B/C 回归）', () => {
     })
 
     const store = useChatStore()
-    await store.init()                 // 本地有数据 → syncToBackend（500ms 防抖）
+    await store.init()                 // init 内部直接对齐（P0-1 起无防抖）
     await vi.advanceTimersByTimeAsync(500)
 
     const conv = store.conversations.find(c => c.id === 'r1')
     expect(conv.title).toBe('远程新')
     expect(conv.messages).toEqual([{ role: 'assistant', content: 'remote' }])
+  })
+
+  it('P0-1/S3：服务端墓碑 → 本地副本必须被删掉（否则下次 sync 会把它推回去复活）', async () => {
+    localStorage.setItem(CONV_KEY, JSON.stringify([
+      { id: 'keep', title: '留', messages: [{ role: 'user', content: 'a' }], createdAt: 1, updatedAt: 1 },
+      { id: 'gone', title: '删', messages: [{ role: 'user', content: 'b' }], createdAt: 2, updatedAt: 2 },
+    ]))
+    localStorage.setItem(CUR_KEY, 'gone')
+    apiClient.post.mockResolvedValueOnce({
+      data: {
+        conversations: [
+          { id: 'keep', title: '留', messages: [{ role: 'user', content: 'a' }], created_at: 1, updated_at: 1 },
+        ],
+        tombstones: ['gone'],
+      },
+    })
+
+    const store = useChatStore()
+    await store.init()
+
+    expect(store.conversations.map(c => c.id)).toEqual(['keep'])
+    expect(store.currentId).toBe('keep')      // 当前对话被删 → 落到剩下那条
+    const stored = JSON.parse(localStorage.getItem(CONV_KEY))
+    expect(stored.map(c => c.id)).toEqual(['keep'])
   })
 })

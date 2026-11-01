@@ -510,9 +510,12 @@ def test_non_stream_chat_declares_explicit_null_sink(monkeypatch):
     captured = {}
 
     async def fake_loop(prompt, messages, *, kg=None, user_id=None, event_queue=None,
-                        event_sink=None, db_dir=None, no_tools=False):
+                        event_sink=None, db_dir=None, no_tools=False, conv_id=None,
+                        plan=None):
         # ⚠️ `no_tools` 必须留在签名里：学习模式开场轮用它禁工具（2026-09-30 加），
         # 少了这个形参 → `process_message` 传参直接 TypeError，整条断言变成 E-CHAT-002。
+        # `conv_id` 同理（2026-10-31 加：会话关联键落 agent_runs.conv_id）。
+        # `plan` 同理（2026-10-31 加：回合计划，决定工具子集/收尾形态）。
         captured["queue"] = event_queue
         captured["sink"] = event_sink
         captured["user_id"] = user_id

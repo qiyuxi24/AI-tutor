@@ -7,11 +7,13 @@
  *   3. 所有图谱 CRUD 操作统一走 Store 方法，组件不直接调用 apiClient
  *   4. SSE 实时更新 + 用户操作后 3 秒抑制机制，避免双重刷新
  *
- * 对话持久化策略（双写）：
- *   - localStorage 为主：每次变更立即写入 localStorage
- *   - 后端同步为辅：有内容的对话异步同步到后端
- *   - 恢复优先级：localStorage 有数据 → 直接用；localStorage 为空 → 从后端加载
- *   - 空对话（messages.length === 0）不持久化到 localStorage，也不同步到后端
+ * 对话持久化策略（**真相在服务端**，2026-10-31 / 架构审查 P0-1）：
+ *   - 历史真相 = 服务端 `conversations.db`：`/chat*` 按 conv_id 从库里组装历史，
+ *     回合结束由后端落库（`chat_service._persist_turn`）
+ *   - localStorage = **离线缓存**：每次变更立即写，只为秒开/断网可读，
+ *     不再上行（曾经"全量 sync"是第二个写入口 → 换设备/清缓存即丢上下文）
+ *   - init 时对齐一次：上行本地副本（老用户迁移）+ 采纳服务端权威 + 剔除墓碑
+ *   - 空对话（messages.length === 0）不持久化
  *
  * 数据流：
  *   Store.fetchGraph() → knowledgeNodes / knowledgeEdges
@@ -127,42 +129,42 @@ export const useChatStore = defineStore('chat', () => {
   // CRUD 操作后 3 秒内忽略 SSE 的 graph_updated 事件，避免双重刷新
   let sseSuppressTimer = null
 
-  // ─── 后端同步防抖 ───
-  // 避免频繁调用同步 API，在 persist 后延迟 500ms 合并一次同步
-  let syncDebounceTimer = null
+  // ─── 与服务端对齐（只在 init 跑一次） ───
+  // 真相归属 = 服务端（2026-10-31，P0-1）：常规对话由 `/chat*` 落库，这里上传本地副本
+  // **只是老用户迁移入口**（第一次登录新版本时把 localStorage 里的历史送上去）。
+  // 之后 persist 只写本地缓存，不再上行 —— 否则双写又回来了。
   let syncPending = false
 
   /**
-   * 将当前有内容的对话同步到后端（防抖 500ms）
-   * 只同步 messages.length > 0 的对话，空对话不上传
+   * 上行本地副本（迁移）并采纳服务端权威状态。
+   *
+   * 服务端返回的是库里真实状态：本地那份若是旧快照会被拒（不覆盖新消息），
+   * 已删对话会出现在 `tombstones` 里（服务端墓碑拒绝写入，本地也要跟着删，
+   * 否则下次同步又会把它推上去）。
    */
-  function syncToBackend() {
-    if (syncDebounceTimer) clearTimeout(syncDebounceTimer)
-    syncDebounceTimer = setTimeout(async () => {
-      if (syncPending) return
-      syncPending = true
-      try {
-        const nonEmpty = conversations.value
-          .filter(c => c.messages.length > 0)
-          .map(c => ({
-            id: c.id,
-            title: c.title,
-            messages: c.messages,
-            createdAt: c.createdAt,
-            // 本地修改时刻：后端据此判断这份快照是不是旧的（旧快照会被拒绝写入）
-            updatedAt: c.updatedAt || c.createdAt,
-          }))
-        // 使用 sync 端点全量同步（后端合并）
-        const { data } = await apiClient.post('/api/v1/conversations/sync', {
-          conversations: nonEmpty,
-        })
-        adoptRemote(data?.conversations)
-      } catch {
-        // 同步失败不影响本地使用，静默忽略
-      } finally {
-        syncPending = false
-      }
-    }, 500)
+  async function syncWithServer() {
+    if (syncPending) return
+    syncPending = true
+    try {
+      const nonEmpty = conversations.value
+        .filter(c => c.messages.length > 0)
+        .map(c => ({
+          id: c.id,
+          title: c.title,
+          messages: c.messages,
+          createdAt: c.createdAt,
+          // 本地修改时刻：后端据此判断这份快照是不是旧的（旧快照会被拒绝写入）
+          updatedAt: c.updatedAt || c.createdAt,
+        }))
+      const { data } = await apiClient.post('/api/v1/conversations/sync', {
+        conversations: nonEmpty,
+      })
+      adoptRemote(data?.conversations, data?.tombstones)
+    } catch {
+      // 离线 / 未登录：本地缓存继续用，下次 init 再对齐
+    } finally {
+      syncPending = false
+    }
   }
 
   /**
@@ -171,11 +173,31 @@ export const useChatStore = defineStore('chat', () => {
    * 后端 sync 返回的是库里真实状态：本地那份若是旧快照会被拒绝写入，此时必须用
    * 后端的版本刷回来，否则用户在另一端看到的是旧消息、以为消息丢了。
    * 正在流式生成的对话不动（本地才是最新的）。
-   * 只写 localStorage、不再触发同步（否则会 sync → adopt → sync 无限循环）。
+   *
+   * @param {Array} remote   服务端全量对话
+   * @param {string[]} tombstones 服务端已删对话 id（本地必须同步删掉）
    */
-  function adoptRemote(remote) {
-    if (!Array.isArray(remote) || remote.length === 0) return
+  function adoptRemote(remote, tombstones = []) {
     let changed = false
+
+    // 墓碑优先：先删本地副本，否则下一步的"服务端没有 = 本地新建"会误判
+    if (Array.isArray(tombstones) && tombstones.length) {
+      const gone = new Set(tombstones)
+      const before = conversations.value.length
+      conversations.value = conversations.value.filter(c => !gone.has(c.id))
+      if (conversations.value.length !== before) {
+        changed = true
+        if (gone.has(currentId.value)) {
+          currentId.value = conversations.value[0]?.id || ''
+        }
+      }
+    }
+
+    if (!Array.isArray(remote) || remote.length === 0) {
+      if (changed) persist()
+      return
+    }
+
     for (const r of remote) {
       if (loading.value && r.id === currentId.value) continue
       // 兼容两种命名：本地上行的 payload 是 camelCase，后端 _all_conversations
@@ -202,50 +224,22 @@ export const useChatStore = defineStore('chat', () => {
         changed = true
       }
     }
-    if (changed) persist(true)
+    if (changed) persist()
   }
 
   /**
-   * 从后端加载对话列表（当 localStorage 为空时调用）
-   * 加载后写入 localStorage，后续以 localStorage 为准
-   */
-  async function loadFromBackend() {
-    try {
-      const { data } = await apiClient.get('/api/v1/conversations')
-      if (data.conversations && data.conversations.length > 0) {
-        // 获取摘要列表后，按需加载每个对话的完整消息
-        // 为了减少请求数，直接用 sync 端点一次性拉取
-        const syncResp = await apiClient.post('/api/v1/conversations/sync', {
-          conversations: [],
-        })
-        if (syncResp.data.conversations && syncResp.data.conversations.length > 0) {
-          conversations.value = syncResp.data.conversations.map(c => ({
-            id: c.id,
-            title: c.title,
-            messages: c.messages || [],
-            createdAt: c.createdAt || c.created_at || Date.now(),
-            updatedAt: c.updatedAt || c.createdAt || Date.now(),
-          }))
-          // 写入 localStorage
-          persist()
-          return true
-        }
-      }
-      return false
-    } catch {
-      return false
-    }
-  }
-
-  /**
-   * 删除后端的对话
-   * @param {string} convId
+   * 墓碑删除后端对话（P0-1/S3）
+   *
+   * 服务端是软删：行留着当墓碑，另一台设备下次对齐时才知道"这条被删了"，
+   * 否则它会把本地副本再推上来（复活）。所以这里必须真的发出去、且失败要可见。
+   * @returns {Promise<boolean>} 是否删除成功（离线/失败 → false，本地仍删）
    */
   async function deleteFromBackend(convId) {
     try {
       await apiClient.delete(`/api/v1/conversations/${encodeURIComponent(convId)}`)
+      return true
     } catch {
-      // 删除失败不影响本地
+      return false
     }
   }
 
@@ -622,10 +616,11 @@ export const useChatStore = defineStore('chat', () => {
     return groups
   })
 
-  // ─── 初始化：从 localStorage 恢复（优先），否则从后端加载 ───
+  // ─── 初始化：本地缓存先上屏，再与服务端对齐（服务端权威） ───
   async function init() {
     // 第 1 步：读 localStorage。解析失败 / 结构异常 → 视为"本地为空"继续，
-    // **不再**用一个 try 把后面的「拉后端 / 建新对话」全吞掉（缺陷 C-3）。
+    // **不再**用一个 try 把后面的「对齐 / 建新对话」全吞掉（缺陷 C-3）。
+    // 本地只是**离线快照**：先上屏避免白屏，第 2 步就被服务端状态覆盖。
     let saved = []
     try {
       const raw = localStorage.getItem(STORAGE_KEY_CONVERSATIONS)
@@ -638,20 +633,17 @@ export const useChatStore = defineStore('chat', () => {
     }
     conversations.value = saved
 
-    // 第 2 步：本地有内容 → 恢复当前对话；本地为空 → **一定**尝试从后端加载
-    if (conversations.value.length > 0) {
-      const cid = localStorage.getItem(STORAGE_KEY_CURRENT)
-      if (cid && conversations.value.some((c) => c.id === cid)) {
-        currentId.value = cid
-      }
-      // 有数据时也同步到后端（双向合并）
-      syncToBackend()
-    } else {
-      const loaded = await loadFromBackend()
-      if (loaded && conversations.value.length > 0) {
-        // 后端有数据，取最新的一条作为当前对话
-        currentId.value = conversations.value[0].id
-      }
+    // 第 2 步：与服务端对齐（P0-1/C3a）
+    //   上行本地副本 = 老用户迁移入口；返回的是库里权威状态（旧快照被拒、墓碑被剔除）。
+    //   对齐完成后本地缓存不再承担"真相"角色，只是下一次离线的底稿。
+    await syncWithServer()
+
+    // 第 3 步：恢复当前对话（本地选中的那条若还在就用它，否则取最新一条）
+    const cid = localStorage.getItem(STORAGE_KEY_CURRENT)
+    if (cid && conversations.value.some((c) => c.id === cid)) {
+      currentId.value = cid
+    } else if (conversations.value.length > 0) {
+      currentId.value = conversations.value[0].id
     }
 
     // 第 3 步：仍没有当前对话（本地和后端都没有数据）→ 自动创建新对话
@@ -909,7 +901,7 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 视图卸载 / 登出：释放全部常驻资源（SSE、定时器、在途流）。可重复调用。
    *
-   * 为什么必须有一个统一出口：防抖同步（500ms）、SSE 抑制（3s）、SSE 重连
+   * 为什么必须有一个统一出口：SSE 抑制（3s）、流式落盘节流、SSE 重连
    * 三处各挂一个裸 setTimeout，没有任何地方成组清理 —— 组件卸载后定时器
    * 仍会戳 store（A3-3）。
    */
@@ -918,10 +910,6 @@ export const useChatStore = defineStore('chat', () => {
     if (sseSuppressTimer) {
       clearTimeout(sseSuppressTimer)
       sseSuppressTimer = null
-    }
-    if (syncDebounceTimer) {
-      clearTimeout(syncDebounceTimer)
-      syncDebounceTimer = null
     }
     if (streamPersistTimer) {
       clearTimeout(streamPersistTimer)
@@ -934,14 +922,11 @@ export const useChatStore = defineStore('chat', () => {
     loading.value = false
   }
 
-  // ─── 持久化 ───
-  // 核心规则：只有有内容的对话才写入 localStorage + 同步到后端
-  // 空对话（messages.length === 0）不存储
-  /**
-   * @param {boolean} [skipSync] true = 只写 localStorage、不回推后端
-   *   （采纳后端权威版本时用，否则会 sync → adopt → sync 递归）
-   */
-  function persist(skipSync = false) {
+  // ─── 持久化（只写本地缓存） ───
+  // 真相在服务端（P0-1）：对话内容由 `/chat*` 落库，这里写 localStorage 只为
+  // 离线/秒开。**不再上行** —— 否则"前端全量 sync"会重新变成第二个写入口，
+  // 正是这次改造要删掉的东西。空对话（messages.length === 0）不存储。
+  function persist() {
     // 过滤掉空对话，只有有内容的对话才持久化
     const nonEmpty = conversations.value.filter(c => c.messages.length > 0)
     localStorage.setItem(STORAGE_KEY_CONVERSATIONS, JSON.stringify(nonEmpty))
@@ -954,9 +939,6 @@ export const useChatStore = defineStore('chat', () => {
       // "存在但无效"的 id，既匹配不到对话、又覆盖掉上一个有效选择（缺陷 C-2）。
       localStorage.removeItem(STORAGE_KEY_CURRENT)
     }
-
-    // 双写：同步到后端（防抖，避免频繁请求）
-    if (!skipSync) syncToBackend()
   }
 
   // ─── 当前对话是否为空（无任何消息） ───
@@ -1014,7 +996,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   // ─── 删除对话 ───
-  function deleteConversation(id) {
+  async function deleteConversation(id) {
     const idx = conversations.value.findIndex((c) => c.id === id)
     if (idx === -1) return
     conversations.value.splice(idx, 1)
@@ -1030,25 +1012,31 @@ export const useChatStore = defineStore('chat', () => {
       currentId.value = conv.id
     }
     persist()
-    // 同步删除后端数据
-    deleteFromBackend(id)
+    // 墓碑删除（S3）：服务端软删，对端下次对齐才删得掉本地副本。
+    // 失败（离线）不阻断本地删除 —— 下次 init 对齐时它会回来，用户看得见。
+    await deleteFromBackend(id)
   }
 
   // ─── 重命名对话 ───
   /**
-   * 只改标题。标题本就在「localStorage 为主 + 后端全量同步」的契约里：persist() 会把新
-   * 标题带进 syncToBackend()，后端 upsert 以客户端 title 为准（conversation_store 的
-   * ON CONFLICT title = excluded.title）—— 所以**不需要再加一个改名端点**。
-   * messages 没变 → 后端不推进 updated_at，列表排序不受影响。
+   * 只改标题。
+   *
+   * 旧实现靠"前端全量 sync 顺带带上 title"；P0-1 之后 persist 不再上行，
+   * 所以标题走自己的 `PATCH /conversations/{id}`（标题是元数据，不影响历史归属）。
    *
    * @param {string} id
    * @param {string} title - 已 trim 的非空标题
    */
-  function renameConversation(id, title) {
+  async function renameConversation(id, title) {
     const conv = conversations.value.find((c) => c.id === id)
     if (!conv || conv.title === title) return
     conv.title = title
     persist()
+    try {
+      await apiClient.patch(`/api/v1/conversations/${encodeURIComponent(id)}`, { title })
+    } catch {
+      // 离线 / 未落库：本地标题仍然显示，下次对齐时以服务端为准
+    }
   }
 
   // ─── 设置知识库上下文范围 ───
@@ -1157,7 +1145,10 @@ export const useChatStore = defineStore('chat', () => {
 
     // 使用流式 API
     streamController = sendMessageStream(
-      conv.messages.slice(0, -1), // 不含占位消息的对话历史
+      // 不含占位消息的对话历史。**照旧全量上行**：服务端有 conv_id 时只取最后一条 user
+      // （库才是真相），这份全量只在"服务端还没有这个对话"时用于一次性 bootstrap。
+      // ponytail: 等存量对话都迁完，可收窄成 [最后一条 user]，届时记得同步改后端契约。
+      conv.messages.slice(0, -1),
       {
         // 每收到一个 token，追加到占位消息；同时**节流落盘**（缺陷 A-2）：
         // 流中途刷新也不会丢正文（原先只有 onDone 才 persist）。
