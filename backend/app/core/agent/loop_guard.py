@@ -35,6 +35,9 @@ STOP_TIME_BUDGET = "time_budget"  # 达 run 墙钟上限
 STOP_CALL_BUDGET = "call_budget"  # 达工具调用总次数上限
 STOP_FAIL_CIRCUIT = "fail_circuit"  # 连续工具失败熔断
 STOP_ERROR = "error"                # run 抛异常（异常中断也要记原因，便于回看）
+STOP_CANCELLED = "cancelled"        # 客户端断连 / 上层 task.cancel()（2026-10-31 补：
+                                    # 原先 CancelledError 绕过 except Exception → 该轮在
+                                    # agent_runs 里根本不存在，查"用户说卡住了"查不到）
 
 # 安全边界拦下 tool_call 的专属原因（只回填给模型，不进 stop_reason —— 模型还可能换参数重试）
 DENY_REPEAT = "repeat"
@@ -88,6 +91,11 @@ class LoopGuard:
 
     def elapsed(self) -> float:
         return time.monotonic() - self.started
+
+    def remaining(self) -> float:
+        """距墙钟上限还剩多少秒（可为负）。单工具超时要叠上它，否则 180s 只是摆设：
+        `deny_reason` 在**调用前**判，三个 60s 超时的工具排成队就能把 180s 撑破一轮。"""
+        return self.max_total_secs - self.elapsed()
 
     def deny_reason(self, tc) -> str | None:
         """返回拦下这条 tool_call 的原因（None = 放行）。"""

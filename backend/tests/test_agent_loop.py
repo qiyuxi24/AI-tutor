@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 from app.core.agent import loop as agent_loop, store as run_store
 from app.core.agent.context import TOOL_RESULT_CLEARED
+from app.core.agent.plan import TurnPlan
 from app.core.agent.events import (
     AgentEventEmitter, NullSink,
     AGENT_START, AGENT_DONE,
@@ -687,3 +688,175 @@ def test_stop_reason_reported_to_event(monkeypatch):
     done = fake.events[-1]
     assert done[0] == AGENT_DONE
     assert done[1]["stop_reason"] == result.stop_reason == "max_rounds"
+
+
+# ─── TurnPlan + 工程护栏（2026-10-31，架构审查 §4）─────────────────────
+
+def test_plan_none_sends_full_tools(monkeypatch):
+    """plan 不给 → 与加 plan 之前逐字节相同：全量工具、不传 tool_choice。"""
+    received = []
+    _install_fake_chat(monkeypatch, [_resp(_msg(content="好"))], received)
+    _install_fake_execute(monkeypatch)
+
+    asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "hi"}], kg=None))
+
+    assert [t["function"]["name"] for t in received[0]["tools"]] == \
+           [t["function"]["name"] for t in agent_loop.KG_TOOLS]
+    assert received[0]["tool_choice"] is None
+
+
+def test_plan_restricts_tools_to_subset(monkeypatch):
+    """学习模式讲解轮：只发子集（顺序按注册表，保证缓存前缀稳定）。"""
+    received = []
+    _install_fake_chat(monkeypatch, [_resp(_msg(content="讲第一节……"))], received)
+    _install_fake_execute(monkeypatch)
+    plan = TurnPlan(allowed_tools=("rag_search", "kg_snapshot"), label="learn:teach")
+
+    asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "hi"}], kg=None,
+                               plan=plan))
+
+    names = [t["function"]["name"] for t in received[0]["tools"]]
+    assert set(names) == {"rag_search", "kg_snapshot"}
+    assert names == [t["function"]["name"] for t in agent_loop.KG_TOOLS
+                     if t["function"]["name"] in names]
+
+
+def test_plan_empty_tools_sends_no_tools_block(monkeypatch):
+    """开场轮：一个工具都不发（连 tools 块都不带，省 schema + 省指南）。"""
+    received = []
+    _install_fake_chat(monkeypatch, [_resp(_msg(content="开场说明"))], received)
+    _install_fake_execute(monkeypatch)
+    plan = TurnPlan(allowed_tools=(), tool_choice="none", label="learn:opener")
+
+    result = asyncio.run(run_agent_loop(
+        "sys", [{"role": "user", "content": "开始学习"}], kg=None, plan=plan))
+
+    assert result.text == "开场说明"
+    assert received[0]["tools"] is None and received[0]["tool_choice"] is None
+
+
+def test_plan_structured_finish_records_sections(monkeypatch):
+    """结构化收尾：指令换成三段式，证据里留下可解析的 finish 段。"""
+    responses = [
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q"}, tc_id="c1")])),
+        _resp(_msg(content="1. 已知：都查到了\n2. 未解：没有\n3. 下一步：做一道题")),
+    ]
+    queue = list(responses)
+    received = []
+
+    async def fake_chat(api_messages, *, temperature, tools=None, tool_choice=None,
+                        max_tokens=2000, user_id=None, on_delta=None):
+        received.append(copy.deepcopy(api_messages))
+        return queue.pop(0)
+
+    monkeypatch.setattr(agent_loop, "_chat_once", fake_chat)
+    _install_fake_execute(monkeypatch)
+    plan = TurnPlan(finish="structured", label="learn:quiz")
+
+    result = asyncio.run(run_agent_loop(
+        "sys", [{"role": "user", "content": "x"}], kg=object(), max_rounds=0,
+        plan=plan))
+
+    assert result.stop_reason == "max_rounds"
+    # 收尾请求里追加的 user 指令是"三段式"那版，不是普通收尾
+    assert "未解" in received[-1][-1]["content"]
+    finish = [s for s in result.evidence if s["kind"] == "finish"]
+    assert finish and finish[0]["has_known"] and finish[0]["has_open"] \
+        and finish[0]["has_next"]
+    stop = [s for s in result.evidence if s["kind"] == "loop_stop"][0]
+    assert stop["plan"] == "learn:quiz"
+
+
+def test_tool_result_truncated_before_refill(monkeypatch):
+    """超长工具结果回填前截断（上下文里不该出现几万字符的裸正文）。"""
+    big = "x" * (agent_loop.AGENT_MAX_TOOL_RESULT_CHARS + 500)
+    _install_fake_execute(monkeypatch, lambda tc, kg: big)
+    received = []
+    _install_fake_chat(monkeypatch, [
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q"}, tc_id="c1")])),
+        _resp(_msg(content="好")),
+    ], received)
+
+    asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}], kg=object()))
+
+    tool_msgs = [m for m in received[1]["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert len(tool_msgs[0]["content"]) < len(big)
+    assert "已截断" in tool_msgs[0]["content"]
+
+
+def test_tool_timeout_clamped_by_remaining_wall_clock(monkeypatch):
+    """单工具超时必须与 run 剩余墙钟取小 —— 否则 3 个 60s 超时就能撑破 180s。"""
+    async def slow(tc, kg):
+        await asyncio.sleep(2)
+        return "慢工具结果"
+
+    _install_fake_execute(monkeypatch, slow)
+    received = []
+    _install_fake_chat(monkeypatch, [
+        _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q"}, tc_id="c1")])),
+        _resp(_msg(content="收尾")),
+    ], received)
+
+    result = asyncio.run(run_agent_loop(
+        "sys", [{"role": "user", "content": "x"}], kg=object(), max_total_secs=1))
+
+    tool_msgs = [m for m in received[1]["messages"] if m.get("role") == "tool"]
+    assert "执行超时" in tool_msgs[0]["content"]
+    assert ">1" in tool_msgs[0]["content"]        # 被墙钟钳到 1s，而不是默认 60s
+    assert result.rounds[0]["ok"] is False
+
+
+def test_midloop_llm_error_degrades_instead_of_raising(monkeypatch):
+    """工具已跑过 + LLM 中途失败 → 用已有材料收尾，不整轮抛出。"""
+    calls = {"n": 0}
+
+    async def fake_chat(api_messages, *, temperature, tools=None, tool_choice=None,
+                        max_tokens=2000, user_id=None, on_delta=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q"}, tc_id="c1")]))
+        if calls["n"] == 2:
+            raise RuntimeError("[E-LLM-001] 模拟网关 502")
+        return _resp(_msg(content="根据已查到的资料，先讲这些……"))
+
+    monkeypatch.setattr(agent_loop, "_chat_once", fake_chat)
+    _install_fake_execute(monkeypatch)
+
+    result = asyncio.run(run_agent_loop(
+        "sys", [{"role": "user", "content": "x"}], kg=object()))
+
+    assert result.text == "根据已查到的资料，先讲这些……"
+    assert result.stop_reason == "error"
+    assert len(result.rounds) == 1                 # 工具确实跑过（不是白跑）
+    assert any(s["kind"] == "llm_error" for s in result.evidence)
+
+
+def test_cancelled_run_persisted(tmp_path, monkeypatch):
+    """客户端断连（CancelledError）也要落 agent_runs，status=cancelled。
+
+    否则用户说"卡住了"时这一轮在库里根本不存在（CancelledError 绕过 except Exception）。
+    """
+    async def hang(api_messages, *, temperature, tools=None, tool_choice=None,
+                   max_tokens=2000, user_id=None, on_delta=None):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(agent_loop, "_chat_once", hang)
+
+    async def go():
+        task = asyncio.create_task(run_agent_loop(
+            "sys", [{"role": "user", "content": "x"}], kg=None, user_id=7,
+            db_dir=tmp_path, event_sink=NullSink()))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(go())
+
+    runs = run_store.list_runs(7, db_dir=tmp_path)
+    assert runs and runs[0]["status"] == "cancelled"
+    run = run_store.get_run(7, runs[0]["run_id"], db_dir=tmp_path)
+    assert run["evidence"][-1]["reason"] == "cancelled"

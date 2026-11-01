@@ -12,8 +12,18 @@
 - **调用次数 / 墙钟 / 重复 / 连续失败**：max_rounds 只限制"最多问模型几次"，管不住
   单轮并行 tool_calls，也管不住模型用**相同参数反复重试**同一工具 —— 后者是
   "一轮轮做同样的事、最后吐出无用兜底文案"的根因，由 `loop_guard.LoopGuard` 四道边界拦下
-- 单工具超时：asyncio.wait_for 包 asyncio.to_thread（参考 Votek tool_timeout_secs）
-- 工具异常隔离：执行出错/超时以错误文案作为 tool 内容回填，循环不炸
+- 单工具超时：asyncio.wait_for 包 asyncio.to_thread（参考 Votek tool_timeout_secs）；
+  **超时额度还要与 run 剩余墙钟取小**（2026-10-31）—— deadline 传到每个工具，
+  否则三个 60s 超时的工具排成队就能把 180s 撑破一轮
+- 工具异常隔离：执行出错/超时以错误文案作为 tool 内容回填，循环不炸；
+  工具结果回填前统一截断（`AGENT_MAX_TOOL_RESULT_CHARS`），避免超长正文挤占上下文
+
+回合计划（2026-10-31，架构审查 §4）：
+- `plan: TurnPlan` 是本模块的**第二个输入**：发哪些工具 / 禁不禁调 / 收尾形态都从它派生。
+  提示词侧用同一个 plan 裁「工具调用指南」段落（`chat_service` 传 specs），两边同源。
+- `plan=None`（全量 + auto + natural）逐字节等价于加 plan 之前的行为。
+- 中途 LLM 失败不再整轮报废：已跑过工具就用已有材料降级收尾（`STOP_ERROR`）；
+  取消（客户端断连）也落库（`STOP_CANCELLED`），不再出现"这一轮查不到"。
 
 真流式（2026-10-10，TODO「[P1]『流式』名不副实」）：
 - 每一轮 `_chat_once` 都走 `llm.stream.chat_create_stream`（stream=True），正文**逐 chunk**
@@ -62,6 +72,7 @@ from app.core.agent.events import (
     TOOL_START, TOOL_RESULT,
     THINKING, TEXT_DELTA,
 )
+from app.core.agent.plan import FINISH_STRUCTURED, TurnPlan, tools_for_plan
 from app.core.agent.store import save_run as _save_run
 from app.core.agent_tools import KG_TOOLS, execute_kg_tool_async, tool_timeout_secs
 from app.core.config import settings
@@ -84,6 +95,13 @@ AGENT_TOOL_TIMEOUT_SECS = 60  # 单工具执行超时（本地 KG 操作瞬时�
 AGENT_TEMPERATURE = 0.3       # 循环内统一低温：工具判定与教育文本都要确定性
 AGENT_MAX_TOKENS = 2000       # 单次 LLM 输出上限（实调与发送前预估同一口径）
 
+# ─── 工具结果回填上限（2026-10-31）───
+# 工具返回会**原样**进下一轮上下文（`_clip` 只作用于落库证据），一次网页/检索就能塞进
+# 几万字符 —— 而清理手段只有 `clear_old_tool_results`（改写历史中段 = 剪断缓存前缀，
+# 代价昂贵）。这里给出统一上限：超出即截断并告诉模型"缩小范围再查"。
+# ponytail: 全局常量，个别工具确需更大时再加 spec 字段（当前最大 = fetch_webpage 20k）。
+AGENT_MAX_TOOL_RESULT_CHARS = 20000
+
 # ─── P0-① Tool Result Clearing 触发阈值（tokens，2026-09-28）───
 # 默认取 settings.llm_ctx_budget（48K）：**仅当 ctx.messages 估算超过它才清理一次**。
 # 为什么不默认清理：清理 = 改写已发过的历史中段 = 把"整轮追加"的缓存前缀链剪断，
@@ -101,6 +119,7 @@ from app.core.agent.loop_guard import (  # noqa: E402  （默认值与规则都�
     AGENT_MAX_TOOL_CALLS,
     AGENT_MAX_TOTAL_SECS,
     STOP_CALL_BUDGET,
+    STOP_CANCELLED,
     STOP_ERROR,
     STOP_FAIL_CIRCUIT,
     STOP_MAX_ROUNDS,
@@ -114,6 +133,23 @@ _FORCE_FINISH_HINT = (
     "你已连续调用工具达到本轮上限。请立即停止调用工具，"
     "直接基于当前已有信息，给出一段面向学生的完整最终回复。"
 )
+
+# `plan.finish="structured"` 时的收尾指令（2026-10-31）：教学场景最需要"我查到哪了、
+# 哪还没把握、学生下一步干什么"，而不是一句客套的兜底。三段标题固定，便于证据可解析。
+_STRUCTURED_FINISH_HINT = (
+    "你已到达本轮的工具调用上限。请立即停止调用工具，按下面三段给出最终回复"
+    "（三段都必须有实质内容，不要只写标题）：\n"
+    "1. 已知：根据目前掌握的信息，可以确定的是什么；\n"
+    "2. 未解：还有哪些没查到或没把握，原因是什么；\n"
+    "3. 下一步：学生现在可以做什么（具体到一个动作）。"
+)
+
+
+def _finish_hint(plan: TurnPlan | None) -> str:
+    """强制收尾时追加给模型的指令（结构化 / 普通两种）。"""
+    if plan is not None and plan.finish == FINISH_STRUCTURED:
+        return _STRUCTURED_FINISH_HINT
+    return _FORCE_FINISH_HINT
 
 # 单条证据文本存储上限（thinking 全文/arguments/工具返回统一护栏，防失控工具写爆 DB）
 _RECORD_LIMIT = 200_000
@@ -253,7 +289,10 @@ async def _execute_tool(tc, kg, timeout: float, round_idx: int,
         guard.note_call(tc)
         # 单工具超时可按 spec 覆盖：慢工具（quiz_generate 要调 LLM 出题）在 spec 里声明
         # timeout_secs，否则会被默认 60s 掐断（2026-09-14）
-        effective_timeout = tool_timeout_secs(tc, timeout)
+        # **再与 run 剩余墙钟取小**（2026-10-31）：墙钟只在调用前判，三个 60s 超时的工具
+        # 排成队就能把 180s 撑破一轮 —— deadline 必须传到每个工具，而不是只贴在门口。
+        effective_timeout = max(1.0, min(float(tool_timeout_secs(tc, timeout)),
+                                         guard.remaining()))
         try:
             result = await asyncio.wait_for(
                 execute_kg_tool_async(tc, kg), timeout=effective_timeout
@@ -263,6 +302,16 @@ async def _execute_tool(tc, kg, timeout: float, round_idx: int,
             ok, content = False, f"工具 {name} 执行超时（>{effective_timeout}s），已中止。"
         except Exception as e:  # execute_kg_tool 内部已兜底，此处仅防未来漏网
             ok, content = False, f"工具 {name} 执行出错: {e}"
+        # 回填进上下文的正文设上限（见 AGENT_MAX_TOOL_RESULT_CHARS）：超长结果留在上下文里
+        # 会挤掉图谱/历史预算，而唯一清理手段是剪断缓存前缀 —— 截断便宜得多。
+        total_chars = len(content or "")
+        if ok and total_chars > AGENT_MAX_TOOL_RESULT_CHARS:
+            content = (content[:AGENT_MAX_TOOL_RESULT_CHARS]
+                       + f"\n…（结果超长已截断，共 {total_chars} 字符；"
+                         "需要更多请缩小查询范围后再查一次）")
+            rlog.log("tool", "tool_result_truncated", "工具结果超长，已截断后回填",
+                     level="WARNING", tool=name, total_chars=total_chars,
+                     limit=AGENT_MAX_TOOL_RESULT_CHARS)
         guard.note_result(ok)
         rlog.log("tool", "tool_result", f"round {round_idx} 工具{'完成' if ok else '失败'}",
                  level="INFO" if ok else "WARNING", tool=name, ok=ok,
@@ -295,14 +344,24 @@ def _build_result(text: str, *, rounds: list[dict], steps: list[dict], llm_calls
                   context_tokens: int, token_usage: TokenUsage,
                   estimated_prompt_tokens: int, token_estimate: dict | None,
                   stop_reason: str, guard: LoopGuard, rlog: RunLogger,
-                  emitter: AgentEventEmitter) -> AgentRunResult:
+                  emitter: AgentEventEmitter,
+                  plan: TurnPlan | None = None) -> AgentRunResult:
     """统一收尾（三处终止点共用）：记 `loop_stop` 证据 + 调试日志 + AGENT_DONE 事件。
 
     `stop_reason` 进事件、进证据、进调试日志 —— 三处同值，回看"为什么停"不用猜。
+    `plan.label` 一并落证据：回看时能分清"这一轮是学习模式出题 / 讲解 / 闲聊"。
     """
     steps.append({"ts": time.time(), "kind": "loop_stop", "reason": stop_reason,
                   "rounds": len(rounds), "tool_calls": guard.tool_calls,
-                  "llm_calls": llm_calls, "elapsed_ms": int(guard.elapsed() * 1000)})
+                  "llm_calls": llm_calls, "elapsed_ms": int(guard.elapsed() * 1000),
+                  "plan": getattr(plan, "label", "") or ""})
+    # 结构化收尾的自检（零误报版）：只记录"要求的段在不在"，不猜语义、不重试。
+    # 缺段 = 这次收尾不合格，`agent_runs` 里能直接筛出来（下一步改提示词有依据）。
+    if plan is not None and plan.finish == FINISH_STRUCTURED:
+        steps.append({"ts": time.time(), "kind": "finish", "mode": plan.finish,
+                      "has_known": "已知" in text, "has_open": "未解" in text,
+                      "has_next": "下一步" in text,
+                      "stop_reason": stop_reason})
     rlog.log("loop", "run_end", "agent run 结束", stop_reason=stop_reason,
              rounds=len(rounds), tool_calls=guard.tool_calls, llm_calls=llm_calls,
              elapsed=round(guard.elapsed(), 1), text_len=len(text))
@@ -322,22 +381,27 @@ async def _finish_without_tools(ctx: AgentContext, *, temperature: float,
                                 estimated_prompt_tokens: int,
                                 token_estimate: dict | None, stop_reason: str,
                                 guard: LoopGuard, rlog: RunLogger,
-                                emitter: AgentEventEmitter) -> AgentRunResult:
+                                emitter: AgentEventEmitter,
+                                tools: list | None = None,
+                                plan: TurnPlan | None = None) -> AgentRunResult:
     """收尾共通段：再问一次 LLM 要最终文本；失败则退化为固定文案。
 
-    **保留 `tools=KG_TOOLS` + `tool_choice="none"`**（而非像旧版那样丢掉 tools）：
+    **保留 tools 块 + `tool_choice="none"`**（而非像旧版那样丢掉 tools）：
     MiniMax 缓存顺序是「工具定义 → 系统提示词 → 历史对话」，丢掉 tools = 第 0 个 token
     就不同 = 该次调用必 0 命中（上下文工程 §3.4）；`tool_choice="none"` 语义上仍强制
     "只出文本、不调工具"，与旧行为等价。网关不支持该参数（典型 400）时**降级**为不带
     tools 的旧行为并记 warning。llm_calls 按**真实发生的 `_chat_once` 次数**递增
     （降级重试就是 2 次，不为好看只加 1）。
+
+    `tools` 由调用方按 plan 解析后传入（None/[] = 本轮没有工具，收尾自然也不带）。
     """
     resp, attempts = None, 0
+    tools = tools or None
     pump = _DeltaPump(emitter)      # 收尾正文也流式（首屏延迟 = 首 chunk 时间）
     try:
         attempts += 1
         resp = await _chat_once(ctx.messages, temperature=temperature,
-                                tools=KG_TOOLS, tool_choice="none",
+                                tools=tools, tool_choice="none" if tools else None,
                                 user_id=getattr(emitter, "user_id", None),
                                 on_delta=pump)
     except Exception as e:
@@ -373,7 +437,7 @@ async def _finish_without_tools(ctx: AgentContext, *, temperature: float,
                          context_tokens=context_tokens, token_usage=token_usage,
                          estimated_prompt_tokens=estimated_prompt_tokens,
                          token_estimate=token_estimate, stop_reason=stop_reason,
-                         guard=guard, rlog=rlog, emitter=emitter)
+                         guard=guard, rlog=rlog, emitter=emitter, plan=plan)
 
 
 async def _force_finish(ctx: AgentContext, msg, *, temperature: float,
@@ -383,22 +447,28 @@ async def _force_finish(ctx: AgentContext, msg, *, temperature: float,
                         token_estimate: dict | None = None,
                         stop_reason: str = STOP_MAX_ROUNDS,
                         guard: LoopGuard, rlog: RunLogger,
-                        emitter: AgentEventEmitter) -> AgentRunResult:
+                        emitter: AgentEventEmitter,
+                        tools: list | None = None,
+                        plan: TurnPlan | None = None) -> AgentRunResult:
     """
     达 max_rounds（或工具预算耗尽）仍请求工具 → 强制自然收尾。
     快照 assistant 文本（丢弃 tool_calls，避免"tool_calls 后缺 tool 消息"的协议 400），
     以 user 指令追加 + 空 tools 再请求一次，让模型给最终文本。
     该次调用失败也不炸：退化为固定汇总文案。
+
+    收尾指令随 plan 变（`plan.finish="structured"` → 要求「已知/未解/下一步」三段）。
     """
     rlog.log("loop", "force_finish", "触发强制收尾，不再执行新工具",
-             level="WARNING", stop_reason=stop_reason, tool_calls=guard.tool_calls)
+             level="WARNING", stop_reason=stop_reason, tool_calls=guard.tool_calls,
+             finish=getattr(plan, "finish", ""))
     ctx.append_assistant_text(msg.content or "")
-    ctx.append_user(_FORCE_FINISH_HINT)
+    ctx.append_user(_finish_hint(plan))
     return await _finish_without_tools(
         ctx, temperature=temperature, rounds=rounds, steps=steps, llm_calls=llm_calls,
         context_tokens=context_tokens, token_usage=token_usage,
         estimated_prompt_tokens=estimated_prompt_tokens, token_estimate=token_estimate,
         stop_reason=stop_reason, guard=guard, rlog=rlog, emitter=emitter,
+        tools=tools, plan=plan,
     )
 
 
@@ -417,6 +487,7 @@ async def _loop_core(
     user_id: int | None = None,
     db_dir=None,
     no_tools: bool = False,
+    plan: TurnPlan | None = None,
 ) -> AgentRunResult:
     """agent 循环主体：LLM ↔ 工具多轮串联。事件实时推送，证据步骤累积到 steps。"""
     ctx = AgentContext(system_prompt, messages)
@@ -424,6 +495,12 @@ async def _loop_core(
     llm_calls = 0
     context_tokens = 0
     token_usage = TokenUsage()
+    # 本轮发给模型的工具（None=全量，[]=没有工具）与"是否禁调工具"都**只从 plan 派生**
+    # （2026-10-31）：提示词侧用 `plan.specs`、这里用 `plan.tools`，两边同源，不会漂移。
+    tools = tools_for_plan(plan)
+    # None（=全量）在协议上就是"把注册表全套发过去"；[] 才是"本轮一个工具都不发"。
+    tool_arg = KG_TOOLS if tools is None else tools
+    disable_tools = no_tools or (plan is not None and plan.tool_choice == "none")
     # Layer 1：发送前预估（仅首轮，后续轮因工具结果无法预估）。带 user_id 时走 Phase 2
     # 历史中位数（读 agent_runs），结果随 run 落库 → 与真值 token_usage 同表可对照校准。
     token_estimate = _estimate_send(ctx.messages, user_id=user_id, db_dir=db_dir)
@@ -432,10 +509,26 @@ async def _loop_core(
         or count_messages_tokens(ctx.messages, model=MODEL_NAME)
     )
 
+    async def _close(stop: str) -> AgentRunResult:
+        """预算耗尽 / 中途失败时的共通收尾：追一句停止指令，再要一次最终文本。
+
+        读的是**调用时刻**的 llm_calls / token 累计（闭包按引用读），所以不必逐个传参。
+        """
+        ctx.append_user(_finish_hint(plan))
+        return await _finish_without_tools(
+            ctx, temperature=temperature, rounds=rounds, steps=steps,
+            llm_calls=llm_calls, context_tokens=context_tokens,
+            token_usage=token_usage,
+            estimated_prompt_tokens=estimated_prompt_tokens,
+            token_estimate=token_estimate, stop_reason=stop,
+            guard=guard, rlog=rlog, emitter=emitter, tools=tool_arg, plan=plan,
+        )
+
     emitter.emit(AGENT_START, max_rounds=max_rounds)
     rlog.log("loop", "run_start", "agent run 开始",   # user_id/db_dir 由 RunLogger 绑定
              max_rounds=max_rounds, tool_budget=guard.max_tool_calls,
              time_budget=guard.max_total_secs, messages=len(ctx.messages),
+             plan=getattr(plan, "label", ""), tools=len(tool_arg),
              estimated_prompt_tokens=estimated_prompt_tokens)
 
     for round_idx in range(max_rounds + 1):
@@ -447,15 +540,7 @@ async def _loop_core(
             rlog.log("loop", "budget_exhausted", f"进入 round {round_idx} 前工具预算已耗尽",
                      level="WARNING", reason=exhausted, tool_calls=guard.tool_calls,
                      elapsed=round(guard.elapsed(), 1))
-            ctx.append_user(_FORCE_FINISH_HINT)
-            return await _finish_without_tools(
-                ctx, temperature=temperature, rounds=rounds, steps=steps,
-                llm_calls=llm_calls, context_tokens=context_tokens,
-                token_usage=token_usage,
-                estimated_prompt_tokens=estimated_prompt_tokens,
-                token_estimate=token_estimate, stop_reason=guard.stop_reason,
-                guard=guard, rlog=rlog, emitter=emitter,
-            )
+            return await _close(guard.stop_reason)
 
         # S8 Tool Result Clearing（P0-①，2026-09-28）：**默认不清理** —— 把较早工具结果
         # 正文换占位符 = 改写已发过的历史中段 = 把"整轮追加"的缓存前缀链剪断，代价是其后的
@@ -474,25 +559,46 @@ async def _loop_core(
                      ctx_tokens=ctx_tokens, threshold=AGENT_CLEAR_TOOL_RESULTS_TOKENS)
         round_start = time.monotonic()
         pump = _DeltaPump(emitter)      # 本轮正文增量泵（多轮时各轮独立计数）
-        if no_tools:
-            # 「本轮禁止调用工具」的**协议层硬保证**（2026-09-30，用户反馈驱动）：
-            # 光在提示词里写"禁止调用任何工具"模型照样调（实测：学习模式开场轮第一轮就
-            # 直接 quiz_generate，清单一个字没讲）。这里用 tool_choice="none" 从协议层禁掉，
-            # 并**保留 tools 块**以维持缓存前缀（与 _finish_without_tools 同策略）；
-            # 网关不支持该参数（典型 400）时降级为不带 tools 的调用。
-            try:
+        try:
+            if disable_tools:
+                # 「本轮禁止调用工具」的**协议层硬保证**（2026-09-30，用户反馈驱动）：
+                # 光在提示词里写"禁止调用任何工具"模型照样调（实测：学习模式开场轮第一轮就
+                # 直接 quiz_generate，清单一个字没讲）。这里用 tool_choice="none" 从协议层禁掉，
+                # 并**保留 tools 块**以维持缓存前缀（与 _finish_without_tools 同策略）；
+                # 网关不支持该参数（典型 400）时降级为不带 tools 的调用。
+                # plan 给了空子集时 tool_arg=[] → 连 tools 块都不发，`tool_choice` 也不需要。
+                try:
+                    resp = await _chat_once(ctx.messages, temperature=temperature,
+                                            tools=tool_arg or None,
+                                            tool_choice="none" if tool_arg else None,
+                                            user_id=user_id, on_delta=pump)
+                except Exception as e:      # noqa: BLE001 —— 网关差异，降级而非报错
+                    rlog.log("loop", "no_tools_choice_unsupported",
+                             "网关拒绝 tool_choice=none（本轮禁工具），降级为不带 tools",
+                             level="WARNING", error=str(e))
+                    # 降级必须**连 tools 一起丢掉**：只丢 tool_choice 等于把工具还给它，
+                    # "本轮禁工具"就名存实亡（缓存前缀这一次认栽）。
+                    resp = await _chat_once(ctx.messages, temperature=temperature,
+                                            user_id=user_id, on_delta=pump)
+            else:
                 resp = await _chat_once(ctx.messages, temperature=temperature,
-                                        tools=KG_TOOLS, tool_choice="none",
+                                        tools=tool_arg or None,
                                         user_id=user_id, on_delta=pump)
-            except Exception as e:      # noqa: BLE001 —— 网关差异，降级而非报错
-                rlog.log("loop", "no_tools_choice_unsupported",
-                         "网关拒绝 tool_choice=none（本轮禁工具），降级为不带 tools",
-                         level="WARNING", error=str(e))
-                resp = await _chat_once(ctx.messages, temperature=temperature,
-                                        user_id=user_id, on_delta=pump)
-        else:
-            resp = await _chat_once(ctx.messages, temperature=temperature, tools=KG_TOOLS,
-                                    user_id=user_id, on_delta=pump)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:      # noqa: BLE001 —— 中途失败，能救则救
+            # 循环中途 LLM 失败（2026-10-31）：已经跑过工具 = 手上有真材料，整轮抛出
+            # 等于工具白跑（用户只看到一句 E-CHAT 错误）。给一次降级收尾；一个工具都没
+            # 跑就照常抛给上层（没有可救的内容，报错更诚实）。
+            if not rounds:
+                raise
+            rlog.log("loop", "llm_error_degraded",
+                     "循环中途 LLM 调用失败，改用已有工具结果收尾",
+                     level="ERROR", round=round_idx, error=str(e),
+                     tool_calls=guard.tool_calls)
+            steps.append({"ts": time.time(), "kind": "llm_error", "round": round_idx,
+                          "error": _clip(str(e))})
+            return await _close(STOP_ERROR)
         llm_ms = int((time.monotonic() - round_start) * 1000)
         llm_calls += 1
         usage = extract_usage(resp)
@@ -512,7 +618,7 @@ async def _loop_core(
 
         # 开场轮禁工具的**兜底**：协议层已用 tool_choice="none"，但网关不守规时仍可能吐
         # tool_calls —— 直接丢弃，保证"学习模式第一轮只出文本"这条不变量真的成立。
-        if no_tools and msg.tool_calls:
+        if disable_tools and msg.tool_calls:
             rlog.log("loop", "no_tools_calls_dropped",
                      "本轮禁工具，但模型仍返回 tool_calls → 已丢弃（不执行）",
                      level="WARNING",
@@ -542,7 +648,7 @@ async def _loop_core(
                                  context_tokens=context_tokens, token_usage=token_usage,
                                  estimated_prompt_tokens=estimated_prompt_tokens,
                                  token_estimate=token_estimate, stop_reason=STOP_NATURAL,
-                                 guard=guard, rlog=rlog, emitter=emitter)
+                                 guard=guard, rlog=rlog, emitter=emitter, plan=plan)
 
         # 已达工具轮上限仍请求 → 强制收尾（不再执行新工具）
         if round_idx == max_rounds:
@@ -553,6 +659,7 @@ async def _loop_core(
                 estimated_prompt_tokens=estimated_prompt_tokens,
                 token_estimate=token_estimate,
                 stop_reason=STOP_MAX_ROUNDS, guard=guard, rlog=rlog, emitter=emitter,
+                tools=tool_arg, plan=plan,
             )
 
         # 回填 assistant（含 tool_calls），逐个执行工具回填 tool 消息
@@ -578,30 +685,24 @@ async def _loop_core(
             rlog.log("loop", "budget_exhausted", "工具预算耗尽，提前收尾",
                      level="WARNING", reason=guard.stop_reason,
                      tool_calls=guard.tool_calls)
-            ctx.append_user(_FORCE_FINISH_HINT)
-            return await _finish_without_tools(
-                ctx, temperature=temperature, rounds=rounds, steps=steps,
-                llm_calls=llm_calls, context_tokens=context_tokens,
-                token_usage=token_usage,
-                estimated_prompt_tokens=estimated_prompt_tokens,
-                token_estimate=token_estimate, stop_reason=guard.stop_reason,
-                guard=guard, rlog=rlog, emitter=emitter,
-            )
+            return await _close(guard.stop_reason)
 
     # 理论上不可达
     return _build_result("", rounds=rounds, steps=steps, llm_calls=llm_calls,
                          context_tokens=context_tokens, token_usage=token_usage,
                          estimated_prompt_tokens=estimated_prompt_tokens,
                          token_estimate=token_estimate, stop_reason=STOP_MAX_ROUNDS,
-                         guard=guard, rlog=rlog, emitter=emitter)
+                         guard=guard, rlog=rlog, emitter=emitter, plan=plan)
 
 
 def _persist_run(run_id: str, user_id: int, started: float,
                  status: str, steps: list[dict], result: AgentRunResult | None = None,
-                 db_dir=None, events_written: int | None = None) -> None:
+                 db_dir=None, events_written: int | None = None,
+                 conv_id: str | None = None) -> None:
     """把一次运行写入 agent_runs 表（正常/异常统一出口，失败仅记日志）。
 
     `events_written`（A2-2）：本次 run 写出的事件数，投递目标可计数时给出（None = 未知）。
+    `conv_id`（P0-1/S4）：会话关联键 —— 想按对话回放"那一轮发生了什么"时唯一可用的连接。
     """
     try:
         _save_run({
@@ -615,6 +716,7 @@ def _persist_run(run_id: str, user_id: int, started: float,
             "final_text": _clip(result.text) if result else "",
             "evidence": steps,
             "events_written": events_written,
+            "conv_id": conv_id,
         }, db_dir=db_dir)
     except Exception as e:  # 落库失败不影响主流程
         logger.warning(f"agent run 落库失败: {e}")
@@ -638,6 +740,8 @@ async def run_agent_loop(
     event_sink=None,
     db_dir=None,
     no_tools: bool = False,
+    conv_id: str | None = None,
+    plan: TurnPlan | None = None,
 ) -> AgentRunResult:
     """
     标准 agent 循环：LLM ↔ 工具 多轮串联直到自然终止或达上限。
@@ -671,6 +775,13 @@ async def run_agent_loop(
                        丢弃网关不守规时吐出的 tool_calls）。学习模式的**开场轮**用它：
                        学生点「去学习」后第一轮只应该是"报菜单"的纯文本，绝不能直接出题
                        （提示词层写"禁止"实测无效，见 chat_service._build_learn_block）。
+        conv_id:       会话 ID（可空）。只用于落 `agent_runs.conv_id` ——
+                       让"这一轮属于哪个对话"可查（此前运行记录与会话无关联键）。
+        plan:          回合计划（`core/agent/plan.py::TurnPlan`，可选）。只有三项作用：
+                       ① `allowed_tools` 决定**本轮发哪些工具**（None=全量，与加 plan
+                       之前逐字节相同；()=一个不发）；② `tool_choice` 并入 no_tools；
+                       ③ `finish="structured"` 时强制收尾要求「已知/未解/下一步」三段。
+                       提示词侧用同一个 plan 裁工具指南（`specs_for_plan`），两边同源。
 
     返回:
         AgentRunResult(text, rounds=trace, evidence=证据序列, total_llm_calls,
@@ -697,8 +808,24 @@ async def run_agent_loop(
             system_prompt, messages, kg=kg, max_rounds=max_rounds,
             tool_timeout_secs=tool_timeout_secs, temperature=temperature,
             emitter=emitter, steps=steps, guard=guard, rlog=rlog,
-            user_id=user_id, db_dir=db_dir, no_tools=no_tools,
+            user_id=user_id, db_dir=db_dir, no_tools=no_tools, plan=plan,
         )
+    except asyncio.CancelledError:
+        # 客户端断连 / 上层取消（2026-10-31）：这不是"异常"，但**必须留下记录** ——
+        # 否则用户说"卡住了"时，这一轮在 agent_runs 里根本不存在（CancelledError
+        # 继承 BaseException，绕过下面的 except Exception）。
+        steps.append({"ts": time.time(), "kind": "loop_stop", "reason": STOP_CANCELLED,
+                      "rounds": None, "tool_calls": guard.tool_calls,
+                      "elapsed_ms": int(guard.elapsed() * 1000),
+                      "plan": getattr(plan, "label", "")})
+        rlog.log("loop", "run_cancelled", "agent run 被取消（客户端断连/上层 cancel）",
+                 level="WARNING", tool_calls=guard.tool_calls,
+                 elapsed=round(guard.elapsed(), 1))
+        if user_id is not None:
+            _persist_run(run_id, user_id, started, "cancelled", steps, db_dir=db_dir,
+                         events_written=getattr(emitter, "events_written", None),
+                         conv_id=conv_id)
+        raise
     except Exception as e:
         # 异常运行也落库（status=error + 已收集的证据），再向上抛保持原错误语义
         steps.append({"ts": time.time(), "kind": "loop_stop", "reason": STOP_ERROR,
@@ -709,9 +836,11 @@ async def run_agent_loop(
                  elapsed=round(guard.elapsed(), 1))
         if user_id is not None:
             _persist_run(run_id, user_id, started, "error", steps, db_dir=db_dir,
-                         events_written=getattr(emitter, "events_written", None))
+                         events_written=getattr(emitter, "events_written", None),
+                         conv_id=conv_id)
         raise
     if user_id is not None:
         _persist_run(run_id, user_id, started, "ok", steps, result, db_dir=db_dir,
-                     events_written=getattr(emitter, "events_written", None))
+                     events_written=getattr(emitter, "events_written", None),
+                     conv_id=conv_id)
     return result
