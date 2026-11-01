@@ -255,6 +255,13 @@ Agent 循环解决的是"**怎么把一次任务跑对**"，不解决"**这一�
 - **决策 #4（观测/trace）**：rounds 随循环长出（round/tool/args_head/ok/duration_ms/result_head）；`context_tokens` 取各轮 `usage.prompt_tokens` **真值累加**；`save_trace` 落 `backend/data/traces/{user_id}/{run_id}.jsonl`（无工具动作不落盘；落盘失败仅 warning）。
 - **决策 #5（去耦合/改动面）**：新建 `app/core/agent_loop.py` 纯编排层（只复用 llm_client 的 client/KG_TOOLS/execute_kg_tool/重试）；`call_llm` 简化回纯文本（删 `enable_tools`/`kg`，原 6 处 `enable_tools=False` 调用点同步清理）；删除死代码 `call_llm_tools`；chat_service 两个入口（`/chat` legacy `process_message` 与 `/chat/stream` 后台 `process_background_tools`）均改走 `run_agent_loop`。GraphAnalyzer 暂保留原触发（中间态/并入留 Batch5）。
 - **决策 #6（2026-09-06，真实联调前稳健性修正）**：① 自然终止但模型返回空 content → 兜底引导文案（不返回空白）；② `force_finish` 的停止指令改以 **user 消息**追加（规避兼容网关对多条 system 的不确定性），且该次调用包 try，失败退化为固定汇总文案；③ 测试增至 9 用例（补自然终止空文本兜底 / 强制收尾 LLM 异常兜底）。
+- **决策 #7（2026-10-31，回合计划 TurnPlan，对应《架构审查_2026-10-31》§4）**：
+  - **落地**：新模块 `core/agent/plan.py`（`TurnPlan` + `LEARN_TOOLSETS` + `tools_for_plan`/`specs_for_plan`/`plan_for_learn`）。`run_agent_loop(plan=...)` 只吃三项：工具子集、`tool_choice`、收尾形态；`plan=None` → 全量，**逐字节等价**（`tests/test_agent_loop.py::test_plan_none_sends_full_tools`）。
+  - **接入**：`chat_service` 两条对话路径都先算 plan（意图取 `policy.Directive.action`，不重算策略），再**用同一份 plan 裁提示词里的「工具调用指南」**（`_tool_capability_prompt`）。原先每轮固定 ≈2k(schema)+5.8k(指南) tokens；学习讲解轮只剩 7 个工具。开场轮/收尾轮 `allowed_tools=()` → 连 tools 块都不发。
+  - **收尾**：`finish="structured"` → 强制收尾要求「已知 / 未解 / 下一步」，证据里记 `finish` 段（`has_known/has_open/has_next`），**只自检不重试**（重试会在流式下产生重复正文）。
+  - **四个工程护栏**：① 单工具超时与 run 剩余墙钟取小（180s 不再被 3×60s 撑破）；② 工具结果回填统一截断 `AGENT_MAX_TOOL_RESULT_CHARS=20000`（`_clip` 只管落库）；③ 客户端断连 `stop_reason=cancelled` 也落库（`CancelledError` 绕过 `except Exception`，此前该轮查不到）；④ 循环中途 LLM 失败用已有工具结果降级收尾（`stop_reason=error`），不再整轮抛出。
+  - **明确未做**：① `required_tools`/承诺检测（需要语义判断，纯协议层会误伤"学生说先讲讲"的合法分支；现有 `ensure_section_quiz_scheduled` 兜底保留）；② 预算三套口径统一（`chat_service` 固定段比例 / `guard` 48k−3k / `loop` 清理阈值）—— 改动面横跨三处，留待单独一批；③ 并行工具执行（当前串行 + deadline 已够用，YAGNI）。
+  - **验收**：`tests/test_agent_plan.py`（9 例：派生口径 / 顺序 / 回落全量 / 工具归类守卫 / 意图映射）+ `tests/test_agent_loop.py` 新增 9 例（plan 全量等价、子集、空集、结构化收尾、截断、墙钟钳制、中途降级、取消落库）；全库 **1851+ passed 零回归**。
 - **验收（Batch1，2026-09-06）**：新增 `tests/test_agent_loop.py` **9 用例**全绿；全库 **247 passed 零回归**（原 238 + 新 9）。
 
 ---

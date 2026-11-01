@@ -99,6 +99,7 @@ Entry points: [chat orchestration](backend/app/services/chat_service.py), [Agent
 | **Progress dashboard** | Mastered / learning / not-started counts, average mastery, estimated time, weak points + per-subject progress | ✅ |
 | **Learner profile v2** | Structured JSON (basic/goals/knowledge/learning/preferences/ai_notes) updated dynamically | ✅ |
 | **File knowledge base (KB)** | Tree-style management; upload PDF/Word/PPT/images/text → parse, chunk, vectorize | ✅ |
+| **Video course import** | Bilibili / YouTube link → lecture notes in the KB: subtitles first, speech-to-text fallback, full collection expansion, slide screenshots, persistent queue (pause/resume/cancel/reorder) | ✅ |
 | **Hybrid retrieval RAG** | Vector + Whoosh BM25 wide recall (30 each) → RRF fusion → path provenance + parent expansion | ✅ |
 | **Agentic RAG** | `rag_search` tool: the LLM retrieves from graph / KB on demand and cites sources | ✅ |
 | **Textbook → graph** | graph_generator builds graph nodes from subject textbooks with semantic deduplication | ✅ |
@@ -107,6 +108,24 @@ Entry points: [chat orchestration](backend/app/services/chat_service.py), [Agent
 | **Run records & evidence replay** | Every run is persisted to `agent_runs` (full thinking, complete tool arguments and results, final answer); events carry `run_id` for source-level review | ✅ |
 | **Model fallback chain** | Silent failover to the backup service on quota exhaustion / auth failure / persistent errors — tutoring sessions never break | ✅ |
 | **User isolation & dual copyright modes** | JWT authentication with per-user data isolation; personal mode (fair use) / commercial mode (L0 open licences only), filtered at the retrieval layer (L2) | ✅ |
+
+<details>
+<summary>Video course import: transcript strategy, collections, and the queue</summary>
+
+Open **Knowledge Base → Video import**, paste links (one per line), and add them to the queue. Transcript mode, collection expansion, and slide capture are configured once under **Settings → Video import**.
+
+| Stage | Behavior |
+| :--- | :--- |
+| Bilibili transcript | Reads the platform subtitle track; if empty, falls back to the "AI summary" track (often the only non-empty one) — no download, no API cost |
+| Other sites | `yt-dlp` downloads the subtitle file (rolling duplicates in auto-captions are collapsed) |
+| No subtitles | Download audio → ffmpeg to 16 kHz → split into 2-minute segments → transcribe each, keeping `[hh:mm:ss]` anchors |
+| Full collections | Bilibili multi-part (`pages[]`) and series (`ugc_season`) expand into every episode under a folder named after the collection; a `?p=N` link imports that part only |
+| Slide screenshots | Download ≤720p video → sample every 2 seconds → keep a frame only when the picture changes (grayscale diff + minimum-interval dedup) → insert before the matching paragraph |
+| Queue | One submission = one task = N episodes, processed serially; pause / resume / cancel / retry failures / reorder, and it resumes after a process restart |
+
+Requirements: subtitle extraction needs network only; speech-to-text needs `ffmpeg` plus a transcription model; slide screenshots also need `yt-dlp`. Every lecture carries a title, source line, and 10-minute chapters so you can jump back to the video.
+
+</details>
 
 ## Tech stack
 

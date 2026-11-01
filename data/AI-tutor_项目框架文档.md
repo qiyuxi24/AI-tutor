@@ -7,6 +7,7 @@
 > - `core/llm_client.py` 已拆并为 `core/llm/` 原语包（clients / embed / messages / retry / fallback / call）
 > - 用户画像已从单文件 `core/user_profile.py` 拆为 `core/profile/` 包（schema / store / markdown / manager）
 > - 对话编排在 `services/chat_service.py`（已不在 `core/` 下），并接入后台 Agent Loop
+> - **对话历史的真相已归服务端**（2026-10-31，P0-1/C3a）：`/chat*` 按 `conv_id` 从 `conversations.db` 组装历史、回合结束由服务端落库；前端 `localStorage` 只是离线缓存（`persist()` 不再上行）；删除走墓碑。§5.4 / §6.2 已就地校正
 > - 权威文档：[README](../README.md) ｜ [AGENTS.md](../AGENTS.md) ｜ [项目 Wiki](https://github.com/qiyuxi24/AI-tutor/wiki)
 
 ---
@@ -138,9 +139,10 @@ AI-tutor/
 | id | TEXT | 对话 ID（前端生成） |
 | user_id | INTEGER | 所属用户 ID |
 | title | TEXT | 对话标题 |
-| messages | TEXT | JSON 字符串（消息列表） |
+| messages | TEXT | JSON 字符串（消息列表；**服务端按回合追加**，2026-10-31 起） |
 | created_at | REAL | 创建时间 |
 | updated_at | REAL | 更新时间 |
+| deleted_at | REAL | **墓碑**（NULL = 未删；非空 = 已删，行保留以防对端 sync 复活；老库自动补列） |
 | PRIMARY KEY | (id, user_id) | 复合主键 |
 
 ---
@@ -251,13 +253,17 @@ JWT token → Depends(get_current_user) → user_id
 
 ### 5.4 对话历史（需认证）
 
+> ⚠️ **2026-10-31 校正**：对话历史的真相已归 **服务端**（P0-1/C3a）。日常写入由
+> `/chat*` 在回合结束时完成，下列"保存/同步"端点只用于迁移与离线补写。
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | /api/v1/conversations | 获取对话列表（不含 messages） |
-| GET | /api/v1/conversations/{id} | 获取完整对话 |
-| POST | /api/v1/conversations/sync | 全量同步（前端 <-> 后端合并） |
-| PUT | /api/v1/conversations/{id} | 更新对话 |
-| DELETE | /api/v1/conversations/{id} | 删除对话 |
+| GET | /api/v1/conversations | 对话摘要列表 + `tombstones`（已删 id，供客户端清本地） |
+| GET | /api/v1/conversations/{id} | 获取完整对话（已删 → 404） |
+| POST | /api/v1/conversations/sync | **迁移同步**：上行本地副本，返回库里真值（非日常写入口） |
+| POST | /api/v1/conversations | 单条快照补写（迁移/离线用；墓碑行拒绝写入） |
+| PATCH | /api/v1/conversations/{id} | 只改标题 |
+| DELETE | /api/v1/conversations/{id} | 删除（**墓碑软删**，幂等；对端下次对齐才删得掉本地副本） |
 
 ### 5.5 用户画像（需认证）
 
@@ -290,10 +296,10 @@ JWT token → Depends(get_current_user) → user_id
 - `knowledgeEdges`：图谱边
 - `graphLoaded`：图谱是否已加载
 
-**双写策略：**
-- `localStorage` 为主（立即写入）
-- 后端同步为辅（防抖 500ms）
-- `localStorage` 为空时从后端加载
+**对话持久化（2026-10-31 起 = 服务端权威）：**
+- 真相 = 服务端 `conversations.db`：`/chat*` 按 `conv_id` 组装历史，回合结束由后端落库
+- `localStorage` = **离线缓存**（立即写入、**不上行**；旧实现"为主 + 500ms 防抖全量同步"已删）
+- `init()` 对齐一次：上行本地副本（老用户迁移）+ 采纳服务端真值 + 剔除墓碑
 
 **SSE 实时更新：**
 - `connectSSE()`：建立 EventSource 连接
@@ -470,7 +476,8 @@ npm run dev    # → http://localhost:5173
 - D3 仿真与 Vue 响应式系统解耦（用 `simulation.nodes()` 直接操作数据）
 - SSE 3 秒抑制机制设计巧妙，避免 CRUD 操作后的双重刷新
 - localStorage 按 `user_id` 隔离，防止多账号数据泄露
-- 对话持久化「双写策略」：localStorage 即时写入 + 后端异步同步
+- 对话持久化：真相归服务端（`/chat*` 按 `conv_id` 组装 + 回合落库），`localStorage` 降级为离线缓存
+  —— **旧的「双写策略」已于 2026-10-31 删除**（它才是本期最大的一条债，不能当亮点复用）
 - 边的 `edgeId` 使用数据库主键（而非数组索引），避免竞态条件
 - 图谱搜索组件支持键盘导航，体验优秀
 

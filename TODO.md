@@ -89,7 +89,7 @@
 - [ ] **[根因·P0] 没有「学习会话」这一等对象 → 状态碎片化 + 每轮重算**
   - 状态散在 4 处：`nodes.mastery`（SQLite）/ `manifest.sections[].learn`（文件）/ `questions.section_id`（题库）/ **每请求新建 kg 实例上的临时属性** `kg.student_input | quiz_consent | learn_target`（`chat_service.py:494-536`）
   - 后果：模型没有跨轮记忆主体，只能靠一条提示词去对冲它自己上一轮的承诺
-  - 关联：「遗留技术债」里 `conversations` 与 `agent_runs` 无关联键；一次 run 不是一等对象
+  - 关联：一次 run 不是一等对象（`agent_runs.conv_id` 已于 2026-10-31 补齐，缺的是**会话对象本身**）
 - [ ] **[P1] 掌握度没有"力"：闭环缺最后一环**
   - 排序只看 prerequisite，**不读 mastery**（`knowledge_graph.py:780`、`:799-813`）；mastery 只在 `:888-894` 决定"推荐指针"
   - 出题 handler 不校验 mastery（`tools/quiz_generate.py:180-287`），只有提示词层一句否决
@@ -276,7 +276,7 @@
 
 - [ ] **试卷拆分器 `quiz_splitter.py` 已实现但零引用**（未接入上传链路）：`collector/quiz_splitter.py` 已有 `tests/test_quiz_splitter.py` 9 例覆盖但全库零调用。**待决策（入口三选一）**：① `/kb/upload` 命中试卷形态后自动拆分；② 独立 `POST /quiz/import`；③ 与 B3.1 `dataset_quiz` 合并做。**接入注意**：`quiz_store.save_questions` 收 `Question` 对象（须 `Question(**q.to_question_dict())`）。
 - [ ] **`collector/pipeline_ingest.py` + `chapterizer.py` 零引用**：整书切章入库链路（`ingest_book_chapters`）已实现且 6 例测试通过，但采集链路 `manager.run_task` 直接调 `kb_manager.upload_and_index`，**未接此管线**。需定入口：采集任务整书入库 / 手动导入 / 判定不用后删除。
-- [ ] **`conversations` 内嵌 tools/thinking 去留 + run 与会话无关联键**（**待决策**）：需定"是否为 `agent_runs` 加 conversation 外键/会话 id（动 schema）"，或接受现状。
+- [x] **`conversations` 内嵌 tools/thinking 去留 + run 与会话无关联键**（**2026-10-31 已定**）：`agent_runs.conv_id` 已加（可空，老库自动补列）；assistant 的 `tools` 摘要由服务端从 run 的 `rounds` 派生后落库（与 `tool_start`/`tool_result` 事件同形，前端零改动），`thinking` **不落**（体积大、刷新后本就不该重放）。见 `AGENTS.md §1`「对话历史的真相在服务端」。**遗留**：墓碑无 GC（`conversations` 只增不减）。
 - [ ] **采集库 `busy_timeout` 未收紧**：`collector/store.py` 用默认 5s，而引用计数 UPDATE 跑在事件循环线程 → 极端情况下可能把 loop 卡住最长 5s。**未当场收紧的理由**：`PRAGMA busy_timeout` 是连接级，调小会把锁等待变成 `database is locked`（比卡 5s 更糟）。**正确修法**：给引用计数另开只写连接（或独立线程/队列），而非全局调 busy_timeout。
 
 ---
@@ -287,3 +287,34 @@
 - **是否对已有图谱全量重建**（用新 prompt 重跑）还是只做增量修复（GQ-4 合并 + 补写空壳）？—— 建议先修代码，再挑一本书重建做 A/B（GQ-13），别直接全量重跑。
 - **现有 `<400 字拒收`（`GRAPH_MIN_CONTENT_CHARS`）是否改为"标记待补、不拒收"**（保下限但不误杀"短而精"的概念）？
 - **多源融合的 4 个开放问题**（`docs/知识图谱/知识图谱_外部调研_论文开源与多源融合.md` §八）：融合单位 / 跨教材推断先修是否算"创造知识" / 冲突是否对学生可见 / 资料删除策略。
+
+---
+
+## 10. 一站式学习（One-stop Learning，2026-10-31）
+
+> 目标：**从一个入口进来，只回答一次「你想学什么」，其余全自动** —— 采资料 → 建图 → 排路径 → 讲一节 → 出题判分 → 复习。用户不再需要在「知识库 / 图谱 / 对话 / 出题」四个页面之间手动搬上下文。
+>
+> 现状卡点：导入（队列）、建图、出题各自都能用，但**彼此不串联** —— 导入完要等通知、建图要另点、学会自己回图谱看进度。缺的不是某个功能，是"把已有环节接成一条线"。
+
+### P0 — 一条串联起来的任务链
+
+- [ ] **统一任务模型**：把「导入 → 建图 → 首轮路径规划」做成一条可暂停/续跑的任务链，复用 `core/kb/import_queue.py` 的任务表 + 每用户单 worker 模式（加 step 字段或 step 表，**不另造第二套调度**）。
+- [ ] **一个入口**：`POST /learn/start` 接收 主题名 / 教材文件 / 视频链接 三类输入，自动判定后续动作（无资料 → 先采集；有资料 → 建图；有图 → 生成路径），返回 `learn_session_id` + 首条进度事件。
+- [ ] **进度归一**：任务链每一步投递到同一个 `learn_progress` 事件（复用现有 SSE 通道），前端只画一条进度，不再分别监听 `import_progress` / `graph_updated` / `quiz_ready`。
+
+### P1 — 学习会话成为一等对象
+
+- [ ] **`learn_sessions` 表**（用户 / 主题 / 当前节点 / 待办队列 / 最近一题状态），**取代**现在散在前端 store 与提示词里的"当前学到哪"（与 §3「提示词当程序」同根因：状态写在提示词里，程序看不见）。
+- [ ] **自动推进**：答完一题 → 判分写掌握度 → 按薄弱点选下一节 → 直接进下一轮讲解，**不需要用户再打"继续"**（`quiz_ready` 通道已具备触发能力，缺的是"推进策略"的收口处）。
+- [ ] **中断可续**：关掉应用再回来落在同一节、同一题；`learn_sessions` 是唯一真源，前端不再拼状态。
+
+### P2 — 复习与长期闭环
+
+- [ ] **错题队列 + 间隔复习**：判分失败进错题池，按 SM-2 简化版排期（在 `main.py::_prune_once` 的 `_JOBS` 旁加常驻调度），每日推一条 `notify` 摘要。
+- [ ] **学习报告**：按会话出「学了哪些节点 / 掌握度变化 / 薄弱点 / 建议下一步」，可导出 Markdown。
+
+### 验收（先写测试再实现）
+
+- [ ] 新用户 3 步内进入可交互课堂：选主题/给资料 → 等任务链跑完 → 直接开始第一节。
+- [ ] 中途关闭页面 5 分钟回来，能回到原节点继续，且不重复出同一题（`avoid_questions` 已具备）。
+- [ ] 一条 20 集的 B 站合集从导入到第一节开讲全自动，中间 0 次手动点击。
