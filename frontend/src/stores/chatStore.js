@@ -1099,7 +1099,7 @@ export const useChatStore = defineStore('chat', () => {
    */
   function renderAssistant(conv, msg, replaceLast = false) {
     if (replaceLast) conv.messages.pop()
-    conv.messages.push(msg)
+    conv.messages.push({ ts: Date.now(), ...msg })
     conv.updatedAt = Date.now()
     persist()
   }
@@ -1116,10 +1116,11 @@ export const useChatStore = defineStore('chat', () => {
       currentId.value = conv.id
     }
 
+    const now = Date.now()
     // 追加用户消息
-    conv.messages.push({ role: 'user', content: text })
+    conv.messages.push({ role: 'user', content: text, ts: now })
     // 内容变化 → 提升本地修改时刻（多端防覆盖：后端据此判断这份快照是不是旧的）
-    conv.updatedAt = Date.now()
+    conv.updatedAt = now
 
     // 如果是第一条消息，自动用前 20 字设定标题
     // 此时对话从"空"变为"有内容"，需要持久化
@@ -1128,7 +1129,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     // 添加占位 AI 消息（流式填充 + 工具/思考事件挂载）
-    conv.messages.push({ role: 'assistant', content: '', tools: [], thinking: [] })
+    conv.messages.push({ role: 'assistant', content: '', tools: [], thinking: [], ts: now })
     loading.value = true
     // 对话已有内容，持久化（persist 内部会过滤空对话，此对话现在不会被过滤）
     persist()
@@ -1188,6 +1189,7 @@ export const useChatStore = defineStore('chat', () => {
         // 收到即收口 loading 并把正文落盘（缺陷 A-1：否则「AI 思考中…」一直转）。
         onAgentDone: () => {
           if (seq !== streamSeq) return   // 旧流迟到的事件，忽略
+          patchLastAssistant(conv, () => ({ ts: Date.now() }))
           loading.value = false
           persist()
         },
