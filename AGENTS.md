@@ -16,8 +16,9 @@
 | 一键启动 | 根目录：`.\start.ps1`（自动探测：有 Docker 走容器，否则本机开发模式；`-Local` / `-Docker` 强制，`start.cmd` 双击同一入口） |
 | 启动后端 | cwd=`backend`：`venv\Scripts\python.exe -m uvicorn app.main:app --port 8000 --workers 1` |
 | 启动前端 | cwd=`frontend`：`npm run dev`（Vite 5173；`/api` 已代理到 8000，SSE 走 ws） |
-| 跑测试 | cwd=项目根：`backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"`。⚠️ **若报 `PermissionError: …Temp…pytest-of-<user>`**：那是宿主沙箱对 `mkdir(mode=0o700)` 的处理缺陷（pytest 的 basetemp 正好用它，`:158`）→ 用兜底 `backend/venv/Scripts/python.exe .dsh_local/run_pytest.py backend/tests -q -m "not llm_api" -p no:cacheprovider --basetemp=.dsh_local/pytest_tmp`（脚本机制见 `docs/架构/重构实施计划_可执行清单.md` §1.4；会话切「完全权限」后不再需要）。**运维后台套件必须另起一次调用**（两边包名都叫 `app`，合跑必 `ModuleNotFoundError`）：同上换 `backend-admin/tests` 且用 `backend/venv` 的 python（`backend-admin/venv` 未装 pytest） |
+| 跑测试 | cwd=项目根：`backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"`。⚠️ **若报 `PermissionError: …Temp…pytest-of-<user>`**：那是宿主沙箱对 `mkdir(mode=0o700)` 的处理缺陷（pytest 的 basetemp 正好用它，`:158`）→ 用兜底 `backend/venv/Scripts/python.exe .dsh_local/pytestrun/run.py backend/tests -q -m "not llm_api" -p no:cacheprovider --basetemp=.dsh_local/pytestrun/tmp`（脚本机制见 `docs/架构/重构实施计划_可执行清单.md` §1.4；会话切「完全权限」后不再需要）。⚠️ **旧的 `.dsh_local/run_pytest.py` 已不可用**：报 `ImportError: cannot import name 'Parameter' from 'inspect'` —— 同目录的 `.dsh_local/inspect.py`（历史临时脚本）遮蔽了标准库；新脚本 `pytestrun/run.py` 只做一件事：把 `pathlib.Path.mkdir` 的 mode 强制改成 `0o777` 再调 `pytest.main`。**运维后台套件必须另起一次调用**（两边包名都叫 `app`，合跑必 `ModuleNotFoundError`）：同上换 `backend-admin/tests` 且用 `backend/venv` 的 python（`backend-admin/venv` 未装 pytest） |
 | 真实 API 测试 | 加 `-m llm_api`（真实付费 key，需 pytest-asyncio，单独跑） |
+| 构建 Android | cwd=`Android`：`.\gradlew.bat :app:assembleDebug`（APK 落 `app/build/outputs/apk/debug/app-debug.apk`）。⚠️ **沙箱下必失败**（`AccessDeniedException: …\.gradle\wrapper\dists\…zip.lck`，Gradle 要写 `~/.gradle`）→ 会话切「完全权限」或 `GRADLE_USER_HOME` 指到工作区内再跑 |
 | 配置真值 | 根目录 `.env`（唯一，`core/config.py` 读 `parents[3]/.env`） |
 | 版本 | 真源 **两处**：`backend/app/__init__.py::__version__`（`main.py` 的 `FastAPI(version=…)` 读它）+ `frontend/package.json`。发版 = 改这两处 → `CHANGELOG.md` 顶部加一节 → `git tag -a vX.Y.Z`（**别在别处再写版本号**） |
 | LLM/嵌入配置 | 对话：**每用户**（设置页「模型」自配，存 `data/llm/{uid}/models.json`（A1b 迁移后单根 = `<repo>/data`；该目录**已在 `.gitignore` 里逐个列出**，否则明文 Key 会被 `git add` 收进历史），Key 明文只在服务端）→ 主→备自动降级；未配置则回落根 `.env` 的 `LLM_API_KEY` + `LLM_BASE_URL` + `MODEL_NAME`（默认 **MiniMax-M3**）= **系统默认档**。嵌入固定：`DASHSCOPE_API_KEY` + `EMBED_BASE_URL`（阿里 text-embedding-v4，**不随用户模型切换**——换嵌入要重建索引） |
@@ -28,7 +29,7 @@
 
 - **uvicorn 必须 `--workers 1`**：EventBus 用户队列与进程内定时 GC 依赖单进程，多 worker 各自持有总线 → 事件必丢。
 - **`.env` 只有根目录一份**，不要在 `backend/` 下另建。
-- **`nodes.id` 是全局 TEXT 主键**（非 per-user）；脚本/测试建节点前先 `INSERT OR IGNORE INTO users`。**给 `knowledge.db` 加表**（`node_aliases`/`mastery_events`/`doc_node_marks` 同族）= `core/kg/schema.py`（`_SchemaMixin._create_tables` 建表 + `_auto_migrate` 补索引），**并同步两处**：`scripts/inspect_graph_quality.py` 的体检口径、`AGENTS.md §5` 路由。**删号清单不需要手工同步**（2026-10-09 起由 schema 派生：`backend-admin/app/core/db.py` 遍历 `sqlite_master` + `PRAGMA table_info`，带 `user_id` 列的表一律 `DELETE ... WHERE user_id = ?`，`users` 走 `id`；回归 `backend-admin/tests/test_admin_api.py`）—— 别再写第二份手写清单。**给 `knowledge.db` 加列**（如 `nodes.sources`、`nodes.subject`）= 写进 `core/kg/schema.py::_auto_migrate` 的 `ALTER TABLE` 清单：`CREATE TABLE IF NOT EXISTS` 不给老表加字段（与 `records.py` 那条同理）。
+- **`nodes.id` 是全局 TEXT 主键**（非 per-user）；脚本/测试建节点前先 `INSERT OR IGNORE INTO users`。**给 `knowledge.db` 加表**（`node_aliases`/`mastery_events`/`doc_node_marks` 同族）= `core/kg/schema.py`（`_SchemaMixin._create_tables` 建表 + `_auto_migrate` 补索引），**并同步两处**：`scripts/inspect_graph_quality.py` 的体检口径、`AGENTS.md §6` 路由。**删号清单不需要手工同步**（2026-10-09 起由 schema 派生：`backend-admin/app/core/db.py` 遍历 `sqlite_master` + `PRAGMA table_info`，带 `user_id` 列的表一律 `DELETE ... WHERE user_id = ?`，`users` 走 `id`；回归 `backend-admin/tests/test_admin_api.py`）—— 别再写第二份手写清单。**给 `knowledge.db` 加列**（如 `nodes.sources`、`nodes.subject`）= 写进 `core/kg/schema.py::_auto_migrate` 的 `ALTER TABLE` 清单：`CREATE TABLE IF NOT EXISTS` 不给老表加字段（与 `records.py` 那条同理）。
 - **用户隔离**：图谱/画像/RAG/记录全按 `user_id` 分区；`KnowledgeGraph(user_id)` 每次新建、用毕 `close()`，别跨协程共享实例。
 - **对话历史的真相在服务端**（2026-10-31，P0-1/C3a）：`/chat*` 按 `conv_id` 从 `conversations.db` 组装历史，**不得**再以 `request.messages` 为准 —— 客户端那份只贡献"本轮提问"一条（无 `conv_id` 才整份采信，那是老前端兼容路径）。回合结束由 `chat_service._persist_turn` 落库（user + assistant + 工具摘要，`thinking` 不落）；前端 `localStorage` 只是离线缓存，`persist()` **不再上行**（`sync` 只做首次迁移）。**删除是墓碑**（`conversations.deleted_at`）：已删行拒绝任何写入，否则另一端的全量 sync 会把它复活。`agent_runs.conv_id` 是"按对话回放那一轮"的唯一关联键。回归 `backend/tests/test_conversation_authority.py`、`frontend/src/stores/chatStore.lifecycle.test.js`。
 - **记录型库（`agent_runs` / `llm_usage` / `agent_debug_logs`）统一走 `core/records.py`**：连接 / 建表 / 补列 / 过期清理的唯一实现，三张表分属两个库（`agent_runs.db`、`debug_log.db`）。**加表 = 写自己的 schema + 调 `records.connect` + 在 `main.py::_prune_once` 的 `_JOBS` 加一行**，别另抄一套连接代码。**加列 = 写进该模块的补列清单**（如 `store._COLUMN_MIGRATIONS`，由 `records.ensure_columns` 就地补）：`CREATE TABLE IF NOT EXISTS` 既不会给老表加字段、也不会自动接线（`token_estimate` 就是这么加的；回归 `test_legacy_db_gets_token_estimate_column`）。
@@ -60,7 +61,7 @@
 - **源分三类，别再混**：① `required=True`（现只有 `GraphStructureSource`）=「每次必须送达的上下文」，**不受** `router` 节流与 `ctx.sources` 影响（图谱结构是教学的唯一边界，学生说"你好"也得给）——kg 经 `ctx.metadata["kg"]` 传入，缺省返回空且**不得自查库**（否则测试会碰真库）；② 普通检索源（graph / kb）= 需要 query + 过节流 + 被 `ctx.sources` 选中；③ 图谱**结构**（有哪些知识点，保证可见）与图谱**片段**（相关正文，按需检索）是**两个**源。`chat_service._build_graph_summary` 经 pipeline 取结构（等价重构，注入文本逐字符不变，回归 `tests/test_graph_structure_source.py`）。
 - **上传必须原子**：`kb_manager.upload_and_index` 里 `add_file` 先提交、`_index_document` 后跑，索引失败必须回滚删节点（回滚用 `except BaseException` —— 客户端断连的 `CancelledError` 绕过 `except Exception`，会留下"有正文、无索引"的孤儿：用户在知识库看得见、点得开，AI 永远检索不到）。**前端上传超时不再是 120s**（扫描版 PDF 逐页 OCR 是分钟级）。存量孤儿体检/重建 = `backend/scripts/reindex_kb.py`（`KbManager.reindex_file`：正文已在 `documents.extract_text`，不重新解析）。
 - **原件（真预览用，2026-09-28）**：`data/kb/{uid}/files/{node_id}{ext}`，路径由 `kb_manager._raw_path` 从 (uid, node_id, `documents.file_type`) 完全推导 —— **不加表也不加列**；上传时与索引同批落盘（失败一起回滚），读出口 = `GET /kb/node/{id}/raw`（`kb_manager.get_raw_path`，前端 PDF/Word/Excel/图片走它，其余走 `/text` 的解析正文）。**新增任何删除路径都要跟着删原件**（`kb_manager.delete_node` 已接；删号由 `purge_user_storage` 整删 `data/kb/{uid}` 覆盖，不用动）。历史文件没原件 → `/raw` 404，前端静默回退正文。⚠️ 原件不设上限，扫描版 PDF 会原样占盘。
-- **视频导入 = 合集展开 + 持久化队列 + 可选截图**（2026-10-30）：分集发现 = `core/kb/bili/collection.py`（多 P `pages[]` / 合集 `ugc_season`；链接带 `?p=N` 只导该集）；排队 = `core/kb/import_queue.py`（状态在**每用户 `kb.db`** 的 `import_tasks`/`import_items`——per-user 库天然隔离，删号无需另维护清单；每用户单 worker 串行，pause/resume/cancel/retry/reorder，进程重启由 `main.lifespan` 的 `resume_all()` 续跑）。**别再引入 `_LECTURE_INFLIGHT` 或"提交即 spawn 导入协程"**。`import_progress` 事件新增 `item_id`/`item_index`/`item_total`（`task_id` 保留）。截图落 `data/kb/{uid}/slides/{asset_key}/`（`documents.asset_key` 记映射，`delete_node` 连目录删），正文写 `/api/v1/kb/slides/{key}/{n}.jpg`；`<img>` 带不了 JWT，前端 `KbTextPreviewDialog` 用 axios 取 blob 换 objectURL。**`kb.db` 加列 = `kb_store._create_tables` 里 PRAGMA 补列**（它没有 `_auto_migrate`，别只改 `CREATE TABLE`）。
+- **视频导入 = 合集展开 + 持久化队列 + 可选截图**（2026-10-30）：分集发现 = `core/kb/bili/collection.py`（多 P `pages[]` / 合集 `ugc_season`；链接带 `?p=N` 只导该集）；排队 = `core/kb/import_queue.py`（状态在**每用户 `kb.db`** 的 `import_tasks`/`import_items`——per-user 库天然隔离，删号无需另维护清单；每用户单 worker 串行，任务级 pause/resume/cancel/retry/reorder + **分集级** `retry`/`cancel`，进程重启由 `main.lifespan` 的 `resume_all()` 续跑）。**别再引入 `_LECTURE_INFLIGHT` 或"提交即 spawn 导入协程"**。**进度分两半**（2026-11-01）：`stage`/`started_at` **落库**（刷新/换设备后仍知道"卡在哪一步、还要多久"，`import_task_progress` 给出耗时与 ETA），段内进度仍是瞬态 `import_progress`（带 `item_id`/`item_index`/`item_total`）——**前端只认 `GET /kb/import/tasks` 这一份真相**，别再另存一份本地任务卡。可选预检 `POST /kb/import/inspect`（不建任务：集数/总时长/字幕/缺依赖）。截图落 `data/kb/{uid}/slides/{asset_key}/`（`documents.asset_key` 记映射，`delete_node` 连目录删），正文写 `/api/v1/kb/slides/{key}/{n}.jpg`；`<img>` 带不了 JWT，前端 `KbTextPreviewDialog` 用 axios 取 blob 换 objectURL。**`kb.db` 加列 = `kb_store._create_tables` 里 PRAGMA 补列**（它没有 `_auto_migrate`，别只改 `CREATE TABLE`）。
 - **README 纪律**：根 README 依 `docs/工程实践/README_编写规范.md`（中文 SSOT，英文派生镜像）；本文件与 README 视角不同，**别互相复制**。
 
 ## 3. 写代码的纪律（已装 skill，按场景选一个）
@@ -88,7 +89,64 @@
 7. **已收敛的历史遗留（别引回来）**：`core→api` 反向依赖、私有符号跨模块、llm_client 上帝模块、工具注册 3 处分散（均 2026-09-08/09-15 处理）。
 8. 想知道"为什么这么设计"：`docs/项目历程_决策与效果记录.md` + `.codebuddy/memory/MEMORY.md`。
 
-## 5. 文档路由（要查什么去哪）
+## 5. Android 客户端（`Android/`，原生 Compose）
+
+**定位**：`Android/` 是**原生 Kotlin + Compose 客户端**，不是 WebView 套壳 —— 手机端 UI/交互从零写，`frontend/` 桌面 Web 本届冻结（只修不扩）。当前状态 = 官方模板 + 一次成功构建（`app-debug.apk` 11.2 MB / 36 tasks / 6m10s），**除 Hello World 外一行业务代码都没有**。
+
+### 5.1 命令（cwd=`Android`）
+
+| 事项 | 命令 |
+|---|---|
+| 编 debug APK | `.\gradlew.bat :app:assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk` |
+| 装到设备 | `.\gradlew.bat :app:installDebug`（`adb devices` 里有设备才行） |
+| JVM 单元测试 | `.\gradlew.bat :app:testDebugUnitTest`（`app/src/test/`） |
+| 真机/模拟器测试 | `.\gradlew.bat :app:connectedDebugAndroidTest`（需设备在线） |
+| 查工具链 | `.\gradlew.bat --version`（`Launcher JVM` 应显示 21.0.10） |
+| 联调后端 | 先起后端（根目录 `.\start.ps1`），再 `adb reverse tcp:8000 tcp:8000`，App 里 baseUrl 用 `http://127.0.0.1:8000` |
+
+**两个必须先处理的环境坑**（不是代码问题，别去改 gradle 配置）：
+1. **沙箱下 gradle 必失败**：`AccessDeniedException: …\.gradle\wrapper\dists\…zip.lck` —— Gradle 要写 `~/.gradle`。会话切「完全权限」，或把 `GRADLE_USER_HOME` 指到工作区内（`mklink /J` 在沙箱下也建不了，别试）。
+2. **pwsh/curl 的 TLS 在本机会失败，但 Java/Python 正常** —— 不要因为 `curl` 报错就断定"没网/不能构建"，Gradle 走 JVM 栈是通的（实测拉 `dl.google.com` 的 AGP pom 200）。
+
+### 5.2 工具链真值（`Android/gradle/libs.versions.toml`）
+
+`agp 9.2.1` / `kotlin 2.2.10` / `composeBom 2026.02.01` / `gradle wrapper 9.4.1` / `JDK 21`（`D:\program files\Android stdio\jbr`，openjdk 21.0.10，**不用另装**）。`minSdk 24`、`targetSdk 36`、**`compileSdk = android-36.1`**（本机 `platforms/` 只有 `android-35` 与 `android-36.1`，没有 36 —— 别把 `minorApiLevel = 1` 删掉）。
+网络层只用 **OkHttp 4.12.0 + Gson 2.11.0**（已在缓存里）。**不要引 Retrofit**：对话流与常驻事件都是 SSE，本来就要裸 OkHttp 流式读，再套一层只会让两个 HTTP 抽象互相翻译。
+
+### 5.3 不写就会做错的六条
+
+1. **AGP 9 的新 DSL，别改回老写法**：`compileSdk { version = release(36) { minorApiLevel = 1 } }`（不是 `compileSdk = 36`）、`buildTypes.release { optimization { enable = false } }`（不是 `isMinifyEnabled`）。
+2. **`settings.gradle.kts` 里没有 `org.jetbrains.kotlin.android`**：AGP 9 内置 Kotlin 插件，plugins 块只有 `android-application` + `kotlin-compose`。加第三行会直接报插件冲突。
+3. **依赖只能加在 `libs.versions.toml`**：`repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)`，在模块 `build.gradle.kts` 里写 `repositories { }` 会让构建失败。加库 = toml 三段（`[versions]` / `[libraries]` / 引用）+ `app/build.gradle.kts` 的 `dependencies`。
+4. **`AndroidManifest.xml` 的 `INTERNET` 权限**：模板原本一条 `<uses-permission>` 都没有，缺了它所有网络请求抛 `SecurityException`（表现得像"网络错误"，很难查）。已补，别删。
+5. **RSA 登录必须显式指定 OAEP 参数**：后端 `core/transport_crypto.py` 用 `OAEP(mgf=MGF1(SHA256), algorithm=SHA256)`。Android 侧要
+   `Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")` **再** `init(DECRYPT_MODE, key, OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT))`。
+   只写 `OAEPWithSHA-256AndMGF1Padding` 会用系统默认的 **MGF1-SHA1** → 后端必然解密失败 400 `[E-AUTH-007]`，而且报错信息看不出是 MGF1 的问题。
+6. **SSE 解析要忽略注释帧**：`text_delta` 的字段名是 **`token`**（不是 `text`）；`event_bus.SSE_HEARTBEAT_SECONDS = 15.0` 会发 `: keepalive\n\n`，**以 `:` 开头的行必须整行跳过**，否则 JSON 解析崩。
+
+### 5.4 后端契约（写客户端只需看这四张表）
+
+| 用途 | 端点 | 关键点 |
+|---|---|---|
+| 取公钥 | `GET /api/v1/auth/public-key` | `{"public_key": "<PEM>"}`，进程级缓存，别每次登录都拉 |
+| 登录 / 注册 | `POST /api/v1/auth/login`、`/auth/register` | body `{"username","password"}`，**password = RSA-OAEP 密文的 base64**；明文长度须 6–50（超了 422）。登录回 `{"token","user":{"id","username","role"}}`，注册 201 |
+| 对话 | `POST /api/v1/chat/stream` | body = `{messages:[{role,content}] (全部历史), current_node?, kb_node_ids?, kb_node_name?, conv_id?}`；`text/event-stream`。**同 `conv_id` 的回合在服务端串行**（第二端要等第一端跑完才开始推流） |
+| 常驻事件 | `GET /api/v1/knowledge/events?token=<JWT>` | JWT 在 **query**（EventSource 带不了 header）；断线后 `GET /api/v1/knowledge/notices/pending` 补拉离线通知 |
+
+- **SSE 事件白名单只有 5 类**（`services/chat_service.py::_format_agent_sse`）：`text_delta`→`{"token":…}`；`thinking`/`tool_start`/`tool_result`/`agent_start`/`agent_done` 原样透传（含 `run_id`）。**未知类型服务端静默丢弃** —— 客户端不要为某类事件"等不到"而怀疑自己解析错。
+- 限流：登录 5 次/60s/IP、对话 20 次/60s/IP，超限 **429 + `Retry-After`**（秒）。
+- **CORS 与原生 App 无关**（App 不发 `Origin`），`CORS_ALLOW_ORIGINS` 只影响 Web 与 WebView 壳。
+- 错误响应统一 `{"detail": "[E-XXX] …"}`（`core/error_codes.py`）；`401` 表示 token 失效，**只有** Auth 端点才有"密码错(400/401)"的语义差异（改密接口刻意回 400，见 `api/v1/auth.py` 注释）。
+
+### 5.5 怎么参考 / 代码放哪
+
+- **唯一参考实现是前端 `frontend/src/api/index.js`**（REST + SSE 的实际收发，含 `Authorization: Bearer`、`AbortController` 取消、错误分流）与 `stores/authStore.js` + `utils/crypto.js`（登录链路、公钥缓存、加密调用点）。**照抄的是"请求怎么发、错误怎么处理"，不是 UI** —— `frontend/` 是桌面布局，390px 下必然重叠，抄结构等于把坑搬过来。
+- **后端是唯一真值**：契约有疑问直接读 `backend/app/api/v1/*.py` 的 docstring 与 Pydantic model，别信文档里的转述。
+- 建议分层（当前只有 `MainActivity.kt`，新代码按此落）：`data/`（OkHttp client、DTO、Repository、SSE 事件解析）/ `domain/`（用例）/ `ui/feature/<tab>/`（Compose + ViewModel）。`ui/theme/` 已有 Material3 动态取色，直接用 `MyApplicationTheme`。
+- 模板里要改的占位：包名 `com.example.myapplication`（改 = `namespace`+`applicationId`+目录+`MainActivity` 等 import+`themes.xml` 的 `Theme.MyApplication`+`ExampleInstrumentedTest.kt:22` 的断言，共 6 处）、`res/values/strings.xml` 的 `My Application`、`rootProject.name = "My Application"`。
+- **本地明文 HTTP**：Android 9+ 默认禁明文，若要 `http://` 联调，得加 `res/xml/network_security_config.xml` 并只在 debug 生效；正式包必须 HTTPS。
+
+## 6. 文档路由（要查什么去哪）
 
 | 要查什么 | 去哪 |
 |---|---|
@@ -125,8 +183,8 @@
 | 跨会话决策与硬约束（AI 会话必读） | `.codebuddy/memory/MEMORY.md` |
 | 未完成项（唯一待办总表） | `TODO.md`；完成侧归档 = `done.md`（只追加） |
 
-## 6. 提交与测试纪律
+## 7. 提交与测试纪律
 
-- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **1654 collected / 7 deselected**（2026-10-12 复核；原 1590 为 2026-10-10 实测；B1 学习会话 / B2 教学策略 / B3 排序与阈值落地后净增 41 例）。历史：1549（2026-10-09）、1512 + 1 failed（2026-10-07，那条"他会话 WIP"已随 A2 关闭）。后台套件基线 = `backend-admin/tests` **41 passed**。
+- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **1932 collected / 7 deselected**（2026-11-04 复核；= 1931 passed + 1 skipped）。历史：1654（2026-10-12）、1590（2026-10-10）、1549（2026-10-09）、1512 + 1 failed（2026-10-07，那条"他会话 WIP"已随 A2 关闭）。后台套件基线 = `backend-admin/tests` **43 passed**（2026-11-04，原 41）。
 - 提交按**文件族**拆；单文件跨主题按**依赖方向**排序（先被调用方）；测试与其修复同一提交；不混无关改动。
 - 与其他 AI 会话共存：提交前 `git status` 看清别人 WIP，**路径限定 add**。
