@@ -98,8 +98,7 @@ export const biliLoginPoll = (qrcodeKey) =>
  *
  * 三条 SSE 通知（都在 chatStore 里消费）：
  *   - `import_progress` { task_id, item_id, item_index, item_total, stage, index?, total? }
- *     —— **瞬态**，步骤条用；stage ∈ subtitle/download/extract/transcribe/compose，
- *     终态 done/failed
+ *     —— **瞬态**（后端只把 stage 落库，段内进度不落）；终态 done/failed
  *   - `kb_updated` { node_id, filename, title } —— 已落库，离线也能补拉
  *   - `error` { message } —— 已落库
  * 400 = 缺 yt-dlp 等前置条件 / 没有链接（detail 给原因）
@@ -107,13 +106,33 @@ export const biliLoginPoll = (qrcodeKey) =>
 export const importLecture = (payload) =>
   apiClient.post('/api/v1/kb/import/lecture', payload, { timeout: 60000 })
 
-/** 导入队列：最近任务 + 各自分集状态 resp: { tasks: [...] } */
+/**
+ * 导入前预检（**可选**，不建任务）：标题 / 集数 / 总时长 / 有没有字幕 / 缺哪些依赖。
+ * payload: { url?, urls?, transcript_source?, asr_model?, expand?, slides? }
+ * resp: { links: [{ url, title, episodes, duration_secs, subtitle, sampled, missing[], note }],
+ *         deps: { yt_dlp, ffmpeg, asr_model, cookie, cookie_source } }
+ * 会联网（每条链接一次 view 接口 + B站字幕抽查），所以只在用户点「先检查」时调。
+ */
+export const inspectLecture = (payload) =>
+  apiClient.post('/api/v1/kb/import/inspect', payload, { timeout: 120000 })
+
+/**
+ * 导入队列快照：任务 + 分集 + 每任务耗时/剩余估计。
+ * resp: { tasks: [{ id, title, status, total, done, failed, elapsed_secs,
+ *                   eta_secs, running_secs, avg_item_secs,
+ *                   items: [{ id, url, title, status, stage, duration_secs, error, ... }] }] }
+ * **前端唯一真相**：SSE 只用于即时刷新，刷新/换设备后靠它还原现场。
+ */
 export const listLectureTasks = (limit = 20) =>
   apiClient.get('/api/v1/kb/import/tasks', { params: { limit } })
 
-/** 队列操作：pause / resume / cancel / retry */
+/** 队列操作：pause / resume / cancel / retry（整批重试失败分集） */
 export const lectureTaskAction = (taskId, action) =>
   apiClient.post(`/api/v1/kb/import/tasks/${taskId}/${action}`)
+
+/** 分集操作：retry（只认失败的）/ cancel（只认还没开跑的） */
+export const lectureItemAction = (taskId, itemId, action) =>
+  apiClient.post(`/api/v1/kb/import/tasks/${taskId}/items/${itemId}/${action}`)
 
 /** 调整待办分集顺序（delta: -1 上移 / +1 下移） */
 export const reorderLectureItem = (taskId, itemId, delta) =>

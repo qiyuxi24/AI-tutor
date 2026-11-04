@@ -41,6 +41,19 @@
   gap: 2px;
 }
 
+/* 模块分组标题：把 tab 按用途归类（通用 / 学习 / 知识图谱 / 帮助） */
+.sn-group + .sn-group {
+  margin-top: 14px;
+}
+
+.sn-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  padding: 0 10px 6px;
+  letter-spacing: 0.4px;
+}
+
 .sn-item {
   display: flex;
   align-items: center;
@@ -229,7 +242,7 @@
   background: var(--color-accent);
 }
 
-/* ── 滑杆卡片：知识图谱力场与节点详情两面板共用 ── */
+/* ── 滑杆卡片：知识图谱力场与节点详情（同一面板的两段）共用 ── */
 .force-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 220px;

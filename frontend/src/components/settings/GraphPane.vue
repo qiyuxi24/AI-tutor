@@ -1,15 +1,20 @@
 <script setup>
 /**
- * GraphPane.vue — 设置 · 知识图谱（布局 + 力导向参数）
+ * GraphPane.vue — 设置 · 知识图谱（布局 + 力导向参数 + 节点详情面板）
  * 改动即生效并保存到本机浏览器（localStorage）。
+ *
+ * 「节点详情」（弹窗尺寸 / 正文字号）与图谱是同一条看图链路上的偏好，
+ * 2026-11-01 起并入本面板，不再单列一个设置项。
  */
 import { computed } from 'vue'
 import { useGraphForces, setGraphForce, resetGraphForces, FORCE_FIELDS } from '../../utils/graphForces'
 import { useGraphLayout, GRAPH_LAYOUTS } from '../../utils/graphLayout'
+import { useDetailPrefs, setDetailPref, resetDetailPrefs, DETAIL_FIELDS } from '../../utils/detailPrefs'
 import GraphForcePreview from '../GraphForcePreview.vue'
 
 const { forces } = useGraphForces()
 const { layout, setGraphLayout } = useGraphLayout()
+const { prefs: detailPrefs } = useDetailPrefs()
 
 /** 当前布局的说明（向用户交代每种布局在表达什么关系） */
 const layoutHint = computed(() => GRAPH_LAYOUTS.find((l) => l.key === layout.value)?.hint || '')
@@ -63,6 +68,31 @@ const layoutHint = computed(() => GRAPH_LAYOUTS.find((l) => l.key === layout.val
       <div class="force-preview-box">
         <GraphForcePreview />
       </div>
+    </div>
+  </section>
+
+  <section class="sc-section">
+    <h3>节点详情</h3>
+    <p class="usage-hint">双击图谱节点弹出的详情面板；拖动即生效，并保存到本机浏览器。</p>
+
+    <div class="force-controls">
+      <div v-for="f in DETAIL_FIELDS" :key="f.key" class="force-row">
+        <div class="force-row-head">
+          <span>{{ f.label }}</span>
+          <span class="force-value">{{ f.toDisplay(detailPrefs[f.key]) }}</span>
+        </div>
+        <input
+          class="force-slider"
+          type="range"
+          :min="f.min"
+          :max="f.max"
+          :step="f.step"
+          :value="detailPrefs[f.key]"
+          @input="setDetailPref(f.key, $event.target.value)"
+        />
+        <div class="force-hint">{{ f.hint }}</div>
+      </div>
+      <button class="sc-btn force-reset" @click="resetDetailPrefs">恢复默认</button>
     </div>
   </section>
 </template>

@@ -169,7 +169,15 @@ async function renderXlsx() {
 const mdRef = ref(null)
 const assetUrls = []
 
+/* 截图视图：讲义里的幻灯片截图单独抽成网格（对齐 course2md 的「一屏纵览整堂课」）。
+   只收 `/kb/slides/` 那批（正文里可能有别的图），数量 0 时视图切换不出现。 */
+const slideImages = ref([])
+const viewMode = ref('text')   // text = 正文 / slides = 截图网格
+const zoom = ref(null)         // 放大中的图 { src, alt }
+
 function revokeAssets() {
+  slideImages.value = []
+  zoom.value = null
   while (assetUrls.length) URL.revokeObjectURL(assetUrls.pop())
 }
 
@@ -178,6 +186,7 @@ async function hydrateImages() {
   if (!host) return
   const imgs = Array.from(host.querySelectorAll('img')).filter((img) =>
     (img.getAttribute('src') || '').startsWith('/api/v1/kb/slides/'))
+  const found = []
   for (const img of imgs) {
     const src = img.getAttribute('src')
     try {
@@ -185,10 +194,12 @@ async function hydrateImages() {
       const url = URL.createObjectURL(data)
       assetUrls.push(url)
       img.src = url
+      found.push({ src: url, alt: img.alt || '' })
     } catch {
       img.alt = img.alt || '截图加载失败'
     }
   }
+  slideImages.value = found
 }
 
 // 同时盯 `loading`：正文可能在弹窗打开后才到（父组件异步取 text），
@@ -197,6 +208,11 @@ watch([html, () => props.loading], async () => {
   revokeAssets()
   await nextTick()
   hydrateImages()
+})
+
+// 换文件 / 关闭 → 回到正文视图（截图网格属于"这一篇"的临时视图，不该串到下一篇）
+watch(() => [props.visible, props.name], () => {
+  viewMode.value = 'text'
 })
 
 /** 打开（或换文件）时按 kind 准备渲染物；关闭时释放 objectURL。 */
@@ -228,8 +244,15 @@ watch(
  * 用 `window.open` 而不是靠 `target="_blank"`——DOMPurify 默认允许 `href`/`rel` 但**不放行
  * `target`**（实测当前版本），写了也会被消毒掉；且不走 `utils/markdown.js`（那是对话/图谱/
  * 画像三处共用管线，改它影响面太大）。这里只拦本组件容器内的 `<a>`，零共享改动。
+ *
+ * 点图片 = 放大（讲义里的截图常常要看清板书/代码，弹窗里只有 320px 宽时字是糊的）。
  */
 function openInNewTab(event) {
+  const img = event.target?.closest?.('img')
+  if (img?.src) {
+    zoom.value = { src: img.src, alt: img.alt || '' }
+    return
+  }
   const link = event.target?.closest?.('a[href]')
   if (!link) return
   event.preventDefault()
@@ -247,6 +270,13 @@ function openInNewTab(event) {
             <span v-if="!loading && !rawBlob && totalChars" class="chars-info">
               {{ chars.toLocaleString() }} / {{ totalChars.toLocaleString() }} 字符
             </span>
+            <!-- 讲义有截图时才有这个切换：正文（图文混排） / 截图（一屏看完整堂课） -->
+            <div v-if="slideImages.length" class="view-switch" role="group" aria-label="视图">
+              <button type="button" :class="{ active: viewMode === 'text' }"
+                      @click="viewMode = 'text'">正文</button>
+              <button type="button" :class="{ active: viewMode === 'slides' }"
+                      @click="viewMode = 'slides'">截图 {{ slideImages.length }}</button>
+            </div>
             <button class="action-btn close-btn" title="关闭" @click="emit('update:visible', false)">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                    stroke-width="2.5" stroke-linecap="round">
@@ -275,12 +305,28 @@ function openInNewTab(event) {
 
           <!-- 解析正文（含历史文件回退、pptx/csv/代码等无渲染器的格式） -->
           <template v-if="!loading && kind === 'text'">
-            <p v-if="truncated" class="truncate-tip">
+            <p v-if="truncated && viewMode === 'text'" class="truncate-tip">
               正文过长，仅显示前 {{ chars.toLocaleString() }} 字（共 {{ totalChars.toLocaleString() }} 字）。
             </p>
-            <div ref="mdRef" class="markdown-body" v-html="html" @click="openInNewTab"></div>
+            <div ref="mdRef" v-show="viewMode === 'text'" class="markdown-body"
+                 v-html="html" @click="openInNewTab"></div>
+
+            <!-- 截图视图：点开看大图（板书/代码在小缩略图里是看不清的） -->
+            <div v-if="viewMode === 'slides'" class="slide-grid">
+              <button v-for="(s, i) in slideImages" :key="s.src" type="button"
+                      class="slide-cell" @click="zoom = s">
+                <img :src="s.src" :alt="s.alt || `截图 ${i + 1}`" loading="lazy" />
+                <span class="slide-cap">{{ s.alt || `截图 ${i + 1}` }}</span>
+              </button>
+            </div>
           </template>
         </div>
+      </div>
+
+      <!-- 图片放大：点遮罩关闭 -->
+      <div v-if="zoom" class="zoom-overlay" @click.self="zoom = null">
+        <img :src="zoom.src" :alt="zoom.alt || '放大查看'" class="zoom-img" />
+        <button type="button" class="zoom-close" @click="zoom = null">关闭</button>
       </div>
     </div>
   </Transition>
@@ -353,6 +399,102 @@ function openInNewTab(event) {
 .chars-info {
   font-size: 12px;
   color: var(--color-text-tertiary);
+}
+
+/* ── 视图切换（正文 / 截图）── */
+.view-switch {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-hover);
+}
+.view-switch button {
+  padding: 3px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.view-switch button:hover { color: var(--color-text-primary); }
+.view-switch button.active {
+  background: var(--color-bg-card);
+  color: var(--color-text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* ── 截图画廊 ── */
+.slide-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+.slide-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-card);
+  overflow: hidden;
+  cursor: zoom-in;
+  text-align: left;
+  font-family: inherit;
+  transition: border-color 0.15s, transform 0.15s;
+}
+.slide-cell:hover { border-color: var(--color-border-strong); }
+.slide-cell:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 2px;
+}
+/* 不裁切：截图裁掉边缘就没有板书了；高度随图走，同一行由 grid 自动对齐 */
+.slide-cell img {
+  display: block;
+  width: 100%;
+  background: var(--color-bg-hover);
+}
+.slide-cap {
+  padding: 0 8px 6px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 放大查看 ── */
+.zoom-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(0, 0, 0, 0.8);
+  cursor: zoom-out;
+}
+.zoom-img {
+  max-width: 92vw;
+  max-height: 82vh;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+.zoom-close {
+  padding: 6px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: #fff;
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  cursor: pointer;
 }
 
 .action-btn {

@@ -1,24 +1,28 @@
 <script setup>
 /**
- * LectureImportView.vue — 视频课程导入页（链接 → 讲义 → 知识库）
+ * LectureImportView.vue — 视频课程导入（链接 → 讲义 → 知识库）
  *
- * 取词逻辑全在后端（`core/kb/video_import.py`）：平台字幕优先 → yt-dlp 字幕 →
- * 切段语音转写。本页只做三件事：提交、显示进度、给出结果入口。
+ * 取词逻辑全在后端（`core/kb/video_import.py`），排队在 `core/kb/import_queue.py`。
+ * 本页只有三块：**粘贴 → （可选）预检 → 队列**。
  *
- * 为什么要有步骤条：导入是分钟级后台任务（下载 → 抽音轨 → 分段转写 → 整理），
- * 提交后请求就返回了。没有进度时用户看到的只有"提交中"一闪，然后长时间毫无反馈，
- * 无法区分"在跑"和"挂了"。进度经 SSE `import_progress` 到达（**瞬态**，不落库），
- * 终态仍走 `kb_updated` / `error`（落库，离线也能补拉）。
+ * 一条硬规矩：**队列是唯一真相**。
+ * 旧版同时维护「本地任务卡（步骤条 + 结果区）」和「队列面板」两份状态，靠轮询回写
+ * 互相追赶（`syncLocalTask` 就是那个补丁）—— 批量导入时两处说的不一样，刷新后本地
+ * 那份直接丢。现在服务端把分集阶段（`stage`）、开始时间（`started_at`）都落库了，
+ * 页面只需要一件事：拉 `GET /kb/import/tasks` 渲染。SSE 只负责让它更快看到变化。
  *
- * 状态只有一份：`store.importProgress`（chatStore 的 SSE 分支写入），本页 watch 它。
- * 不在本页自建 EventSource —— 全局只有一条长连接。
+ * 进度分三层，各自有归属：
+ *   任务级  done+failed / total（进度条）
+ *   分集级  第 i 集 / 共 n 集（哪一集在跑）
+ *   步骤级  查找字幕 → 下载 → 提取 → 转写 → 整理（那一集在第几步）
  */
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useChatStore } from '../stores/chatStore'
 import {
-  biliLoginPoll, biliLoginQrcode, getKbNodeText, importLecture, lectureTaskAction,
-  listLectureTasks, probeLectureImport, reorderLectureItem,
+  biliLoginPoll, biliLoginQrcode, getKbNodeText, importLecture, inspectLecture,
+  lectureItemAction, lectureTaskAction, listLectureTasks, probeLectureImport,
+  reorderLectureItem,
 } from '../api/kb.js'
 import { subtitleLanguages, useLectureSettings } from '../utils/lectureSettings.js'
 import KbTextPreviewDialog from '../components/KbTextPreviewDialog.vue'
@@ -26,95 +30,172 @@ import KbTextPreviewDialog from '../components/KbTextPreviewDialog.vue'
 const emit = defineEmits(['go-kb'])
 
 const store = useChatStore()
+const settings = useLectureSettings()
 
-/** 步骤条：key 与后端 `video_import.STAGE_*` 一一对应（顺序即执行顺序） */
+// ── 状态字典（顺序 = 执行顺序；key 与后端 video_import.STAGE_* 一一对应）──
 const STEPS = [
-  { key: 'subtitle', label: '查找字幕', hint: 'B站字幕轨 / AI 总结 / 平台字幕文件' },
-  { key: 'download', label: '下载音频', hint: 'yt-dlp 拉取音轨（无字幕时才走）' },
-  { key: 'extract', label: '提取音轨', hint: 'ffmpeg 转 16kHz 单声道' },
-  { key: 'transcribe', label: '语音转写', hint: '按 2 分钟切段，逐段转写' },
-  { key: 'compose', label: '整理讲义', hint: '分段 / 时间锚点 / 标题章节' },
+  { key: 'subtitle', label: '查找字幕' },
+  { key: 'download', label: '下载音频' },
+  { key: 'extract', label: '提取音轨' },
+  { key: 'transcribe', label: '语音转写' },
+  { key: 'compose', label: '整理讲义' },
 ]
+const STAGE_LABEL = Object.fromEntries(STEPS.map((s) => [s.key, s.label]))
+
+const STATUS = {
+  pending: '排队中', running: '导入中', paused: '已暂停',
+  done: '完成', failed: '失败', canceled: '已取消',
+}
+const OPEN = ['pending', 'running', 'paused']
 
 const url = ref('')
 const deps = ref(null)
 const submitting = ref(false)
-const elapsed = ref(0)
+const inspecting = ref(false)
+const report = ref(null)       // 预检结果（可选路径；null = 没检查过）
+const tasks = ref([])
+const expanded = ref(new Set())
+const fetchedAt = ref(0)
+const tick = ref(0)
 
-// 取词方式 / 合集展开 / 幻灯片截图 / 字幕语言 / 转写模型都在「设置 → 视频导入」
-// （本机偏好，见 utils/lectureSettings.js）—— 导入页只贴链接，不再逐个问
-const settings = useLectureSettings()
+let pollTimer = null
+let refreshTimer = null
+let clockTimer = null
 
-/** 队列（后端 GET /kb/import/tasks）：一个任务 = 一次提交，可含 N 集 */
-const queue = ref([])
-let queueTimer = null
+// ── 队列 ──────────────────────────────────────────────
 
-const OPEN_STATES = ['pending', 'running', 'paused']
-const hasOpenTasks = computed(() => queue.value.some((t) => OPEN_STATES.includes(t.status)))
+const openTasks = computed(() => tasks.value.filter((t) => OPEN.includes(t.status)))
+const closedTasks = computed(() => tasks.value.filter((t) => !OPEN.includes(t.status)))
+const hasOpen = computed(() => openTasks.value.length > 0)
+const linkCount = computed(() => url.value.split(/\r?\n/).filter((l) => l.trim()).length)
+/** 历史区默认只显示最近一个：刚导完的讲义要能立刻点开预览，老任务不该占屏 */
+const visibleClosed = computed(() => (
+  expanded.value.has('__history') ? closedTasks.value : closedTasks.value.slice(0, 1)
+))
 
-const STATUS_TEXT = {
-  pending: '排队中', running: '导入中', paused: '已暂停',
-  done: '完成', failed: '失败', canceled: '已取消',
+function sortTasks(list) {
+  const rank = { running: 0, pending: 1, paused: 2 }
+  return [...list].sort((a, b) => (rank[a.status] ?? 3) - (rank[b.status] ?? 3))
 }
-const statusText = (status) => STATUS_TEXT[status] || status
 
-function progressPercent(task) {
-  const total = task.total || task.items?.length || 0
-  if (!total) return 0
-  return Math.round(((task.done + task.failed) / total) * 100)
-}
-
-/** 拉一次队列快照；有未完成任务时保持 2.5s 轮询，全部结束后停掉 */
 async function refreshQueue() {
   try {
     const { data } = await listLectureTasks()
-    queue.value = data.tasks || []
+    tasks.value = sortTasks(data.tasks || [])
+    fetchedAt.value = Date.now()
   } catch {
-    // 轮询失败不弹错（网络抖动），下一轮会再来
+    // 拉取失败不弹错：下一轮（SSE 或兜底轮询）会再来
   }
-  syncLocalTask()
-  if (hasOpenTasks.value) startQueueTimer()
-  else stopQueueTimer()
+  syncTimers()
 }
 
-/** 队列里的终态回写本地任务卡（批次完成后步骤条/结果区跟着收尾） */
-function syncLocalTask() {
-  const t = task.value
-  if (!t || t.phase !== 'running') return
-  const mine = queue.value.find((item) => item.id === t.id)
-  if (!mine || !['done', 'failed', 'canceled'].includes(mine.status)) return
-  const successful = (mine.items || []).filter((item) => item.status === 'done')
-  t.phase = mine.status === 'done' ? 'done' : 'failed'
-  t.stage = 'compose'
-  t.error = mine.status === 'done'
-    ? ''
-    : (mine.error || '部分分集失败，展开队列查看原因')
-  t.result = t.batch > 1 && mine.status === 'done'
-    ? {
-        nodeId: successful[0]?.node_id,
-        filename: `${successful.length} 集已入库`,
-        title: mine.title || '课程合集',
-        source: '', chars: successful.reduce((sum, i) => sum + (i.chars || 0), 0),
-      }
-    : null
-  stopClock()
+/** SSE 已经说明有变化 → 晚 1.5s 拉一次，省掉每来一条事件都打接口 */
+function refreshSoon() {
+  if (refreshTimer) return
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null
+    refreshQueue()
+  }, 1500)
 }
 
-onMounted(refreshQueue)
-
-function startQueueTimer() {
-  if (queueTimer) return
-  queueTimer = setInterval(refreshQueue, 2500)
+function syncTimers() {
+  const open = hasOpen.value
+  if (open && !pollTimer) pollTimer = setInterval(refreshQueue, 15000)
+  if (!open && pollTimer) { clearInterval(pollTimer); pollTimer = null }
 }
 
-function stopQueueTimer() {
-  if (queueTimer) clearInterval(queueTimer)
-  queueTimer = null
+/** 距上次拉取过了多少秒（依赖 `tick`：秒针每秒 +1 触发重算，而不是每 15 秒跳一格） */
+const sinceFetch = computed(() => {
+  void tick.value
+  return Math.max(0, Math.round((Date.now() - fetchedAt.value) / 1000))
+})
+
+function taskElapsed(t) {
+  const base = t.elapsed_secs || 0
+  return t.status === 'running' ? base + sinceFetch.value : base
 }
+
+function taskEta(t) {
+  if (t.status !== 'running' || !t.eta_secs) return 0
+  return Math.max(0, t.eta_secs - sinceFetch.value)
+}
+
+function fmtSecs(secs) {
+  const s = Math.max(0, Math.round(secs || 0))
+  if (s < 60) return `${s} 秒`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m} 分${s % 60 ? ` ${s % 60} 秒` : ''}`
+  return `${Math.floor(m / 60)} 小时 ${m % 60} 分`
+}
+
+function progressPercent(t) {
+  if (!t.total) return 0
+  return Math.min(100, Math.round(((t.done + t.failed) / t.total) * 100))
+}
+
+function runningItem(t) {
+  return (t.items || []).find((i) => i.status === 'running') || null
+}
+
+function itemIndex(t, item) {
+  return (t.items || []).findIndex((i) => i.id === item.id) + 1
+}
+
+/** 分集在第几步（-1 = 还没有阶段信息） */
+function stepIndex(item) {
+  return STEPS.findIndex((s) => s.key === item?.stage)
+}
+
+function stepState(item, step) {
+  if (!item) return 'todo'
+  if (item.status === 'failed' && step.key === item.stage) return 'failed'
+  if (item.status === 'done') return 'done'
+  const cur = stepIndex(item)
+  const idx = STEPS.findIndex((s) => s.key === step.key)
+  if (cur < 0) return 'todo'
+  if (idx === cur) return 'active'
+  return idx < cur ? 'done' : 'todo'
+}
+
+function itemMeta(t, item) {
+  if (item.status === 'running') {
+    const label = STAGE_LABEL[item.stage] || '准备中'
+    // 段内进度只有 SSE 有（后端不落库：转写一集要报几十次，写库没意义）
+    return item._prog ? `${label} · ${item._prog.index}/${item._prog.total} 段` : label
+  }
+  if (item.status === 'done') {
+    const bits = []
+    if (item.chars) bits.push(`${item.chars} 字`)
+    if (item.duration_secs != null) bits.push(fmtSecs(item.duration_secs))
+    if (item.source) bits.push(item.source)
+    return bits.join(' · ')
+  }
+  if (item.status === 'failed') return item.error || '失败'
+  if (item.status === 'canceled') return '已取消'
+  return '等待中'
+}
+
+function toggleItems(taskId) {
+  const next = new Set(expanded.value)
+  if (next.has(taskId)) next.delete(taskId)
+  else next.add(taskId)
+  expanded.value = next
+}
+
+// ── 操作 ──────────────────────────────────────────────
 
 async function actTask(taskId, action) {
   try {
     await lectureTaskAction(taskId, action)
+    await refreshQueue()
+  } catch (e) {
+    ElMessage.error('操作失败：' + (e.response?.data?.detail || e.message))
+  }
+}
+
+async function actItem(task, item, action) {
+  try {
+    await lectureItemAction(task.id, item.id, action)
     await refreshQueue()
   } catch (e) {
     ElMessage.error('操作失败：' + (e.response?.data?.detail || e.message))
@@ -130,32 +211,90 @@ async function moveItem(task, item, delta) {
   }
 }
 
-/** task = { id, url, stage, phase: running|done|failed, visited[], index, total, error, result } */
-const task = ref(null)
-let clock = null
+// ── 提交 / 预检 ───────────────────────────────────────
 
-const preview = reactive({
-  visible: false, loading: false, name: '', markdown: '', chars: 0, totalChars: 0,
-  truncated: false,
-})
-
-const running = computed(() => task.value?.phase === 'running')
-
-/** 登录态来源的展示文案（后端 probe 的 cookie_source：env / file / browser） */
-function cookieText() {
-  const d = deps.value
-  if (!d) return '未知'
-  if (!d.cookie) return '未配置'
-  const map = {
-    env: '已配置（手工）',
-    file: '已配置（文件）',
-    saved: '已登录（扫码）',
-    browser: `自动（${d.cookie_browser || '浏览器'}，导入时读取）`,
+function payloadFor(links) {
+  const payload = {
+    urls: links,
+    transcript_source: settings.transcriptSource,
+    expand: settings.expand,
+    slides: settings.slides,
   }
-  return map[d.cookie_source] || '已配置'
+  const langs = subtitleLanguages()
+  if (langs.length) payload.languages = langs
+  if (settings.asrModel.trim()) payload.asr_model = settings.asrModel.trim()
+  return payload
 }
 
-/** 刷新依赖探测（失败当"未知"，不阻断提交） */
+/** 依赖够不够**只由后端判定**（`missing_requirements` 按链接 + 模式逐条查），
+ *  前端复制一份判定就是双源漂移：B 站平台字幕本来零依赖，却被 `!d.yt_dlp` 拦死。 */
+async function submit() {
+  const links = url.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  if (!links.length || submitting.value) return
+  submitting.value = true
+  try {
+    const { data } = await importLecture(payloadFor(links))
+    ElMessage.success(`已加入队列：${data.items} 集`)
+    url.value = ''
+    report.value = null
+    await refreshQueue()
+  } catch (e) {
+    ElMessage.error('导入失败：' + (e.response?.data?.detail || e.message))
+  } finally {
+    submitting.value = false
+  }
+}
+
+/** 可选预检：先看清楚"这链接有几集、要多久、有没有字幕、缺什么"再决定 */
+async function doInspect() {
+  const links = url.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  if (!links.length || inspecting.value) return
+  inspecting.value = true
+  try {
+    const { data } = await inspectLecture(payloadFor(links))
+    report.value = data
+    deps.value = data.deps || deps.value
+  } catch (e) {
+    ElMessage.error('检查失败：' + (e.response?.data?.detail || e.message))
+  } finally {
+    inspecting.value = false
+  }
+}
+
+function reportMeta(row) {
+  const bits = []
+  if (row.episodes > 1) bits.push(`${row.episodes} 集`)
+  if (row.duration_secs) bits.push(`总时长 ${fmtSecs(row.duration_secs)}`)
+  if (row.subtitle) {
+    bits.push(`有字幕${row.sampled ? '（抽查第 1 集）' : ''}`)
+  } else if (row.missing.length) {
+    bits.push('缺依赖')
+  } else {
+    bits.push('无平台字幕 · 将走语音转写')
+  }
+  return bits.join(' · ')
+}
+
+// ── 依赖自检（只在有缺口时提示，不常驻四个 chip）──────────
+
+const depProblems = computed(() => {
+  const d = deps.value
+  if (!d) return []
+  const out = []
+  if (!d.yt_dlp) out.push('yt-dlp 缺失（pip install yt-dlp）')
+  if (!d.ffmpeg) out.push('ffmpeg 缺失（语音转写/截图需要）')
+  if (!d.asr_model) out.push('ASR 模型未配置（无字幕课程需要）')
+  if (!d.cookie) out.push('未登录 B 站（会员课 / AI 总结字幕需要）')
+  return out
+})
+
+function cookieText() {
+  const d = deps.value
+  if (!d?.cookie) return '未登录'
+  return { env: '手工配置', file: '凭证文件', saved: '扫码已登录', browser: '浏览器自动读取' }[
+    d.cookie_source] || '已配置'
+}
+
 async function probe() {
   try {
     const { data } = await probeLectureImport()
@@ -163,37 +302,22 @@ async function probe() {
   } catch {
     deps.value = null
   }
-  return deps.value
 }
 
-// ── B 站扫码登录（凭证只留在服务端；这里只有二维码与状态）──
+// ── B 站扫码登录（凭证只留在服务端）────────────────────
 const qr = reactive({ visible: false, loading: false, key: '', image: '', status: 'waiting', message: '' })
 let qrTimer = null
 
-function stopQrTimer() {
-  if (qrTimer) clearInterval(qrTimer)
-  qrTimer = null
-}
-
 function qrStatusText() {
-  const map = {
-    waiting: '等待扫码…',
-    scanned: '已扫码，请在手机上确认',
-    expired: '二维码已失效',
-    error: qr.message || '二维码获取失败',
-    success: '登录成功',
-  }
-  return map[qr.status] || qr.message || ''
+  return {
+    waiting: '等待扫码…', scanned: '已扫码，请在手机上确认',
+    expired: '二维码已失效', success: '登录成功', error: qr.message || '获取失败',
+  }[qr.status] || ''
 }
 
 async function openBiliLogin() {
   stopQrTimer()
-  qr.visible = true
-  qr.loading = true
-  qr.image = ''
-  qr.key = ''
-  qr.status = 'waiting'
-  qr.message = ''
+  Object.assign(qr, { visible: true, loading: true, image: '', key: '', status: 'waiting', message: '' })
   try {
     const { data } = await biliLoginQrcode()
     qr.key = data.qrcode_key || ''
@@ -217,165 +341,31 @@ async function pollQr() {
       stopQrTimer()
       qr.visible = false
       await probe()
-      ElMessage.success('B 站登录成功：会员课与 AI 总结字幕已可用')
-    } else if (data.status === 'expired' || data.status === 'error') {
+      ElMessage.success('B 站登录成功')
+    } else if (['expired', 'error'].includes(data.status)) {
       stopQrTimer()
     }
-  } catch {
-    // 单次轮询失败（网络抖动）不终止，下一轮会再来
-  }
+  } catch { /* 单次轮询失败不终止 */ }
 }
 
-function startClock() {
-  stopClock()
-  elapsed.value = 0
-  clock = setInterval(() => { elapsed.value += 1 }, 1000)
+function stopQrTimer() {
+  if (qrTimer) clearInterval(qrTimer)
+  qrTimer = null
 }
 
-function stopClock() {
-  if (clock) clearInterval(clock)
-  clock = null
-}
-
-function elapsedText() {
-  const m = Math.floor(elapsed.value / 60)
-  const s = elapsed.value % 60
-  return m ? `${m} 分 ${s} 秒` : `${s} 秒`
-}
-
-/** 该步骤当前的状态：pending / active / done / skipped / failed */
-function stepState(step) {
-  const t = task.value
-  if (!t) return 'pending'
-  const idx = STEPS.findIndex((s) => s.key === step.key)
-  const visited = t.visited.includes(step.key)
-  if (t.phase === 'done') return visited ? 'done' : 'skipped'
-  const cur = STEPS.findIndex((s) => s.key === t.stage)
-  if (t.phase === 'failed') {
-    if (step.key === t.stage) return 'failed'
-    return idx < cur && visited ? 'done' : 'pending'
-  }
-
-  if (idx === cur) return 'active'
-  if (idx < cur) return visited ? 'done' : 'skipped'
-  return 'pending'
-}
-
-function stepNote(step) {
-  const t = task.value
-  if (!t) return step.hint
-  if (t.phase === 'running' && step.key === t.stage && step.key === 'transcribe' && t.total) {
-    return `第 ${t.index} / ${t.total} 段`
-  }
-  const state = stepState(step)
-  if (state === 'skipped') return '跳过（已有字幕）'
-  if (state === 'done') return '完成'
-  if (state === 'failed') return '失败'
-  return step.hint
-}
-
-watch(() => store.importProgress, (p) => {
-  if (!p || !task.value || (p.task_id && p.task_id !== task.value.id)) return
-  const t = task.value
-  if (p.stage === 'done') {
-    if (t.batch > 1) {
-      // 批次里单集完成≠任务结束：步骤条留着当前集，任务收尾交给队列轮询
-      t.completed = (t.completed || 0) + 1
-      return
-    }
-    t.phase = 'done'
-    t.result = {
-      nodeId: p.node_id, filename: p.filename || '',
-      title: p.title || '', source: p.source || '', chars: p.chars || 0,
-    }
-    t.stage = 'compose'
-    stopClock()
-    url.value = ''
-    // 成功提示由 chatStore.handleKbUpdated 统一弹（kb_updated 到达时），这里不再重复
-    return
-  }
-  if (p.stage === 'failed') {
-    if (t.batch > 1) {
-      // 单集失败不终止整批（后端会继续跑下一集），失败明细看队列面板
-      t.completed = (t.completed || 0) + 1
-      return
-    }
-    // 保持 t.stage 不变：失败点就是"当时正在跑的那一步"，步骤条据此标红
-    t.phase = 'failed'
-    t.error = p.message || '导入失败'
-    stopClock()
-    return
-  }
-  t.stage = p.stage
-  if (!t.visited.includes(p.stage)) t.visited.push(p.stage)
-  if (p.index) t.index = p.index
-  if (p.total) t.total = p.total
+// ── 讲义预览 ──────────────────────────────────────────
+const preview = reactive({
+  visible: false, loading: false, name: '', markdown: '', chars: 0, totalChars: 0, truncated: false,
 })
 
-async function submit() {
-  // 一行一条：批量提交与合集展开都在后端（expand），前端不做链接解析
-  const links = url.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  if (!links.length || submitting.value) return
-
-  submitting.value = true
-  try {
-    // 依赖够不够**只由后端判定**（`video_import.missing_requirements`：按这条链接 +
-    // 这个模式逐条查）。前端这里曾复制一份 `!d.yt_dlp` 硬拦，结果是双源漂移 ——
-    // B 站平台字幕直取本来零依赖就能跑，却被判成不可用。真缺东西时后端返 400，
-    // detail 由下面的 catch 弹出来。
-    const payload = {
-      urls: links, transcript_source: settings.transcriptSource,
-      expand: settings.expand, slides: settings.slides,
-    }
-    const langs = subtitleLanguages()
-    if (langs.length) payload.languages = langs
-    if (settings.asrModel.trim()) payload.asr_model = settings.asrModel.trim()
-
-    const { data } = await importLecture(payload)
-    const startStage = settings.transcriptSource === 'asr' ? 'download' : 'subtitle'
-    task.value = {
-      id: data?.task_id || '',
-      url: data?.items > 1 ? `${links.length} 条链接 → ${data.items} 集` : links[0],
-      links, batch: data?.items || 1, completed: 0,
-      stage: startStage, phase: 'running',
-      visited: [startStage], index: 0, total: 0, error: '', result: null,
-    }
-    startClock()
-    url.value = ''
-    await refreshQueue()
-    startQueueTimer()
-  } catch (e) {
-    ElMessage.error('导入失败：' + (e.response?.data?.detail || e.message))
-  } finally {
-    submitting.value = false
-  }
-}
-
-function retry() {
-  const links = task.value?.links || (task.value?.url ? [task.value.url] : [])
-  task.value = null
-  elapsed.value = 0
-  if (links.length) {
-    url.value = links.join('\n')
-    submit()
-  }
-}
-
-function resetTask() {
-  task.value = null
-  elapsed.value = 0
-  stopClock()
-}
-
-async function openPreview() {
-  const nodeId = task.value?.result?.nodeId
-  if (!nodeId) return
+async function openPreview(item) {
+  if (!item.node_id) return
   preview.visible = true
   preview.loading = true
-  preview.name = task.value.result.filename
+  preview.name = `课程讲义-${item.title || item.url}.md`
   preview.markdown = ''
   try {
-    const { data } = await getKbNodeText(nodeId)
+    const { data } = await getKbNodeText(item.node_id)
     preview.markdown = data.markdown || ''
     preview.chars = data.chars || 0
     preview.totalChars = data.total_chars || 0
@@ -388,59 +378,65 @@ async function openPreview() {
   }
 }
 
-onBeforeUnmount(() => {
-  stopClock()
-  stopQrTimer()
-  stopQueueTimer()
+// ── 生命周期 ──────────────────────────────────────────
+
+// SSE 进度：先就地更新那一行的阶段（不等下一次拉取），再延迟同步一次计数
+watch(() => store.importProgress, (p) => {
+  if (!p) return
+  const task = tasks.value.find((t) => t.id === p.task_id)
+  if (task) {
+    const item = (task.items || []).find((i) => i.id === p.item_id)
+    if (item) {
+      if (p.stage && !['done', 'failed'].includes(p.stage)) item.stage = p.stage
+      if (p.index && p.total) item._prog = { index: p.index, total: p.total }
+      if (p.chars) item.chars = p.chars
+    }
+    if (p.stage === 'done' || p.stage === 'failed') refreshSoon()
+  } else {
+    refreshSoon()
+  }
 })
-probe()
+
+// 后台任务已落库的通知（kb_updated）→ 立刻重拉
+watch(() => store.kbEpoch, refreshSoon)
+
+onMounted(async () => {
+  await Promise.all([probe(), refreshQueue()])
+  clockTimer = setInterval(() => { tick.value += 1 }, 1000)
+})
+
+onBeforeUnmount(() => {
+  stopQrTimer()
+  if (pollTimer) clearInterval(pollTimer)
+  if (refreshTimer) clearTimeout(refreshTimer)
+  if (clockTimer) clearInterval(clockTimer)
+})
 </script>
 
 <template>
   <div class="page-scroll">
-    <main class="lecture-inner page-inner page-inner--narrow">
-      <header class="lc-header">
-        <h1 class="page-title">视频课程导入</h1>
+    <main class="page-inner page-inner--narrow li">
+      <header class="li-head">
+        <div>
+          <h1 class="page-title">视频课程导入</h1>
+          <p class="page-sub">
+            粘贴 B 站 / YouTube 链接，先取平台字幕，没有字幕才语音转写；讲义直接进知识库。
+          </p>
+        </div>
+        <button type="button" class="li-ghost" @click="openBiliLogin">
+          {{ deps?.cookie ? `B 站：${cookieText()}` : '登录 B 站' }}
+        </button>
       </header>
 
-      <!-- ── 依赖自检 ── -->
-      <div class="lc-deps" :class="{ unknown: !deps }">
-        <template v-if="deps">
-          <span class="lc-dep" :class="deps.yt_dlp ? 'ok' : 'bad'">
-            <i class="dot" />yt-dlp {{ deps.yt_dlp ? '就绪' : '缺失' }}
-          </span>
-          <span class="lc-dep" :class="deps.ffmpeg ? 'ok' : 'warn'">
-            <i class="dot" />ffmpeg {{ deps.ffmpeg ? '就绪' : '缺失（转写 / 截图需要）' }}
-          </span>
-          <span class="lc-dep" :class="deps.asr_model ? 'ok' : 'warn'">
-            <i class="dot" />ASR {{ deps.asr_model || '未配置' }}
-          </span>
-          <span class="lc-dep" :class="deps.cookie ? 'ok' : 'warn'">
-            <i class="dot" />B站登录态 {{ cookieText() }}
-          </span>
-          <span v-if="!deps.yt_dlp" class="lc-fix">
-            安装：<code>pip install yt-dlp</code>
-          </span>
-          <span v-else-if="!deps.ffmpeg" class="lc-fix">
-            转写才需要：<code>winget install Gyan.FFmpeg</code>
-          </span>
-          <span v-else-if="!deps.asr_model" class="lc-fix">
-            无字幕课程需要：<code>.env</code> 里设 <code>ASR_MODEL</code>
-          </span>
-          <span v-else-if="!deps.cookie" class="lc-fix">
-            B 站会员课 / AI 总结字幕需要登录态：点右侧「扫码登录 B 站」即可
-            （写入 <code>data/bili/cookies.txt</code>；浏览器 Cookie 因系统加密已不可读）
-          </span>
-        </template>
-        <span v-else class="lc-dep warn"><i class="dot" />依赖状态获取失败（不影响提交）</span>
-        <span class="lc-deps-actions">
-          <button type="button" class="lc-reprobe" @click="openBiliLogin">扫码登录 B 站</button>
-          <button type="button" class="lc-reprobe" @click="probe">重新探测</button>
-        </span>
+      <!-- 环境：只在有缺口时出现一行，不再常驻四个状态 chip -->
+      <div v-if="depProblems.length" class="li-warn">
+        <span class="li-warn-dot" aria-hidden="true" />
+        <span>{{ depProblems.join('；') }}</span>
+        <button type="button" class="li-link" @click="probe">重新探测</button>
       </div>
 
-      <!-- ── 导入 ── -->
-      <section class="lc-card">
+      <!-- 粘贴 -->
+      <section class="li-compose">
         <el-input
           v-model="url"
           type="textarea"
@@ -449,146 +445,214 @@ probe()
           placeholder="粘贴课程链接，一行一条（B站 / YouTube）"
           maxlength="6000"
         />
-        <div class="lc-row lc-row--submit">
-          <span class="lc-row-hint">
-            共 {{ url.split(/\r?\n/).filter((line) => line.trim()).length }} 条链接 ·
-            取词方式与合集 / 截图开关在 设置 → 视频导入
+        <div class="li-compose-foot">
+          <span class="li-hint">
+            {{ linkCount ? `${linkCount} 条链接` : '把链接粘进来' }} ·
+            取词方式 / 合集展开 / 截图在 设置 → 视频导入
           </span>
-          <el-button
-            type="primary"
-            size="large"
-            :loading="submitting"
-            :disabled="!url.trim()"
-            @click="submit"
-          >
-            加入队列
-          </el-button>
+          <div class="li-compose-actions">
+            <button
+              type="button"
+              class="li-ghost"
+              :disabled="!linkCount || inspecting"
+              @click="doInspect"
+            >
+              {{ inspecting ? '检查中…' : '先检查' }}
+            </button>
+            <el-button
+              type="primary"
+              :loading="submitting"
+              :disabled="!linkCount"
+              @click="submit"
+            >
+              加入队列
+            </el-button>
+          </div>
         </div>
       </section>
 
-      <!-- ── 任务进度 ── -->
-      <section v-if="task" class="lc-card lc-task" :class="task.phase">
-        <header class="lc-task-head">
-          <span class="lc-task-title">
-            <template v-if="task.phase === 'running'">正在导入</template>
-            <template v-else-if="task.phase === 'done'">导入完成</template>
-            <template v-else>导入失败</template>
-            <span class="lc-task-elapsed">{{ elapsedText() }}</span>
-          </span>
-          <span class="lc-task-url" :title="task.url">{{ task.url }}</span>
+      <!-- 预检结果（可选路径） -->
+      <section v-if="report" class="li-card">
+        <header class="li-card-head">
+          <h3>检查结果</h3>
+          <button type="button" class="li-link" @click="report = null">关闭</button>
         </header>
-
-        <ol class="lc-steps">
-          <li v-for="step in STEPS" :key="step.key" class="lc-step" :class="stepState(step)">
-            <span class="lc-step-mark" />
-            <span class="lc-step-body">
-              <span class="lc-step-label">{{ step.label }}</span>
-              <span class="lc-step-note">{{ stepNote(step) }}</span>
+        <ul class="li-report">
+          <li v-for="row in report.links" :key="row.url">
+            <span class="li-report-title" :title="row.url">{{ row.title || row.url }}</span>
+            <span class="li-report-meta">
+              {{ row.note || reportMeta(row) }}
             </span>
           </li>
-        </ol>
-
-        <p v-if="task.phase === 'running'" class="lc-task-foot">
-          任务在后台继续，可以离开本页；完成时会弹提示。
-        </p>
-
-        <div v-else-if="task.phase === 'failed'" class="lc-task-foot lc-fail">
-          <span>{{ task.error }}</span>
-          <el-button size="small" type="primary" plain @click="retry">重试</el-button>
-          <el-button size="small" text @click="resetTask">关闭</el-button>
-        </div>
-
-        <div v-else class="lc-result">
-          <div class="lc-result-main">
-            <div class="lc-result-title">{{ task.result.title || task.result.filename }}</div>
-            <div class="lc-result-meta">
-              <span v-if="task.result.source" class="lc-badge">{{ task.result.source }}</span>
-              <span v-if="task.result.chars" class="lc-meta-item">{{ task.result.chars }} 字</span>
-              <span class="lc-meta-item">{{ task.result.filename }}</span>
-            </div>
-          </div>
-          <div class="lc-result-actions">
-            <el-button size="small" @click="openPreview">预览讲义</el-button>
-            <el-button size="small" type="primary" @click="emit('go-kb')">去知识库</el-button>
-            <el-button size="small" text @click="resetTask">再导一个</el-button>
-          </div>
-        </div>
+        </ul>
+        <footer class="li-card-foot">
+          <span class="li-hint">
+            共 {{ report.links.reduce((n, r) => n + r.episodes, 0) }} 集会排队，逐集串行处理
+          </span>
+          <el-button type="primary" :loading="submitting" @click="submit">开始导入</el-button>
+        </footer>
       </section>
 
-      <!-- ── 导入队列（持久化：刷新/重启后仍在）── -->
-      <section v-if="queue.length" class="lc-card lc-queue">
-        <header class="lc-queue-head">
+      <!-- 队列（唯一真相） -->
+      <section v-if="openTasks.length" class="li-card li-queue">
+        <header class="li-card-head">
           <h3>导入队列</h3>
-          <span class="lc-queue-hint">同一时间只跑一集；可暂停、取消、调整顺序</span>
+          <span class="li-hint">同一时间只跑一集 · 暂停/取消在集与集之间生效</span>
         </header>
 
-        <div v-for="t in queue" :key="t.id" class="lc-qtask" :class="t.status">
-          <div class="lc-qtask-head">
-            <span class="lc-qtag">{{ statusText(t.status) }}</span>
-            <span class="lc-qtitle" :title="t.title">{{ t.title || '未命名导入' }}</span>
-            <span class="lc-qcount">{{ t.done + t.failed }} / {{ t.total }}</span>
-            <span class="lc-qactions">
+        <article
+          v-for="t in openTasks"
+          :key="t.id"
+          class="li-task"
+          :class="t.status"
+        >
+          <div class="li-task-head">
+            <span class="li-status" :class="t.status">
+              <i aria-hidden="true" />{{ STATUS[t.status] || t.status }}
+            </span>
+            <span class="li-task-title" :title="t.title || t.id">
+              {{ t.title || '未命名导入' }}
+            </span>
+            <span class="li-task-count">{{ t.done + t.failed }} / {{ t.total }} 集</span>
+            <span class="li-task-time">
+              {{ fmtSecs(taskElapsed(t)) }}
+              <template v-if="taskEta(t)">· 约剩 {{ fmtSecs(taskEta(t)) }}</template>
+            </span>
+            <span class="li-task-actions">
               <button
                 v-if="t.status === 'running' || t.status === 'pending'"
-                type="button" @click="actTask(t.id, 'pause')"
+                type="button" class="li-link" @click="actTask(t.id, 'pause')"
               >暂停</button>
               <button
                 v-if="t.status === 'paused'"
-                type="button" @click="actTask(t.id, 'resume')"
+                type="button" class="li-link" @click="actTask(t.id, 'resume')"
               >继续</button>
               <button
                 v-if="t.failed"
-                type="button" @click="actTask(t.id, 'retry')"
+                type="button" class="li-link" @click="actTask(t.id, 'retry')"
               >重试失败</button>
               <button
-                v-if="!['done', 'failed', 'canceled'].includes(t.status)"
-                type="button" class="danger" @click="actTask(t.id, 'cancel')"
+                type="button" class="li-link danger" @click="actTask(t.id, 'cancel')"
               >取消</button>
             </span>
           </div>
 
-          <div class="lc-qbar">
+          <div class="li-bar" role="progressbar" :aria-valuenow="progressPercent(t)"
+               aria-valuemin="0" aria-valuemax="100" :aria-label="`导入进度 ${progressPercent(t)}%`">
             <i :style="{ width: progressPercent(t) + '%' }" />
           </div>
 
-          <ul class="lc-qitems">
+          <!-- 正在跑的那一集：三层进度落到一行 -->
+          <div v-if="runningItem(t)" class="li-now">
+            <span class="li-now-title">
+              第 {{ itemIndex(t, runningItem(t)) }} 集
+              <b>{{ runningItem(t).title || '（未命名）' }}</b>
+            </span>
+            <ol class="li-steps">
+              <li
+                v-for="step in STEPS" :key="step.key"
+                :class="stepState(runningItem(t), step)"
+              >{{ step.label }}</li>
+            </ol>
+          </div>
+
+          <!-- 分集明细（默认折叠：队列要能一屏看完） -->
+          <button type="button" class="li-items-toggle" @click="toggleItems(t.id)">
+            {{ expanded.has(t.id) ? '收起分集' : `展开 ${t.items.length} 集` }}
+          </button>
+          <ul v-if="expanded.has(t.id)" class="li-items">
             <li v-for="(it, i) in t.items" :key="it.id" :class="it.status">
-              <span class="lc-qdot" />
-              <span class="lc-qitem-title" :title="it.url">{{ it.title || it.url }}</span>
-              <span class="lc-qitem-state">{{ statusText(it.status) }}</span>
-              <span v-if="it.error" class="lc-qitem-err" :title="it.error">{{ it.error }}</span>
-              <span v-if="it.status === 'pending'" class="lc-qmove">
-                <button type="button" :disabled="i === 0"
-                        @click="moveItem(t, it, -1)">↑</button>
-                <button type="button" :disabled="i === t.items.length - 1"
-                        @click="moveItem(t, it, 1)">↓</button>
+              <span class="li-item-dot" aria-hidden="true" />
+              <span class="li-item-index">{{ i + 1 }}</span>
+              <span class="li-item-title" :title="it.url">{{ it.title || it.url }}</span>
+              <span class="li-item-meta" :title="itemMeta(t, it)">{{ itemMeta(t, it) }}</span>
+              <span class="li-item-actions">
+                <button v-if="it.status === 'done' && it.node_id" type="button"
+                        class="li-link" @click="openPreview(it)">预览</button>
+                <button v-if="it.status === 'failed'" type="button"
+                        class="li-link" @click="actItem(t, it, 'retry')">重试</button>
+                <button v-if="it.status === 'pending'" type="button"
+                        class="li-link" @click="actItem(t, it, 'cancel')">取消</button>
+                <template v-if="it.status === 'pending'">
+                  <button type="button" class="li-move" :disabled="i === 0"
+                          title="上移" @click="moveItem(t, it, -1)">↑</button>
+                  <button type="button" class="li-move" :disabled="i === t.items.length - 1"
+                          title="下移" @click="moveItem(t, it, 1)">↓</button>
+                </template>
               </span>
             </li>
           </ul>
-        </div>
+        </article>
       </section>
 
+      <!-- 已完成 / 已取消：最近一个总是露出来（刚导完要能立刻预览），其余折叠 -->
+      <section v-if="closedTasks.length" class="li-card li-history">
+        <button type="button" class="li-history-head" @click="toggleItems('__history')">
+          <span>历史任务</span>
+          <span class="li-hint">
+            {{ closedTasks.length }} 个 ·
+            {{ expanded.has('__history') ? '只看最近一个' : '展开全部' }}
+          </span>
+        </button>
+        <article
+          v-for="t in visibleClosed"
+          :key="t.id"
+          class="li-task"
+          :class="t.status"
+        >
+          <div class="li-task-head">
+            <span class="li-status" :class="t.status">
+              <i aria-hidden="true" />{{ STATUS[t.status] || t.status }}
+            </span>
+            <span class="li-task-title" :title="t.title || t.id">
+              {{ t.title || '未命名导入' }}
+            </span>
+            <span class="li-task-count">{{ t.done }} / {{ t.total }} 集</span>
+            <span class="li-task-time">{{ fmtSecs(t.elapsed_secs) }}</span>
+            <span class="li-task-actions">
+              <button v-if="t.failed" type="button" class="li-link"
+                      @click="actTask(t.id, 'retry')">重试失败</button>
+              <button type="button" class="li-link" @click="toggleItems(t.id)">
+                {{ expanded.has(t.id) ? '收起' : '分集' }}
+              </button>
+            </span>
+          </div>
+          <ul v-if="expanded.has(t.id)" class="li-items">
+            <li v-for="(it, i) in t.items" :key="it.id" :class="it.status">
+              <span class="li-item-dot" aria-hidden="true" />
+              <span class="li-item-index">{{ i + 1 }}</span>
+              <span class="li-item-title" :title="it.url">{{ it.title || it.url }}</span>
+              <span class="li-item-meta" :title="itemMeta(t, it)">{{ itemMeta(t, it) }}</span>
+              <span class="li-item-actions">
+                <button v-if="it.status === 'done' && it.node_id" type="button"
+                        class="li-link" @click="openPreview(it)">预览</button>
+                <button v-if="it.status === 'failed'" type="button"
+                        class="li-link" @click="actItem(t, it, 'retry')">重试</button>
+              </span>
+            </li>
+          </ul>
+        </article>
+      </section>
+
+      <p v-if="openTasks.length || closedTasks.length" class="li-foot">
+        任务在后台继续，可以离开本页；完成时会弹提示。
+        <button type="button" class="li-link" @click="emit('go-kb')">去知识库</button>
+      </p>
     </main>
 
-    <!-- B 站扫码登录：凭证只落服务端，前端只拿二维码与状态 -->
-    <el-dialog
-      v-model="qr.visible"
-      title="B 站扫码登录"
-      width="300px"
-      align-center
-      append-to-body
-      @closed="stopQrTimer"
-    >
-      <div class="lc-qr">
-        <img v-if="qr.image" :src="qr.image" alt="B 站登录二维码" class="lc-qr-img" />
-        <div v-else class="lc-qr-empty">二维码生成中…</div>
-        <p class="lc-qr-status" :class="qr.status">{{ qrStatusText() }}</p>
-        <p class="lc-qr-hint">手机 B 站 App →「我的」→ 扫一扫。登录态只保存在服务端：会员课与 AI 总结字幕需要它。</p>
-        <el-button
-          v-if="qr.status === 'expired' || qr.status === 'error'"
-          size="small"
-          @click="openBiliLogin"
-        >刷新二维码</el-button>
+    <!-- B 站扫码登录 -->
+    <el-dialog v-model="qr.visible" title="登录 B 站" width="300px" align-center
+               append-to-body @closed="stopQrTimer">
+      <div class="li-qr">
+        <img v-if="qr.image" :src="qr.image" alt="B 站登录二维码" class="li-qr-img" />
+        <div v-else class="li-qr-empty">二维码生成中…</div>
+        <p class="li-qr-status" :class="qr.status">{{ qrStatusText() }}</p>
+        <p class="li-hint">
+          手机 B 站 App →「我的」→ 扫一扫。凭证只保存在服务端，
+          会员课与 AI 总结字幕需要它。
+        </p>
+        <el-button v-if="['expired', 'error'].includes(qr.status)" size="small"
+                   @click="openBiliLogin">刷新二维码</el-button>
       </div>
     </el-dialog>
 
@@ -606,387 +670,407 @@ probe()
 </template>
 
 <style scoped>
-/* 页面骨架（滚动 / 限宽 / 留白）全在 styles/page.css，本页只保留纵向排布 */
-.lecture-inner {
+.li {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-}
-
-/* ── 依赖自检 ── */
-.lc-deps {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 16px;
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-}
-
-.lc-dep {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.lc-dep .dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.7;
-}
-
-.lc-dep.ok { color: var(--color-green); }
-.lc-dep.warn { color: var(--color-orange); }
-.lc-dep.bad { color: var(--color-red); }
-
-.lc-fix { color: var(--color-text-tertiary); }
-.lc-fix code {
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: var(--color-bg-subtle);
-  font-size: 11px;
-}
-
-.lc-deps-actions {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
   gap: 14px;
 }
 
-.lc-reprobe {
+/* ── 页头 ── */
+.li-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.li-head .page-sub { max-width: 52ch; }
+
+/* 次要按钮统一形态：无边框文字，hover 才有底色（避免一行里堆三种按钮样式） */
+.li-ghost {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.li-ghost:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+  border-color: var(--color-border-strong);
+}
+.li-ghost:disabled { opacity: 0.45; cursor: default; }
+
+.li-link {
+  padding: 0;
   border: none;
   background: transparent;
-  padding: 0;
-  color: var(--color-text-tertiary);
-  font-size: 12px;
+  color: var(--color-accent);
   font-family: inherit;
+  font-size: var(--font-size-xs);
   cursor: pointer;
-  text-decoration: underline;
 }
-.lc-reprobe:hover { color: var(--color-text-primary); }
+.li-link:hover { text-decoration: underline; }
+.li-link.danger { color: var(--color-danger); }
 
-/* ── 扫码登录 ── */
-.lc-qr {
+.li-hint {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+
+/* ── 环境提示：只有缺口才出现 ── */
+.li-warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: var(--color-warning-soft);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+}
+.li-warn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-warning);
+  flex-shrink: 0;
+}
+
+/* ── 粘贴区 ── */
+.li-compose {
   display: flex;
   flex-direction: column;
-  align-items: center;
   gap: 10px;
-  text-align: center;
-}
-
-.lc-qr-img {
-  width: 200px;
-  height: 200px;
-  border-radius: 8px;
-  background: #fff;
-}
-
-.lc-qr-empty {
-  width: 200px;
-  height: 200px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px dashed var(--color-border);
-  border-radius: 8px;
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-}
-
-.lc-qr-status {
-  margin: 0;
-  font-size: 13px;
-  color: var(--color-text-secondary);
-}
-.lc-qr-status.scanned { color: var(--color-primary); }
-.lc-qr-status.success { color: var(--color-green); }
-.lc-qr-status.expired,
-.lc-qr-status.error { color: var(--color-red); }
-
-.lc-qr-hint {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--color-text-tertiary);
-}
-
-/* ── 卡片与表单 ── */
-.lc-card {
-  background: var(--color-bg-surface);
+  padding: 14px;
   border: 1px solid var(--color-border);
-  border-radius: 12px;
-  padding: 16px;
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-card);
 }
-
-.lc-row {
+.li-compose-foot {
   display: flex;
-  gap: 8px;
   align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
-.lc-row :deep(.el-input) { flex: 1; min-width: 0; }
+.li-compose-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
-/* 批量输入：多行文本框 + 右下角提交 */
-.lc-row--submit { justify-content: flex-end; margin-top: 10px; }
-.lc-row-hint { font-size: 12px; color: var(--color-text-tertiary); }
-
-/* ── 导入队列 ── */
-.lc-queue-head {
+/* ── 卡片（预检 / 队列） ── */
+.li-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-card);
+  padding: 14px;
+}
+.li-card-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
 }
-.lc-queue-head h3 {
+.li-card-head h3 {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--font-size-base);
   font-weight: 600;
   color: var(--color-text-primary);
 }
-.lc-queue-hint { font-size: 12px; color: var(--color-text-tertiary); }
-
-.lc-qtask + .lc-qtask {
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--color-border);
-}
-.lc-qtask-head {
+.li-card-foot {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
-.lc-qtag {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--color-bg-surface);
-  color: var(--color-text-secondary);
-  flex-shrink: 0;
-}
-.lc-qtask.running .lc-qtag { color: var(--color-primary); }
-.lc-qtask.failed .lc-qtag { color: var(--color-danger, #d9534f); }
-.lc-qtitle {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--color-text-primary);
-}
-.lc-qcount { font-size: 12px; color: var(--color-text-tertiary); flex-shrink: 0; }
-.lc-qactions { display: inline-flex; gap: 4px; flex-shrink: 0; }
-.lc-qactions button,
-.lc-qmove button {
-  border: none;
-  background: transparent;
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-.lc-qactions button:hover:not(:disabled),
-.lc-qmove button:hover:not(:disabled) { background: var(--color-bg-hover); color: var(--color-text-primary); }
-.lc-qactions button.danger:hover { color: var(--color-danger, #d9534f); }
-.lc-qmove button:disabled { opacity: 0.35; cursor: default; }
-
-.lc-qbar {
-  height: 4px;
-  border-radius: 2px;
-  background: var(--color-bg-surface);
-  margin: 8px 0;
-  overflow: hidden;
-}
-.lc-qbar i {
-  display: block;
-  height: 100%;
-  background: var(--color-primary);
-  transition: width 0.3s ease;
-}
-.lc-qtask.failed .lc-qbar i { background: var(--color-danger, #d9534f); }
-
-.lc-qitems { list-style: none; margin: 0; padding: 0; }
-.lc-qitems li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 3px 0;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-}
-.lc-qdot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-border);
-  flex-shrink: 0;
-}
-.lc-qitems li.done .lc-qdot { background: #3aa675; }
-.lc-qitems li.failed .lc-qdot { background: var(--color-danger, #d9534f); }
-.lc-qitems li.running .lc-qdot { background: var(--color-primary); }
-.lc-qitem-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.lc-qitem-state { flex-shrink: 0; color: var(--color-text-tertiary); }
-.lc-qitem-err {
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--color-danger, #d9534f);
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border-soft);
 }
 
-/* ── 任务 ── */
-.lc-task-head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 14px;
-}
-.lc-task-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-.lc-task-elapsed {
-  margin-left: 8px;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--color-text-tertiary);
-}
-.lc-task-url {
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.lc-steps {
+/* ── 预检结果 ── */
+.li-report {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 6px;
 }
-
-.lc-step {
+.li-report li {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 6px 0;
-  position: relative;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--font-size-xs);
 }
-
-/* 竖线：连接相邻步骤（最后一步不画） */
-.lc-step:not(:last-child)::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 20px;
-  bottom: -4px;
-  width: 1px;
-  background: var(--color-border);
+.li-report-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-primary);
 }
-
-.lc-step-mark {
+.li-report-meta {
   flex-shrink: 0;
-  width: 9px;
-  height: 9px;
-  margin-top: 4px;
-  border-radius: 50%;
-  border: 2px solid var(--color-border-strong);
-  background: var(--color-bg-surface);
-}
-
-.lc-step-body { display: flex; flex-direction: column; gap: 1px; }
-.lc-step-label { font-size: 13px; color: var(--color-text-secondary); }
-.lc-step-note { font-size: 11px; color: var(--color-text-tertiary); }
-
-.lc-step.active .lc-step-mark {
-  border-color: var(--color-primary);
-  background: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-subtle);
-  animation: lc-pulse 1.6s ease-in-out infinite;
-}
-.lc-step.active .lc-step-label { color: var(--color-text-primary); font-weight: 600; }
-
-.lc-step.done .lc-step-mark {
-  border-color: var(--color-green);
-  background: var(--color-green);
-}
-.lc-step.failed .lc-step-mark {
-  border-color: var(--color-red);
-  background: var(--color-red);
-}
-.lc-step.skipped .lc-step-label,
-.lc-step.skipped .lc-step-note { opacity: 0.5; }
-
-@keyframes lc-pulse {
-  0%, 100% { box-shadow: 0 0 0 3px var(--color-primary-subtle); }
-  50% { box-shadow: 0 0 0 6px transparent; }
-}
-
-.lc-task-foot {
-  margin: 12px 0 0;
-  font-size: 12px;
   color: var(--color-text-tertiary);
 }
 
-.lc-fail {
+/* ── 队列：任务行 ── */
+.li-task + .li-task {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-border-soft);
+}
+.li-task-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--font-size-xs);
+  min-width: 0;
+}
+.li-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
+}
+.li-status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.li-status.running { color: var(--color-accent); }
+.li-status.done { color: var(--color-success); }
+.li-status.failed { color: var(--color-danger); }
+.li-status.paused { color: var(--color-warning); }
+.li-task.running .li-task-title { font-weight: 600; }
+
+.li-task-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-primary);
+}
+.li-task-count,
+.li-task-time {
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.li-task-actions {
+  display: inline-flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.li-bar {
+  height: 3px;
+  margin: 8px 0;
+  border-radius: var(--radius-full);
+  background: var(--color-bg-disabled);
+  overflow: hidden;
+}
+.li-bar i {
+  display: block;
+  height: 100%;
+  background: var(--color-accent);
+  transition: width 0.3s ease;
+}
+.li-task.failed .li-bar i { background: var(--color-danger); }
+.li-task.paused .li-bar i { background: var(--color-warning); }
+
+/* 正在跑的那一集 */
+.li-now {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-hover);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+.li-now-title b {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.li-steps {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+.li-steps li {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.li-steps li + li::before {
+  content: '';
+  width: 14px;
+  height: 1px;
+  margin: 0 4px;
+  background: var(--color-border);
+}
+.li-steps li::marker { content: ''; }
+/* 状态不只靠颜色区分：当前步加粗、失败步加下划线 */
+.li-steps li.active { color: var(--color-accent); font-weight: 600; }
+.li-steps li.done { color: var(--color-success); }
+.li-steps li.failed { color: var(--color-danger); text-decoration: underline; }
+
+.li-items-toggle {
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+.li-items-toggle:hover { color: var(--color-text-primary); }
+
+/* 分集列表 */
+.li-items {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.li-items li {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
-  color: var(--color-red);
+  padding: 4px 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
 }
+.li-item-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-border-strong);
+  flex-shrink: 0;
+}
+.li-items li.done .li-item-dot { background: var(--color-success); }
+.li-items li.failed .li-item-dot { background: var(--color-danger); }
+.li-items li.running .li-item-dot { background: var(--color-accent); }
+.li-item-index {
+  width: 18px;
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.li-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.li-item-meta {
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-tertiary);
+}
+.li-items li.failed .li-item-meta { color: var(--color-danger); }
+.li-item-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.li-move {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.li-move:hover:not(:disabled) { background: var(--color-bg-hover); color: var(--color-text-primary); }
+.li-move:disabled { opacity: 0.35; cursor: default; }
 
-/* ── 结果 ── */
-.lc-result {
+/* ── 历史任务 ── */
+.li-history { padding: 10px 14px; }
+.li-history-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--color-border);
+  width: 100%;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  cursor: pointer;
 }
+.li-history-head:hover { color: var(--color-text-primary); }
 
-.lc-result-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  line-height: 1.4;
-}
-
-.lc-result-meta {
+.li-foot {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
   display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* ── 扫码登录 ── */
+.li-qr {
+  display: flex;
+  flex-direction: column;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
-  margin-top: 5px;
-  font-size: 12px;
+  text-align: center;
+}
+.li-qr-img {
+  width: 200px;
+  height: 200px;
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+.li-qr-empty {
+  width: 200px;
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
 }
-
-.lc-badge {
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--color-primary-subtle);
-  color: var(--color-primary);
-  font-size: 11px;
+.li-qr-status {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
 }
-
-.lc-result-actions { display: flex; gap: 8px; align-items: center; }
-
+.li-qr-status.scanned { color: var(--color-accent); }
+.li-qr-status.success { color: var(--color-success); }
+.li-qr-status.expired,
+.li-qr-status.error { color: var(--color-danger); }
 </style>
