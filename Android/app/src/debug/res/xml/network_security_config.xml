@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  【只有 debug 变体用这份】同名资源覆盖 src/main/res/xml/ 的那份。
+
+  为什么要覆盖：联调时后端跑在开发机（或同事的 PC）上，地址形如
+  http://192.168.x.x:8000 / http://10.x.x.x:8000 —— 每个人的局域网 IP 都不一样，
+  而 network-security-config 只支持按域名逐条放行、不支持网段（不能写 192.168.0.0/16）。
+  让每个同学都去改 XML 既麻烦又容易改错，所以干脆：
+
+    · debug    → 全放开明文（这份文件），谁连谁都不用改代码
+    · release  → 仍按 src/main/res/xml/ 的严格白名单（只有 127.0.0.1/localhost/10.0.2.2）
+
+  这是安全的：release 包（真正分发的那个）不包含 debug 源集，这条宽松策略进不去。
+  release 若连 HTTP 明文，会照旧抛 java.net.UnknownServiceException。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

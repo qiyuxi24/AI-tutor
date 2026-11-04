@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 # AI Tutor 一键启动脚本 (PowerShell) —— 唯一启动入口
 #
 #  默认：装了 Docker 且守护进程可用 → 容器模式（docker compose）
@@ -10,11 +10,13 @@
 #    .\start.ps1 -Docker              # 强制容器模式
 #    .\start.ps1 -Docker -Force       # 容器模式并强制重建镜像
 #    .\start.ps1 -Docker -Port 8081   # 容器模式换宿主端口
+#    .\start.ps1 -Local -Lan          # 本机模式 + 后端监听 0.0.0.0（手机/同事经局域网直连）
 # ============================================================
 param(
     [switch]$Local,
     [switch]$Docker,
     [switch]$Force,
+    [switch]$Lan,
     [int]$Port = 0
 )
 
@@ -425,8 +427,17 @@ $backendDir = Join-Path $projectRoot "backend"
 $venvPython = Join-Path $backendDir "venv\Scripts\python.exe"
 $backendLog = Join-Path $projectRoot "logs\uvicorn-dev.log"
 
+# -Lan：后端监听 0.0.0.0，供手机 / 同事的电脑经局域网直连（Android 联调默认走这条路）。
+# 不加 -Lan 时仍是 127.0.0.1（只回环）：这是有意的默认 —— 0.0.0.0 会把服务暴露给整个
+# 局域网，而 JWT 的 SECRET_KEY、SSE token 走 query，公开网络下都不该裸奔。
+$backendHost = if ($Lan) { "0.0.0.0" } else { "127.0.0.1" }
+
 Write-Host "----------------------------------------" -ForegroundColor Cyan
-Write-Host "[后端] 启动 FastAPI 服务 (端口 8000)..." -ForegroundColor Yellow
+if ($Lan) {
+    Write-Host "[后端] 启动 FastAPI 服务 (端口 8000，监听 0.0.0.0 供局域网访问)..." -ForegroundColor Yellow
+} else {
+    Write-Host "[后端] 启动 FastAPI 服务 (端口 8000)..." -ForegroundColor Yellow
+}
 
 # 检查并安装后端依赖
 $backendDepsExit = Invoke-NativeQuiet { & $venvPython -c "import fastapi, uvicorn" }
@@ -456,7 +467,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path $backendLog -Parent) | Out
 #    「Error: Got unexpected extra arguments (- 副本\...\data\prompts)」→ 进程秒退，
 #    而脚本只会报「后端启动超时」（真因在 logs\uvicorn-dev.log）。2026-09-28 踩过一次。
 $promptsDir = Join-Path $projectRoot "data\prompts"
-$backendProcess = Start-Process -FilePath $venvPython -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--reload", "--reload-dir", "app", "--reload-dir", "`"$promptsDir`"", "--no-use-colors" -PassThru -WindowStyle Hidden -WorkingDirectory $backendDir -RedirectStandardError $backendLog
+$backendProcess = Start-Process -FilePath $venvPython -ArgumentList "-m", "uvicorn", "app.main:app", "--host", $backendHost, "--port", "8000", "--reload", "--reload-dir", "app", "--reload-dir", "`"$promptsDir`"", "--no-use-colors" -PassThru -WindowStyle Hidden -WorkingDirectory $backendDir -RedirectStandardError $backendLog
 
 Write-Host "[后端] PID: $($backendProcess.Id)" -ForegroundColor Green
 
@@ -600,6 +611,61 @@ Write-Host "  运维前端:     http://localhost:5174" -ForegroundColor White
 Write-Host "  运维后端:     http://localhost:8001" -ForegroundColor White
 Write-Host "  后端日志:     logs\uvicorn-dev.log" -ForegroundColor White
 Write-Host "  运维后端日志: logs\uvicorn-admin.log" -ForegroundColor White
+Write-Host ""
+
+# ---------- -Lan：输出手机/同事该用的地址，并自检 Windows 防火墙 ----------
+# 直接复用 Docker 分支那套判据：取「默认路由所在网卡」的 IPv4（不能靠网段猜，本机可能
+# 同时有 VirtualBox 192.168.56.1、WSL 172.x 等虚拟网卡，猜错就是"给了个连不上的 IP"）。
+if ($Lan) {
+    $lanIp = $null
+    $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+        Where-Object { $_.NextHop -ne "0.0.0.0" } |
+        Sort-Object RouteMetric | Select-Object -First 1
+    if ($defaultRoute) {
+        $lanIp = (Get-NetIPAddress -InterfaceIndex $defaultRoute.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -notlike "169.254.*" } |
+            Select-Object -First 1).IPAddress
+    }
+
+    if ($lanIp) {
+        Write-Host "  局域网访问 : http://${lanIp}:8000" -ForegroundColor White
+        Write-Host "               ↑ 手机 / 同事的电脑用这个地址，Android 的 baseUrl 填它" -ForegroundColor DarkGray
+        Write-Host "                 （debug 包已放开明文 HTTP，不用改 network_security_config）" -ForegroundColor DarkGray
+    } else {
+        Warn "未检测到局域网 IP（可能未联网），手机将无法直连"
+    }
+
+    # 防火墙自检：本机 self-test 永远 200（本机访问不走入站规则），所以必须单独查规则，
+    # 否则「本机一切正常、手机死活连不上」这个坑会反复出现（Docker 分支踩过一次）。
+    # 认四类规则：Docker Desktop 的端口转发、我们自己的 TutorAgent LAN、以及 Python 的
+    # 程序级放行（uvicorn 就是 python.exe 起的，程序级规则 LocalPort=Any 同样放行 8000）。
+    $curProfile = (Get-NetConnectionProfile -ErrorAction SilentlyContinue | Select-Object -First 1).NetworkCategory
+    if ($curProfile) {
+        $candidates = Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -match "com\.docker\.backend|TutorAgent LAN|^python" }
+        $portAllowed = $false
+        foreach ($rule in $candidates) {
+            if ($rule.Profile -ne "Any" -and $rule.Profile -notmatch $curProfile) { continue }
+            $pf = $rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue
+            if ($pf -and ($pf.LocalPort -eq "Any" -or $pf.LocalPort -eq "8000")) {
+                $portAllowed = $true
+                break
+            }
+        }
+
+        if (-not $portAllowed) {
+            Write-Host ""
+            Warn "局域网访问可能被 Windows 防火墙拦截！"
+            Warn ("  当前网络类别：{0}；未找到放行 8000 端口的入站规则" -f $curProfile)
+            Write-Host "  本机自测 200 不能证明手机能连上（本机访问不走入站规则）。" -ForegroundColor DarkGray
+            Write-Host "  以管理员身份运行下面这条命令即可放行（只需一次）：" -ForegroundColor Yellow
+            Write-Host '    New-NetFirewallRule -DisplayName "TutorAgent LAN 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -Profile Any' -ForegroundColor White
+        } else {
+            Ok "Windows 防火墙已放行 8000（网络类别：$curProfile）"
+        }
+    }
+}
+
 Write-Host ""
 Write-Host "  运维后台管理员: admin / admin123" -ForegroundColor DarkGray
 Write-Host ""

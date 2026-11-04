@@ -8,9 +8,13 @@
 
 ## 0. 五分钟跑起来
 
-**前置**：JDK 21 + Android SDK（本机已装，见下方"本机环境"）。不需要另装 Gradle，模板自带 wrapper。
+**前置**：JDK 21 + Android SDK（本机已装，见下方"本机环境"）。不需要另装 Gradle，模板自带 wrapper。**后端跑在开发机上，手机/模拟器经局域网连**——你不需要自己搭后端。
 
 ```powershell
+# 0) adb 不在 PATH 里，先把它加上（只需要一次，重启终端后失效就重加）
+$env:PATH = "$env:LOCALAPPDATA\Android\Sdk\platform-tools;$env:PATH"
+adb version          # 应输出 Android Debug Bridge version 1.0.41
+
 cd Android
 
 # 1) 编出 APK（第一次约 1.5–6 分钟，之后几十秒）
@@ -19,16 +23,23 @@ cd Android
 
 # 2) 装到已连接的设备/模拟器
 .\gradlew.bat :app:installDebug
-
-# 3) 联调后端（关键一步，别跳过）
-#    先起后端：在仓库根目录跑 .\start.ps1
-#    然后把手机的 8000 端口映射到 PC 的 8000
-adb reverse tcp:8000 tcp:8000
 ```
 
-App 里的 `baseUrl` 用 `http://127.0.0.1:8000`。
+**连后端**：让开发机用局域网模式启动（在仓库根目录）：
 
-> 为什么是 `adb reverse` 而不是填电脑局域网 IP：后端默认只监听 `127.0.0.1`（`start.ps1` 里写死的），手机用局域网 IP 连不上；`adb reverse` 会让手机上的 127.0.0.1:8000 转发到 PC，不用改后端也不用查 IP。走这条路时 `network_security_config.xml` 已经放行了 `127.0.0.1`，不用额外配置。
+```powershell
+.\install.ps1          # 首次必跑：从 .env.example 生成 .env 并自动填随机 SECRET_KEY
+.\start.ps1 -Local -Lan   # 后端监听 0.0.0.0:8000，启动完会打印局域网地址
+```
+
+启动末尾会打印形如 `局域网访问 : http://192.168.x.x:8000` 的一行 —— **那就是 App 的 `baseUrl`**，填进你的网络层配置即可。若同时提示防火墙未放行，按它给的 `New-NetFirewallRule` 命令执行一次（管理员 PowerShell）。
+
+> **为什么 debug 包不用改网络安全配置**：`app/src/debug/res/xml/network_security_config.xml` 在 debug 变体里**全放开明文 HTTP**，所以每个人的局域网 IP 都能直接连，不用改 XML。
+> release 变体仍走 `app/src/main/res/xml/` 的严格白名单（只放行 `127.0.0.1`/`localhost`/`10.0.2.2`）—— debug 源集不会进 release 包，这是安全的。
+>
+> **模拟器另有一条路**：模拟器和开发机在同一台机器时，用 `adb reverse tcp:8000 tcp:8000` 把手机的 127.0.0.1:8000 转发到 PC，`baseUrl` 用 `http://127.0.0.1:8000`。真机跨设备联调则必须走上面的局域网地址。
+
+> **`baseUrl` 写在哪**：建议放 `buildConfigField` 或 `local.properties` 读取，别硬编码在 Kotlin 文件里 —— 每个同学的环境不同，硬编码会在提交时互相覆盖。
 
 **本机环境（已确认可用，别自己重装）**
 

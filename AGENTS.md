@@ -102,7 +102,8 @@
 | JVM 单元测试 | `.\gradlew.bat :app:testDebugUnitTest`（`app/src/test/`） |
 | 真机/模拟器测试 | `.\gradlew.bat :app:connectedDebugAndroidTest`（需设备在线） |
 | 查工具链 | `.\gradlew.bat --version`（`Launcher JVM` 应显示 21.0.10） |
-| 联调后端 | 先起后端（根目录 `.\start.ps1`），再 `adb reverse tcp:8000 tcp:8000`，App 里 baseUrl 用 `http://127.0.0.1:8000` |
+| 联调后端（推荐） | 根目录 `.\start.ps1 -Local -Lan`（后端监听 `0.0.0.0:8000`，启动末尾打印局域网地址）→ App 的 baseUrl 填那个 `http://<LAN-IP>:8000` |
+| 联调后端（模拟器同机） | 先起后端（`.\start.ps1`），再 `adb reverse tcp:8000 tcp:8000`，baseUrl 用 `http://127.0.0.1:8000` |
 
 **两个必须先处理的环境坑**（不是代码问题，别去改 gradle 配置）：
 1. **沙箱下 gradle 必失败**：`AccessDeniedException: …\.gradle\wrapper\dists\…zip.lck` —— Gradle 要写 `~/.gradle`。会话切「完全权限」，或把 `GRADLE_USER_HOME` 指到工作区内（`mklink /J` 在沙箱下也建不了，别试）。
@@ -144,7 +145,7 @@
 - **后端是唯一真值**：契约有疑问直接读 `backend/app/api/v1/*.py` 的 docstring 与 Pydantic model，别信文档里的转述。
 - 建议分层（当前只有 `MainActivity.kt`，新代码按此落）：`data/`（OkHttp client、DTO、Repository、SSE 事件解析）/ `domain/`（用例）/ `ui/feature/<tab>/`（Compose + ViewModel）。`ui/theme/` 已有 Material3 动态取色，直接用 `MyApplicationTheme`。
 - 模板里要改的占位：包名 `com.example.myapplication`（改 = `namespace`+`applicationId`+目录+`MainActivity` 等 import+`themes.xml` 的 `Theme.MyApplication`+`ExampleInstrumentedTest.kt:22` 的断言，共 6 处）、`res/values/strings.xml` 的 `My Application`、`rootProject.name = "My Application"`。
-- **本地明文 HTTP 已配好**：`app/src/main/res/xml/network_security_config.xml` 只放行 `127.0.0.1` / `localhost` / `10.0.2.2` 三个回环与模拟器地址，已在 manifest 里用 `android:networkSecurityConfig` 挂上。真机走局域网 IP 时要临时加 `<domain>`，**别为了图省事写 `<base-config cleartextTrafficPermitted="true">`**（那等于全站放行）。正式包连 HTTPS 域名时这份配置自然失效。
+- **本地明文 HTTP 已配好，分两套**：`app/src/main/res/xml/network_security_config.xml`（release 用）只放行 `127.0.0.1` / `localhost` / `10.0.2.2`；**`app/src/debug/res/xml/network_security_config.xml`（debug 用）同名覆盖、全放开明文** —— 因为联调时后端在开发机上，每个人的局域网 IP 都不同，而 network-security-config 不支持网段，让每个人改 XML 既麻烦又改错。debug 源集不进 release 包，所以 release 仍禁止明文。**别把 debug 那份的宽松写法搬到 main 那份里**。
 - **开工前先读 `Android/README.md`**：里面有 tab 骨架、第一个里程碑（跑通登录 + 一轮对话流）、以及"哪些事不要自己拍板"的清单。它是给人看的，本文件（AGENTS.md）是给 agent 看的，两者视角不同别互相复制。
 
 ## 6. 文档路由（要查什么去哪）

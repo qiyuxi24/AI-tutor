@@ -7,8 +7,10 @@
   没有白名单时 OkHttp 会抛 java.net.UnknownServiceException: CLEARTEXT communication
   not permitted —— 报错看着像网络问题，实际是安全策略拦的。
 
-  只放行回环地址：真机走局域网 IP 时请临时加 <domain>，或直接让后端上 HTTPS。
-  release 包若连的是 https:// 域名，这里一条都用不上，保持原样即可。
+  只放行回环地址。**注意 debug 变体有一份同名覆盖**（`app/src/debug/res/xml/`），
+  那份全放开明文，所以联调时无论手机连哪个局域网 IP 都不用改这里的 XML。
+  本文件只在 release 包生效 —— 它保证真正分发出去的 APK 仍然禁止明文 HTTP。
+  release 若连的是 https:// 域名，这里一条都用不上，保持原样即可。
 -->
 <network-security-config>
     <domain-config cleartextTrafficPermitted="true">
