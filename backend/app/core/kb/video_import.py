@@ -759,17 +759,20 @@ def _slides_from_video(video: Path, workdir: Path, slide_dir: Path | None,
     return slides
 
 
-def expand(url: str, *, cookie: str | None = None
-           ) -> tuple[str, list[tuple[str, str]]]:
-    """链接 → `(合集标题, [(分集 URL, 分集标题)])`；非 B 站/单集就是一条。
+def discover(url: str, *, cookie: str | None = None
+             ) -> tuple[str, list[dict]]:
+    """链接 → `(合集标题, [{url, title, duration}])`；非 B 站/单集就是一条。
 
     只认 B 站：多 P 与 ugc_season 有稳定公开接口；YouTube 等播放列表要 yt-dlp
     `extract_flat`，会在**入队时**就联网下载元信息 —— 队列的失败重试语义会被提前
     消耗掉，所以播放列表展开放到"逐个提交多条链接"由用户决定（见模块 docstring）。
+
+    带 `duration`（秒，未知为 0）是给**预检**用的：用户要知道"这个合集是 40 集 × 20 分钟"
+    才能判断值不值得排队。`expand` 是本函数的薄包装（同一份发现逻辑，别抄第二遍）。
     """
     ref = bili_urls.normalize(url)
     if not ref.is_bilibili or ref.page > 1:
-        return "", [(ref.url, ref.filename_stem)]
+        return "", [{"url": ref.url, "title": ref.filename_stem, "duration": 0}]
     problems: list[str] = []
     coll = bili_collection.expand(
         ref.bvid or f"av{ref.aid}", page=ref.page,
@@ -777,4 +780,28 @@ def expand(url: str, *, cookie: str | None = None
     )
     if problems:
         logger.info("合集展开降级为单集（%s）：%s", ref.raw, "；".join(problems))
-    return coll.title, [(ep.url, ep.title or ep.bvid) for ep in coll.items]
+    return coll.title, [{"url": ep.url, "title": ep.title or ep.bvid,
+                         "duration": ep.duration} for ep in coll.items]
+
+
+def expand(url: str, *, cookie: str | None = None
+           ) -> tuple[str, list[tuple[str, str]]]:
+    """`discover` 的 `(url, title)` 视图（排队只关心这两样，时长留给预检）。"""
+    title, episodes = discover(url, cookie=cookie)
+    return title, [(ep["url"], ep["title"]) for ep in episodes]
+
+
+def subtitle_probe(url: str, *, cookie: str | None = None) -> str:
+    """这条链接能不能**不下载**就拿到字幕；返回来源标志（空 = 没有/查不到）。
+
+    预检专用：只查 B 站平台直取（零依赖、零成本的那条路）。非 B 站要 yt-dlp 才知道，
+    那等于先下载一遍，不适合放在"先检查一下"里。
+    """
+    ref = bili_urls.normalize(url)
+    if not ref.is_bilibili:
+        return ""
+    problems: list[str] = []
+    pick = bili_subtitle.fetch_subtitle(
+        ref.bvid, page=ref.page,
+        cookie=_cookie_header() if cookie is None else cookie, problems=problems)
+    return f"bilibili-{pick.source}" if pick is not None else ""

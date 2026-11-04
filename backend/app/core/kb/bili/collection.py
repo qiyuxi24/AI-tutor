@@ -30,11 +30,16 @@ KIND_SEASON = "season"
 
 @dataclass(frozen=True)
 class Episode:
-    """一集。`page` 只对分 P 有意义（合集条目各自是第 1 P）。"""
+    """一集。`page` 只对分 P 有意义（合集条目各自是第 1 P）。
+
+    `duration` 是秒数（上游 view 接口给的），只用于**预检展示**与"这活儿要多久"的
+    粗略判断 —— 取词与排队都不依赖它，拿不到就是 0，不猜。
+    """
 
     bvid: str
     page: int = 1
     title: str = ""
+    duration: int = 0
 
     @property
     def url(self) -> str:
@@ -62,7 +67,8 @@ def _episodes_from_pages(data: Mapping[str, object], bvid: str) -> tuple[Episode
         except (TypeError, ValueError):
             continue
         out.append(Episode(bvid=bvid, page=page_no,
-                           title=str((raw or {}).get("part") or "")))
+                           title=str((raw or {}).get("part") or ""),
+                           duration=_int((raw or {}).get("duration"))))
     return tuple(out)
 
 
@@ -76,8 +82,17 @@ def _episodes_from_season(data: Mapping[str, object]) -> tuple[Episode, ...]:
                 continue
             arc = episode.get("arc") or {}
             title = str(episode.get("title") or arc.get("title") or "")
-            out.append(Episode(bvid=bvid, page=1, title=title))
+            out.append(Episode(bvid=bvid, page=1, title=title,
+                               duration=_int(arc.get("duration"))))
     return tuple(out)
+
+
+def _int(value: object) -> int:
+    """上游时长字段时有时无（int / str / 缺）；非数字一律当 0，不抛。"""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def expand(bvid: str, *, page: int = 1, cookie: str = "",
@@ -115,7 +130,8 @@ def expand(bvid: str, *, page: int = 1, cookie: str = "",
         if len(pages) > 1:
             return Collection(title=title, items=pages, kind=KIND_PAGES)
 
-        only = pages[0] if pages else Episode(bvid=bvid, page=1)
+        only = pages[0] if pages else Episode(
+            bvid=bvid, page=1, duration=_int(data.get("duration")))
         return Collection(title=title, items=(only,), kind=KIND_SINGLE)
     except Exception as e:  # noqa: BLE001 - 展开是增强项，失败只降级
         note(f"合集展开失败：{type(e).__name__}: {e}")

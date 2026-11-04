@@ -11,7 +11,11 @@
   GET    /kb/search                  - 在目录范围内语义检索
   POST   /kb/context                 - 收集目录范围内的文件节点（进上下文用）
   GET    /kb/import/probe            - 视频导入的外部依赖探测（yt-dlp/ffmpeg/ASR 模型）
+  POST   /kb/import/inspect          - 导入前预检（可选，不建任务：标题/集数/时长/字幕）
   POST   /kb/import/lecture          - 导入视频课程链接为讲义（后台长任务）
+  GET    /kb/import/tasks            - 导入队列快照（分集状态 + 步骤 + 耗时/剩余估计）
+  POST   /kb/import/tasks/{id}/{action}          - 任务级 pause/resume/cancel/retry
+  POST   /kb/import/tasks/{id}/items/{iid}/{action} - 分集级 retry/cancel
   GET    /kb/bili/login/qrcode       - B 站扫码登录：取二维码（PNG data URL）
   GET    /kb/bili/login/poll         - B 站扫码登录：轮询状态（成功后凭证落盘）
   GET    /kb/stats                   - 索引统计
@@ -85,6 +89,16 @@ class LectureImportRequest(BaseModel):
     slides: bool = Field(False, description="抽幻灯片截图（要下载视频，慢一些）")
 
 
+class LectureInspectRequest(BaseModel):
+    """导入前预检（可选）：只读探测，不建任务、不占队列。"""
+    url: str = Field("", max_length=2000)
+    urls: List[str] = Field(default_factory=list, max_length=20)
+    transcript_source: str = Field("auto", pattern="^(auto|subtitle|asr)$")
+    asr_model: str = Field("", max_length=100)
+    expand: bool = Field(True)
+    slides: bool = Field(False)
+
+
 class ReorderRequest(BaseModel):
     item_id: int
     delta: int = Field(..., ge=-1, le=1, description="-1 上移 / +1 下移")
@@ -153,6 +167,23 @@ async def upload_file(file: UploadFile = File(...),
 async def import_probe(user_id: int = Depends(get_current_user)):
     """外部依赖探测（yt-dlp / ffmpeg / 转写模型名），供前端提前提示，避免用户白等"""
     return video_import.probe()
+
+
+@router.post("/kb/import/inspect")
+async def import_inspect(req: LectureInspectRequest,
+                         user_id: int = Depends(get_current_user)):
+    """导入前预检（**可选**路径）：标题 / 集数 / 总时长 / 有没有字幕 / 缺哪些依赖。
+
+    不建任务、不入队、零副作用。前端只在用户点「先检查」时调用 —— 多一次点击对熟手
+    是负担，但"40 集合集 + 没字幕"这种昂贵情况值得先看一眼。
+    """
+    links = [req.url] + list(req.urls)
+    try:
+        return await import_queue.inspect(
+            user_id, links, transcript_source=req.transcript_source,
+            asr_model=req.asr_model or None, slides=req.slides, expand=req.expand)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/kb/bili/login/qrcode")
@@ -232,10 +263,41 @@ async def list_import_tasks(limit: int = Query(20, ge=1, le=100),
     return {"tasks": import_queue.list_tasks(user_id, limit)}
 
 
+@router.post("/kb/import/tasks/{task_id}/reorder")
+async def import_task_reorder(task_id: str, req: ReorderRequest,
+                              user_id: int = Depends(get_current_user)):
+    """调整待办分集的顺序（上移/下移一格）。
+
+    ⚠️ 必须注册在下面的 `/{action}` 之前：两条路径的段数相同，Starlette 按注册顺序匹配，
+    放到后面就会被当成 action="reorder" 吃掉（曾是 404「不支持的操作」）。
+    """
+    try:
+        import_queue.reorder(user_id, task_id, req.item_id, req.delta)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok"}
+
+
+@router.post("/kb/import/tasks/{task_id}/items/{item_id}/{action}")
+async def import_item_action(task_id: str, item_id: int, action: str,
+                             user_id: int = Depends(get_current_user)):
+    """单集操作：`retry`（只认失败的）/ `cancel`（只认还没开跑的）。"""
+    handlers = {"retry": import_queue.retry_item, "cancel": import_queue.cancel_item}
+    handler = handlers.get(action)
+    if handler is None:
+        raise HTTPException(status_code=404,
+                            detail=f"不支持的操作 {action}（可用：{'/'.join(handlers)}）")
+    try:
+        handler(user_id, task_id, item_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok"}
+
+
 @router.post("/kb/import/tasks/{task_id}/{action}")
 async def import_task_action(task_id: str, action: str,
                              user_id: int = Depends(get_current_user)):
-    """队列操作：`pause` / `resume` / `cancel` / `retry`。"""
+    """队列操作：`pause` / `resume` / `cancel` / `retry`（整批）。"""
     handlers = {
         "pause": import_queue.pause,
         "resume": import_queue.resume,
@@ -251,17 +313,6 @@ async def import_task_action(task_id: str, action: str,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"status": "ok", "action": action, "result": result}
-
-
-@router.post("/kb/import/tasks/{task_id}/reorder")
-async def import_task_reorder(task_id: str, req: ReorderRequest,
-                              user_id: int = Depends(get_current_user)):
-    """调整待办分集的顺序（上移/下移一格）。"""
-    try:
-        import_queue.reorder(user_id, task_id, req.item_id, req.delta)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "ok"}
 
 
 @router.get("/kb/slides/{asset_key}/{name}")

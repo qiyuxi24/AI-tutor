@@ -272,7 +272,14 @@ class KbManager:
 
         # verbose=True 取回完整 ParseResult：meta 记录解析方式/页数/OCR 页数/乱码率
         # （解析契约见 parsers/base.py 与 docs/RAG/RAG_文档解析（含视觉与PDF）_调研与实施方案.md §4.6）
-        parsed = parse_document(filename, content, verbose=True)
+        #
+        # 必须在工作线程里解析：这是**同步重活**（扫描版 PDF 逐页 OCR、电子书
+        # ebook-convert 是 subprocess，实测可达分钟级）。若直接在事件循环里调用，
+        # 单 worker 部署下期间**所有用户的对话与 SSE 一起停摆** —— 症状是
+        # "别人的请求超时"，而不是"上传慢"，极难归因。
+        # 只搬解析这一段：它内部无 await、不碰共享可变状态，是纯函数，搬出去安全。
+        # （分块/写库那一段耗时是秒级，且中间夹着 `await _embed`，不在本次范围。）
+        parsed = await asyncio.to_thread(parse_document, filename, content, verbose=True)
         text = parsed.text
         if parsed.meta:
             logger.info(f"解析 {filename} 完成: {parsed.meta}")

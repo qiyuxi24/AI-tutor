@@ -103,12 +103,14 @@ class KbStore:
                     url        TEXT NOT NULL,
                     title      TEXT DEFAULT '',
                     status     TEXT DEFAULT 'pending',  -- pending/running/done/failed/canceled
+                    stage      TEXT DEFAULT '',         -- 当前步骤（video_import.STAGE_*）
                     node_id    INTEGER,
                     chars      INTEGER DEFAULT 0,
                     source     TEXT DEFAULT '',
                     error      TEXT DEFAULT '',
                     position   INTEGER DEFAULT 0,
                     created_at TEXT DEFAULT (datetime('now')),
+                    started_at TEXT,
                     finished_at TEXT
                 )
             """)
@@ -116,6 +118,18 @@ class KbStore:
                 "CREATE INDEX IF NOT EXISTS idx_import_items_task "
                 "ON import_items (task_id, status, position)"
             )
+            # 老库补列（同 documents.asset_key 的道理：CREATE TABLE IF NOT EXISTS 不加字段）。
+            # stage / started_at 是"刷新后还能看到在第几步、还要多久"的唯一依据 ——
+            # 进度事件本身是瞬态的（`import_queue._progress`），不落库就刷新即失忆。
+            cols = {row["name"] for row in
+                    self._conn.execute("PRAGMA table_info(import_items)").fetchall()}
+            for column, ddl in (
+                ("stage", "TEXT DEFAULT ''"),
+                ("started_at", "TEXT"),
+            ):
+                if column not in cols:
+                    self._conn.execute(
+                        f"ALTER TABLE import_items ADD COLUMN {column} {ddl}")
 
     def close(self) -> None:
         self._conn.close()
@@ -358,7 +372,11 @@ class KbStore:
         return dict(row) if row else None
 
     def list_import_tasks(self, user_id: int, limit: int = 20) -> list[dict]:
-        """最近的任务 + 各自的分集（前端队列面板用）。"""
+        """最近的任务 + 各自的分集（前端队列面板用）。
+
+        分集带上 `duration_secs`（本集实际用时）：队列行要显示"这集跑了多久 / 还要多久"，
+        而 `created_at` 是入队时间（整批相同），只有 `started_at → finished_at` 才是耗时。
+        """
         rows = self._conn.execute(
             "SELECT * FROM import_tasks WHERE user_id = ?"
             " ORDER BY created_at DESC, rowid DESC LIMIT ?",
@@ -368,11 +386,54 @@ class KbStore:
         for row in rows:
             task = dict(row)
             task["items"] = [dict(r) for r in self._conn.execute(
-                "SELECT * FROM import_items WHERE task_id = ? ORDER BY position, id",
+                "SELECT *, CASE WHEN started_at IS NOT NULL AND finished_at IS NOT NULL"
+                " THEN CAST((julianday(finished_at) - julianday(started_at)) * 86400 AS INTEGER)"
+                " END AS duration_secs"
+                " FROM import_items WHERE task_id = ? ORDER BY position, id",
                 (task["id"],),
             ).fetchall()]
             tasks.append(task)
         return tasks
+
+    def import_task_progress(self, task_id: str) -> dict:
+        """任务级耗时与剩余估计（只做算术，不猜）。
+
+        `eta_secs` 用**本任务已完成分集的平均耗时 × 待办数**；一集都没跑完时返回 0，
+        前端显示"估算中"——比编一个数字诚实，也避免用户按假 ETA 安排时间。
+        """
+        task = self.get_import_task(task_id) or {}
+        avg = self._conn.execute(
+            "SELECT AVG((julianday(finished_at) - julianday(started_at)) * 86400.0) AS secs"
+            " FROM import_items WHERE task_id = ?"
+            " AND started_at IS NOT NULL AND finished_at IS NOT NULL", (task_id,),
+        ).fetchone()["secs"] or 0.0
+        left = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM import_items WHERE task_id = ?"
+            " AND status IN ('pending', 'running')", (task_id,),
+        ).fetchone()["n"]
+        running = self._conn.execute(
+            "SELECT (julianday('now') - julianday(started_at)) * 86400.0 AS secs"
+            " FROM import_items WHERE task_id = ? AND status = 'running'"
+            " AND started_at IS NOT NULL LIMIT 1", (task_id,),
+        ).fetchone()
+        started = self._conn.execute(
+            "SELECT MIN(started_at) AS t FROM import_items WHERE task_id = ?"
+            " AND started_at IS NOT NULL", (task_id,),
+        ).fetchone()["t"]
+        # 起点：第一集真正开始的时间；一集都没开始 → 建任务时间
+        begin = started or task.get("created_at") or ""
+        end = task.get("finished_at")
+        elapsed = self._conn.execute(
+            "SELECT CAST((julianday(COALESCE(?, 'now')) - julianday(?)) * 86400 AS INTEGER) AS secs",
+            (end, begin),
+        ).fetchone()["secs"] or 0
+        return {
+            "elapsed_secs": max(0, int(elapsed)),
+            "running_secs": round(float(running["secs"] or 0)) if running else 0,
+            "avg_item_secs": round(avg),
+            "eta_secs": round(avg * left) if avg else 0,
+        }
+
 
     def set_import_task_status(self, task_id: str, status: str,
                               error: Optional[str] = None) -> None:
@@ -411,17 +472,38 @@ class KbStore:
     def set_import_item_status(self, item_id: int, status: str, *,
                                node_id: Optional[int] = None, chars: int = 0,
                                source: str = "", error: str = "") -> None:
+        """改分集状态，并顺带维护计时：running 记 started_at，退回 pending 清掉它。
+
+        `started_at` 是队列"这集跑了多久 / 还要多久"的唯一数据来源；
+        重试（pending）必须清空，否则同一集重跑会把上一次的时长算进去。
+        """
         with self._conn:
             self._conn.execute(
                 "UPDATE import_items SET status = ?,"
                 " node_id = COALESCE(?, node_id), chars = ?,"
                 " source = CASE WHEN ? = '' THEN source ELSE ? END,"
                 " error = ?,"
+                " stage = CASE WHEN ? = 'pending' THEN '' ELSE stage END,"
+                " started_at = CASE"
+                "   WHEN ? = 'running' AND started_at IS NULL THEN datetime('now')"
+                "   WHEN ? = 'pending' THEN NULL"
+                "   ELSE started_at END,"
                 " finished_at = CASE WHEN ? IN ('done','failed','canceled')"
                 " THEN datetime('now') ELSE finished_at END"
                 " WHERE id = ?",
-                (status, node_id, chars, source, source, error, status, item_id),
+                (status, node_id, chars, source, source, error,
+                 status, status, status, status, item_id),
             )
+
+    def set_import_item_stage(self, item_id: int, stage: str) -> None:
+        """只记当前步骤（进度落库）。
+
+        事件本身仍是瞬态的（前端拿来实时刷新），但阶段必须留在库里：
+        刷新/换设备后 `running` 这一行要能回答"它卡在哪一步"，而不是只剩一个状态词。
+        """
+        with self._conn:
+            self._conn.execute(
+                "UPDATE import_items SET stage = ? WHERE id = ?", (stage[:20], item_id))
 
     def refresh_import_task(self, task_id: str) -> dict:
         """重算计数；没有待办分集时收尾（done / failed）。返回任务行。"""
@@ -439,11 +521,14 @@ class KbStore:
                 " WHERE id = ?", (done, failed, task_id),
             )
         if left == 0 and task.get("status") not in ("paused", "canceled"):
-            # 一集都没成功 = 失败；部分成功仍记 done，失败明细留在分集里
-            self.set_import_task_status(
-                task_id, "done" if done else "failed",
-                error="" if done else "全部分集导入失败",
-            )
+            # 一集都没成功 = 失败；部分成功仍记 done，失败明细留在分集里。
+            # 全被用户取消（没有成功也没有失败）→ canceled，别报成"全部分集导入失败"
+            if done:
+                self.set_import_task_status(task_id, "done")
+            elif failed:
+                self.set_import_task_status(task_id, "failed", error="全部分集导入失败")
+            else:
+                self.set_import_task_status(task_id, "canceled")
         return self.get_import_task(task_id) or {}
 
     def cancel_import_task(self, task_id: str) -> None:
@@ -462,15 +547,44 @@ class KbStore:
         """失败的分集退回 pending（重试）；返回被重置的条数。"""
         with self._conn:
             cur = self._conn.execute(
-                "UPDATE import_items SET status = 'pending', error = ''"
+                "UPDATE import_items SET status = 'pending', error = '', stage = '',"
+                " started_at = NULL, finished_at = NULL"
                 " WHERE task_id = ? AND status = 'failed'", (task_id,),
             )
             if cur.rowcount:
-                self._conn.execute(
-                    "UPDATE import_tasks SET status = 'pending', finished_at = NULL,"
-                    " updated_at = datetime('now') WHERE id = ?", (task_id,),
-                )
+                self._reopen_import_task(task_id)
             return cur.rowcount
+
+    def retry_import_item(self, task_id: str, item_id: int) -> bool:
+        """单集重试（只认 failed 的分集）；返回是否真的重置了。"""
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE import_items SET status = 'pending', error = '', stage = '',"
+                " started_at = NULL, finished_at = NULL"
+                " WHERE id = ? AND task_id = ? AND status = 'failed'",
+                (item_id, task_id),
+            )
+            if cur.rowcount:
+                self._reopen_import_task(task_id)
+            return bool(cur.rowcount)
+
+    def cancel_import_item(self, task_id: str, item_id: int) -> bool:
+        """取消某一集待办（只认 pending：正在跑的那集跑完为止，见 import_queue 的说明）。"""
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE import_items SET status = 'canceled', stage = '',"
+                " finished_at = datetime('now')"
+                " WHERE id = ? AND task_id = ? AND status = 'pending'",
+                (item_id, task_id),
+            )
+            return bool(cur.rowcount)
+
+    def _reopen_import_task(self, task_id: str) -> None:
+        """把已收尾的任务翻回 pending，让 worker 重新取走（重试的唯一入口）。"""
+        self._conn.execute(
+            "UPDATE import_tasks SET status = 'pending', finished_at = NULL,"
+            " updated_at = datetime('now') WHERE id = ?", (task_id,),
+        )
 
     def reorder_import_item(self, task_id: str, item_id: int, delta: int) -> None:
         """把某个待办分集上移/下移一格（delta = -1 / +1）。"""
