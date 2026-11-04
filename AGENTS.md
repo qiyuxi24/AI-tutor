@@ -144,7 +144,8 @@
 - **后端是唯一真值**：契约有疑问直接读 `backend/app/api/v1/*.py` 的 docstring 与 Pydantic model，别信文档里的转述。
 - 建议分层（当前只有 `MainActivity.kt`，新代码按此落）：`data/`（OkHttp client、DTO、Repository、SSE 事件解析）/ `domain/`（用例）/ `ui/feature/<tab>/`（Compose + ViewModel）。`ui/theme/` 已有 Material3 动态取色，直接用 `MyApplicationTheme`。
 - 模板里要改的占位：包名 `com.example.myapplication`（改 = `namespace`+`applicationId`+目录+`MainActivity` 等 import+`themes.xml` 的 `Theme.MyApplication`+`ExampleInstrumentedTest.kt:22` 的断言，共 6 处）、`res/values/strings.xml` 的 `My Application`、`rootProject.name = "My Application"`。
-- **本地明文 HTTP**：Android 9+ 默认禁明文，若要 `http://` 联调，得加 `res/xml/network_security_config.xml` 并只在 debug 生效；正式包必须 HTTPS。
+- **本地明文 HTTP 已配好**：`app/src/main/res/xml/network_security_config.xml` 只放行 `127.0.0.1` / `localhost` / `10.0.2.2` 三个回环与模拟器地址，已在 manifest 里用 `android:networkSecurityConfig` 挂上。真机走局域网 IP 时要临时加 `<domain>`，**别为了图省事写 `<base-config cleartextTrafficPermitted="true">`**（那等于全站放行）。正式包连 HTTPS 域名时这份配置自然失效。
+- **开工前先读 `Android/README.md`**：里面有 tab 骨架、第一个里程碑（跑通登录 + 一轮对话流）、以及"哪些事不要自己拍板"的清单。它是给人看的，本文件（AGENTS.md）是给 agent 看的，两者视角不同别互相复制。
 
 ## 6. 文档路由（要查什么去哪）
 

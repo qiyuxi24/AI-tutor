@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  明文 HTTP 白名单。
+
+  为什么必须有这个文件：targetSdk 36 下 Android 默认禁止明文 HTTP（API 28 起），
+  而本地联调的后端是 http://127.0.0.1:8000（配合 adb reverse tcp:8000 tcp:8000）。
+  没有白名单时 OkHttp 会抛 java.net.UnknownServiceException: CLEARTEXT communication
+  not permitted —— 报错看着像网络问题，实际是安全策略拦的。
+
+  只放行回环地址：真机走局域网 IP 时请临时加 <domain>，或直接让后端上 HTTPS。
+  release 包若连的是 https:// 域名，这里一条都用不上，保持原样即可。
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <!-- 10.0.2.2 = Android 模拟器里访问宿主机 localhost 的固定地址；
+             用模拟器且没开 adb reverse 时走这条 -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

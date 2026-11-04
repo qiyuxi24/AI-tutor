@@ -46,6 +46,12 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    // 网络层：REST 与 SSE 共用同一个 OkHttpClient（不引 Retrofit，理由见 libs.versions.toml）
+    implementation(libs.okhttp)
+    implementation(libs.gson)
+    // 日志拦截器只在 debug 变体：release 包里不能出现请求/响应体日志
+    debugImplementation(libs.okhttp.logging)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
