@@ -34,6 +34,27 @@ _COLUMN_MIGRATIONS = {
     "deleted_at": "REAL",      # 墓碑：非空 = 已删（跨端传播用，不物理删）
 }
 
+# 索引（2026-11-04）：本表全部读路径都是
+#   `WHERE user_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC`
+# 而 `_create_table` 只给了 `PRIMARY KEY (id, user_id)` —— 即全表扫 + 无索引排序。
+# 两个都建 **partial index**：活行与墓碑互不污染索引体积（墓碑长期占少数）。
+# 老库由 `_ensure_indexes` 就地补（没有 `_auto_migrate`，与补列同款）。
+_INDEXES = {
+    # 列表页：list_conversations / _all_conversations
+    "idx_conversations_user_updated":
+        "CREATE INDEX IF NOT EXISTS idx_conversations_user_updated "
+        "ON conversations(user_id, updated_at DESC) WHERE deleted_at IS NULL",
+    # 墓碑传播：tombstones()，每次多端 sync 都调
+    "idx_conversations_tombstones":
+        "CREATE INDEX IF NOT EXISTS idx_conversations_tombstones "
+        "ON conversations(user_id, deleted_at) WHERE deleted_at IS NOT NULL",
+}
+
+# 墓碑保留期。**不能按"删了就走"**：墓碑要活到每台设备都见过它为止，
+# 否则离线设备下次 sync 会把这个对话复活（`save_conversation` 的墓碑拦截
+# 只对"库里还有这行"生效）。90 天 = 离线三个月的设备本就该重新拉全量。
+_TOMBSTONE_RETENTION_DAYS = 90
+
 # 未删除的行（所有读路径的唯一过滤条件，别再各写一份）
 _LIVE = "deleted_at IS NULL"
 
@@ -82,6 +103,7 @@ class ConversationStore:
                 )
             """)
         self._ensure_columns()
+        self._ensure_indexes()
 
     def _ensure_columns(self) -> None:
         """老库补列（新建库已含 deleted_at，这里对它是 no-op）"""
@@ -90,6 +112,18 @@ class ConversationStore:
             for name, ddl in _COLUMN_MIGRATIONS.items():
                 if name not in have:
                     self._conn.execute(f"ALTER TABLE conversations ADD COLUMN {name} {ddl}")
+
+    def _ensure_indexes(self) -> None:
+        """老库补索引。`CREATE INDEX IF NOT EXISTS` 本身幂等，但这里显式比对
+        `index_list` 先跳过已存在的，免得每次请求（每次 new 一个 store）都白写一遍 DDL。
+        """
+        have = {r["name"] for r in self._conn.execute("PRAGMA index_list(conversations)")}
+        missing = [(n, ddl) for n, ddl in _INDEXES.items() if n not in have]
+        if not missing:
+            return
+        with self._conn:
+            for _, ddl in missing:
+                self._conn.execute(ddl)
 
     def close(self) -> None:
         """关闭数据库连接"""
@@ -386,3 +420,39 @@ class ConversationStore:
             })
         return {"conversations": self._all_conversations(),
                 "tombstones": self.tombstones()}
+
+
+# ════════════════════════════════════════════
+#  墓碑回收（每日 GC 调用，跨用户全局）
+# ════════════════════════════════════════════
+
+def purge_tombstones(days: float | None = None, *,
+                     data_dir: Optional[Path] = None) -> dict:
+    """物理删除超过保留期的墓碑行。返回值形状对齐 `main.py::_prune_once` 的 `_JOBS` 契约。
+
+    :param days: 保留天数（默认 `_TOMBSTONE_RETENTION_DAYS` = 90）
+    :param data_dir: 覆盖库目录（测试注入 tmp_path 用）
+    :return: {"deleted": n, "stripped": 0}（stripped 恒 0 —— 本表没有可摘的大字段）
+
+    **为什么不按用户跑**：与 `agent_runs` / `notices` 同款，每日 GC 是全局任务，
+    按用户循环会把 20 次连接变成 20 次建目录的风险点。
+
+    **库不存在时不建库**：GC 会扫所有用户，任何一次误建目录都是副作用
+    （`kb_store.purge_orphan_questions` 同款约定）。
+    """
+    db_path = (Path(data_dir) if data_dir else storage.conversations_dir()) / "conversations.db"
+    if not db_path.exists():
+        return {"deleted": 0, "stripped": 0}
+
+    cutoff = time.time() - (_TOMBSTONE_RETENTION_DAYS if days is None else days) * 86400
+    conn = sqlite3.connect(str(db_path), timeout=10.0)
+    try:
+        conn.execute("PRAGMA busy_timeout=10000")
+        with conn:
+            cur = conn.execute(
+                "DELETE FROM conversations WHERE deleted_at IS NOT NULL AND deleted_at < ?",
+                (cutoff,),
+            )
+            return {"deleted": cur.rowcount, "stripped": 0}
+    finally:
+        conn.close()

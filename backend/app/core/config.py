@@ -94,6 +94,13 @@ class Settings:
     # ─── 启动 / 管理员 ───
     default_admin_password: str = ""
 
+    # ─── API 文档开关（/docs、/redoc、/openapi.json）───
+    # 默认关：这三个入口会把**全部 103 条路由的路径、参数、schema 与错误码**一次性
+    # 吐给任何访问者，等于免费给出一份系统地图（商用/比赛演示都不该暴露）。
+    # 本地开发想看 Swagger 就在 .env 里写 API_DOCS_ENABLED=true。
+    # 注意 /api/health 不受影响 —— 健康检查与 docker healthcheck 都依赖它。
+    api_docs_enabled: bool = False
+
     # ─── 网页搜索（MCP 工具 web_search，见 core/agent_tools/mcp_host.py）───
     # 关掉即回到原生 8 工具（不加载 MCP server，无需重启以外的清理）
     web_search_enabled: bool = True
@@ -151,6 +158,7 @@ class Settings:
             cors_allow_methods=_parse_list(os.getenv("CORS_ALLOW_METHODS"), ["*"]),
             cors_allow_headers=_parse_list(os.getenv("CORS_ALLOW_HEADERS"), ["*"]),
             default_admin_password=os.getenv("DEFAULT_ADMIN_PASSWORD", ""),
+            api_docs_enabled=_parse_bool(os.getenv("API_DOCS_ENABLED"), False),
             web_search_enabled=_parse_bool(os.getenv("WEB_SEARCH_ENABLED"), True),
             searxng_url=os.getenv("SEARXNG_URL", ""),
             web_archive_max_pages=int(os.getenv("WEB_ARCHIVE_MAX_PAGES", "2")),

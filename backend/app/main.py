@@ -93,13 +93,15 @@ async def lifespan(app: FastAPI):
     # 唯一落点：新增记录表只需在 _JOBS 加一行，不必再抄一遍"启动 + 每日"两段。
     from app.core.agent import debug_log, store as run_store
     from app.core.llm import usage as llm_usage
-    from app.core import notices
+    from app.core import conversation_store, notices
 
     _JOBS = (
         ("agent_runs", run_store.prune),   # 分层：30 天全量 / 180 天摘 evidence / 180+ 删
         ("调试日志", debug_log.prune),      # 14 天
         ("用量明细", llm_usage.prune),      # 365 天
         ("待投递通知", notices.prune),      # 7 天（A2-3：未补拉的通知也得过期）
+        # 90 天：墓碑要活到每台设备都见过它，太短会让离线设备把对话同步复活
+        ("对话墓碑", conversation_store.purge_tombstones),
     )
 
     def _prune_once(tag: str) -> None:
@@ -134,7 +136,18 @@ async def lifespan(app: FastAPI):
     runtime.set_main_loop(None)
 
 
-app = FastAPI(title="AI Tutor API", version=__version__, lifespan=lifespan)
+# API 文档三入口默认关闭（见 config.Settings.api_docs_enabled）：
+# 它们会把 103 条路由的路径/参数/schema 全量吐给任何访问者。开发态想看 Swagger
+# 就在 .env 里设 API_DOCS_ENABLED=true。/api/health 不受影响。
+_docs = settings.api_docs_enabled
+app = FastAPI(
+    title="AI Tutor API",
+    version=__version__,
+    lifespan=lifespan,
+    docs_url="/docs" if _docs else None,
+    redoc_url="/redoc" if _docs else None,
+    openapi_url="/openapi.json" if _docs else None,
+)
 
 # ════════════════════════════════════════════
 #  CORS 跨域配置（白名单/方法/头从统一 Settings 读取）

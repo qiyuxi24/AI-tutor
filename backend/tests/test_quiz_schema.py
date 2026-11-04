@@ -96,7 +96,7 @@ def test_question_dict_serialization():
         options=[QuestionOption(label="A选项", value="A")],
         answer=["A"],
     )
-    d = q.dict()
+    d = q.model_dump()
     assert d["id"] == "q1"
     assert d["type"] == "single"
     assert d["options"][0]["label"] == "A选项"

@@ -1,0 +1,52 @@
+name: Frontend Tests
+
+# 前端（frontend/）此前完全没有 CI：2 个 vitest 文件（chatStore 生命周期 + 图谱树）
+# 只在本地跑。它们锁的恰好是最容易被改坏的契约 —— SSE 生命周期与图谱树构建。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: cd frontend && npm ci
+
+      - name: Run unit tests
+        run: cd frontend && npm test
+
+      - name: Build (保证产物可构建 —— 类型/导入断裂在这里暴露)
+        run: cd frontend && npm run build
+
+  admin-build:
+    # 运维后台没有单测，但"能不能构建"是它唯一的结构性回归
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend-admin/package-lock.json
+
+      - name: Install dependencies
+        run: cd frontend-admin && npm ci
+
+      - name: Build
+        run: cd frontend-admin && npm run build

@@ -27,13 +27,27 @@ from app.core.event_bus import (
 from app.services.chat_service import _consume_agent_events
 
 
+def _parse_frame(sse: str):
+    """把一条 SSE 帧解析成事件字典；保活注释帧返回 None。
+
+    `subscribe()` 现在会在空闲时发 `: keepalive\\n\\n`（见 event_bus.SSE_HEARTBEAT_SECONDS），
+    那是 SSE 注释行、EventSource 会自动忽略，不是业务事件 —— 必须跳过。
+    """
+    text = sse.strip()
+    if not text or text.startswith(":"):
+        return None
+    return json.loads(text.replace("data: ", ""))
+
+
 def _drain_events(gen, count, timeout=1.0):
     """从 subscribe 生成器取 count 条事件，超时报错。"""
     events = []
 
     async def _collect():
         async for sse in gen:
-            payload = json.loads(sse.replace("data: ", "").strip())
+            payload = _parse_frame(sse)
+            if payload is None:
+                continue
             events.append(payload)
             if len(events) >= count:
                 break
@@ -45,7 +59,9 @@ def _drain_events(gen, count, timeout=1.0):
 async def _collect_all(gen, events_list, max_events=1):
     """从生成器收集最多 max_events 条事件。"""
     async for sse in gen:
-        payload = json.loads(sse.replace("data: ", "").strip())
+        payload = _parse_frame(sse)
+        if payload is None:
+            continue
         events_list.append(payload)
         if len(events_list) >= max_events:
             break

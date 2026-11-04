@@ -53,7 +53,7 @@ def _decrypt_req_password(cipher_b64: str) -> str:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
     if len(plain) < 6 or len(plain) > 50:
         detail = log_error(ErrorCode.AUTH_VALIDATION_ERROR)
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=detail)
     return plain
 
 

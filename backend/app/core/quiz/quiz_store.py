@@ -31,9 +31,12 @@ class QuizStore:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.data_dir / "quiz.db"
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        # timeout/busy_timeout：多端同时写同一库时**等写锁**而不是立刻抛
+        # "database is locked"。与 knowledge.db / conversations.db 同口径。
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10.0)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=10000")
         self._create_tables()
 
     def _create_tables(self) -> None:
@@ -146,7 +149,7 @@ class QuizStore:
                     subject,
                     q.type,
                     q.question,
-                    json.dumps([o.dict() for o in q.options], ensure_ascii=False),
+                    json.dumps([o.model_dump() for o in q.options], ensure_ascii=False),
                     json.dumps(q.answer, ensure_ascii=False),
                     q.points,
                     difficulty,

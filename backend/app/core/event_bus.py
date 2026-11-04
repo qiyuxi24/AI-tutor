@@ -78,6 +78,11 @@ _user_queue_last_access: dict[int, float] = {}
 # 有活跃订阅者的队列**不允许**被 TTL 清理 —— 见 _cleanup_stale_queues。
 _active_subs: dict[int, int] = {}
 
+# SSE 保活间隔（秒）：空闲连接每隔这么久发一行注释帧。
+# **必须小于反代的读超时**（nginx.conf 的 proxy_read_timeout 300s），否则空闲连接
+# 会被反代静默掐断；同时应显著小于 _USER_QUEUE_TTL，避免"连接还活着但队列被判空闲"。
+SSE_HEARTBEAT_SECONDS = 15.0
+
 
 def _get_global_queue() -> asyncio.Queue:
     """获取或创建全局事件队列（惰性初始化）。"""
@@ -244,13 +249,17 @@ def notify(user_id: int, event_type: str, data: dict | None = None, *,
     notices.mark_delivered(notice_id, db_dir=db_dir)
 
 
-async def subscribe(user_id: Optional[int] = None) -> AsyncGenerator[str, None]:
+async def subscribe(
+    user_id: Optional[int] = None,
+    heartbeat_seconds: Optional[float] = None,
+) -> AsyncGenerator[str, None]:
     """
     SSE 订阅生成器。
 
     参数:
         user_id: 传入时订阅该用户专属队列（只收自己的事件 + 全局事件）；
                  不传时订阅全局队列（兼容旧 /knowledge/events 端点）。
+        heartbeat_seconds: 空闲多久发一次保活注释帧。默认取 `SSE_HEARTBEAT_SECONDS`。
 
     用法:
         # 旧端点兼容
@@ -259,15 +268,32 @@ async def subscribe(user_id: Optional[int] = None) -> AsyncGenerator[str, None]:
         # 新端点：按用户路由
         return StreamingResponse(subscribe(user_id=current_user.id),
                                  media_type="text/event-stream")
+
+    ⚠️ 为什么要保活（2026-11-04 修）：此前这里是裸 `await q.get()`，**空闲连接一句话
+       都不发**。而 nginx.conf 是 `proxy_read_timeout 300s` —— 一个没有任何事件的长连接
+       会在第 300 秒被反代直接掐断，前端 EventSource 表现为"莫名掉线"，国产 ROM 后台
+       更容易触发。保活帧必须是 SSE **注释行**（以 `:` 开头），不带 `data:` 前缀，
+       这样 EventSource 会自动忽略、不会触发 onmessage，也不会被当成业务事件。
+       间隔取 15s：远小于 300s，也小于 `_USER_QUEUE_TTL`，同时不至于太吵。
     """
+    interval = SSE_HEARTBEAT_SECONDS if heartbeat_seconds is None else heartbeat_seconds
+
+    async def _next_frame(q: "asyncio.Queue") -> Optional[str]:
+        """等一条事件；超时则返回保活帧，队列本身不受影响。"""
+        try:
+            event_data = await asyncio.wait_for(q.get(), timeout=interval)
+        except asyncio.TimeoutError:
+            # 注释帧：EventSource 静默忽略
+            return ": keepalive\n\n"
+        return f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+
     if user_id is not None:
         # 用户专属模式：**本订阅者一条独立队列**（多端各收一份，互不抢事件）
         q = _new_user_queue(user_id)
         _active_subs[user_id] = _active_subs.get(user_id, 0) + 1
         try:
             while True:
-                event_data = await q.get()
-                yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                yield await _next_frame(q)
         finally:
             # 断开时摘掉自己的队列并释放计数（该用户仍有别的订阅者则保留条目）
             _drop_user_queue(user_id, q)
@@ -280,5 +306,4 @@ async def subscribe(user_id: Optional[int] = None) -> AsyncGenerator[str, None]:
         # 全局模式（兼容旧端点）
         q = _get_global_queue()
         while True:
-            event_data = await q.get()
-            yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+            yield await _next_frame(q)

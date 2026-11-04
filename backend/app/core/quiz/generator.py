@@ -416,7 +416,7 @@ async def generate_quiz(
         )
 
     return {
-        "questions": [q.dict() for q in accepted],
+        "questions": [q.model_dump() for q in accepted],
         "rejected": rejected,
         "materials_used": len(materials),
         "requested": target,

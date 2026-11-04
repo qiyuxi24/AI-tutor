@@ -4,7 +4,7 @@ JWT 认证模块
 - JWT token 生成/解析
 - 获取当前登录用户的依赖注入
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 import bcrypt
 from fastapi import Depends, HTTPException, status
@@ -42,11 +42,15 @@ def create_access_token(user_id: int) -> str:
     :param user_id: 用户数据库 ID
     :return: 编码后的 JWT 字符串
     """
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    # timezone-aware（2026-11-04 技术债）：`datetime.utcnow()` 自 Python 3.12 起弃用。
+    # `jose.jwt.encode` 对 naive datetime 按 UTC 解释，换 aware 后编码结果**逐字节不变**，
+    # 只是把"隐含 UTC"这个约定写进类型里。
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode = {
         "sub": str(user_id),  # sub 字段存储用户 ID
         "exp": expire,
-        "iat": datetime.utcnow(),
+        "iat": now,
     }
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
