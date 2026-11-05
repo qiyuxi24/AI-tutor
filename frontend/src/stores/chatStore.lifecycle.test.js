@@ -303,4 +303,22 @@ describe('对话持久化与流式收口（缺陷 A/B/C 回归）', () => {
     const stored = JSON.parse(localStorage.getItem(CONV_KEY))
     expect(stored.map(c => c.id)).toEqual(['keep'])
   })
+
+  it('send 与 onAgentDone 为 user/assistant 消息写入毫秒级时间戳 ts 并落盘', async () => {
+    sendMessageStream.mockImplementation((_msgs, cbs) => {
+      cbs.onToken('回答内容')
+      cbs.onAgentDone({ rounds: 1 })
+      return { abort: vi.fn() }
+    })
+    const store = useChatStore()
+    const before = Date.now()
+
+    await store.send('你好')
+
+    const stored = JSON.parse(localStorage.getItem(CONV_KEY))
+    const conv = stored[0]
+    expect(conv.messages).toHaveLength(2)
+    expect(conv.messages[0].ts).toBeGreaterThanOrEqual(before)
+    expect(conv.messages[1].ts).toBeGreaterThanOrEqual(conv.messages[0].ts)
+  })
 })
