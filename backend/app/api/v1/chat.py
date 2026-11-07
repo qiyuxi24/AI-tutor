@@ -6,8 +6,9 @@
 
 统一 SSE 流架构（方案 B，2026-09-07）：
   /chat        — 传统一次性回复（兼容旧版）
-  /chat/stream — 统一 SSE 流，agent_loop 为主答案生成器，
-                 循环内事件（thinking/tool_start/tool_result/text_delta）实时推送
+  /chat/stream — 统一 SSE 流，agent_loop 为主答案生成器；循环内事件经
+                 run_agent_loop 的请求私有队列投递，由 chat_service 消费转发 SSE，
+                 **不经 event_bus**（见 services/chat_service.py 模块 docstring）
 """
 import json
 import asyncio

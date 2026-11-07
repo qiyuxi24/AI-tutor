@@ -4,8 +4,14 @@
 流程（Agent Loop，2026-09-06 起，已全面收敛）：
   统一调用 run_agent_loop（app/core/agent/loop.py）标准 agent 循环：
   带工具说明的提示词 → LLM↔工具多轮串联 → 最终回答；运行记录自动落 agent_runs，
-  循环内事件（thinking/tool_start/tool_result/text_delta）经 event_bus 实时推送
-  （/chat/stream 消费转发 SSE，每事件带 run_id 便于前端回源）。
+  循环内事件（thinking/tool_start/tool_result/text_delta/agent_start/agent_done）
+  经 run_agent_loop(event_queue=...) 的**请求私有队列**投递，由本模块
+  _consume_agent_events 消费、_format_agent_sse 白名单过滤后转发 SSE（每事件带
+  run_id 便于前端回源）。**禁止把请求内事件发到 event_bus**：per-user 队列同时被
+  常驻长连接 /knowledge/events 消费，两个消费者会互相抢事件（2026-09-26 故障：
+  长连接抢走 text_delta → 前端空流）。event_bus 只承载**与具体请求无关的
+  通知/瞬态事件**（清单见 core/event_bus.py 模块顶部注册表，不在此写死数量）；
+  见 core/agent/events.py。
 
 提示词组装逻辑：
   唯一模板 (system_prompt_common.j2，2026-09-26 由三种引导模式合并) → 完整 system prompt
