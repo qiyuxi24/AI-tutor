@@ -14,13 +14,16 @@
   而 `uvicorn --workers 1` 是硬约束（AGENTS §1），进程内锁足够。
 - 索引是**增强项**：任何异常都吞掉 + 记日志，绝不能让建/改节点因索引失败而回滚或报错
   （与 `index_node` 自身的降级语义一致）。
+- **失败保留**：索引失败（异常 / `index_node` 返回 0）的节点留在 dirty 等下次 flush
+  重试，只移除成功节点。flush 用「peek 快照 + 成功后按差集移除」，绝不整体清空 ——
+  flush 期间新登记的 id 不会被误删，取消/断连时集合也原封不动。
 - 工具是**同步 handler**（在 `asyncio.to_thread` 的工作线程里跑，无运行中的事件循环）→
   `sync_flush` 复用 `tools/rag_search._run_async` 的同款桥（不新建第二套语义）。
 
 四个出口：
     mark_dirty / mark_dirty_many   写路径登记（不索引）
     index_nodes                    立刻索引一批（已知 id，如工具路径）
-    flush                          取走该用户 dirty 集合再索引（异步调用方）
+    flush                          索引该用户 dirty 集合（异步调用方）
     sync_flush                     同步→异步桥（同步工具 handler 用）
 """
 
@@ -73,13 +76,16 @@ def _lock_for(user_id: int) -> "asyncio.Lock | None":
     return lock
 
 
-async def index_nodes(user_id: int, node_ids, kg=None) -> int:
+async def index_nodes(user_id: int, node_ids, kg=None, failed_ids=None) -> int:
     """立刻索引一批节点（已知 id 时用），返回成功入索引的节点数。
 
     参数:
-        user_id:  用户 ID
-        node_ids: 节点 id 可迭代对象
-        kg:       可复用的 KnowledgeGraph 实例；None 时自建并在结束时关闭
+        user_id:     用户 ID
+        node_ids:    节点 id 可迭代对象
+        kg:          可复用的 KnowledgeGraph 实例；None 时自建并在结束时关闭
+        failed_ids:  可选 set；索引失败（异常 / 返回 0）的 id 会回填进来，供调用方
+                     保留 dirty 重试。节点本身不存在（已删）不算失败：无正文可索引，
+                     索引清理由删除路径负责。返回类型仍是 int（向后兼容）。
 
     异常:
         不抛 —— 逐节点异常吞掉并记日志（索引是增强项）。
@@ -109,12 +115,17 @@ async def index_nodes(user_id: int, node_ids, kg=None) -> int:
             for nid in ids:
                 try:
                     node = kg.get_node(nid)
-                    if node is None:
+                    if node is None:        # 已删节点：索引清理由删除路径负责，不重试
                         continue
-                    if await rag_manager.index_node(user_id, node, kg) > 0:
-                        indexed += 1
+                    if await rag_manager.index_node(user_id, node, kg) <= 0:
+                        if failed_ids is not None:
+                            failed_ids.add(nid)
+                        continue
+                    indexed += 1
                 except Exception as e:                   # noqa: BLE001 —— 降级：不抛
-                    logger.warning(f"RAG 索引节点 {nid} 失败（已忽略，不影响建/改节点）：{e}")
+                    if failed_ids is not None:
+                        failed_ids.add(nid)
+                    logger.warning(f"RAG 索引节点 {nid} 失败（保留 dirty 待重试）：{e}")
         finally:
             if deferred:
                 try:
@@ -149,21 +160,42 @@ async def index_nodes(user_id: int, node_ids, kg=None) -> int:
     return indexed
 
 
+async def _flush_ids(user_id: int, ids, kg, failed_ids: set) -> int:
+    """只移除成功索引的 id；失败与 flush 期间新登记的 id 一律保留在 dirty。"""
+    indexed = await index_nodes(user_id, ids, kg, failed_ids=failed_ids)
+    succeeded = set(ids) - failed_ids
+    if succeeded:
+        current = _dirty.get(int(user_id))
+        if current is not None:
+            current.difference_update(succeeded)         # 绝不整体清空
+            # 仅当 key 仍指向刚清空的那个集合时才删 key；若并发已挂上新集合，
+            # 按 key 删会连带丢掉它里面的新登记（身份校验防这类误删）。
+            if not current and _dirty.get(int(user_id)) is current:
+                _dirty.pop(int(user_id), None)
+    return indexed
+
+
+def _peek_dirty(user_id: int) -> set[str]:
+    """只读快照（不清空）；flush 期间新登记的 id 不在此快照内，自然不受影响。"""
+    return set(_dirty.get(int(user_id), ()))
+
+
 async def flush(user_id: int, kg=None) -> int:
-    """取走该用户的 dirty 集合再索引（异步调用方的收口）。"""
-    ids = take_dirty(user_id)
+    """索引该用户的 dirty 集合（异步调用方的收口）；失败的留在 dirty 等下次重试。"""
+    ids = _peek_dirty(user_id)
     if not ids:
         return 0
-    return await index_nodes(user_id, ids, kg)
+    failed_ids: set[str] = set()
+    return await _flush_ids(user_id, ids, kg, failed_ids)
 
 
 def sync_flush(user_id: int, kg=None) -> int:
     """同步→异步桥：给 `handler(args, kg)` 这类**同步**工具用（勿改成协程，见 AGENTS §2）。
 
     复用的正是 `tools/rag_search._run_async` 那套桥（工作线程里另起临时 loop），
-    别在这里新建第二套语义。
+    别在这里新建第二套语义。失败节点的 dirty 保留与 `flush` 完全一致。
     """
-    ids = take_dirty(user_id)
+    ids = _peek_dirty(user_id)
     if not ids:
         return 0
     try:
@@ -172,7 +204,8 @@ def sync_flush(user_id: int, kg=None) -> int:
         logger.warning(f"RAG 增量索引跳过（同步桥不可用）：{e}")
         return 0
     try:
-        return _run_async(index_nodes(user_id, ids, kg))
+        failed_ids: set[str] = set()
+        return _run_async(_flush_ids(user_id, ids, kg, failed_ids))
     except Exception as e:                               # noqa: BLE001
         logger.warning(f"RAG 增量索引失败（已忽略，不影响建/改节点）：{e}")
         return 0
