@@ -93,7 +93,7 @@ cd Android
 
 - **SSE 要忽略注释帧**。后端每 15 秒发一行 `: keepalive`（冒号开头），防止 nginx 300 秒空闲超时掐断连接。解析时**以 `:` 开头的行整行跳过**，否则 JSON 解析直接崩。另外注意正文增量的字段名是 **`token`** 不是 `text`。
 
-- **SSE 事件白名单只有 5 类**：`text_delta`（→ `{"token": …}`）、`thinking`、`tool_start`、`tool_result`、`agent_start`、`agent_done`。服务端对未知类型**静默丢弃** —— 所以"等不到某个事件"不是解析写错了，是后端不发。
+- **SSE 事件白名单共 6 类**：`text_delta`（→ `{"token": …}`）、`thinking`、`tool_start`、`tool_result`、`agent_start`、`agent_done`。服务端对未知类型**静默丢弃** —— 所以"等不到某个事件"不是解析写错了，是后端不发。
 
 其余：限流是登录 5 次/60 秒/IP、对话 20 次/60 秒/IP，超限返回 **429 + `Retry-After`**（秒），要照着做退避。错误响应统一 `{"detail": "[E-XXX] …"}`，`401` = token 失效。
 

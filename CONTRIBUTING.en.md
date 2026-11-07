@@ -1,4 +1,4 @@
-<!-- base: CONTRIBUTING.md @ c54d571 (2026-09-12). English mirror of the Chinese contribution guide — keep both in sync; spec: docs/工程实践/README_编写规范.md §6. -->
+<!-- base: CONTRIBUTING.md. English mirror of the Chinese contribution guide — keep both in sync with the current tree; spec: docs/工程实践/README_编写规范.md §6. -->
 
 # Contributing to AI-tutor
 
@@ -193,7 +193,7 @@ Rules (full spec: [`docs/工程实践/README_编写规范.md`](docs/工程实践
 1. **Editing only the master file is not enough**: added/removed/renamed sections, commands, ports, environment variables and test counts must be mirrored **in the same commit**.
 2. Section numbering / order, table row counts and code blocks must correspond one-to-one.
 3. Code block contents are identical character for character (commands, paths, URLs and badge syntax are **not translated**).
-4. After syncing, update the `<!-- base: README.md @ <commit> (date) -->` comment at the top of the mirror.
+4. After syncing, keep the `<!-- base: README.md. English mirror ... -->` comment at the top of the mirror; **do not pin a commit hash** (this repo does not auto-commit and often has concurrent writing sessions, so any hash drifts; see spec §6.5).
 5. Purely cosmetic changes may lag, but should be picked up in the next sync.
 
 > Syncing after an architecture, command or number change costs five minutes; skipping it leaves the English version three months behind.

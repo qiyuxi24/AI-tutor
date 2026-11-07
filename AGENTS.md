@@ -2,7 +2,7 @@
 
 > **定位**（依 [agents.md](https://agents.md/) 规范）：本文件是**给 agent 的操作手册**，不是项目百科。
 > 只写三类：① **可直接执行的命令** ② **不写就会做错的硬约束/坑** ③ **文档路由**。
-> 架构说明、模块职责、端点 schema **刻意不写在这里** —— 权威依次为：代码 `docstring` → 各包 `README.md` → `docs/*.md` → 运行后的 `http://localhost:8000/docs`。
+> 架构说明、模块职责、端点 schema **刻意不写在这里** —— 权威依次为：代码 `docstring` → 各包 `README.md` → `docs/*.md` → 运行后的 `http://localhost:8000/docs`。默认关闭，需 `.env` 设 `API_DOCS_ENABLED=true` 才开启（见 `core/config.py:102`）。
 > 为什么这么瘦：AGENTS.md 能把 agent 的运行时间中位降低 **~28.6%**、输出 token 降低 **~16.6%**（arXiv 2601.20404），但**仓库概览型内容不提升成功率、反而让成本 +>20%**（ETH arXiv 2602.11988）→ 只留可执行信息。取舍经过见 `docs/归档/工程实践/AI编码Skill_ponytail实测与通用Skill选型.md`。
 > 冲突裁决：用户对话中的显式指令 > 本文件。
 
@@ -51,7 +51,7 @@
 - **M3 三段坑**：思考与正文**共享** `max_tokens` 预算 → 批量结构化抽取必须 `thinking=False`，长 JSON 显式调大 max_tokens（否则"空正文 / 硬截断"交替出现）。
 - **加工具 = 1 个新模块 + 1 行注册 + 3 份产物自动生成**：在 `core/agent_tools/tools/` 下**复制任一模块**（一工具一文件），改 `DESCRIPTION` / `PARAMETERS` / `GUIDANCE` / `handler` / `SPEC` 五处，再在 `tools/__init__.py` 的 `NATIVE_SPECS` 加一行；`KG_TOOLS`、执行分发、提示词「工具调用指南」全自动生效，**不要再手写第四份说明**（曾双源漂移：MCP 关闭后提示词仍教模型调不存在的工具）。编写规范/检查清单见 `core/agent_tools/tools/README.md`，一致性由 `backend/tests/test_tools_registry.py` 锁死。**MCP 工具不用改本仓库任何文件**：`core/agent_tools/mcp_host.py::_SERVERS` 加 `(前缀, 模块路径)` 即入注册表。
 - **工具 handler**：同步 `(args, kg) -> str` 或 `async def`；只有当工具内需要 `asyncio.create_task` 起后台任务时才用 async（如 `quiz_generate`）——**不要为了"想 await"改协程再 `asyncio.run`**（AsyncOpenAI 单例跨事件循环会报 "Event loop is closed"）。业务错误回填 `"操作失败: …"`、权限拒绝回填 `"权限不足: …"`（`ValueError`/`PermissionError` 分级在 `dispatch` 统一兜底）。
-- **SSE 事件改动三处同步**：`core/agent/events.py` 发射 → `chat_service._consume_agent_events`（**白名单 if/elif，无 else，不加就静默丢弃**）→ `frontend/src/api/index.js` 回调分发；运行类事件**必带 run_id**。**请求内事件（thinking/text_delta/tool_*/agent_*）只能走 `run_agent_loop(event_queue=...)` 的请求私有队列，禁止经 `event_bus`（`broadcast`/`notify`）** —— per-user 队列是对话流与常驻长连接 `/knowledge/events` 的**共享队列**，两个消费者会互相抢事件（2026-09-26 故障：长连接抢走 text_delta → 前端空流 → 表现为"对话没反应"，后端 agent_runs 却完整）；该队列只留 `graph_updated`/`quiz_ready`/`error` 三类通知。**两条对话路径都要传**（`process_message_stream` 与 `process_message`），回归 `tests/test_event_bus.py`。
+- **SSE 事件改动三处同步**：`core/agent/events.py` 发射 → `chat_service._consume_agent_events`（**白名单 if/elif，无 else，不加就静默丢弃**）→ `frontend/src/api/index.js` 回调分发；运行类事件**必带 run_id**。**请求内事件（thinking/text_delta/tool_*/agent_*）只能走 `run_agent_loop(event_queue=...)` 的请求私有队列，禁止经 `event_bus`（`broadcast`/`notify`）** —— per-user 队列是对话流与常驻长连接 `/knowledge/events` 的**共享队列**，两个消费者会互相抢事件（2026-09-26 故障：长连接抢走 text_delta → 前端空流 → 表现为"对话没反应"，后端 agent_runs 却完整）；该队列只承载**与具体请求无关的通知/瞬态事件**（清单见 `core/event_bus.py` 模块顶部注册表，别在此写死数量：视频导入已新增 `kb_updated`/`import_progress`）。**两条对话路径都要传**（`process_message_stream` 与 `process_message`），回归 `tests/test_event_bus.py`。
 - **通知类事件只有两个投递口（A2-1b，`publish` 已删除）**：全局刷新走 `broadcast(type, data=None)`；发给他一人走 `notify(user_id, type, data=None)`。**`notify` 先落库再推**（`core/notices.py` 的 `pending_notices`，与 agent_runs 同库）：推成功即标记已投递（与重连补拉互斥，不重复渲染），无订阅者则留库 → 客户端重连经 `GET /knowledge/notices/pending` 补拉。**别在调用方另写"推丢了就算"的分支，也别为通知另建一张表**；新增按 user_id 分区的行必须同步 `backend-admin` 删号清单与 `main.py::_prune_once` 的 `_JOBS`。
 - **开发态自动刷新（改代码 → 页面自动同步，2026-09-27）**：前端改动走 **Vite HMR**（内置，无需接线）；后端改动靠 `chatStore.connectSSE` 的**断线重连信号** —— uvicorn `--reload` 重启必掐断 SSE → `onopen` 发 `backend-reloaded` 事件 → `HomeView` 重挂当前子视图（`:key="viewEpoch"`）+ `refreshGraph()`，**仅 `import.meta.env.DEV` 生效**（生产不受网络抖动影响）。⚠️ 新增子视图若数据由组件自己 `onMounted` 拉取，**必须挂 `:key="viewEpoch"`**，否则改后端后该页数据不刷新。事件名常量 `chatStore.BACKEND_RELOADED_EVENT` 是唯一来源。`start.ps1` 后端另加 `--reload-dir data/prompts`（不在 `app/` 下，漏了改 `.j2` 不重载）。
 - **掌握度更新的唯一主信号 = 出题判分**：`grade_answer` 答对确定性 +20；`update_mastery` 只认 3 种硬证据（实测模型**从不主动调用**它）。**手动改掌握度的入口已全部删除（2026-09-28）：节点详情滑块 + `PUT /knowledge/node/{id}/mastery` 端点 + `chatStore.updateMastery`，勿重加**（`update_node_info` 的 mastery 写入通道本身保留，判分要用）。触发类提示词必须写成**铁律**并写明"**不要**用追问代替出题"（对立表述），否则会被更强的既有教学原则盖过；出题必须跨调用去重（`avoid_questions=`），否则重答同题可刷掌握度。
@@ -121,8 +121,8 @@
 3. **依赖只能加在 `libs.versions.toml`**：`repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)`，在模块 `build.gradle.kts` 里写 `repositories { }` 会让构建失败。加库 = toml 三段（`[versions]` / `[libraries]` / 引用）+ `app/build.gradle.kts` 的 `dependencies`。
 4. **`AndroidManifest.xml` 的 `INTERNET` 权限**：模板原本一条 `<uses-permission>` 都没有，缺了它所有网络请求抛 `SecurityException`（表现得像"网络错误"，很难查）。已补，别删。
 5. **RSA 登录必须显式指定 OAEP 参数**：后端 `core/transport_crypto.py` 用 `OAEP(mgf=MGF1(SHA256), algorithm=SHA256)`。Android 侧要
-   `Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")` **再** `init(DECRYPT_MODE, key, OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT))`。
-   只写 `OAEPWithSHA-256AndMGF1Padding` 会用系统默认的 **MGF1-SHA1** → 后端必然解密失败 400 `[E-AUTH-007]`，而且报错信息看不出是 MGF1 的问题。
+   `Cipher.getInstance("RSA/ECB/OAEPWithSHA-256AndMGF1Padding")` **再** `init(ENCRYPT_MODE, key, OAEPParameterSpec("SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT))`。
+   只写 `OAEPWithSHA-256AndMGF1Padding` 会用系统默认的 **MGF1-SHA1** → 后端必然解密失败 400 `[E-AUTH-007]`，而且报错信息看不出是 MGF1 的问题。注意方向：客户端持有公钥，做的是 **加密**（`ENCRYPT_MODE`），服务端才解密；旧版本这里误写成 `DECRYPT_MODE`，照抄会登录失败。`Android/README.md:83-92` 与 `frontend/src/utils/crypto.js:21-31` 已是正确写法。
 6. **SSE 解析要忽略注释帧**：`text_delta` 的字段名是 **`token`**（不是 `text`）；`event_bus.SSE_HEARTBEAT_SECONDS = 15.0` 会发 `: keepalive\n\n`，**以 `:` 开头的行必须整行跳过**，否则 JSON 解析崩。
 
 ### 5.4 后端契约（写客户端只需看这四张表）
@@ -134,7 +134,7 @@
 | 对话 | `POST /api/v1/chat/stream` | body = `{messages:[{role,content}] (全部历史), current_node?, kb_node_ids?, kb_node_name?, conv_id?}`；`text/event-stream`。**同 `conv_id` 的回合在服务端串行**（第二端要等第一端跑完才开始推流） |
 | 常驻事件 | `GET /api/v1/knowledge/events?token=<JWT>` | JWT 在 **query**（EventSource 带不了 header）；断线后 `GET /api/v1/knowledge/notices/pending` 补拉离线通知 |
 
-- **SSE 事件白名单只有 5 类**（`services/chat_service.py::_format_agent_sse`）：`text_delta`→`{"token":…}`；`thinking`/`tool_start`/`tool_result`/`agent_start`/`agent_done` 原样透传（含 `run_id`）。**未知类型服务端静默丢弃** —— 客户端不要为某类事件"等不到"而怀疑自己解析错。
+- **SSE 事件白名单共 6 类**（`services/chat_service.py::_format_agent_sse`）：`text_delta`→`{"token":…}`；`thinking`/`tool_start`/`tool_result`/`agent_start`/`agent_done` 原样透传（含 `run_id`）。**未知类型服务端静默丢弃** —— 客户端不要为某类事件"等不到"而怀疑自己解析错。
 - 限流：登录 5 次/60s/IP、对话 20 次/60s/IP，超限 **429 + `Retry-After`**（秒）。
 - **CORS 与原生 App 无关**（App 不发 `Origin`），`CORS_ALLOW_ORIGINS` 只影响 Web 与 WebView 壳。
 - 错误响应统一 `{"detail": "[E-XXX] …"}`（`core/error_codes.py`）；`401` 表示 token 失效，**只有** Auth 端点才有"密码错(400/401)"的语义差异（改密接口刻意回 400，见 `api/v1/auth.py` 注释）。
@@ -152,7 +152,7 @@
 
 | 要查什么 | 去哪 |
 |---|---|
-| 端点 / 请求响应 schema | 起后端后 `http://localhost:8000/docs`（**唯一端点级权威**） |
+| 端点 / 请求响应 schema | 起后端后 `http://localhost:8000/docs`（**唯一端点级权威**）；默认关闭，需 `.env` 设 `API_DOCS_ENABLED=true` 才开启（见 `core/config.py:102`），否则 404 |
 | 整体架构与快速上手 | 根 `README.md` |
 | **数据根 / 路径取径（唯一声明处）** | `backend/app/core/storage.py`（`DATA_ROOT` + 每域取径函数，保留一版旧路径回退）；一次性迁移 = `backend/scripts/migrate_data_root.py`（**默认 dry-run**，`--apply` 才动）；回归 `backend/tests/test_storage_paths.py` / `test_migrate_data_root.py` |
 | **全项目架构问题清单与重构路线（P0~P2 / Phase A-B-C）** | `docs/架构/整体架构_问题清单与重构方案.md`（根因「主体性错层」另见 `TODO.md` §3）；**执行施工计划 / 分工与验收 / 任务 ID** → `docs/架构/重构实施计划_可执行清单.md` |
@@ -187,6 +187,6 @@
 
 ## 7. 提交与测试纪律
 
-- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **1932 collected / 7 deselected**（2026-11-04 复核；= 1931 passed + 1 skipped）。历史：1654（2026-10-12）、1590（2026-10-10）、1549（2026-10-09）、1512 + 1 failed（2026-10-07，那条"他会话 WIP"已随 A2 关闭）。后台套件基线 = `backend-admin/tests` **43 passed**（2026-11-04，原 41）。
+- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **1946 collected / 7 deselected**（2026-11-06 复核；= 1945 passed + 1 skipped）。比 2026-11-04 的 1932 多 14 条 = P0 修复新增的回归用例（会话时间戳 2 / 索引失败重试 8 / 删小节重索引 4）。历史：1654（2026-10-12）、1590（2026-10-10）、1549（2026-10-09）、1512 + 1 failed（2026-10-07，那条"他会话 WIP"已随 A2 关闭）。后台套件基线 = `backend-admin/tests` **43 passed**（2026-11-04，原 41）。
 - 提交按**文件族**拆；单文件跨主题按**依赖方向**排序（先被调用方）；测试与其修复同一提交；不混无关改动。
 - 与其他 AI 会话共存：提交前 `git status` 看清别人 WIP，**路径限定 add**。

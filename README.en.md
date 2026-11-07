@@ -1,4 +1,4 @@
-<!-- base: README.md @ c54d571 (2026-09-12). English mirror of the Chinese README — keep both in sync; spec: docs/工程实践/README_编写规范.md §6. -->
+<!-- base: README.md. English mirror of the Chinese README — keep both in sync with the current tree; spec: docs/工程实践/README_编写规范.md §6. -->
 
 # AI-tutor — A Knowledge-Graph-Driven Adaptive Tutoring Agent
 
@@ -188,7 +188,7 @@ Set `LLM_API_KEY`, `DASHSCOPE_API_KEY`, and `SECRET_KEY` in `.env`. The chat mod
 | Entry point | Address and expected result |
 | :--- | :--- |
 | Learning interface | [localhost:5173](http://localhost:5173) |
-| API documentation | [localhost:8000/docs](http://localhost:8000/docs), with request and response schemas |
+| API documentation | [localhost:8000/docs](http://localhost:8000/docs), with request and response schemas (disabled by default; set `API_DOCS_ENABLED=true` in `.env` to enable) |
 | Health check | [localhost:8000/api/health](http://localhost:8000/api/health), returning `{"status":"ok"}` |
 
 Register an account on first use. To create `admin` at startup, set `DEFAULT_ADMIN_PASSWORD` first; leaving it empty does not create an administrator automatically.
@@ -260,7 +260,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Open [localhost:8080](http://localhost:8080) locally, or the server address for a remote deployment. Set `PORT` to change the exposed port. Compose mounts graph, conversation, profile, and `backend/data` directories; prompt templates ship with the image. See the [operations guide](docs/运维部署/运维_生产上线与日常运营指南.md) for deployment, backups, and troubleshooting.
+Open [localhost:8080](http://localhost:8080) locally, or the server address for a remote deployment. Set `PORT` to change the exposed port. Compose mounts the graph, conversation, profile, knowledge base, RAG index, model config, keys, and Bilibili login-state directories individually under the project-root `data/`; prompt templates ship with the image (not mounted, to avoid shadowing the in-image copy). See the [operations guide](docs/运维部署/运维_生产上线与日常运营指南.md) for deployment, backups, and troubleshooting.
 
 </details>
 
@@ -289,7 +289,7 @@ Template: [.env.example](.env.example) · Loader: [config.py](backend/app/core/c
 | `FALLBACK_LLM_BASE_URL` / `FALLBACK_MODEL_NAME` | Optional | Configure both with an available key to enable the backup service |
 | `WEB_SEARCH_ENABLED` | Optional | Defaults to `true`; set to `false` to disable MCP web search |
 | `SEARXNG_URL` | Optional | Self-hosted SearXNG URL; uses ddgs when unset |
-| `LLM_CTX_BUDGET` | Optional | Conversation request budget; defaults to `32000` tokens |
+| `LLM_CTX_BUDGET` | Optional | Conversation request budget; defaults to `48000` tokens |
 | `GRAPH_INJECT_MAX_CHARS` | Optional | Graph context character limit; defaults to `12000`, with `0` meaning unlimited |
 | `LLM_TIMEOUT` | Optional | Model request timeout; defaults to `120` seconds |
 | `CORS_ALLOW_ORIGINS` / `PORT` | Optional | Allowed cross-origin sources and Docker host port; the latter defaults to `8080` |
@@ -360,7 +360,7 @@ Use `--embed api` for real embeddings. See [smoke_chat_quiz.py](backend/scripts/
 | :--- | :--- |
 | Development setup, commit conventions, and contribution workflow | [Contribution guide](CONTRIBUTING.md) |
 | Module responsibilities, tool integration, and architecture contracts | Each package's `README.md` |
-| API parameters and responses | [FastAPI /docs](http://localhost:8000/docs) after starting the backend |
+| API parameters and responses | [FastAPI /docs](http://localhost:8000/docs) after starting the backend (disabled by default; set `API_DOCS_ENABLED=true` in `.env`) |
 | Agent design | [Agent Loop design](docs/AgentLoop/AgentLoop_重构设计讨论.md) |
 | Knowledge base and quizzes | [RAG retrieval and evaluation](docs/RAG/RAG_图谱混合检索与真实嵌入评测_报告.md) · [Quiz design](docs/教学模块/QUIZ_出题逻辑调研.md) |
 | Web tools | [MCP web search design](docs/RAG/MCP_网页搜索工具_调研与实施方案.md) |

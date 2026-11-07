@@ -254,7 +254,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-本机访问 [localhost:8080](http://localhost:8080)；远程部署使用服务器地址，端口可通过 `PORT` 调整。Compose 挂载图谱、对话、画像及 `backend/data`；提示词模板随镜像提供。部署、备份与排障见[生产上线与日常运营指南](docs/运维部署/运维_生产上线与日常运营指南.md)。
+本机访问 [localhost:8080](http://localhost:8080)；远程部署使用服务器地址，端口可通过 `PORT` 调整。Compose 逐域挂载项目根 `data/` 下的图谱、对话、画像、知识库、RAG 索引、模型配置、密钥与 B 站登录态等目录；提示词模板随镜像提供（不挂载，避免遮蔽镜像内版本）。部署、备份与排障见[生产上线与日常运营指南](docs/运维部署/运维_生产上线与日常运营指南.md)。
 
 </details>
 
@@ -283,7 +283,7 @@ docker compose ps
 | `FALLBACK_LLM_BASE_URL` / `FALLBACK_MODEL_NAME` | 可选 | 同时配置且有可用 Key 时启用备用服务 |
 | `WEB_SEARCH_ENABLED` | 可选 | 默认 `true`；设为 `false` 关闭 MCP 网页搜索 |
 | `SEARXNG_URL` | 可选 | 自建 SearXNG 地址；未配置时使用 ddgs |
-| `LLM_CTX_BUDGET` | 可选 | 对话发送预算，默认 `32000` tokens |
+| `LLM_CTX_BUDGET` | 可选 | 对话发送预算，默认 `48000` tokens |
 | `GRAPH_INJECT_MAX_CHARS` | 可选 | 图谱注入字符上限，默认 `12000`；`0` 表示不限制 |
 | `LLM_TIMEOUT` | 可选 | 模型请求超时，默认 `120` 秒 |
 | `CORS_ALLOW_ORIGINS` / `PORT` | 可选 | 前者配置跨域来源；后者控制 Docker 映射端口，默认 `8080` |
@@ -354,7 +354,7 @@ AI-tutor/
 | :--- | :--- |
 | 开发环境、提交约定与贡献流程 | [贡献指南](CONTRIBUTING.md) |
 | 模块职责、工具接入与架构契约 | 各包目录下的 `README.md` |
-| API 参数与响应 | 启动后访问 [FastAPI /docs](http://localhost:8000/docs) |
+| API 参数与响应 | 启动后访问 [FastAPI /docs](http://localhost:8000/docs)（默认关闭，需在 `.env` 设 `API_DOCS_ENABLED=true`） |
 | Agent 设计 | [Agent Loop 重构设计](docs/AgentLoop/AgentLoop_重构设计讨论.md) |
 | 知识库与出题 | [RAG 检索与评测](docs/RAG/RAG_图谱混合检索与真实嵌入评测_报告.md) · [出题设计](docs/教学模块/QUIZ_出题逻辑调研.md) |
 | 联网工具 | [MCP 网页搜索方案](docs/RAG/MCP_网页搜索工具_调研与实施方案.md) |
