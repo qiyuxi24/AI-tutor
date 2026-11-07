@@ -303,4 +303,65 @@ describe('对话持久化与流式收口（缺陷 A/B/C 回归）', () => {
     const stored = JSON.parse(localStorage.getItem(CONV_KEY))
     expect(stored.map(c => c.id)).toEqual(['keep'])
   })
+
+  // ─── P0 时间戳单位错配（2026-11-05）：秒 vs 毫秒 ───
+  // 后端 time.time() 是秒（~1.7e9），前端 Date.now() 是毫秒（~1.7e12）。
+  // 旧实现把两者直接比较：采纳 `remoteAt > localAt` 恒假 → 客户端永不采纳服务端
+  // 较新版本；上行又用毫秒 → 后端 `current > incoming` 恒假 → 旧缓存盖新历史。
+  it('P0 单位错配：服务端秒级 updated_at 较新时必须被采纳，且上行换算成秒', async () => {
+    const STALE_LOCAL_MS = 1_600_000_000_000   // 本地旧快照（2020，毫秒）
+    const REMOTE_NEWER_SEC = 1_700_000_000     // 服务端较新版本（2023，秒）
+    localStorage.setItem(CONV_KEY, JSON.stringify([
+      { id: 'u1', title: '本地旧', messages: [{ role: 'user', content: 'old' }],
+        createdAt: STALE_LOCAL_MS, updatedAt: STALE_LOCAL_MS },
+    ]))
+    localStorage.setItem(CUR_KEY, 'u1')
+    apiClient.post.mockResolvedValueOnce({
+      data: {
+        conversations: [{
+          id: 'u1', title: '远程新',
+          messages: [{ role: 'assistant', content: 'remote' }],
+          created_at: 1_600_000_000, updated_at: REMOTE_NEWER_SEC,
+        }],
+      },
+    })
+
+    const store = useChatStore()
+    await store.init()
+
+    // 采纳边界：远端秒还原成毫秒后才与本地（毫秒）可比 → 服务端较新版本覆盖旧快照
+    const conv = store.conversations.find(c => c.id === 'u1')
+    expect(conv.title).toBe('远程新')
+    expect(conv.messages).toEqual([{ role: 'assistant', content: 'remote' }])
+    expect(conv.updatedAt).toBe(REMOTE_NEWER_SEC * 1000)               // 秒还原成毫秒
+
+    // 上行边界：本地毫秒必须换算成秒（后端单位是秒）
+    const sent = apiClient.post.mock.calls.at(-1)[1].conversations
+    expect(sent[0].updatedAt).toBe(Math.floor(STALE_LOCAL_MS / 1000))
+    expect(sent[0].createdAt).toBe(Math.floor(STALE_LOCAL_MS / 1000))
+  })
+
+  it('P0 单位错配：采纳远端新对话时秒级 createdAt 还原成毫秒，分组不落 1970', async () => {
+    const REMOTE_SEC = 1_700_000_000
+    localStorage.setItem(CONV_KEY, JSON.stringify([]))
+    apiClient.post.mockResolvedValueOnce({
+      data: {
+        conversations: [{
+          id: 'remote-only', title: '服务端对话',
+          messages: [{ role: 'user', content: 'hi' }],
+          created_at: REMOTE_SEC, updated_at: REMOTE_SEC,
+        }],
+      },
+    })
+
+    const store = useChatStore()
+    await store.init()
+
+    const conv = store.conversations.find(c => c.id === 'remote-only')
+    expect(conv).toBeTruthy()
+    expect(conv.createdAt).toBe(REMOTE_SEC * 1000)   // 秒 → 毫秒
+    const d = new Date(REMOTE_SEC * 1000)
+    const label = `${d.getMonth() + 1}/${d.getDate()}`
+    expect(Object.keys(store.groupedConversations)).toContain(label)  // 不是 1970
+  })
 })

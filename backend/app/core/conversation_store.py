@@ -59,6 +59,20 @@ _TOMBSTONE_RETENTION_DAYS = 90
 _LIVE = "deleted_at IS NULL"
 
 
+def _normalize_ts(value) -> float:
+    """把明显是毫秒的时间戳归一化为**秒**（本库唯一单位，由 time.time() 产生）。
+
+    老前端 / 第三方会直接把 `Date.now()`（毫秒，~1.7e12）上行；若原样落库，
+    `save_conversation` 的防覆盖比较「库里秒 vs 上行毫秒」会恒假，旧缓存就能
+    盖掉服务端新历史（P0，2026-11-05）。秒级值（含历史小秒值）原样不动。
+    """
+    try:
+        n = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return n / 1000.0 if n > 1e12 else n
+
+
 class ConversationStore:
     """
     对话存储管理类（SQLite 后端，独立数据库）
@@ -243,7 +257,11 @@ class ConversationStore:
           无条件刷新会把它们刷成同一时刻，排序同样失效。
         """
         now = time.time()
-        incoming_updated = float(conv.get("updated_at") or 0)
+        # 入口归一化：老前端/第三方的毫秒时间戳先折算成秒，否则「库里秒 vs 上行毫秒」
+        # 的防覆盖比较恒假，旧缓存会盖掉服务端新历史。秒级值原样通过。
+        incoming_updated = _normalize_ts(conv.get("updated_at"))
+        created_at = _normalize_ts(conv.get("created_at")) or now
+        updated_at = incoming_updated or now
 
         with self._write_txn():
             current = self._conn.execute(
@@ -276,8 +294,8 @@ class ConversationStore:
                     self.user_id,
                     conv.get("title", "新对话"),
                     json.dumps(conv.get("messages", []), ensure_ascii=False),
-                    conv.get("created_at") or now,
-                    conv.get("updated_at") or now,
+                    created_at,
+                    updated_at,
                 ),
             ).fetchone()
         return row["updated_at"] if row else now

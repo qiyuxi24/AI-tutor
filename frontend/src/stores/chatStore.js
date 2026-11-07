@@ -77,6 +77,20 @@ function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
 
+// 时间戳单位：后端是**秒**（time.time()，~1.7e9），前端是**毫秒**（Date.now()，~1.7e12）。
+// 旧实现把两者直接比较/上行：采纳 `remoteAt > localAt` 恒假 → 永不采纳服务端较新版本；
+// 上行毫秒 → 后端 `current > incoming` 恒假 → 旧缓存盖掉服务端新历史（P0，2026-11-05）。
+// 边界统一：上行毫秒换算成秒，采纳把秒还原成毫秒；已是另一单位的值原样通过。
+const MS_THRESHOLD = 1e12
+function toSec(v) {
+  const n = Number(v) || 0
+  return n > MS_THRESHOLD ? Math.floor(n / 1000) : n
+}
+function toMs(v) {
+  const n = Number(v) || 0
+  return n > 0 && n < MS_THRESHOLD ? n * 1000 : n
+}
+
 function todayLabel(date) {
   const d = new Date(date)
   const now = new Date()
@@ -152,9 +166,9 @@ export const useChatStore = defineStore('chat', () => {
           id: c.id,
           title: c.title,
           messages: c.messages,
-          createdAt: c.createdAt,
-          // 本地修改时刻：后端据此判断这份快照是不是旧的（旧快照会被拒绝写入）
-          updatedAt: c.updatedAt || c.createdAt,
+          // 上行边界：本地毫秒 → 后端秒（后端据此判断这份快照是不是旧的）
+          createdAt: toSec(c.createdAt),
+          updatedAt: toSec(c.updatedAt || c.createdAt),
         }))
       const { data } = await apiClient.post('/api/v1/conversations/sync', {
         conversations: nonEmpty,
@@ -203,14 +217,16 @@ export const useChatStore = defineStore('chat', () => {
       // 兼容两种命名：本地上行的 payload 是 camelCase，后端 _all_conversations
       // 返回的是 snake_case（updated_at/created_at）——只认一种会让 remoteAt 恒为 0，
       // 远程较新的版本永远判不出来（缺陷 C-4）。
-      const remoteAt = Number(r.updatedAt ?? r.updated_at) || 0
+      // 采纳边界：后端秒还原成毫秒，才能与本地（毫秒）比较、供 todayLabel 正确分组。
+      const remoteAt = toMs(Number(r.updatedAt ?? r.updated_at) || 0)
+      const remoteCreatedAt = toMs(Number(r.createdAt ?? r.created_at) || 0) || Date.now()
       const local = conversations.value.find(c => c.id === r.id)
       if (!local) {
         conversations.value.push({
           id: r.id,
           title: r.title,
           messages: r.messages || [],
-          createdAt: r.createdAt ?? r.created_at ?? Date.now(),
+          createdAt: remoteCreatedAt,
           updatedAt: remoteAt,
         })
         changed = true
