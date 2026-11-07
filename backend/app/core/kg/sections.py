@@ -276,6 +276,8 @@ class _SectionsMixin:
                 path.unlink()
             self._write_manifest(node_id, manifest)
         self.invalidate_content_cache(node_id)
+        # 删了正文 → 该节点需重索引（否则旧全文仍留在 BM25/向量索引里被 S6 注入）
+        mark_node_dirty(self.user_id, node_id)
         return True
 
     def clear_sections(self, node_id: str) -> int:
@@ -303,6 +305,8 @@ class _SectionsMixin:
                                    if (q.get("section_id") or "") not in gone]
             self._write_manifest(node_id, manifest)
         self.invalidate_content_cache(node_id)
+        # 删了正文 → 该节点需重索引（len(sections) 已在锁内存好，外层补挂）
+        mark_node_dirty(self.user_id, node_id)
         return len(sections)
 
     def add_quiz_ref(self, node_id: str, quiz_id: str, section_id: str = "") -> None:
