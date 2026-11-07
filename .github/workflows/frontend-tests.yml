@@ -28,7 +28,7 @@ jobs:
       - name: Run unit tests
         run: cd frontend && npm test
 
-      - name: Build (保证产物可构建 —— 类型/导入断裂在这里暴露)
+      - name: Build (保证产物可构建与导入解析完整；Vite build 不做类型检查)
         run: cd frontend && npm run build
 
   admin-build:

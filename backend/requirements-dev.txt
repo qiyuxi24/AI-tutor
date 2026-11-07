@@ -1,2 +1,6 @@
 # 开发/测试依赖（RAG 测试链路全部 mock 掉 LLM/embedding，零网络依赖）
-pytest>=8.0.0
+# 精确锁：与 backend/venv 及 CI 同版本，避免 pytest 大版本漂移导致口径变化
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-timeout==2.4.0
+ruff==0.14.5

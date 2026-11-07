@@ -28,6 +28,7 @@ bigram 切分（对中文检索友好），英文走词干化，兼顾中英文�
 import logging
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from whoosh import index as whoosh_index
 from whoosh.analysis import (
@@ -41,6 +42,9 @@ from whoosh.analysis import (
 from whoosh.fields import ID, NUMERIC, STORED, TEXT, Schema
 from whoosh.qparser import MultifieldParser, OrGroup
 from whoosh.query import And, Every, Or, Term
+
+if TYPE_CHECKING:
+    from whoosh.writing import IndexWriter
 
 logger = logging.getLogger("ai-tutor")
 
@@ -111,7 +115,7 @@ class SparseIndex:
         # 以索引自带 schema 为准（老 kb 索引是 NUMERIC，被常量覆盖会导致词条编码不匹配 → 静默查不到）
         self._schema = self._ix.schema
         self._has_node_name = "node_name" in self._schema.names()
-        self._pending: "AsyncWriter | None" = None  # 延迟提交模式的共享 writer
+        self._pending: "IndexWriter | None" = None  # 延迟提交模式的共享 writer
 
     def _open_or_create(self):
         if whoosh_index.exists_in(str(self.index_dir)):

@@ -25,11 +25,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r backend-admin/requirements.txt
-          pip install pytest
+          pip install -r backend/requirements-dev.txt
 
       - name: Run admin tests
         env:
           SECRET_KEY: ci-test-secret-key-not-for-production
         run: |
           cd backend-admin
-          python -m pytest tests -q
+          python -m pytest tests -q -m "not llm_api"
