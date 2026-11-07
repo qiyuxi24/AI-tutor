@@ -94,7 +94,12 @@ const pwdForm = ref({ old_password: '', new_password: '' })
 onMounted(() => {
   const info = localStorage.getItem('admin_info')
   if (info) {
-    adminInfo.value = JSON.parse(info)
+    try {
+      adminInfo.value = JSON.parse(info)
+    } catch (e) {
+      console.warn('[Layout] 本地管理员信息损坏，已忽略：', e)
+      adminInfo.value = null
+    }
   }
 })
 

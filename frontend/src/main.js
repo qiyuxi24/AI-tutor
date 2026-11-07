@@ -40,4 +40,10 @@ app.use(createPinia())
 app.use(router)
 app.use(ElementPlus)
 app.directive('click-outside', clickOutside)
+
+// 给组件渲染/事件里的未捕获异常一个明确落点（原来只剩控制台裸栈 + 白屏）
+app.config.errorHandler = (err, _instance, info) => {
+  console.error('[Vue error]', info, err)
+}
+
 app.mount('#app')

@@ -41,9 +41,6 @@
         </el-form-item>
       </el-form>
       
-      <div class="hint">
-        初始账号: admin / admin123
-      </div>
     </el-card>
   </div>
 </template>

@@ -166,7 +166,16 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Search } from '@element-plus/icons-vue'
 import api, { errorMessage } from '../api'
 
-const myInfo = JSON.parse(localStorage.getItem('admin_info') || 'null')
+/** 本地管理员信息损坏时回退 null，避免 setup 阶段抛错导致整页白屏。 */
+function readMyInfo() {
+  try {
+    return JSON.parse(localStorage.getItem('admin_info') || 'null')
+  } catch (e) {
+    console.warn('[Admins] 本地管理员信息损坏，已忽略：', e)
+    return null
+  }
+}
+const myInfo = readMyInfo()
 const myId = myInfo?.id
 const isSuperAdmin = computed(() => myInfo?.role === 'super_admin')
 

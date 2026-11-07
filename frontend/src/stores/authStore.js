@@ -8,11 +8,21 @@ import { formatError } from '../utils/errorCodes.js'
 const STORAGE_KEY_TOKEN = 'ai_tutor_token'
 const STORAGE_KEY_USER = 'ai_tutor_user'
 
+/** 本地用户信息可能被旧版本残留 / 浏览器插件写坏，损坏时忽略而不是启动即白屏。 */
+function readStoredUser() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY_USER) || 'null')
+  } catch (e) {
+    console.warn('[authStore] 本地用户信息损坏，已忽略：', e)
+    return null
+  }
+}
+
 
 export const useAuthStore = defineStore('auth', () => {
   // ─── 状态 ───
   const token = ref(localStorage.getItem(STORAGE_KEY_TOKEN) || null)
-  const user = ref(JSON.parse(localStorage.getItem(STORAGE_KEY_USER) || 'null'))
+  const user = ref(readStoredUser())
   const loginError = ref('')
 
   // ─── 计算属性 ───

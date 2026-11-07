@@ -116,6 +116,10 @@ async function handleDelete() {
           :class="{ active: conv.id === store.currentId }"
           :title="conv.title"
           @click="handleSwitch(conv.id)"
+          role="button"
+          tabindex="0"
+          @keydown.enter.self="handleSwitch(conv.id)"
+          @keydown.space.self.prevent="handleSwitch(conv.id)"
         >
           <svg class="chat-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -144,7 +148,11 @@ async function handleDelete() {
     <!-- 条目菜单：容器与图谱侧栏共用 -->
     <ContextMenu :visible="menuVisible" :x="menuX" :y="menuY" @close="closeMenu">
       <template #default="{ close }">
-        <div class="menu-item" @click="close(); startRename(menuConv)">
+        <div class="menu-item" @click="close(); startRename(menuConv)"
+          role="button" tabindex="0"
+          @keydown.enter.self="close(); startRename(menuConv)"
+          @keydown.space.self.prevent="close(); startRename(menuConv)"
+        >
           <span class="menu-icon">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -154,7 +162,11 @@ async function handleDelete() {
           重命名对话
         </div>
         <div class="menu-divider"></div>
-        <div class="menu-item menu-item-danger" @click="close(); handleDelete()">
+        <div class="menu-item menu-item-danger" @click="close(); handleDelete()"
+          role="button" tabindex="0"
+          @keydown.enter.self="close(); handleDelete()"
+          @keydown.space.self.prevent="close(); handleDelete()"
+        >
           <span class="menu-icon">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
