@@ -54,11 +54,17 @@ services:
       - ./data/knowledge:/app/data/knowledge
       - ./data/conversations:/app/data/conversations
       - ./data/profiles:/app/data/profiles
-      # 上传知识库(RAG) + 出题 + 采集 + 每用户模型配置（原 /app/backend/data 下的域）
+      # 上传知识库(RAG) + 出题 + 采集（原 /app/backend/data 下的域）
       - ./data/kb:/app/data/kb
       - ./data/rag:/app/data/rag
       - ./data/quiz:/app/data/quiz
       - ./data/collector:/app/data/collector
+      # 每用户模型配置含明文 API Key（llm/{uid}/models.json），重建容器丢失必持久化
+      - ./data/llm:/app/data/llm
+      # RSA 登录私钥（keys/rsa_private.pem），丢失会换密钥对致存量客户端解密失败
+      - ./data/keys:/app/data/keys
+      # B 站扫码登录态（bili/cookies.txt），丢失即退出登录需重新扫码
+      - ./data/bili:/app/data/bili
       # 运行记录 / 调试流水（原 /app/backend/app/data 下）
       - ./data/agent_runs:/app/data/agent_runs
       - ./data/agent_debug:/app/data/agent_debug

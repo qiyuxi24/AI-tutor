@@ -124,6 +124,8 @@ scp -r data/collector     root@服务器IP:/opt/ai-tutor/data/
 scp -r data/agent_runs    root@服务器IP:/opt/ai-tutor/data/
 scp -r data/agent_debug   root@服务器IP:/opt/ai-tutor/data/
 scp -r data/llm           root@服务器IP:/opt/ai-tutor/data/   # 每用户模型配置（含明文 API Key）
+scp -r data/keys          root@服务器IP:/opt/ai-tutor/data/   # RSA 登录私钥
+scp -r data/bili          root@服务器IP:/opt/ai-tutor/data/   # B 站扫码登录态（凭证）
 ```
 
 > ⚠️ **老部署（A1b 之前建的）升级上来**：数据还在宿主机的 `backend/data/` 与 `backend/app/data/`，
@@ -203,7 +205,7 @@ docker compose up -d --build --no-deps
 ```
 
 ### Q6: 备份数据
-A1b 之后**只有一个数据根**：宿主机 `./data/`（其下 `knowledge/ conversations/ profiles/ kb/ rag/ quiz/ collector/ agent_runs/ agent_debug/ llm/ keys/`），日志在 `./backend/logs/`。SQLite 文件可在线复制，最稳先停容器：
+A1b 之后**只有一个数据根**：宿主机 `./data/`（其下 `knowledge/ conversations/ profiles/ kb/ rag/ quiz/ collector/ llm/ keys/ bili/ agent_runs/ agent_debug/`，均由 compose 逐域挂载），日志在 `./backend/logs/`。SQLite 文件可在线复制，最稳先停容器：
 
 ```bash
 docker compose stop
