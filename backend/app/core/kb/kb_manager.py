@@ -503,6 +503,17 @@ class KbManager:
         """
         在指定目录范围（文件节点列表）内混合检索（向量 + whoosh BM25，宽召回 + 加权融合）。
 
+        `node_ids` 有**三种**输入，别再压成两种（2026-11-08）：
+        - `None`（默认，= 不限范围）→ 检索该用户全部上传文档
+        - 非空列表 → 只在给定的这些文件里检索
+        - **空列表** → 给了范围但范围内没有文件 → **返回空**
+
+        空列表曾是第三个缺陷源：旧实现用 `if node_ids:` 判断，`[]` 与 `None` 走同一条
+        全库分支，于是"用户选了范围、范围内恰好没文件"被放大成"检索整个知识库"。
+        三条触发路径都不需要用户做错任何事：`KbRagSource` 的 `file_node_ids or None`、
+        `GET /kb/search?node_id=<空文件夹>`、出题依据收集。回归
+        `tests/test_kb_empty_scope.py`。
+
         流程（对齐 RAG 召回优化标准）：
             宽召回：向量、BM25 各取 RECALL_TOP_K（默认 30）条候选
               → 加权融合：alpha * 向量分 + (1-alpha) * BM25 分（alpha 见 DEFAULT_ALPHA）
@@ -516,7 +527,8 @@ class KbManager:
         参数:
             user_id:   用户 ID
             query:     查询文本
-            node_ids:  限定范围的文件节点 ID 列表（None=检索全部上传文档）
+            node_ids:  限定范围的文件节点 ID 列表；**None（默认）= 检索全部上传文档**，
+                       空列表 = 范围为空（返回空，不要当成"不限范围"）
             top_k:     最终返回条数（精排后进 LLM 的数量）
 
         返回:
@@ -527,8 +539,13 @@ class KbManager:
         """
         if not query.strip():
             return []
+        # 空范围先于嵌入退出：既保证语义正确，也省掉一次无意义的嵌入调用
+        if node_ids is not None and not node_ids:
+            return []
 
         # 路 1：稠密向量语义检索（宽召回）
+        # node_ids 在这里一定非空或为 None（空列表已在上方提前返回），
+        # 所以两条检索腿都可以按"有没有范围"直接判 truthy。
         embeddings = await self._embed([query])
         vec_results: list[dict] = []
         if embeddings:
