@@ -152,28 +152,42 @@ class KbRagSource:
         node_ids = scope.get("node_ids") or []
         kb_name = scope.get("name") or "我的知识库"
 
-        # 目录节点 → 递归展开为文件节点 ID 列表
+        # 目录节点 → 递归展开为文件节点 ID 列表。
+        # ⚠ 这里**不能**写 `file_node_ids or None`：空选区（选中的文件夹里一个文件
+        # 都没有，或最后一个文件刚被删掉）会被 `or` 悄悄放大成"检索全库"，
+        # 用户明确限定的范围变成了一句空话。空列表要原样传下去 ——
+        # `kb_manager.search` 把 `[]` 解释为"范围内没有可检索的东西"，返回空。
+        # 回归 `tests/test_kb_empty_scope.py`。
         file_node_ids: list[int] = []
         for nid in node_ids:
             collected = kb_manager.collect_files(ctx.user_id, nid)
             file_node_ids.extend(collected)
         file_node_ids = list(set(file_node_ids))
+        scoped = bool(node_ids)                 # 调用方到底有没有指定范围
 
         # 商用模式白名单（决策 #23）：排除 自动采集/L2 子树文件后再检索。
-        # None = 无限制，保持现有 node_ids 语义；白名单为空 → 无可商用资料，跳过该源。
+        # ⚠ 白名单生效时**必须传显式 ID 列表、绝不传 None** —— None 是"不限范围"，
+        # 会让刚被排除的 L2 文件重新进来（回归 `test_commercial_full_kb_whitelist`）。
+        # 白名单为空 → 无可商用资料，跳过该源。
         allowed = kb_manager.allowed_node_ids(ctx.user_id, ctx.mode)
         if allowed is not None:
-            allowed_set = set(allowed)
-            file_node_ids = (
-                [f for f in file_node_ids if f in allowed_set]
-                if file_node_ids else allowed
-            )
+            if scoped:
+                allowed_set = set(allowed)
+                file_node_ids = [f for f in file_node_ids if f in allowed_set]
+            else:
+                # 未指定范围 → 用白名单本身当范围（等价于"全库减去不可商用"）
+                file_node_ids = list(allowed)
             if not file_node_ids:
                 return []
+            search_scope = file_node_ids
+        else:
+            # 无白名单：scope 决定是"指定范围"还是"不限范围"；
+            # 指定了范围就照实传（含空列表 → 检索不到东西）
+            search_scope = file_node_ids if scoped else None
 
         results = await kb_manager.search(
             ctx.user_id, ctx.query,
-            node_ids=file_node_ids or None,
+            node_ids=search_scope,
             top_k=ctx.top_k,
         )
 
