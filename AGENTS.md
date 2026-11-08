@@ -143,7 +143,7 @@
 
 - **唯一参考实现是前端 `frontend/src/api/index.js`**（REST + SSE 的实际收发，含 `Authorization: Bearer`、`AbortController` 取消、错误分流）与 `stores/authStore.js` + `utils/crypto.js`（登录链路、公钥缓存、加密调用点）。**照抄的是"请求怎么发、错误怎么处理"，不是 UI** —— `frontend/` 是桌面布局，390px 下必然重叠，抄结构等于把坑搬过来。
 - **后端是唯一真值**：契约有疑问直接读 `backend/app/api/v1/*.py` 的 docstring 与 Pydantic model，别信文档里的转述。
-- 建议分层（当前只有 `MainActivity.kt`，新代码按此落）：`data/`（OkHttp client、DTO、Repository、SSE 事件解析）/ `domain/`（用例）/ `ui/feature/<tab>/`（Compose + ViewModel）。`ui/theme/` 已有 Material3 动态取色，直接用 `MyApplicationTheme`。
+- 建议分层（当前只有 `MainActivity.kt`，新代码按此落）：`data/`（OkHttp client、DTO、Repository、SSE 事件解析）/ `domain/`（用例）/ `ui/feature/<tab>/`（Compose + ViewModel）。`ui/theme/` 是固定品牌色板（`dynamicColor` 已删，别加回来），直接用 `MyApplicationTheme`。
 - 模板里要改的占位：包名 `com.example.myapplication`（改 = `namespace`+`applicationId`+目录+`MainActivity` 等 import+`themes.xml` 的 `Theme.MyApplication`+`ExampleInstrumentedTest.kt:22` 的断言，共 6 处）、`res/values/strings.xml` 的 `My Application`、`rootProject.name = "My Application"`。
 - **本地明文 HTTP 已配好，分两套**：`app/src/main/res/xml/network_security_config.xml`（release 用）只放行 `127.0.0.1` / `localhost` / `10.0.2.2`；**`app/src/debug/res/xml/network_security_config.xml`（debug 用）同名覆盖、全放开明文** —— 因为联调时后端在开发机上，每个人的局域网 IP 都不同，而 network-security-config 不支持网段，让每个人改 XML 既麻烦又改错。debug 源集不进 release 包，所以 release 仍禁止明文。**别把 debug 那份的宽松写法搬到 main 那份里**。
 - **开工前先读 `Android/README.md`**：里面有 tab 骨架、第一个里程碑（跑通登录 + 一轮对话流）、以及"哪些事不要自己拍板"的清单。它是给人看的，本文件（AGENTS.md）是给 agent 看的，两者视角不同别互相复制。

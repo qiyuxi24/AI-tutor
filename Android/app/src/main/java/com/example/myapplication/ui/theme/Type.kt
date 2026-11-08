@@ -12,8 +12,7 @@ import androidx.compose.ui.unit.sp
  * 一律用系统无衬线（[FontFamily.Default]）—— 不打包 ttf：中文字体 3–10MB 且
  * Compose 不能子集化，参考图里那种手写体已确认不做。
  *
- * 字号对应用 `Android/preview/style-preview-purple.html`：问候语 30 / 屏标题 23 /
- * 卡片标题 17 / 正文 16 / 说明 13 / 底栏标签 9.5。
+ * 字号沿用设计口径：问候语 30 / 屏标题 23 / 卡片标题 17 / 正文 16 / 说明 13 / 底栏标签 9.5。
  * 只用 [Typography] 的既有槽位承载，别新增第二套 `TextStyle` 表（会与 M3 组件默认值打架）。
  */
 val AppTypography = Typography(

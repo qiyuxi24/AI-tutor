@@ -44,7 +44,8 @@ Modifier.padding(AppDimens.ScreenPadding).height(AppDimens.RowHeight)
 
 字体一律 `FontFamily.Default`（系统无衬线）；不打包 ttf —— 中文字体 3–10MB 且 Compose 不能子集化。
 
-## 与预览页的对应
+## 与 Web 端的对应
 
-色值与尺寸逐项对齐 `Android/preview/style-preview-purple.html` 顶部那组 CSS 变量。
-主色 `#8B5CF6` 同时等于 Web 端 `frontend/src/style.css` 的 `--primary` —— **两边要一起改**，只改一边会出现同一个产品两种紫。
+色值与尺寸对齐 Web 端 `frontend/src/style.css` 顶部那组 CSS 变量（`--color-*` / `--radius-*`）。
+主色 `#8B5CF6` 同时等于该文件的 `--color-primary` —— **两边要一起改**，只改一边会出现同一个产品两种紫。
+字号口径（问候语 30 / 屏标题 23 / 卡片标题 17 / 正文 16 / 说明 13 / 底栏 9.5）来自设计稿，Web 与 Android 共用同一套数值。

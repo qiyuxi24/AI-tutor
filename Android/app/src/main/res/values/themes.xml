@@ -5,6 +5,10 @@
         窗口级主题：只管「Compose 接管之前」的系统窗口外观。
         页面底色必须在这里也设一次 —— 否则冷启动会先闪一帧纯白（深色下是纯黑），
         再被 Compose 的 #F7F7F7 覆盖，观感上是闪屏。
+
+        ⚠️ 下面两条 windowLight* 只对**冷启动那一瞬**有效：MainActivity.onCreate 里的
+        enableEdgeToEdge() 会接管状态栏/导航栏外观并覆盖这里的设置。留着是因为它能让
+        首帧的图标颜色正确，别误以为改它就能改运行时的状态栏配色。
     -->
     <style name="Theme.MyApplication" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/app_page</item>

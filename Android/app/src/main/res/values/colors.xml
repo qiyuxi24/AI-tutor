@@ -3,9 +3,9 @@
     <!--
         窗口级色值。Compose 里的真值在 ui/theme/Color.kt::Palette ——
         这里是「App 启动那一瞬、Compose 还没接管」时用的同一批颜色，改色要两边一起改。
+        只放**确实被引用**的项：没有消费方的颜色不放（否则「改色要两边一起改」无从执行）。
     -->
     <color name="app_page">#FFF7F7F7</color>
-    <color name="app_card">#FFFFFFFF</color>
     <color name="app_page_dark">#FF111113</color>
 
     <color name="black">#FF000000</color>

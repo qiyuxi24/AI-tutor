@@ -5,10 +5,10 @@ import androidx.compose.ui.graphics.Color
 /**
  * 色板真值（唯一）。
  *
- * 命名与 `Android/preview/style-preview-purple.html` 顶部那组 CSS 变量一一对应，
+ * 命名与 Web 端 `frontend/src/style.css` 顶部那组 CSS 变量（`--color-*`）一一对应，
  * 改颜色只改这里；`Theme.kt` 只做「token → Material3 ColorScheme」的映射，不写死色值。
  *
- * 主色 `#8B5CF6` 与 Web 端 `frontend/src/style.css` 的 `--primary` 同值 —— 两边要一起改，
+ * 主色 `#8B5CF6` 与 Web 端 `frontend/src/style.css` 的 `--color-primary` 同值 —— 两边要一起改，
  * 只改一边会造成同一个 App 两种紫。
  */
 object Palette {

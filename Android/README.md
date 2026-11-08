@@ -126,7 +126,7 @@ app/src/main/java/<your/package>/
 ├── data/                    # OkHttp client、DTO（Gson）、Repository、SSE 事件解析
 ├── domain/                  # 用例（可以薄，别为了分层而分层）
 └── ui/
-    ├── theme/              # 已有 Material3 动态取色，直接用 MyApplicationTheme
+    ├── theme/              # 固定品牌色板（已删动态取色），直接用 MyApplicationTheme
     └── feature/
         ├── chat/           # 对话 tab
         ├── library/        # 知识库 tab
