@@ -364,4 +364,32 @@ describe('对话持久化与流式收口（缺陷 A/B/C 回归）', () => {
     const label = `${d.getMonth() + 1}/${d.getDate()}`
     expect(Object.keys(store.groupedConversations)).toContain(label)  // 不是 1970
   })
+
+  it('send 与 onAgentDone 为 user/assistant 消息写入毫秒级时间戳 ts 并落盘', async () => {
+    // 用假时钟把「发送时刻」与「收口时刻」拉开 —— 否则两条 ts 都由 send 里的同一个
+    // `now` 赋值，`assistant.ts >= user.ts` 恒真，删掉 onAgentDone 的补写仍然全绿
+    // （空转）。这里断言 assistant.ts == 收口时刻，能真正锁住那次补写。
+    vi.useFakeTimers()
+    const SENT_AT = 1_700_000_000_000
+    const DONE_AT = SENT_AT + 5_000          // 流了 5 秒
+    vi.setSystemTime(SENT_AT)
+    sendMessageStream.mockImplementation((_msgs, cbs) => {
+      cbs.onToken('回答内容')
+      vi.setSystemTime(DONE_AT)
+      cbs.onAgentDone({ rounds: 1 })
+      return { abort: vi.fn() }
+    })
+    const store = useChatStore()
+
+    await store.send('你好')
+
+    const stored = JSON.parse(localStorage.getItem(CONV_KEY))
+    const conv = stored[0]
+    expect(conv.messages).toHaveLength(2)
+    // 毫秒级：send 时刻原值，不是 toSec 折成的秒级（1e9 量级）
+    expect(conv.messages[0].ts).toBe(SENT_AT)
+    // onAgentDone 把占位气泡的 ts 覆盖成收口时刻（这条是本次改动的真正意图）
+    expect(conv.messages[1].ts).toBe(DONE_AT)
+    expect(conv.messages[1].ts).toBeGreaterThan(conv.messages[0].ts)
+  })
 })
