@@ -50,7 +50,10 @@ def _base_env(tmp_path: Path, *, panel_dir: Path | None = None,
               secret: str | None = "panel-server-test-secret") -> dict[str, str]:
     """隔离过的子进程环境：临时数据根 / 日志 / 面板目录。"""
     env = {k: v for k, v in os.environ.items() if not k.startswith("AI_TUTOR_")}
-    for key in ("SECRET_KEY", "DATA_ROOT", "LOG_DIR"):
+    # DEFAULT_ADMIN_PASSWORD 必须一起清掉：lifespan 见到它就会插 users(id=1, 'admin')，
+    # 于是 ensure_local_user(1) 不再补建 local1，断言变成 {'username': 'admin'}。
+    # CI 全局设了该变量（本地 .env 里是注释掉的），少了这一行就是「本机绿、CI 红」。
+    for key in ("SECRET_KEY", "DATA_ROOT", "LOG_DIR", "DEFAULT_ADMIN_PASSWORD"):
         env.pop(key, None)
     if secret is not None:
         env["SECRET_KEY"] = secret

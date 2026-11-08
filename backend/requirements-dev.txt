@@ -4,3 +4,9 @@ pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-timeout==2.4.0
 ruff==0.14.5
+# TestClient 的传输层（tests/test_admin_api.py 等）：starlette 1.x 只把 httpx 塞在 [full]
+# extra 里，不装它 `from fastapi.testclient import TestClient` 直接 RuntimeError。
+# backend/requirements.txt 里也有同名同版本（主后端的运行期依赖），这里再声明一次是因为
+# **backend-admin 的 CI job 不装 backend/requirements.txt**，只装本文件 + admin 的 requirements
+# —— 少了这行就是「本机绿（venv 里有 httpx）、CI 红（collection error）」。
+httpx==0.28.1
