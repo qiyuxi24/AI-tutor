@@ -1,5 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.MyApplication" parent="android:Theme.Material.Light.NoActionBar" />
+    <!--
+        窗口级主题：只管「Compose 接管之前」的系统窗口外观。
+        页面底色必须在这里也设一次 —— 否则冷启动会先闪一帧纯白（深色下是纯黑），
+        再被 Compose 的 #F7F7F7 覆盖，观感上是闪屏。
+    -->
+    <style name="Theme.MyApplication" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/app_page</item>
+        <item name="android:colorBackground">@color/app_page</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
 </resources>

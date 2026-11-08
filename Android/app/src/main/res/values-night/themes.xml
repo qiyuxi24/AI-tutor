@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+        深色窗口主题：跟随系统深色（values-night 由 AAPT 自动选用，无需代码判断）。
+        Compose 侧的深色调色板在 ui/theme/Color.kt 的 `*Dark` 一组。
+    -->
+    <style name="Theme.MyApplication" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/app_page_dark</item>
+        <item name="android:colorBackground">@color/app_page_dark</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>
