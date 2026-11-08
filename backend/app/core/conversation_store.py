@@ -73,6 +73,25 @@ def _normalize_ts(value) -> float:
     return n / 1000.0 if n > 1e12 else n
 
 
+def _normalize_messages(messages) -> list[dict]:
+    """把每条消息里的 `ts` 统一成**秒**（本库唯一单位）。
+
+    为什么在落库口做：`ts` 是前端气泡时间标签的来源，而它会随 `messages` 上行
+    （客户端 `Date.now()` = 毫秒）。不归一化的话，同一个 `messages` 数组里会同时存在
+    「服务端 `append_turn` 写的秒」与「客户端迁移带上来的毫秒」，前端 `formatMsgTime`
+    虽然有秒/毫秒判据，但库内单位混着就没法再用 `ts` 做排序或比较。
+
+    只处理 `ts` 一个字段：`created_at`/`updated_at` 是行级列，不走这里。
+    """
+    out = []
+    for m in messages or []:
+        if isinstance(m, dict) and m.get("ts"):
+            out.append({**m, "ts": _normalize_ts(m["ts"])})
+        else:
+            out.append(m)
+    return out
+
+
 class ConversationStore:
     """
     对话存储管理类（SQLite 后端，独立数据库）
@@ -293,7 +312,7 @@ class ConversationStore:
                     conv["id"],
                     self.user_id,
                     conv.get("title", "新对话"),
-                    json.dumps(conv.get("messages", []), ensure_ascii=False),
+                    json.dumps(_normalize_messages(conv.get("messages", [])), ensure_ascii=False),
                     created_at,
                     updated_at,
                 ),
@@ -310,6 +329,12 @@ class ConversationStore:
 
         :param tools: 工具调用摘要（`[{tool, status, result}]`，前端气泡渲染用）；
                       thinking **不落**（体积大、刷新后本就不该重放）
+
+        每条消息带 `ts`（**秒**，与本库 `updated_at` 同单位）：前端气泡时间标签要从
+        消息自己身上读，刷新/换端后 `adoptRemote` 会用库里的 messages **整段替换**本地
+        副本 —— 不落 ts 就只剩会话级 `updatedAt` 可退，一个会话里每条气泡显示同一时刻。
+        单位必须是秒（与 `_normalize_ts` 同口径），前端 `formatMsgTime` 按 <1e11 判秒。
+
         幂等：同内容重复追加（客户端重试 / 请求重放）不写第二份。
         """
         now = time.time()
@@ -336,8 +361,8 @@ class ConversationStore:
                     and msgs[-1].get("content") == assistant_content):
                 return
 
-            msgs.append({"role": "user", "content": user_content})
-            assistant = {"role": "assistant", "content": assistant_content}
+            msgs.append({"role": "user", "content": user_content, "ts": now})
+            assistant = {"role": "assistant", "content": assistant_content, "ts": now}
             if tools:
                 assistant["tools"] = tools
             msgs.append(assistant)

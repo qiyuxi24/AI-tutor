@@ -71,6 +71,40 @@ def test_append_turn_is_idempotent_for_same_turn(store):
     assert len(msgs) == 2, f"重复追加了：{msgs}"
 
 
+def test_append_turn_stamps_each_message_with_second_ts(store):
+    """每条消息自带 `ts`（秒）—— 前端气泡时间标签靠它，不是靠会话级 updatedAt。
+
+    `adoptRemote` 会用库里的 messages **整段替换**本地副本（main 的 P0 防覆盖策略），
+    所以不落 ts 就只剩 `conversation.updatedAt` 可退，一个会话里每条气泡都显示同一刻。
+    单位必须是**秒**（与 `updated_at` 同口径）：前端按「< 1e11 视为秒」判。
+    """
+    store.append_turn("c1", "什么是可逆矩阵", "就是行列式不为零")
+
+    msgs = store.get_conversation("c1")["messages"]
+    for m in msgs:
+        assert "ts" in m, f"消息缺 ts：{m}"
+        assert 1e9 < m["ts"] < 1e11, f"ts 必须是秒级，拿到 {m['ts']}"
+    assert msgs[0]["ts"] <= msgs[1]["ts"], "同一回合内 assistant 不早于 user"
+
+
+def test_save_conversation_normalizes_client_ms_ts_to_seconds(store):
+    """客户端迁移上行的毫秒 `ts` 在落库口折算成秒（库内单位唯一，且能继续比较/排序）。"""
+    MS = 1_700_000_000_000
+    store.save_conversation({
+        "id": "c1",
+        "title": "迁移来的",
+        "messages": [
+            {"role": "user", "content": "问", "ts": MS},
+            {"role": "assistant", "content": "答", "ts": MS + 5000},
+        ],
+        "created_at": 1_700_000_000,
+        "updated_at": 1_700_000_100,
+    })
+
+    ts_list = [m["ts"] for m in store.get_conversation("c1")["messages"]]
+    assert ts_list == [1_700_000_000.0, 1_700_000_005.0]
+
+
 def test_ensure_conversation_bootstraps_only_when_missing(store):
     """bootstrap 只在服务端没有该对话时发生；已有历史不被客户端快照覆盖。"""
     up = [{"role": "user", "content": "旧问题"}, {"role": "assistant", "content": "旧回答"}]

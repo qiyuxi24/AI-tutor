@@ -4,6 +4,7 @@ import { renderMarkdown } from '../utils/markdown.js'
 import { avatarState } from '../utils/avatar.js'
 import QuizCard from './QuizCard.vue'
 import { BRAND_ICON } from '../utils/brandAssets.js'
+import { formatMsgTime } from '../utils/time.js'
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -44,17 +45,7 @@ async function handleCopy() {
   copyTimer = setTimeout(() => { copied.value = false }, 1500)
 }
 
-/** 格式化消息时间（如 "10月23日 21:08"），兼容秒级与毫秒级时间戳 */
-function formatMsgTime(raw) {
-  const n = Number(raw)
-  if (!n || !Number.isFinite(n)) return ''
-  const ms = n < 1e11 ? n * 1000 : n
-  const d = new Date(ms)
-  if (Number.isNaN(d.getTime())) return ''
-  const pad = (v) => String(v).padStart(2, '0')
-  return `${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
+/** 格式化消息时间（如 "10月23日 21:08"）—— 单位换算与阈值只有 utils/time.js 一份 */
 const timeLabel = computed(() =>
   formatMsgTime(props.message.ts || props.message.createdAt || props.message.created_at || props.fallbackTs)
 )
@@ -343,9 +334,12 @@ watch(renderedContent, () => {
                 'tool-error': tool.status === 'error',
               }"
             >
-              <div
+              <button
+                type="button"
                 class="tool-step-main"
                 :class="{ clickable: !!(tool.args_head || tool.result?.summary) }"
+                :disabled="!(tool.args_head || tool.result?.summary)"
+                :aria-expanded="!!(tool.args_head || tool.result?.summary) ? expandedToolIdx === idx : undefined"
                 @click="(tool.args_head || tool.result?.summary) && toggleToolDetail(idx)"
               >
                 <span v-if="tool.status === 'running'" class="tool-spinner" />
@@ -362,7 +356,7 @@ watch(renderedContent, () => {
                 <span v-else-if="formatDuration(tool.result?.duration_ms)" class="tool-step-duration">
                   {{ formatDuration(tool.result?.duration_ms) }}
                 </span>
-              </div>
+              </button>
 
               <!-- 点击步骤展开：入参 & 返回结果摘要 -->
               <div
@@ -687,6 +681,23 @@ watch(renderedContent, () => {
   border-radius: 6px;
   color: var(--color-text-secondary);
   transition: background 0.15s ease;
+  /* 真 <button>：清掉浏览器按钮默认外观（原本是 <div @click>，键盘不可达） */
+  appearance: none;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+}
+
+/* 没有可展开内容时是纯展示行（disabled 只为退出 tab 序，不是"不可用"语义） */
+.tool-step-main:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.tool-step-main:focus-visible {
+  outline: 2px solid var(--color-accent, var(--color-text-secondary));
+  outline-offset: 1px;
 }
 
 .tool-step-main.clickable {

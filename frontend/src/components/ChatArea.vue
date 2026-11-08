@@ -29,10 +29,14 @@ let isProgrammaticScroll = false
 let touchStartY = 0
 let jumpTimer = null
 let mutationObserver = null
+// scrollToBottomInstant 每帧都可能被调，rAF 句柄要留一个以便卸载时取消（残留回调会在
+// 组件已经拆掉之后再去写 isProgrammaticScroll）
+let rafId = 0
 
 /** 去除 Markdown 标记，供右侧进度条悬浮卡片展示干净的纯文本摘要 */
 function stripMarkdown(md = '') {
   return String(md || '')
+    .slice(0, 400)   // 只用于摘要：先截断再跑 8 条正则，否则流式每 token 都全文重算
     .replace(/```[\s\S]*?```/g, ' [代码] ')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
@@ -88,6 +92,13 @@ function tickLevelClass(idx) {
   return idx === activeTurnIdx.value ? 'is-active' : ''
 }
 
+/** 刻度的可访问名：读数 + 该轮用户提问的前 20 字（纯 <div> 点击区读屏器读不出意图） */
+function tickLabel(turn) {
+  const text = (turn?.userText || '').trim()
+  if (!text) return '空提问'
+  return text.length > 20 ? text.slice(0, 20) + '…' : text
+}
+
 function handleTickEnter(idx, e) {
   hoverTurnIdx.value = idx
   const itemEl = e.currentTarget
@@ -118,9 +129,15 @@ function updateActiveTurn() {
     return
   }
   const probeY = el.scrollTop + el.clientHeight * 0.35
+  // 一次取全部气泡再按 idx 定位：原来对每一轮各跑一次 `[data-msg-idx=…]` 属性选择器，
+  // 40 轮 scroll 事件就是 40 次查询 + 40 次 offsetTop（幂等的重复劳动）。
+  const byIdx = new Map()
+  for (const node of el.querySelectorAll('[data-msg-idx]')) {
+    byIdx.set(Number(node.dataset.msgIdx), node)
+  }
   let current = 0
   for (let i = 0; i < list.length; i++) {
-    const node = el.querySelector(`[data-msg-idx="${list[i].userMsgIdx}"]`)
+    const node = byIdx.get(list[i].userMsgIdx)
     if (node && node.offsetTop <= probeY) {
       current = i
     } else if (node && node.offsetTop > probeY) {
@@ -152,7 +169,9 @@ function scrollToBottomInstant() {
   lastScrollTop = el.scrollTop
   atBottom.value = true
   activeTurnIdx.value = Math.max(0, turns.value.length - 1)
-  requestAnimationFrame(() => {
+  if (rafId) cancelAnimationFrame(rafId)
+  rafId = requestAnimationFrame(() => {
+    rafId = 0
     isProgrammaticScroll = false
   })
 }
@@ -322,10 +341,12 @@ onMounted(() => {
       atBottom.value = isNearBottom()
     }
   })
+  // 只观察结构变化（新气泡/工具卡）。**不要 characterData**：流式每来一个 token 都会
+  // 触发一次回调，与上面 content-length 的 watch 形成两套每-token 滚动，且两次都读
+  // scrollHeight（强制同步布局）。
   mutationObserver.observe(listRef.value, {
     childList: true,
     subtree: true,
-    characterData: true,
   })
 })
 
@@ -333,6 +354,10 @@ onBeforeUnmount(() => {
   mutationObserver?.disconnect()
   mutationObserver = null
   if (jumpTimer) clearTimeout(jumpTimer)
+  if (rafId) {
+    cancelAnimationFrame(rafId)
+    rafId = 0
+  }
 })
 
 const greetingMessages = [
@@ -402,23 +427,28 @@ const greetingMessages = [
         aria-label="对话轮次导航"
         @mouseleave="hoverTurnIdx = -1"
       >
-        <div
+        <button
           v-for="t in turns"
           :key="t.index"
+          type="button"
           class="turn-tick-item"
           :style="{ paddingTop: tickPadY + 'px', paddingBottom: tickPadY + 'px' }"
+          :aria-label="`跳到第 ${t.index + 1} 轮：${tickLabel(t)}`"
           @mouseenter="handleTickEnter(t.index, $event)"
+          @focus="handleTickEnter(t.index, $event)"
           @click="scrollToTurn(t)"
         >
           <span class="turn-tick-bar" :class="tickLevelClass(t.index)" />
-        </div>
+        </button>
 
         <!-- 悬停预览浮窗：展示该轮用户输入与 LLM 回复截取 -->
         <Transition name="turn-preview-fade">
-          <div
+          <button
             v-if="hoveredTurn"
+            type="button"
             class="turn-preview"
             :style="{ top: previewTop + 'px' }"
+            :aria-label="`跳到第 ${hoveredTurn.index + 1} 轮：${tickLabel(hoveredTurn)}`"
             @click="scrollToTurn(hoveredTurn)"
           >
             <div class="turn-preview-user">{{ hoveredTurn.userText || '（空输入）' }}</div>
@@ -428,7 +458,7 @@ const greetingMessages = [
                   || (store.loading && hoveredTurn.index === turns.length - 1 ? 'AI 思考中…' : '暂无回复')
               }}
             </div>
-          </div>
+          </button>
         </Transition>
       </aside>
 
@@ -487,6 +517,8 @@ const greetingMessages = [
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* 供右侧刻度条做容器查询：小窗（FloatingBall 340×480）里没有横向余量 */
+  container-type: inline-size;
 }
 
 /* 消息列表：左右最大留白 = max(24px, 剩余空间/2)，把消息列封顶在 760px 并居中
@@ -520,6 +552,15 @@ const greetingMessages = [
   user-select: none;
 }
 
+/* 窄容器（悬浮小窗 compact=340 → .ball-win 有 overflow:hidden，且右侧内边距只有 24px）
+   下刻度条会压住正文、预览卡（280px + 8px）必然被裁掉 —— 直接不渲染这一层。
+   560px 的界：主视图最小宽度也在这个量级之上，桌面端不受影响。 */
+@container (max-width: 560px) {
+  .turn-rail {
+    display: none;
+  }
+}
+
 .turn-tick-item {
   width: 28px;
   padding-left: 4px;
@@ -528,6 +569,17 @@ const greetingMessages = [
   align-items: center;
   justify-content: flex-end;
   cursor: pointer;
+  /* 用真 <button> 拿键盘可达与读屏语义 → 把浏览器按钮默认外观清干净 */
+  appearance: none;
+  border: 0;
+  background: none;
+  font: inherit;
+  border-radius: 4px;
+}
+
+.turn-tick-item:focus-visible {
+  outline: 2px solid var(--color-accent, var(--color-text-secondary));
+  outline-offset: 1px;
 }
 
 .turn-tick-bar {
@@ -583,6 +635,10 @@ const greetingMessages = [
   box-shadow: var(--shadow-popup);
   cursor: pointer;
   transition: top 0.12s cubic-bezier(0.22, 1, 0.36, 1);
+  /* 卡片本身是 <button>（键盘可达 + 读屏可读），清掉按钮默认外观 */
+  appearance: none;
+  font: inherit;
+  text-align: left;
 }
 
 .turn-preview-user {
