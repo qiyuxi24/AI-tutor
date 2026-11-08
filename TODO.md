@@ -39,6 +39,10 @@
 - [ ] **LLM 服务商抽象层**（deepseek/GLM 切换）；KG_TOOLS → 抽象"动作层"
 - [ ] **RAG 引用卡片拖拽窗口**（知识卡片白板，借鉴 OpenMAIC）
 
+- [ ] **知识库长任务统一进度与状态可见**（2026-11-08 调研；前端一档已写出但**未提交**，见 §11.1）
+  > 一句话：上传 / 建图这类"点完要等几十秒到几分钟"的操作，目前**看不到它在干什么**。
+  > 调研结论、已落地的前端实现、以及**为什么刷新后一切归零**（不是显示问题，是任务真被取消了）都在 **§11.1**，动手前先读那一节。
+
 ---
 
 ## 2. 架构待决（2026-09-26 对话「没反应」故障复盘）
@@ -326,3 +330,142 @@
 - [ ] 新用户 3 步内进入可交互课堂：选主题/给资料 → 等任务链跑完 → 直接开始第一节。
 - [ ] 中途关闭页面 5 分钟回来，能回到原节点继续，且不重复出同一题（`avoid_questions` 已具备）。
 - [ ] 一条 20 集的 B 站合集从导入到第一节开讲全自动，中间 0 次手动点击。
+
+---
+
+## 11. 知识库任务进度：调研结论与施工清单（2026-11-08）
+
+> 触发问题：知识库里"上传 / 生成图谱"这类操作，**看不到它在干什么**，也没有任何量化进度。
+> 本节记录**实测结论**（不是猜测）、**已写好的前端一档**（未提交）、以及**还缺什么**。
+> 结论先行：**四类任务里有三类后端数据已经齐了**，只有上传缺段内信号；但更严重的问题在别处 ——
+> **建图任务在前端刷新/关页时会被真的取消**，不只是"显示丢了"。
+
+### 11.1 四类任务的现状（逐条实测）
+
+| 任务 | 状态可见 | 量化进度 | 数据从哪来 | 结论 |
+|---|---|---|---|---|
+| 视频课程导入 | ✅ 已完善 | ✅ **真实百分比 + ETA** | `import_items.stage` 落库 + `GET /kb/import/tasks` 返回 `elapsed_secs`/`eta_secs`/`avg_item_secs` | **不用动**（只是局限在导入页） |
+| 建图 | ⚠️ 仅 409 互斥 | ✅ **可派生**（`content_status`） | `GET /knowledge/graph` 的节点带 `content_status` | 前端可算，后端**无进度事件也不需要加** |
+| 出题 | ⚠️ 仅 409 | ❌ 只有时间型 | `quiz_ready` 是终态事件（约 40s 一次到达） | 只能做时间型进度，性价比低 |
+| 上传文件 | ❌ 只有"上传中"文字 | ❌ 无段内信号 | 解析完才知道分块数 | **唯一需要改后端的**（且改动很小） |
+
+**建图进度的口径**（实测确认，非推断）：阶段①把概念树落成 `content_status='skeleton'` 的节点，
+阶段②逐概念写正文并翻成 `filled`。所以
+
+```
+进度 = filled / total     ← 「已写出正文的概念数 / 总概念数」
+```
+
+比时间估算准，且刷新/换设备后照样算得出。实测真实数据：
+
+```
+GET /api/v1/knowledge/graph?subject=线性代数  →  total=17 filled=17 → 100%
+样例节点字段含 content_status = True
+```
+
+⚠️ 建图是**增量补全**（已有学科会并轨），所以比例**不是从 0 开始**。UI 必须同时给绝对数
+（`已写 12/30`），否则用户会以为卡住了 —— 不要只画一条从半空开始的进度条。
+
+**上传为什么没有真实百分比**（诚实边界，别硬编）：
+- 分块数要**解析完**才知道（`kb_manager._index_document` 里 `chunks = chunk_text(text)`）；
+- 嵌入是批量内部循环（`llm/embed.py` 的 `EMBED_BATCH_SIZE=10`），批次之间没有回调出口。
+- 所以可量化的只有**文件级 `i/N`**；单文件内部只报阶段文字（解析中 / 向量化中 / 入库）。
+
+### 11.2 已写好但**未提交**的前端一档（分支 `feat/kb-task-progress`）
+
+> 代码在 `git stash`（**8 个文件**：5 个改动 + 3 个新增，后者在 stash 的 untracked 部分，
+> 用 `git stash show --include-untracked --stat 'stash@{0}'` 才看得全）。
+> 要捡起来：`git stash pop`。
+
+改动面（**全部前端，后端零改动**）：
+
+| 文件 | 内容 |
+|---|---|
+| `frontend/src/utils/kbTaskProgress.js` | 新增：`isIndeterminate` / `taskPercent` / `taskCounter` / `taskSubtitle` / `taskTone` 纯函数 |
+| `frontend/src/utils/kbTaskProgress.test.js` | 新增：12 例（NaN 防护、边界钳位、不可量化判定） |
+| `frontend/src/components/KbPanel.tasks.test.js` | 新增：11 例，jsdom 真挂载（显示开关 / 进度条宽度 / 不画 0% 空条） |
+| `frontend/src/components/KbPanel.vue` | +276：任务面板 UI、上传接入、建图轮询、样式 |
+| `frontend/src/stores/chatStore.js` | +56：`kbTasks` 状态 + `beginKbTask`/`updateKbTask`/`endKbTask`/`dismissKbTask`/`clearFinishedKbTasks` |
+| `frontend/src/api/kb.js` | +13：`getGraphProgress(subject)` |
+| `frontend/src/views/KbView.vue` | +3：传 `show-tasks`（**只在独立页显示**，侧栏窄放不下） |
+| `frontend/vitest.config.js` | +14：启用 `vue()` 插件（挂 SFC 必需；插件本就是 devDependency） |
+
+**已验证**（2026-11-08）：前端 `49 passed (5 files)`（原 27 + 新增 22）、`npm run build` 通过、
+后端 `1953 passed / 7 deselected`（唯一 FAILED 是既有的 `test_backup_script` WSL 路径问题）。
+真实 Chrome 测过像素宽度：容器 560px 下三条进度条实测 `364 / 218 / 544`，与 67% / 40% / 100% 对应。
+
+**关键设计取舍**（改的时候别推翻）：
+- **任务状态放 store，不放组件**：KbPanel 在**两处**挂载（图谱页侧栏 + 知识库独立页），且
+  `HomeView` 用 `:key="viewEpoch"` 让它重挂。状态留在组件里 → 切个视图回来任务就"消失"。
+- **不可量化时绝不画 0% 空条**：视觉上等于"卡死"。用 `···` 不确定态代替。
+- **任务面板只在知识库独立页渲染**（`showTasks` prop）：侧栏最宽 560 还要塞目录树。
+  副作用：从侧栏发起建图，得切到独立页才看得到进度。
+
+### 11.3 真正的坑：刷新/关页 → **任务被取消**，不是"显示丢了"
+
+这是本次调研最重要的发现，比进度条重要得多。
+
+**现象分层**（两层都要修，别只修第一层）：
+
+1. **显示层**：`kbTasks` 是纯内存 `ref`，没写 localStorage → 刷新后清空。
+   （这一层好补：按 `user_id` 隔离写 localStorage，与对话缓存的 key 风格一致。）
+2. **任务层**（**既有缺陷，非本次引入**）：建图请求 `POST /kb/graph/generate` **没有**
+   `asyncio.shield`、也没有 `runtime.spawn` 后台化 —— 它靠前端请求保活。客户端一断连
+   （刷新 / 关页 / 切网络），FastAPI 取消 handler 协程 → 建图真的停在半路。
+
+实测（用一个永不返回的假生成器模拟）：
+
+```
+占位后 is_building = True
+进入生成 = True
+被取消 = True | 跑完 = False     ← 任务确实没跑完
+释放后 is_building = False       ← finally 里的 end_graph_build 正常释放，不会永久锁死
+```
+
+**降低伤害的既有机制**：建图是分阶段落库的 —— 阶段①的概念树已经写成 skeleton 节点，
+所以刷新后图谱里**看得到骨架**，只是阶段②的正文没写完。这正是 11.1 的 `filled/total`
+能把"还剩多少"说清楚的原因。
+
+**还缺的**：
+
+| 缺口 | 位置 | 说明 |
+|---|---|---|
+| 没有 GET 暴露"正在建图" | `core/kb/graph_generator.py::is_graph_building` | 目前只在 6 处用于判 409（`api/v1/knowledge.py`），**没有任何端点能查** |
+| 断连即取消 | `api/v1/kb.py::generate_graph` | 需 `shield` 或 `runtime.spawn` 后台化 |
+| 无暂停/续跑/重试 | —— | 对比视频导入有完整队列（`import_queue`），建图没有 |
+
+### 11.4 施工清单（按成本递增，A/B 可一起做）
+
+- [ ] **A · 只修显示**（纯前端，~30 分钟）
+  `kbTasks` 写 localStorage（按 user_id 隔离，key 风格对齐 `chatStore` 的 `STORAGE_KEY_*`），
+  刷新后能重放"上次未完成的任务"。
+  ⚠️ **单独做 A 是不够的**：任务其实已经被取消了，这会显示一条**过时**的进度 —— 诚实但无用。
+  所以 A 必须和 B 或 C 一起上，否则别做。
+
+- [ ] **B · 显示 + 断连保活 + 状态可查**（含小改后端，~半天）**← 推荐**
+  1. `generate_graph` 改后台化：`runtime.spawn`（项目已有该工具，见 `core/runtime.py`；
+     裸 `asyncio.create_task` 不持有返回值会被 GC，`runtime.spawn` 就是为这个存在的）；
+  2. 新增 `GET /kb/graph/status`（或并入 `/kb/stats`）暴露 `is_graph_building` + 进度，
+     前端刷新后据此恢复任务卡；轮询间隔参考 `KbPanel` 里的 `GRAPH_POLL_MS=3000`；
+  3. 前端 A 的 localStorage 重放 + B 的状态查询二选一或叠加（状态查询更准，localStorage 更快）。
+  **验收**：建图跑到一半刷新页面 → 任务卡还在、进度继续往前走、最终落成完整图谱。
+
+- [ ] **C · 完全对齐视频导入**（持久化队列，1–2 天）
+  建图也做成 `import_queue` 式任务（暂停/续跑/重试/重排），需要新增表。
+  与 §10「统一任务模型」是同一件事的两个入口，**别另造第二套调度**（§10 P0 原文即
+  「复用 `core/kb/import_queue.py` 的任务表 + 每用户单 worker 模式，不另造第二套调度」）。
+  做完这条，§10 的「统一任务模型」就只剩"把导入和建图接成一条链"。
+
+### 11.5 不能改坏的不变量
+
+- **SSE 请求内事件必须走请求私有队列**：若将来给建图加实时进度，**不要**用 `event_bus`
+  的 per-user 队列发 `import_progress` 那类高频事件（会与常驻长连接抢事件，见 `AGENTS.md §2`）。
+  要么走 `notify(..., persist=False)` 的既有通道，要么让前端轮询（当前实现用的是轮询）。
+- **`ctx.kb` / `node_ids` 的语义**：`None` = 不限范围，`[]` = 空范围（检索不到）。详见 §1 那条
+  「知识库检索范围」；回归用例 `backend/tests/test_kb_empty_scope.py`（随 **PR #8** 提交，
+  合并前在 `fix/kb-empty-scope` 分支上）。
+- **建图互斥 GQ-15**：任何后台化改造都必须保住 `try_begin_graph_build` / `end_graph_build` 的
+  成对释放（放 `finally`），否则该用户会被永久锁死，此后每次建图都 409。
+- **`content_status` 是进度真源**：别为进度另建一张表或新字段。
+
+---
