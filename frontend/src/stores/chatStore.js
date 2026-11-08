@@ -35,6 +35,7 @@ import { sendMessageStream, apiClient } from '../api/index.js'
 // 更准确，且直接指向「可重试」；因此不再需要 fmt / ErrorDefs。
 import { clientError } from '../utils/errorCodes.js'
 import { normalizeEdges } from '../utils/graphNormalize.js'
+import { toSec, toMs } from '../utils/time.js'
 
 // 按 user_id 隔离 localStorage，防止切换账号后对话历史泄露
 const _uid = (() => {
@@ -77,19 +78,10 @@ function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
 }
 
-// 时间戳单位：后端是**秒**（time.time()，~1.7e9），前端是**毫秒**（Date.now()，~1.7e12）。
-// 旧实现把两者直接比较/上行：采纳 `remoteAt > localAt` 恒假 → 永不采纳服务端较新版本；
-// 上行毫秒 → 后端 `current > incoming` 恒假 → 旧缓存盖掉服务端新历史（P0，2026-11-05）。
-// 边界统一：上行毫秒换算成秒，采纳把秒还原成毫秒；已是另一单位的值原样通过。
-const MS_THRESHOLD = 1e12
-function toSec(v) {
-  const n = Number(v) || 0
-  return n > MS_THRESHOLD ? Math.floor(n / 1000) : n
-}
-function toMs(v) {
-  const n = Number(v) || 0
-  return n > 0 && n < MS_THRESHOLD ? n * 1000 : n
-}
+// 时间戳单位换算（秒 ↔ 毫秒）唯一实现在 utils/time.js —— 别再在这里另定义阈值，
+// 历史上第二份阈值（1e11）与这份（1e12）差一个数量级，会把「老的秒」和「新的毫秒」
+// 判成同一档。re-export 只是让既有调用方沿用原导入路径。
+export { toSec, toMs }
 
 function todayLabel(date) {
   const d = new Date(date)
@@ -1115,7 +1107,7 @@ export const useChatStore = defineStore('chat', () => {
    */
   function renderAssistant(conv, msg, replaceLast = false) {
     if (replaceLast) conv.messages.pop()
-    conv.messages.push(msg)
+    conv.messages.push({ ts: Date.now(), ...msg })
     conv.updatedAt = Date.now()
     persist()
   }
@@ -1132,10 +1124,11 @@ export const useChatStore = defineStore('chat', () => {
       currentId.value = conv.id
     }
 
+    const now = Date.now()
     // 追加用户消息
-    conv.messages.push({ role: 'user', content: text })
+    conv.messages.push({ role: 'user', content: text, ts: now })
     // 内容变化 → 提升本地修改时刻（多端防覆盖：后端据此判断这份快照是不是旧的）
-    conv.updatedAt = Date.now()
+    conv.updatedAt = now
 
     // 如果是第一条消息，自动用前 20 字设定标题
     // 此时对话从"空"变为"有内容"，需要持久化
@@ -1144,7 +1137,7 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     // 添加占位 AI 消息（流式填充 + 工具/思考事件挂载）
-    conv.messages.push({ role: 'assistant', content: '', tools: [], thinking: [] })
+    conv.messages.push({ role: 'assistant', content: '', tools: [], thinking: [], ts: now })
     loading.value = true
     // 对话已有内容，持久化（persist 内部会过滤空对话，此对话现在不会被过滤）
     persist()
@@ -1204,6 +1197,7 @@ export const useChatStore = defineStore('chat', () => {
         // 收到即收口 loading 并把正文落盘（缺陷 A-1：否则「AI 思考中…」一直转）。
         onAgentDone: () => {
           if (seq !== streamSeq) return   // 旧流迟到的事件，忽略
+          patchLastAssistant(conv, () => ({ ts: Date.now() }))
           loading.value = false
           persist()
         },

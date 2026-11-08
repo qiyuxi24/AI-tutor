@@ -38,6 +38,12 @@
 - [ ] **"AI 同学"多角色讨论 / 白板图谱联动（SVG）**
 - [ ] **LLM 服务商抽象层**（deepseek/GLM 切换）；KG_TOOLS → 抽象"动作层"
 - [ ] **RAG 引用卡片拖拽窗口**（知识卡片白板，借鉴 OpenMAIC）
+- [ ] **对话 Rewind（回退）与 Branch（分叉）** `[改]`（须遵守 P0-1 服务端对话权威，**严禁**前端截断后走迁移口 `POST /conversations` 全量覆盖）：
+  - **后端（权威真源）**：`core/conversation_store.py` + `api/v1/conversations.py` 新增命令式端点 `POST /conversations/{id}/rewind`（按 `keep_messages` 在 `_write_txn` 内截断库里 `messages`）与 `POST /conversations/{id}/branch`（在库内从源对话复制前 `keep_messages` 条生成新对话行，不收客户端上传的消息数组）
+  - **前端 Store 与视图**：`stores/chatStore.js` 新增 `rewindTo(msgIdx)` / `branchFrom(msgIdx)`（先 abort 在途流 → 调后端接口 → 同步本地离线缓存）；`ChatArea.vue` / `MessageBubble.vue` 提供操作入口
+  - **验收**：`backend/tests/test_conversation_authority.py` 断言 rewind 后下一轮 `/chat*` 注入给模型的是截断后的历史，branch 后原对话不变、新对话继承前缀历史
+- [ ] **AI 回复底部悬停工具栏扩展动作** `[改]`（本节随 PR 一起提供底座：`MessageBubble.vue::.msg-toolbar` + 复制按钮 + 时间戳 + `toolbarActions`/`extraActions` 扩展口）：
+  - **候选扩展项（均纯前端或复用既有权威入口）**：① **TTS 语音朗读**（`window.speechSynthesis` 朗读去 Markdown 后的正文，再点停止）；② **引用追问**（优先取 `window.getSelection()` 划选文本，未划选则截取回复前 60~80 字纯文本，在 `InputArea.vue` 上方渲染可关闭引用条，发送时拼入标准 `user` 消息走 `store.send()`）；③ **头部 `用时 Xs >` 折叠**（记录流式起止时长或汇总 `tools[].result.duration_ms`，与思考过程面板合一）；④ **导出单条回复为 `.md` 笔记**；⑤ **一键针对本条知识点出题**
 
 ---
 
@@ -70,6 +76,12 @@
   - `stores/chatStore.js` 同管对话 + 图谱 + SSE + 同步 + 出题回流；长连接生命周期由 `HomeView.onMounted → store.init()` 决定
   - 本次故障能潜伏很久正因为这个耦合（图谱通道能吞掉对话正文）
   - **待决策**：是否按关注点拆 store；不拆则至少把「**通道只管送到、渲染只有一份**」写成约定
+- [ ] **[P1] 开发态 SSE 断线重连误报「后端已重载」（2026-11-03 实测）** `[改]`
+  - **现象**：LLM 对话流式生成及后台图谱分析（`_analyze_and_apply`）结束约 5s 后，常在后端进程**并未重启**的情况下弹出 `ⓘ 后端已重载，页面数据已同步`，并触发 `viewEpoch += 1` 重挂子视图
+  - **根因**：前端 `chatStore.js::connectSSE` 把任意一次 `onerror → onopen` 重连成功直接等价判为「后端进程重载」并发射 `BACKEND_RELOADED_EVENT`（`HomeView.vue:80-86`）
+  - **已排除**：心跳包缺口（`event_bus.subscribe()` 的裸 `await q.get()`）**已于 2026-11-04 修复**，见 §8「常驻 SSE 长连接无心跳」那条 —— 本项的触发条件只剩前端这条判定
+  - **落点**：`frontend/src/stores/chatStore.js` & `frontend/src/views/HomeView.vue`（仅在后端真实 `boot_id` 变化时才判为重载，或去掉弹窗/视图强制重挂）
+  - **验收**：长耗时 LLM 对话结束后不再误弹「后端已重载」；真改后端代码触发 `uvicorn --reload` 时仍能自动同步
 
 ---
 
