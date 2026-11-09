@@ -76,12 +76,12 @@
   - `stores/chatStore.js` 同管对话 + 图谱 + SSE + 同步 + 出题回流；长连接生命周期由 `HomeView.onMounted → store.init()` 决定
   - 本次故障能潜伏很久正因为这个耦合（图谱通道能吞掉对话正文）
   - **待决策**：是否按关注点拆 store；不拆则至少把「**通道只管送到、渲染只有一份**」写成约定
-- [ ] **[P1] 开发态 SSE 断线重连误报「后端已重载」（2026-11-03 实测）** `[改]`
+- [x] **[P1] 开发态 SSE 断线重连误报「后端已重载」（2026-11-03 实测，2026-11-09 已修）** `[改]`
   - **现象**：LLM 对话流式生成及后台图谱分析（`_analyze_and_apply`）结束约 5s 后，常在后端进程**并未重启**的情况下弹出 `ⓘ 后端已重载，页面数据已同步`，并触发 `viewEpoch += 1` 重挂子视图
-  - **根因**：前端 `chatStore.js::connectSSE` 把任意一次 `onerror → onopen` 重连成功直接等价判为「后端进程重载」并发射 `BACKEND_RELOADED_EVENT`（`HomeView.vue:80-86`）
-  - **已排除**：心跳包缺口（`event_bus.subscribe()` 的裸 `await q.get()`）**已于 2026-11-04 修复**，见 §8「常驻 SSE 长连接无心跳」那条 —— 本项的触发条件只剩前端这条判定
-  - **落点**：`frontend/src/stores/chatStore.js` & `frontend/src/views/HomeView.vue`（仅在后端真实 `boot_id` 变化时才判为重载，或去掉弹窗/视图强制重挂）
+  - **根因**：前端 `chatStore.js::connectSSE` 把任意一次 `onerror → onopen` 重连成功直接等价判为「后端进程重载」并发射 `BACKEND_RELOADED_EVENT`（`HomeView.vue:80-86`）—— 而重连有三种成因（真重启 / 网络抖动 / 反代 300s 读超时），只有第一种该刷新
+  - **修法**：`GET /api/health` 增 **进程级** `boot_id`（`main.py::BOOT_ID = uuid.uuid4().hex`，模块导入一次 → `--reload` 换进程即换值；`status` 字段原样保留，docker healthcheck / entrypoint / deploy 脚本零改动）。前端 `_checkBackendBoot()` 每次 SSE 连上（首连与重连都走）拉一次比一次，**只有 id 变了**才发 `BACKEND_RELOADED_EVENT`；`onerror` 不再判定任何事（删掉 `sseWasDown`，判断挪到"能拿到证据"的那一侧）；拿不到 `boot_id`（后端未升级 / 请求失败）**什么都不做** —— 宁可漏一次刷新，不可误报一次（误报会冲掉用户正在填的作答）
   - **验收**：长耗时 LLM 对话结束后不再误弹「后端已重载」；真改后端代码触发 `uvicorn --reload` 时仍能自动同步
+  - **回归**：`frontend/src/stores/chatStore.lifecycle.test.js`（3 例：id 未变不发 / id 变了要发 / 拿不到 id 不发）+ `backend/tests/test_health_boot_id.py`（3 例：`status` 未被破坏 / 同进程内 id 恒定 / 不是硬编码常量）
 
 ---
 

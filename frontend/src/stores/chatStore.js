@@ -51,8 +51,10 @@ const STORAGE_KEY_CURRENT = `ai_tutor_current_${_uid}`
  * 开发态信号：后端进程已重载（uvicorn --reload 重启）。
  *
  * 前端代码改动由 Vite HMR 负责；后端代码改动没有任何 HMR 通道，
- * 但**进程重启必然掐断所有 TCP 连接** → 常驻 SSE 断线后重连成功，
- * 就是"后端已重载完成"的免费信号（不需要后端加任何钩子/接口）。
+ * 但**进程重启必然掐断所有 TCP 连接** → 常驻 SSE 断线后重连成功是必要条件，
+ * 但**不充分**：网络抖动、反代 300s 读超时同样会断线重连（TODO §2 P1 实测误报）。
+ * 因此判据是 `/api/health` 的 `boot_id`（进程级 UUID）真的变了 ——
+ * 见 `_checkBackendBoot`。
  * HomeView 监听本事件 → 局部重挂当前视图 + 重拉图谱。
  */
 export const BACKEND_RELOADED_EVENT = 'backend-reloaded'
@@ -685,7 +687,9 @@ export const useChatStore = defineStore('chat', () => {
   // ─── SSE：监听后端数据变更，自动刷新图谱 ───
   let sseSource = null
   let sseReconnectTimer = null
-  let sseWasDown = false   // 断线标记：只认"断过线又连上"= 后端重载，首次连接不算
+  // 已确认的后端进程标识（/api/health 的 boot_id）。null = 还没取到过。
+  // 判据只能是它变了：断线重连成功与"后端重载"不是同一件事（TODO §2 P1）。
+  let sseBootId = null
   let sseStopped = false   // 已显式断开（登出 / 视图卸载）→ 禁止一切（重）连接
   let sseReconnectDelay = SSE_RECONNECT_BASE_MS
 
@@ -698,6 +702,32 @@ export const useChatStore = defineStore('chat', () => {
     if (sseSource) {
       sseSource.close()
       sseSource = null
+    }
+  }
+
+  /**
+   * 比对后端进程标识：变了才认为"后端重载了"。
+   *
+   * 为什么不能只看"重连成功"：前端长连接会因为**网络抖动**、反代读超时、
+   * 后台标签页被冻结等原因断开再连上，后端进程却一直没变 —— 旧实现把这些
+   * 一律判成重载，于是长耗时回答结束时误弹「后端已重载」并强制重挂视图
+   * （TODO §2 P1，2026-11-03 实测）。
+   *
+   * 拿不到 boot_id（后端还没升级 / 请求失败）→ **什么都不做**：宁可漏一次刷新，
+   * 也不要误报一次（误报会冲掉用户正在填的作答）。生产环境不发信号。
+   */
+  async function _checkBackendBoot() {
+    let bootId = null
+    try {
+      const { data } = await apiClient.get('/api/health')
+      bootId = data?.boot_id || null
+    } catch { return }
+    if (!bootId) return
+    const prev = sseBootId
+    sseBootId = bootId
+    if (prev === null || prev === bootId) return   // 首次取到 / 进程没换
+    if (import.meta.env.DEV) {
+      window.dispatchEvent(new CustomEvent(BACKEND_RELOADED_EVENT))
     }
   }
 
@@ -716,14 +746,8 @@ export const useChatStore = defineStore('chat', () => {
         // 首连与重连都要补拉离线通知（A2-3）：出题是后台任务（~40s 才回），
         // 断线窗口里产生的 quiz_ready 只能靠后端落库那条路救回来。
         fetchPendingNotices()
-        // 首连成功什么都不做；断线后重连成功 = 后端已重载 → 通知页面刷新
-        if (!sseWasDown) return
-        sseWasDown = false
-        // 发射端也只认开发态：生产环境一次网络抖动不该打这个信号
-        // （接收端 HomeView 本来就有 DEV 判断，但信号本身也不该进生产）
-        if (import.meta.env.DEV) {
-          window.dispatchEvent(new CustomEvent(BACKEND_RELOADED_EVENT))
-        }
+        // 首连只记 boot_id；之后每次连上比一次，变了才是真重载。
+        _checkBackendBoot()
       }
       sseSource.onmessage = (event) => {
         try {
@@ -750,9 +774,9 @@ export const useChatStore = defineStore('chat', () => {
         } catch { /* ignore parse errors */ }
       }
       sseSource.onerror = () => {
-        // 断线原因可能是后端重载、网络抖动、后端挂了 —— 一律记为"断过线"，
-        // 重连成功时统一刷新（刷新幂等且廉价，无法区分也不必区分）。
-        sseWasDown = true
+        // 断线原因可能是后端重载、网络抖动、后端挂了 —— 这里**不**做任何判断，
+        // 一律先退避重连；重连成功后由 _checkBackendBoot 比对 boot_id 才知道
+        // 究竟是不是换了进程（判断放在"能拿到证据"的那一侧）。
         _closeSSE()
         if (sseStopped) return
         // 退避重连：5s → 10s → … → 60s 封顶（后端久挂时不刷屏、不烧电）
@@ -902,7 +926,6 @@ export const useChatStore = defineStore('chat', () => {
    */
   function disconnectSSE() {
     sseStopped = true
-    sseWasDown = false
     _closeSSE()
   }
 

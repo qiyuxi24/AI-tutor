@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -31,6 +32,10 @@ logger = setup_logging()
 # ════════════════════════════════════════════
 
 _gc_task: "asyncio.Task | None" = None
+
+# 进程标识：模块导入一次，uvicorn --reload 换进程即换值。
+# 只用于"这次重连是换进程了还是只是网络抖了一下"，不参与任何鉴权/持久化。
+BOOT_ID = uuid.uuid4().hex
 
 
 @asynccontextmanager
@@ -221,4 +226,10 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok"}
+    """健康检查 + 进程标识。
+
+    `boot_id` = **进程级** UUID：uvicorn --reload 重启 = 新进程 = 新 id。
+    前端据此判断「重连成功」到底是不是「后端换了个进程」—— 网络抖动 / 反代
+    300s 掐断同样会触发 EventSource 重连，光看"连上了"会把它们全判成重载。
+    """
+    return {"status": "ok", "boot_id": BOOT_ID}

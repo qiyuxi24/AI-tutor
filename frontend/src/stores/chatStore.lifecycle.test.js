@@ -23,7 +23,7 @@ vi.mock('../api/index.js', () => ({
   },
 }))
 
-import { useChatStore } from './chatStore.js'
+import { useChatStore, BACKEND_RELOADED_EVENT } from './chatStore.js'
 import { sendMessageStream, apiClient } from '../api/index.js'
 
 /** 最小 EventSource 替身：留实例、暴露三个回调、close() 可断言 */
@@ -128,6 +128,78 @@ describe('离线通知补拉（A2-3）', () => {
     await vi.waitFor(() => {
       expect(apiClient.get).toHaveBeenCalledWith('/api/v1/knowledge/notices/pending')
     })
+  })
+})
+
+describe('后端重载判定（TODO §2 P1：重连 ≠ 重载）', () => {
+  /**
+   * 让 /api/health 依次返回给定的 boot_id 序列（末值重复使用）。
+   * 其余请求（pending_notices 等）给空响应。
+   */
+  function healthReturns(...bootIds) {
+    let i = 0
+    apiClient.get.mockImplementation((url) => {
+      if (url !== '/api/health') return Promise.resolve({ data: {} })
+      const boot = bootIds[Math.min(i++, bootIds.length - 1)]
+      return Promise.resolve({ data: { status: 'ok', boot_id: boot } })
+    })
+  }
+
+  function spyReloadEvent() {
+    const spy = vi.fn()
+    window.addEventListener(BACKEND_RELOADED_EVENT, spy)
+    return spy
+  }
+
+  /** 走一遍「首连 → 断线 → 重连」，返回重载事件监听器。 */
+  async function connectBreakReconnect() {
+    localStorage.setItem('ai_tutor_token', 't')
+    const onReload = spyReloadEvent()
+    const store = useChatStore()
+    await store.init()
+
+    FakeEventSource.instances[0].onopen()      // 首连：只记 boot_id
+    await vi.advanceTimersByTimeAsync(0)       // 冲掉 _checkBackendBoot 的微任务
+    FakeEventSource.instances[0].onerror()     // 断线
+    await vi.advanceTimersByTimeAsync(5000)    // 退避后重连
+    FakeEventSource.instances[1].onopen()      // 重连成功
+    await vi.advanceTimersByTimeAsync(0)
+    return onReload
+  }
+
+  it('重连成功但 boot_id 没变 → 不发「后端已重载」（网络抖动不该刷页面）', async () => {
+    vi.useFakeTimers()
+    healthReturns('boot-A', 'boot-A')
+    const onReload = await connectBreakReconnect()
+
+    expect(FakeEventSource.instances).toHaveLength(2)
+    expect(onReload).not.toHaveBeenCalled()
+  })
+
+  it('boot_id 真的变了（uvicorn --reload 换进程）→ 发「后端已重载」', async () => {
+    vi.useFakeTimers()
+    healthReturns('boot-A', 'boot-B')
+    const onReload = await connectBreakReconnect()
+
+    expect(onReload).toHaveBeenCalledTimes(1)
+  })
+
+  it('拿不到 boot_id（后端没升级 / 请求失败）→ 不发信号，宁可漏刷也不误报', async () => {
+    vi.useFakeTimers()
+    localStorage.setItem('ai_tutor_token', 't')
+    apiClient.get.mockRejectedValue(new Error('nope'))
+    const onReload = spyReloadEvent()
+    const store = useChatStore()
+    await store.init()
+
+    FakeEventSource.instances[0].onopen()
+    await vi.advanceTimersByTimeAsync(0)
+    FakeEventSource.instances[0].onerror()
+    await vi.advanceTimersByTimeAsync(5000)
+    FakeEventSource.instances[1].onopen()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(onReload).not.toHaveBeenCalled()
   })
 })
 

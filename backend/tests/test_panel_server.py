@@ -268,7 +268,9 @@ def test_panel_health_injected_index_me_and_graph(server: _PanelServer, tmp_path
     status, _, body = server.get("/assets/app.js")
     assert status == 200 and "console.log('panel')" in body
     status, _, body = server.get("/api/health")
-    assert status == 200 and json.loads(body) == {"status": "ok"}
+    health = json.loads(body)
+    assert status == 200 and health["status"] == "ok"
+    assert health["boot_id"]      # 前端据此判定"后端是否换了进程"（TODO §2 P1）
 
     # ── 启动协议：stdout 恰一行 PORT=（日志全部走 stderr）──
     assert 0 < server.port < 65536
