@@ -3,6 +3,28 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// 显式 import：Kotlin DSL 里 `java` 被 JavaPluginExtension 遮蔽，
+// 直接写 `java.util.Properties()` 会报 Unresolved reference 'util'。
+import java.util.Properties
+
+/**
+ * 读 `local.properties` 里的键。
+ *
+ * ⚠️ **不能用 `project.findProperty`**：那只读 Gradle 属性（`gradle.properties`、
+ * `-P` 参数），而 `local.properties` 是 Android 工具链自己的文件，不在其中
+ * （AGP 只是用它来放 `sdk.dir`）。用它会让配置"看起来生效其实没生效"——
+ * 实测传了 `api.base.url` 后 `BuildConfig` 里仍是默认值。
+ *
+ * 文件不存在（新 clone）时返回 null，由调用方兜底默认值 —— 不能让构建失败。
+ */
+fun localProperty(key: String): String? {
+    val file = rootProject.file("local.properties")
+    if (!file.exists()) return null
+    val props = Properties()
+    file.inputStream().use { props.load(it) }
+    return props.getProperty(key)?.takeIf { it.isNotBlank() }
+}
+
 android {
     namespace = "com.example.myapplication"
     compileSdk {
@@ -21,9 +43,9 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // 后端地址。**不硬编码在 Kotlin 里** —— 每人环境不同（模拟器 / 真机 / 同事的电脑）。
-        // 取值：local.properties 里写 `api.base.url=http://...` 即可覆盖下面这份默认值。
+        // 取值优先级：local.properties 的 api.base.url > 下面这份默认值。
         // local.properties 已在 .gitignore，各人填自己的，提交时不会互相覆盖。
-        val apiBaseUrl = (project.findProperty("api.base.url") as String?)
+        val apiBaseUrl = localProperty("api.base.url")
             ?: "http://10.0.2.2:8000"   // 10.0.2.2 = 模拟器访问宿主机的固定地址
         buildConfigField("String", "API_BASE_URL", "\"$apiBaseUrl\"")
     }
