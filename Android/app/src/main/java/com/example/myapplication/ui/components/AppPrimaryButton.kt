@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -55,9 +54,12 @@ fun AppPrimaryButton(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (loading) {
-            CircularProgressIndicator(
-                modifier = Modifier.height(20.dp),
+            // 用自绘的圈，不用 M3 的 CircularProgressIndicator：
+            // 后者内部会再追加 .size(40dp)，与调用方传的尺寸叠加成非正方形容器，
+            // 圈会飘到按钮外面（详见 AppCircularProgress 注释）。
+            AppCircularProgress(
                 color = colors.card,
+                diameter = 20.dp,
                 strokeWidth = 2.dp,
             )
         } else {
