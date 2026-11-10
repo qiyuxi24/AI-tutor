@@ -17,6 +17,12 @@ gson = "2.11.0"
 coroutines = "1.7.3"
 # JWT 落盘必须加密（Android/README.md §5.2「别存明文 SharedPreferences」）。
 securityCrypto = "1.1.0"
+# LaTeX 公式排版（矩阵/分式/积分）。**MIT 许可**，与项目协议兼容。
+# 选 1.6.3-kt2.1.0 而不是最新 1.7.2：作者明确写了 1.6.3-kt2.1.0 是
+# Kotlin 2.1 兼容线的最后一版，依赖 kotlin-stdlib 2.2.10（与本项目一致）；
+# 1.7.x 会把 Kotlin 拉到 2.4.21、Compose 拉到 1.12.2，与现有 BOM 冲突。
+# ⚠️ 不要换成 ru.noties:jlatexmath-android —— 那个是 GPL-2.0，会传染整个项目。
+latex = "1.6.3-kt2.1.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -39,6 +45,11 @@ androidx-compose-material3 = { group = "androidx.compose.material3", name = "mat
 androidx-compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
+# LaTeX 渲染（MIT）。-android 后缀是该 KMP 库的 Android 变体；
+# renderer 会传递依赖 parser + base，不用单独引。
+latex-renderer = { group = "io.github.huarangmeng", name = "latex-renderer-android", version.ref = "latex" }
+# KaTeX 配套字体：不引也能跑（回落系统字体），但矩阵/分式的字形会不标准
+latex-fonts-katex = { group = "io.github.huarangmeng", name = "latex-fonts-katex-android", version.ref = "latex" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
 gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }

@@ -85,6 +85,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     // JWT 加密落盘（EncryptedSharedPreferences）。别退回明文 SharedPreferences
     implementation(libs.androidx.security.crypto)
+    // LaTeX 公式排版（MIT 许可）。矩阵/分式/积分画成真公式，不是显示源码
+    implementation(libs.latex.renderer)
+    implementation(libs.latex.fonts.katex)
     // 网络层：REST 与 SSE 共用同一个 OkHttpClient（不引 Retrofit，理由见 libs.versions.toml）
     implementation(libs.okhttp)
     implementation(libs.gson)
