@@ -298,6 +298,10 @@
 - 两处 `_embed()` 合并统一门面（2026-09-12，`embed_texts` 唯一出口 + 部分返回整批作废，杜绝 chunk/向量错位）
 - 商用过滤 node 白名单语义确认 → 落于 `kb_manager.allowed_node_ids()`
 - 「usage_mode」存取方式确认 → 复用 `PATCH /profile`
+- **「同一 user 两标签页，`quiz_ready` 随机进其一」**（2026-11-10 核实已不存在）：`event_bus.subscribe(user_id=…)` 早已是 **per-connection fan-out**（每次调用新建队列并登记进 `_user_queues[user_id]` 这个 set，`broadcast`/`notify` 给每条队列各一份）。TODO §2 那条的"剩余缺口 + 三选一待决策"前提已过时，搬来此处。回归 `tests/test_event_bus.py:214`、`:228`。
+- **对话内出题的两条遗留**（2026-11-10 核实已完成）：① 题目卡片 —— `frontend/src/components/QuizCard.vue` 存在并挂于 `MessageBubble.vue:401-404`；② 题目漂移 —— `core/quiz/chat_quiz.py:48` 定 `CHAT_QUIZ_TOP_K = 0`（"出题依据只允许用当前节点的正文"，注释记录的正是这次实测结论）。
+- **HyDE / Query Expansion**（2026-11-10 核实已实现）：`core/rag_pipeline/query_expansion.py::hyde_query` 存在，开关 `core/config.py:116` 的 `rag_hyde_enabled`（env `RAG_HYDE_ENABLED`，**默认 `False`**）。从 P2「待实现」降级为「待评估收益」—— 配置注释已写明"收益主要体现在口语化提问，离线集上很可能看不到提升"。
+- **`<400 字拒收`是否改成"标记待补"**（2026-09-26 定案）：已落地**两档守门** —— `core/kb/graph_generator.py:119` 的 `GRAPH_SHALLOW_REJECT_CHARS = 150`（低于此值才算截断产物、拒收且留 skeleton）+ `GRAPH_MIN_CONTENT_CHARS = 400`（完整性目标线，介于两者之间**保留但标记待补**，名字进 `rejected_shallow`）。TODO §9 那条待拍板项已无内容。
 
 ## 11. 硬伤修复（2026-10-11，审计驱动）
 

@@ -22,9 +22,9 @@
 - [x] **空图谱时的行动顺序 · 工具层引导**：节点不存在时把 `E-LLM-007` 变成"请先用 `add_knowledge_node` 创建它"的可自纠正提示（P1 对照实验发现模型会拿节点名当 `node_id`）
   - 修法（2026-11-10）：`core/kg/edges.py::add_edge` 的两条 `ValueError` 改成"下一步动作"（点名 `add_knowledge_node` + "要传**节点 ID** 不是知识点名字"）。只改文案，不动判据 —— 原来只说"节点不存在"，模型解读成"参数没传对"→ 用同样参数重试 → 撞 `loop._LoopGuard` 同参数 ≤2 熔断 → 用户看到"AI 说在整理图谱然后什么都没发生"。
   - 回归：`tests/test_kg_edge_error_hint.py`（3 例，断言的是"文案里有可执行动作"而非具体措辞）。
-- [ ] **对话内出题（P0）遗留**（主链路已落地，见 `done.md` §6.2）：
-  - [ ] 题目渲染成可点选项卡片（前端 `quiz_ready` 已带 `questions` 字段，`MessageBubble` 加 `QuizCard.vue`）
-  - [ ] 已知瑕疵：KB 检索片段混入依据会导致题目轻微漂移（节点是"二叉树性质1"，却出了"每层都达最大结点数 → 满二叉树"的题）—— 可考虑降 `CHAT_QUIZ_TOP_K` 或只用节点正文
+- [x] **对话内出题（P0）遗留**（主链路已落地，见 `done.md` §6.2）：
+  - [x] 题目渲染成可点选项卡片（前端 `quiz_ready` 已带 `questions` 字段，`MessageBubble` 加 `QuizCard.vue`）—— **核实已完成**：`frontend/src/components/QuizCard.vue` 存在，挂在 `MessageBubble.vue:401-404`（`v-if="message.quiz?.length"`，`@submit` 走 `submit-quiz`）。
+  - [x] 已知瑕疵：KB 检索片段混入依据会导致题目轻微漂移（节点是"二叉树性质1"，却出了"每层都达最大结点数 → 满二叉树"的题）—— 可考虑降 `CHAT_QUIZ_TOP_K` 或只用节点正文 —— **已解决**：`core/quiz/chat_quiz.py:48` 定 `CHAT_QUIZ_TOP_K = 0`，注释写明"必须是 0：出题依据只允许用当前节点的正文"（原文记录的正是这次实测结论）。
 - [ ] **出题稳定性遗留**（分批 + 补题 + 批次隔离已落地，见 `done.md` §6.1）：
   - [ ] 可选优化：出题改用非思考模型（结构化任务未必需要深度推理），需 A/B 质量验证
 - [ ] **建节点收口 · 收尾项**（写路径部分 2026-09-15 已闭环）：
@@ -34,7 +34,7 @@
 ### P2 — 功能路线图（比赛可选项 / 有真实 key 后）
 
 - [ ] **RAG 精排（Cross-Encoder）**：hybrid_search 后接 rerank，量化收益（须先有真实 embedding 灌库）
-- [ ] **HyDE / Query Expansion**：召回 +15-25%，LLM 失败回退普通检索
+- [x] ~~**HyDE / Query Expansion**：召回 +15-25%，LLM 失败回退普通检索~~ —— **已实现但默认关**（2026-11-10 核实）：`core/rag_pipeline/query_expansion.py::hyde_query` 存在，开关 = `core/config.py:116` 的 `rag_hyde_enabled`（env `RAG_HYDE_ENABLED`，默认 `False`）。配置注释已写明"收益主要体现在口语化提问，离线集上很可能看不到提升"→ 属**待评估**而非**待实现**，故从 P2 路线图移出。
 - [ ] **出题进阶**：参数化母题模板、题目知识关联回填图谱
 - [ ] **学习大纲生成 / 主动引导式提问 / 自包含 HTML 复习卡导出**
 - [ ] **"AI 同学"多角色讨论 / 白板图谱联动（SVG）**
@@ -314,7 +314,7 @@
 
 - **深度 vs 成本**：GQ-5/6/16/23 会改变单次建图耗时与 token 量，是否接受"一次建图更慢但质量更高"？（GQ-23 的"单概念独立生成"预计总 token 上升，用成本换深度）
 - **是否对已有图谱全量重建**（用新 prompt 重跑）还是只做增量修复（GQ-4 合并 + 补写空壳）？—— 建议先修代码，再挑一本书重建做 A/B（GQ-13），别直接全量重跑。
-- **现有 `<400 字拒收`（`GRAPH_MIN_CONTENT_CHARS`）是否改为"标记待补、不拒收"**（保下限但不误杀"短而精"的概念）？
+- ~~**现有 `<400 字拒收`（`GRAPH_MIN_CONTENT_CHARS`）是否改为"标记待补、不拒收"**（保下限但不误杀"短而精"的概念）？~~ —— **已定案并落地（2026-09-26）**：改为**两档守门**，`core/kb/graph_generator.py:119` 的 `GRAPH_SHALLOW_REJECT_CHARS = 150`（低于此值才算截断产物、拒收且留 skeleton）+ `GRAPH_MIN_CONTENT_CHARS = 400`（完整性目标线，介于两者之间**保留但标记待补**，名字进 `rejected_shallow`）。本条已无待拍板内容。
 - **多源融合的 4 个开放问题**（`docs/知识图谱/知识图谱_外部调研_论文开源与多源融合.md` §八）：融合单位 / 跨教材推断先修是否算"创造知识" / 冲突是否对学生可见 / 资料删除策略。
 
 ---
