@@ -116,7 +116,33 @@ private fun AppScaffoldContent(
                         factory = chatViewModelFactory(container, userName),
                     )
                     val state by vm.uiState.collectAsState()
-                    ChatScreen(state = state)
+                    ChatScreen(
+                        state = state,
+                        onInputChange = vm::onInputChange,
+                        onSend = vm::send,
+                        onStop = vm::stopStreaming,
+                        onPickSuggestion = vm::sendSuggestion,
+                        onToggleToolbar = vm::toggleMessageToolbar,
+                        onQuote = { messageId, selected ->
+                            // selected == null → 没划词，用整条正文
+                            val whole = state.messages.firstOrNull { it.id == messageId }
+                            val text = selected ?: whole?.content.orEmpty()
+                            // 用户消息可能含引用协议标签，引用时只取正文部分
+                            val clean = if (whole?.role == com.example.myapplication.data.chat.ChatMessage.Role.User) {
+                                com.example.myapplication.ui.feature.chat.QuotedMessageBuilder
+                                    .split(text).second
+                            } else {
+                                text
+                            }
+                            vm.setQuote(
+                                messageId = messageId,
+                                text = clean,
+                                isWholeMessage = selected == null,
+                            )
+                        },
+                        onClearQuote = vm::clearQuote,
+                        onJumpToQuoted = { /* 跳转在 ChatScreen 内部按滚动实现 */ },
+                    )
                 }
 
                 TabDestination.Progress -> ProgressScreen()
@@ -146,8 +172,8 @@ private fun chatViewModelFactory(
             "未知的 ViewModel: ${modelClass.name}"
         }
         return ChatViewModel(
-            sessionStore = container.sessionStore,
-            fallbackUserName = userName,
+            chatRepository = container.chatRepository,
+            userName = userName,
         ) as T
     }
 }

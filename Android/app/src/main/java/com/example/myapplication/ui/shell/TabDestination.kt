@@ -31,7 +31,7 @@ enum class TabDestination(
     val label: String,
     val icon: ImageVector,
 ) {
-    Chat("chat", "对话", Icons.Outlined.ChatBubbleOutline),
+    Chat("chat", "AI-tutor", Icons.Outlined.ChatBubbleOutline),
     Progress("progress", "进度", Icons.Outlined.Insights),
     Graph("graph", "知识图谱", Icons.Outlined.Hub),
     Quiz("quiz", "出题", Icons.Outlined.EditNote),
