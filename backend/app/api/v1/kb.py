@@ -34,6 +34,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from app.core.auth import get_current_user
+from app.core.event_bus import GRAPH_UPDATED, notify
 from app.core.kb.bili import login as bili_login
 from app.core.kb.kb_manager import kb_manager
 from app.core.kb import graph_generator, import_queue, video_import
@@ -458,6 +459,32 @@ async def stats(user_id: int = Depends(get_current_user)):
     return kb_manager.stats(user_id)
 
 
+def _graph_generated_payload(subject: str, result: dict | None,
+                             error: str) -> dict:
+    """建图完成的 `graph_updated` 通知体 —— 只挑前端要显示/判断的字段。
+
+    为什么带 `subject`：前端要能判断"这条通知说的就是我正在看的那个学科"，
+    否则别的学科的建图完成会把它当前画布刷掉一次（浪费且闪）。
+
+    为什么要带结果明细：建图是**长任务**，用户在等待期间大概率已经切走，回来时
+    界面上什么提示都没有 —— 这是 GQ-25（建图失败/跳过对用户不可见）的一半。
+    字段口径与 aggregate 一致（见 `graph_generator._generate`），不复述解释。
+
+    失败也发（`ok=False` + `error`）：前端靠它结束"生成中"状态。
+    """
+    r = result or {}
+    return {
+        "subject": subject,
+        "ok": not error,
+        "error": error,
+        "created_nodes": len(r.get("created_nodes") or []),
+        "created_edges": int(r.get("created_edges") or 0),
+        "failed_docs": list(r.get("failed_docs") or []),
+        "skipped_docs": list(r.get("skipped_docs") or []),
+        "merged_nodes": len(r.get("merged_nodes") or []),
+    }
+
+
 @router.post("/kb/graph/generate")
 async def generate_graph(req: GraphGenerateRequest,
                          user_id: int = Depends(get_current_user)):
@@ -474,6 +501,14 @@ async def generate_graph(req: GraphGenerateRequest,
 
     ⚠ GQ-15 并发互斥：同一用户**已有建图在跑**时直接返回 409 —— 否则同一批文件会被
     反复整批重跑（每次 LLM 重新命名 → 精确同名判重失效 → 同一概念累积多个碎片节点）。
+
+    ⚠ **结果必须走通知，不能只靠 HTTP 响应**（2026-11-10 修）：实测单本教材要跑
+    15 分钟量级（37 单元 / 22 概念逐概念成文），而 axios 与 Vite 代理的 timeout 都是
+    300s —— 前端必然先超时；用户中途切页面 / 刷新 / 断线时，响应更是没人接。只靠
+    「请求返回后自己 refreshGraph」的话，后台明明建完了、前端却纹丝不动，只能手动刷新。
+    故 `finally` 里发一条 `graph_updated`（走 `notify` → 先落库再推）：在线端立刻刷新，
+    离线的端下次连上经 `/knowledge/notices/pending` 补拉，与出题 / 导入同一套投递语义。
+    失败也发（payload 带 `error`），否则前端永远停在"生成中"。
 
     返回:
       {
@@ -494,18 +529,39 @@ async def generate_graph(req: GraphGenerateRequest,
     if not graph_generator.try_begin_graph_build(user_id):
         raise HTTPException(status_code=409, detail="上一次建图尚未完成，请稍后再试")
 
+    outcome: dict | None = None      # 成功 = aggregate；进通知 payload 供前端展示结果
+    error_msg = ""
     try:
         result = await graph_generator.generate_graph(user_id, req.subject, req.node_ids)
+        outcome = result
 
         if result.get("error"):
+            error_msg = result["error"]
             raise HTTPException(status_code=422, detail=result["error"])
         return {"status": "ok", **result}
-    except HTTPException:
+    except HTTPException as e:
+        error_msg = error_msg or str(e.detail)
         raise
     except Exception as e:
-        logger.error(f"生成学科图谱失败: {e}")
-        raise HTTPException(status_code=500, detail=f"生成学科图谱失败: {str(e)}")
+        error_msg = f"生成学科图谱失败: {str(e)}"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
     finally:
         # 异常 / 超时 / 取消（CancelledError 属 BaseException，也会走到 finally）都要释放，
         # 否则该用户被永久锁死、此后每次建图都 409。
         graph_generator.end_graph_build(user_id)
+        # 走到 finally 却既没有结果也没有错误 = 被取消（CancelledError 是 BaseException，
+        # 上面两个 except 都捕不到）。这恰恰是最常见的场景：用户关掉页面/切走 →
+        # 前端已经没有响应可接，只有这条通知能告诉它"这轮结束了"。
+        if outcome is None and not error_msg:
+            error_msg = "建图已中断（连接断开或服务重启），已写入的部分保留"
+        # 结果只经 HTTP 响应传达是不够的（见 docstring）：响应可能早被 300s 超时掐断、
+        # 或根本没人接。这条通知才是"建完了"的唯一可靠出口，所以放在 finally ——
+        # 成功、失败、取消都要发，前端才不会永远停在"生成中"。
+        # 单独 try 包住：finally 里抛出的异常会**顶掉**原来的结果/错误，让真正的失败
+        # 原因（422/500 的 detail、CancelledError）彻底丢失 —— 通知只是尽力而为。
+        try:
+            notify(user_id, GRAPH_UPDATED,
+                   _graph_generated_payload(req.subject, outcome, error_msg))
+        except Exception as e:                     # noqa: BLE001 —— 不让通知失败污染结果
+            logger.warning(f"建图完成通知发送失败（subject={req.subject}）: {e}")

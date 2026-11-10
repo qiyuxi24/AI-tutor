@@ -111,6 +111,9 @@ export const useChatStore = defineStore('chat', () => {
   // 视频课程导入进度（**瞬态**：后端不落库，晚到就没有意义）→ 导入页 watch 它渲染步骤条。
   // 只保留最后一条：步骤条是"当前状态"而不是历史。
   const importProgress = ref(null)
+  // 正在建图的学科名（空串 = 没有在建图）。**只用于 UI 状态**（按钮转圈/文案），
+  // 不承担"结果是否到达"——结果一律以 `graph_updated` 通知为准（见 generateSubjectGraph）。
+  const graphGenerating = ref('')
 
   // ─── 知识图谱状态 ───
   const knowledgeNodes = ref([])
@@ -429,24 +432,36 @@ export const useChatStore = defineStore('chat', () => {
   const displayEdges = computed(() => knowledgeEdges.value)
 
   /**
-   * 从学科书籍生成知识图谱（AI 直接写库），生成后刷新图谱。
+   * 从学科书籍生成知识图谱（AI 直接写库）。
    * 勾选文件夹时，新节点会归入该文件夹同名的知识板块。
+   *
+   * ⚠️ **不要把 HTTP 响应当作"建完了"**（2026-11-10 修）：建图实测要 15 分钟量级，
+   * 而这里（以及 axios 默认、Vite 代理）的 timeout 是 300s —— 长任务必然先超时；
+   * 用户中途切页面 / 刷新 / 断线时响应更是没人接。旧实现把 `fetchGraph` 挂在响应之后，
+   * 于是后台明明建完了、前端却纹丝不动，**只能手动刷新**。
+   *
+   * 现在：响应只当"顺手拿到的明细"（小书秒回时有用），**完成信号一律以
+   * `graph_updated` 通知为准**（后端在 `finally` 里 `notify` 落库再推，见
+   * `api/v1/kb.py::generate_graph`）。超时/断线在这里**不当失败** —— 那是"结果还没到"。
    *
    * @param {string} subject - 学科名（如 '数据结构'）
    * @param {number[]} nodeIds - KB 中的文件/文件夹节点 ID 列表
-   * @returns {Promise<Object>} 生成结果（created_nodes 等）
+   * @returns {Promise<Object|null>} 响应体；未拿到（超时等）→ null
    */
   async function generateSubjectGraph(subject, nodeIds) {
-    const { data } = await apiClient.post('/api/v1/kb/graph/generate', {
-      subject,
-      node_ids: nodeIds,
-    }, { timeout: 300000 })  // 生成可能较慢
-    await fetchSubjects()
-    // 生成后自动切换到该学科视图
-    currentSubject.value = subject
-    graphLoaded.value = false
-    await fetchGraph(true)
-    return data
+    graphGenerating.value = subject
+    try {
+      const { data } = await apiClient.post('/api/v1/kb/graph/generate', {
+        subject,
+        node_ids: nodeIds,
+      }, { timeout: 300000 })  // 生成可能较慢
+      return data
+    } catch (e) {
+      // 超时（ECONNABORTED）/ 代理掐断 / 断网：**不是建图失败**，后端仍在跑，
+      // 结果会由 graph_updated 通知送达。真失败也走同一条通知（payload.ok=false）。
+      console.warn('[graph-generate] 未拿到响应，等待 graph_updated 通知：', e?.message || e)
+      return null
+    }
   }
 
   /**
@@ -753,9 +768,7 @@ export const useChatStore = defineStore('chat', () => {
         try {
           const data = JSON.parse(event.data)
           if (data.type === 'graph_updated') {
-            // 如果刚刚执行过 CRUD 操作（3 秒内），忽略此次 SSE 事件
-            if (sseSuppressTimer) return
-            refreshGraph()
+            handleGraphUpdated(data)
           } else if (data.type === 'quiz_ready') {
             // 对话内出题完成（后台任务，约 40s 后到达）→ 追加一条题目消息
             handleQuizReady(data)
@@ -869,6 +882,44 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * 图谱变更通知（含"建图任务跑完了"）→ 刷新画布 + 结束生成中状态 + 报告结果。
+   *
+   * ⚠️ 与旧实现的两处关键差异：
+   *   1. **建图完成的通知不受 3 秒抑制**。抑制的动机是"自己刚做完 CRUD，别再拉一遍"，
+   *      而建图是分钟级后台任务 —— 它完成时那个 3 秒窗口早过了；反过来，若用户
+   *      碰巧在这 3 秒内做了别的 CRUD，旧实现会把**建图完成**这条通知一起吃掉，
+   *      结果就是"建完了但界面不动"（本 bug 的成因之一）。
+   *   2. 建图失败/跳过**要告诉用户**（GQ-25）：后端在 payload 里带了
+   *      `ok` / `error` / `failed_docs` / `skipped_docs`，用户等 15 分钟不能只收到
+   *      一句"什么都没有"。
+   *
+   * `subject` 只在"就是当前正在看的学科"时才切视图 —— 后台建别的学科不该把当前画布掀掉。
+   */
+  function handleGraphUpdated(data) {
+    const isGraphBuild = data && typeof data.ok === 'boolean'
+    if (!isGraphBuild && sseSuppressTimer) return   // 自身 CRUD 的重复通知，照旧抑制
+    if (isGraphBuild) {
+      graphGenerating.value = ''
+      if (data.ok) {
+        const parts = [`新增 ${data.created_nodes || 0} 个知识点`]
+        if (data.created_edges) parts.push(`${data.created_edges} 条关系`)
+        if (data.merged_nodes) parts.push(`并入 ${data.merged_nodes} 个已有节点`)
+        ElMessage.success(`「${data.subject}」图谱生成完成：${parts.join('、')}`)
+        // 未处理的资料必须点名（GQ-25）：用户以为全建好了，其实有几本没进图
+        const missed = [...(data.failed_docs || []), ...(data.skipped_docs || [])]
+        if (missed.length) {
+          ElMessage.warning(`${missed.length} 份资料未入图：${missed.slice(0, 5).join('、')}`
+                            + (missed.length > 5 ? ' 等' : ''))
+        }
+        if (data.subject) currentSubject.value = data.subject   // 切到刚建好的学科
+      } else if (data.error) {
+        ElMessage.error(`「${data.subject}」图谱生成失败：${data.error}`)
+      }
+    }
+    return refreshGraph()
+  }
+
+  /**
    * 补拉离线期间产生的通知（A2-3）。
    *
    * 为什么需要：出题是后台任务（约 40s 才回），这段时间里用户可能关掉页面或断网，
@@ -881,7 +932,7 @@ export const useChatStore = defineStore('chat', () => {
       const { data } = await apiClient.get('/api/v1/knowledge/notices/pending')
       for (const notice of data?.notices || []) {
         if (notice.type === 'quiz_ready') handleQuizReady(notice)
-        else if (notice.type === 'graph_updated') refreshGraph()
+        else if (notice.type === 'graph_updated') handleGraphUpdated(notice)
         else if (notice.type === 'kb_updated') handleKbUpdated(notice)
         else if (notice.type === 'error') {
           console.warn(`[SSE Error] ${notice.code} | ${notice.module}: ${notice.message}`,
@@ -1283,6 +1334,7 @@ export const useChatStore = defineStore('chat', () => {
     kbContext,
     kbEpoch,
     importProgress,
+    graphGenerating,
     currentConversation,
     currentMessages,
     currentTitle,

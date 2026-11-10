@@ -38,11 +38,21 @@ class _EdgesMixin:
             raise ValueError(f"无效的关系类型：{relation}，合法值：{VALID_RELATIONS}")
 
         # 验证节点存在
+        # ⚠ 文案是**给模型看的可自纠正提示**，不是纯断言（TODO §1 P1）：实测模型会把
+        #   「知识点名字」当 node_id 传进来（如 from="二叉搜索树"），或者凭空连一条它
+        #   以为已存在的边。只说"节点不存在"模型只会重试同样的参数；点名"先用
+        #   add_knowledge_node 创建、或先 add_knowledge_node 拿到 id"才能让它换动作。
         node_ids = set(self.get_node_ids())
         if from_id not in node_ids:
-            raise ValueError(f"起始节点不存在：{from_id}")
+            raise ValueError(
+                f"起始节点不存在：{from_id}。请先用 add_knowledge_node 创建该节点"
+                f"（或确认你传的是**节点 ID** 而不是知识点名字），再连边"
+            )
         if to_id not in node_ids:
-            raise ValueError(f"目标节点不存在：{to_id}")
+            raise ValueError(
+                f"目标节点不存在：{to_id}。请先用 add_knowledge_node 创建该节点"
+                f"（或确认你传的是**节点 ID** 而不是知识点名字），再连边"
+            )
 
         # 去重检查（仅当前用户）
         existing = self._conn.execute(

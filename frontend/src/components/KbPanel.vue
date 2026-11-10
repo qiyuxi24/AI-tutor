@@ -33,11 +33,11 @@
       <el-button
         type="primary"
         size="small"
-        :loading="generating"
-        :disabled="!tree.length"
+        :loading="submitting || !!store.graphGenerating"
+        :disabled="!tree.length || (!!store.graphGenerating && !submitting)"
         @click="handleGenerate"
       >
-        {{ generating ? '生成中...' : '一键生成图谱' }}
+        {{ store.graphGenerating ? `生成中（${store.graphGenerating}）...` : '一键生成图谱' }}
       </el-button>
     </div>
 
@@ -249,7 +249,8 @@ const stats = ref({ files: 0, chunks: 0 })
 
 // 一键生成
 const subjectInput = ref('')
-const generating = ref(false)
+// 本地"请求在途"（HTTP 层）；跨页面/超时的真正状态是 store.graphGenerating
+const submitting = ref(false)
 
 // 上传状态：uploading 驱动进度行与入口置灰，uploadStatus 显示「正在上传 i/N：文件名」
 const uploading = ref(false)
@@ -478,17 +479,16 @@ async function handleGenerate() {
     ElMessage.warning('请先勾选至少一个文件或文件夹作为书籍来源')
     return
   }
-  generating.value = true
+  // 建图是**分钟级后台任务**：这里只负责发出请求。"建完了"由 store 的
+  // graph_updated 通知收口（后端 finally 里 notify 落库再推），所以：
+  //   · 按钮状态读 store.graphGenerating —— 请求超时也不会误以为结束，
+  //     切页面/刷新回来仍能看到"生成中"（这是最容易被误认为"卡死"的地方）；
+  //   · 结果提示（成功/失败/未入图资料）统一由 store 弹，组件不再重复弹一遍。
+  submitting.value = true
   try {
-    // 走 store（图谱写入的唯一前端入口）：生成后自动刷新学科列表并切到该学科
-    const d = (await store.generateSubjectGraph(subject, nodeIds)) || {}
-    ElMessage.success(
-      `「${subject}」生成完成：新增 ${(d.created_nodes || []).length} 个知识点、${d.created_edges || 0} 条关系`
-    )
-  } catch (e) {
-    ElMessage.error('生成失败：' + (e.response?.data?.detail || e.message))
+    await store.generateSubjectGraph(subject, nodeIds)
   } finally {
-    generating.value = false
+    submitting.value = false       // 释放 HTTP 层；真正的"生成中"是 store 那个
   }
 }
 

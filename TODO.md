@@ -19,7 +19,9 @@
 ### P1 — 工程化补强（评委可问项）
 
 - [ ] **Prompt 笔记优化**：教学后主动 `update_node_content` / `add_knowledge_node` 记笔记（提示词层，未动）
-- [ ] **空图谱时的行动顺序 · 工具层引导**：节点不存在时把 `E-LLM-007` 变成"请先用 `add_knowledge_node` 创建它"的可自纠正提示（P1 对照实验发现模型会拿节点名当 `node_id`）
+- [x] **空图谱时的行动顺序 · 工具层引导**：节点不存在时把 `E-LLM-007` 变成"请先用 `add_knowledge_node` 创建它"的可自纠正提示（P1 对照实验发现模型会拿节点名当 `node_id`）
+  - 修法（2026-11-10）：`core/kg/edges.py::add_edge` 的两条 `ValueError` 改成"下一步动作"（点名 `add_knowledge_node` + "要传**节点 ID** 不是知识点名字"）。只改文案，不动判据 —— 原来只说"节点不存在"，模型解读成"参数没传对"→ 用同样参数重试 → 撞 `loop._LoopGuard` 同参数 ≤2 熔断 → 用户看到"AI 说在整理图谱然后什么都没发生"。
+  - 回归：`tests/test_kg_edge_error_hint.py`（3 例，断言的是"文案里有可执行动作"而非具体措辞）。
 - [ ] **对话内出题（P0）遗留**（主链路已落地，见 `done.md` §6.2）：
   - [ ] 题目渲染成可点选项卡片（前端 `quiz_ready` 已带 `questions` 字段，`MessageBubble` 加 `QuizCard.vue`）
   - [ ] 已知瑕疵：KB 检索片段混入依据会导致题目轻微漂移（节点是"二叉树性质1"，却出了"每层都达最大结点数 → 满二叉树"的题）—— 可考虑降 `CHAT_QUIZ_TOP_K` 或只用节点正文
@@ -56,9 +58,14 @@
 
 - [ ] **[P0] SSE 通道分层**（本次只修掉"对话流"这一处冲突）
   - 不变量已钉进 `event_bus.publish` docstring：通知类（`graph_updated`/`quiz_ready`/`error`）走 per-user 队列；请求内 6 事件必须走 `AgentEventEmitter(queue=...)` 私有队列
-  - 剩余缺口：同一 user 开两个标签页 = 两条 `subscribe(user_id)`，`quiz_ready` 仍随机进其一（队列层面无解，要 per-connection 投递才能解）
-  - **待决策**：a) 按通道分队列（改动集中在 `event_bus.py`，**推荐**）／b) per-connection 队列 + 订阅路由表（能解多标签页，改动最大）／c) 维持现状
-  - 验收：加"同一 user 多连接订阅"测试，断言通知类事件按预期投递
+  - ~~剩余缺口：同一 user 开两个标签页 = 两条 `subscribe(user_id)`，`quiz_ready` 仍随机进其一~~
+    **（2026-11-10 核实：前提已过时，多标签页问题已不存在）** `event_bus.subscribe(user_id=...)` 现在是 **per-connection fan-out** —— 每次调用都新建队列并登记进 `_user_queues[user_id]` 这个 **set**（`event_bus.py:156-163` 注释明确"旧语义'同用户返回同一实例'已随多端 fan-out 废弃"）；`broadcast()` 给每条订阅队列各一份、`notify()` 同理。两个标签页各收一份，不抢。回归 `tests/test_event_bus.py:214`（多连接订阅）与 `:228`。
+  - **待决策**：~~a) 按通道分队列／b) per-connection 队列 + 路由表／c) 维持现状~~ → 已被现状实现，本条只剩"a) 按通道分队列"的**演化方向**值得保留（若将来要做"某类通知只给某个页面"）
+  - 验收：加"同一 user 多连接订阅"测试，断言通知类事件按预期投递（**已存在**，见上方回归）
+- [ ] **[P0] 长同步端点的结果必须走通知，不能只靠 HTTP 响应**（2026-11-10 发现并修掉建图这一处，另外几处待查）
+  - 已修：`POST /kb/graph/generate`（实测 15 分钟量级，axios/Vite 代理都是 300s 超时，用户切页面/断线则永远收不到）→ 完成即 `notify(user_id, GRAPH_UPDATED, payload)`，成功/失败/取消都发。回归 `tests/test_kb_graph_generate_notify.py`。
+  - 排查口径：任何**墙钟可能超过 1 分钟**的同步 HTTP 端点都属此列。已知嫌疑：`POST /kb/graph/generate`（已修）、`POST /knowledge/sections/generate`（已在完成时 `broadcast(GRAPH_UPDATED)`，但仍是同步等待）。
+  - 更彻底的方向（未做，属结构性改造）：改成 `POST` 立即返 `task_id` + 前端轮询/订阅进度，见 `docs/上下文工程/上下文工程_调研与差距审计.md:466`。
 - [ ] **[P1] 对话调用链（M3）三处收尾**（「真流式」已完成，见 `done.md` §4.5）
   - **思考吃光 `max_tokens` → 长回答可能整段空正文**（优先）：`AGENT_MAX_TOKENS=2000` + 允许思考时二者共享预算 —— 真机探针一次 52.8s 全烧在思考上、`content=0`、`finish=length`
   - `strip_think_tags` 仍是**整段正则**（未做流式状态机）：靠 `reasoning_split=True` 让 content 保持纯净；若某网关忽略该参数，流式正文可能短暂含思考标签（存量兜底仍会清库里的文本）
@@ -163,7 +170,9 @@
   - 幂等键 `(user_id, subject, doc_id)`；与 GQ-15 **合并**（同一把锁 + 同一张"资料已建"登记表），不要做成两套
   - 验收：加第二本教材后 —— ① 能列出「本次被标记的节点清单」② 新概念挂进正确板块、被标记节点正文被补充、`sources` 正确累积 ③ **未被标记的节点零改动**（`updated_at` 对比验证）
 - [ ] **GQ-20 合并决策落表 `merge_decisions`** 🟠 P1：`(kept_id, merged_id, score, evidence, decided_by, ts)` → 支持**回滚**与人工复核
-- [ ] **GQ-25 建图失败/跳过对用户可见** 🟠 P1：后端已带 `aggregate.failed_docs`/`skipped_docs`；**前端未做** —— `KnowledgeView.vue` 的 `genResult` 仍只显示 created/skipped nodes。验收：部分资料失败时结果区明确列出"未处理的资料"
+- [x] **GQ-25 建图失败/跳过对用户可见** 🟠 P1：后端已带 `aggregate.failed_docs`/`skipped_docs`；**前端未做** —— `KnowledgeView.vue` 的 `genResult` 仍只显示 created/skipped nodes。验收：部分资料失败时结果区明确列出"未处理的资料"
+  - 修法（2026-11-10）：`kb.py::_graph_generated_payload` 把 `failed_docs`/`skipped_docs`/`merged_nodes` 一并放进 `graph_updated` 通知，`chatStore.handleGraphUpdated` 收到后弹 `ElMessage.warning("N 份资料未入图：…")`（超过 5 个截断为"等"）。**顺带解决更根本的一条**：建图结果不再依赖 HTTP 响应（分钟级同步端点 + axios 300s 超时 + 用户切页面 → 永远收不到），改为完成即通知。
+  - 回归：`tests/test_kb_graph_generate_notify.py`（7 例，含取消路径）、`frontend/src/stores/chatStore.lifecycle.test.js`「建图结果由 graph_updated 通知收口」6 例。
 - [ ] **GQ-26 溯源粒度：从「章节标题」升到「切片/段落」** 🟠 P2（暂缓）：现状 `chunk_id` 恒为 `None`（索引侧 `doc_chunks` 与建图侧 `collect_units` 是两套独立切分，边界不共享）。三条升级路按用途选一条：① 对齐切分体系（细粒度覆盖统计/冲突裁决）② 加引文（`part_index` + 片段前 ~80 字，人工核对）③ 检索命中记账进当轮 `agent_runs` 证据（回溯 AI 回答依据）
 
 ### 数据结构与检索通路（KG-D）

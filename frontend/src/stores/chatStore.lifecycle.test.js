@@ -23,6 +23,8 @@ vi.mock('../api/index.js', () => ({
   },
 }))
 
+import { ElMessage } from 'element-plus'
+
 import { useChatStore, BACKEND_RELOADED_EVENT } from './chatStore.js'
 import { sendMessageStream, apiClient } from '../api/index.js'
 
@@ -463,5 +465,132 @@ describe('对话持久化与流式收口（缺陷 A/B/C 回归）', () => {
     // onAgentDone 把占位气泡的 ts 覆盖成收口时刻（这条是本次改动的真正意图）
     expect(conv.messages[1].ts).toBe(DONE_AT)
     expect(conv.messages[1].ts).toBeGreaterThan(conv.messages[0].ts)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 建图完成必须由通知收口（2026-11-10）
+//
+// 现场：点「一键生成图谱」后，后端确实建完了（日志里逐概念成文跑完），前端却纹丝
+// 不动，只能手动刷新。根因是旧实现把刷新挂在 **HTTP 响应之后** —— 而建图实测 15 分钟
+// 量级，axios 与 Vite 代理都在 300s 超时；更常见的是用户等不下去切走了页面。
+//
+// 现在的约定（三层，缺一条就退回旧 bug）：
+//   ① 请求超时/断线 = "结果还没到"，**不是失败**，不能弹错、不能清掉"生成中"；
+//   ② 完成信号只认 graph_updated 通知（后端 finally 里 notify，先落库再推）；
+//   ③ 该通知**不受 3 秒 CRUD 抑制** —— 否则用户在等待期间随手改点什么，
+//      就会把"建图完成"这条吃掉，看起来又像"没刷新"。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('建图结果由 graph_updated 通知收口（不靠 HTTP 响应）', () => {
+  /** 计数某个 URL 的 GET —— 用作"刷新发生了"的可观测信号（stats 每次刷新必拉）。 */
+  function countGets(url) {
+    return apiClient.get.mock.calls.filter(([u]) => u === url).length
+  }
+
+  async function bootStore() {
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+    await store.init()
+    return store
+  }
+
+  it('请求超时/断线：不弹失败、返回 null、仍保持"生成中"（等通知）', async () => {
+    const store = await bootStore()
+    const errSpy = vi.spyOn(ElMessage, 'error')
+    apiClient.post.mockRejectedValueOnce(Object.assign(new Error('timeout of 300000ms exceeded'),
+                                                        { code: 'ECONNABORTED' }))
+
+    const ret = await store.generateSubjectGraph('数据结构', [1])
+
+    expect(ret).toBeNull()                       // 没拿到明细，但不代表失败
+    expect(errSpy).not.toHaveBeenCalled()        // 关键：不能把超时报成失败
+    expect(store.graphGenerating).toBe('数据结构')  // 后端还在跑，按钮继续转
+  })
+
+  it('收到 ok 通知：结束生成中 + 刷新 + 报告新增量', async () => {
+    const store = await bootStore()
+    const okSpy = vi.spyOn(ElMessage, 'success')
+    await store.generateSubjectGraph('数据结构', [1])
+    expect(store.graphGenerating).toBe('数据结构')
+
+    const before = countGets('/api/v1/knowledge/stats')
+    FakeEventSource.instances[0].onmessage({
+      data: JSON.stringify({
+        type: 'graph_updated', subject: '数据结构', ok: true,
+        created_nodes: 7, created_edges: 9, merged_nodes: 2,
+        failed_docs: [], skipped_docs: [],
+      }),
+    })
+    await vi.waitFor(() => expect(countGets('/api/v1/knowledge/stats')).toBeGreaterThan(before))
+
+    expect(store.graphGenerating).toBe('')       // 生成中结束
+    expect(okSpy).toHaveBeenCalledTimes(1)
+    expect(okSpy.mock.calls[0][0]).toContain('7 个知识点')
+    expect(store.currentSubject).toBe('数据结构')  // 切到刚建好的学科
+  })
+
+  it('收到 ok=false 通知：结束生成中 + 弹失败原因（不能让按钮永远转圈）', async () => {
+    const store = await bootStore()
+    const errSpy = vi.spyOn(ElMessage, 'error')
+    await store.generateSubjectGraph('物理', [1])
+
+    FakeEventSource.instances[0].onmessage({
+      data: JSON.stringify({
+        type: 'graph_updated', subject: '物理', ok: false,
+        error: '没有可处理的书籍文本',
+      }),
+    })
+
+    expect(store.graphGenerating).toBe('')
+    expect(errSpy).toHaveBeenCalledTimes(1)
+    expect(errSpy.mock.calls[0][0]).toContain('没有可处理的书籍文本')
+  })
+
+  it('未入图的资料要点名（GQ-25）：否则用户以为全建好了', async () => {
+    const store = await bootStore()
+    const warnSpy = vi.spyOn(ElMessage, 'warning')
+    await store.generateSubjectGraph('数据结构', [1])
+
+    FakeEventSource.instances[0].onmessage({
+      data: JSON.stringify({
+        type: 'graph_updated', subject: '数据结构', ok: true,
+        created_nodes: 1, created_edges: 0, merged_nodes: 0,
+        failed_docs: ['坏书.pdf'], skipped_docs: ['已建完.md'],
+      }),
+    })
+
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    const msg = warnSpy.mock.calls[0][0]
+    expect(msg).toContain('2 份资料未入图')
+    expect(msg).toContain('坏书.pdf')
+  })
+
+  it('建图完成通知**不受**3 秒 CRUD 抑制（用户等待期间随手改点东西也会被吃掉）', async () => {
+    const store = await bootStore()
+    await store.generateSubjectGraph('数据结构', [1])
+    await store.refreshGraph(true)               // 置上 3 秒抑制窗口
+    const before = countGets('/api/v1/knowledge/stats')
+
+    FakeEventSource.instances[0].onmessage({
+      data: JSON.stringify({
+        type: 'graph_updated', subject: '数据结构', ok: true, created_nodes: 1,
+      }),
+    })
+    await vi.waitFor(() => expect(countGets('/api/v1/knowledge/stats')).toBeGreaterThan(before))
+
+    expect(store.graphGenerating).toBe('')
+  })
+
+  it('普通 graph_updated（无 ok 字段）在抑制窗口内仍然被跳过（旧行为不变）', async () => {
+    const store = await bootStore()
+    await store.refreshGraph(true)               // 置上 3 秒抑制窗口
+    const before = countGets('/api/v1/knowledge/stats')
+
+    FakeEventSource.instances[0].onmessage({
+      data: JSON.stringify({ type: 'graph_updated' }),
+    })
+    await new Promise(r => setTimeout(r, 0))   // 让可能的异步链走完（真定时器）
+
+    expect(countGets('/api/v1/knowledge/stats')).toBe(before)
   })
 })
