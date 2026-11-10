@@ -5,8 +5,10 @@ import com.example.myapplication.BuildConfig
 import com.example.myapplication.data.auth.AuthRepository
 import com.example.myapplication.data.auth.EncryptedSessionStore
 import com.example.myapplication.data.auth.SessionStore
+import com.example.myapplication.data.chat.ChatRepository
 import com.example.myapplication.data.remote.ApiClient
 import com.example.myapplication.data.remote.AuthApi
+import com.example.myapplication.data.remote.ChatApi
 
 /**
  * 手写依赖容器（不用 Hilt）。
@@ -41,4 +43,20 @@ class AppContainer(context: Context) {
     val authRepository: AuthRepository by lazy {
         AuthRepository(authApi = authApi, sessionStore = sessionStore)
     }
+
+    /**
+     * 对话接口。
+     *
+     * 刻意**复用 [apiClient] 的 OkHttpClient 配置**（通过默认参数拿到同一份超时口径），
+     * 但请求本身走裸 OkHttp 流式读 —— SSE 不能用 ApiClient 的 `get/post`
+     * （那两个会把整个 body 读成 String，而事件流不会结束，必然卡死）。
+     */
+    val chatApi: ChatApi by lazy {
+        ChatApi(
+            baseUrl = BuildConfig.API_BASE_URL,
+            sessionStore = sessionStore,
+        )
+    }
+
+    val chatRepository: ChatRepository by lazy { ChatRepository(chatApi) }
 }
