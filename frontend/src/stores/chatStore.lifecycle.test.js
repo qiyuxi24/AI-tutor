@@ -594,3 +594,89 @@ describe('建图结果由 graph_updated 通知收口（不靠 HTTP 响应）', (
     expect(countGets('/api/v1/knowledge/stats')).toBe(before)
   })
 })
+
+describe('回前台补偿（TODO §2 P1：切回来就补拉一次）', () => {
+  /** stats 每次 refreshGraph 必拉 → 作为"刷新发生了"的可观测信号 */
+  function statsGets() {
+    return apiClient.get.mock.calls.filter(([u]) => u === '/api/v1/knowledge/stats').length
+  }
+
+  async function bootStore() {
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+    await store.init()
+    return store
+  }
+
+  it('visibilitychange 且可见 → 补拉通知 + 刷新图谱', async () => {
+    const store = await bootStore()
+    const beforeStats = statsGets()
+    const beforeNotices = apiClient.get.mock.calls
+      .filter(([u]) => u === '/api/v1/knowledge/notices/pending').length
+
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.waitFor(() => expect(statsGets()).toBeGreaterThan(beforeStats))
+
+    const afterNotices = apiClient.get.mock.calls
+      .filter(([u]) => u === '/api/v1/knowledge/notices/pending').length
+    expect(afterNotices).toBeGreaterThan(beforeNotices)
+    expect(store).toBeTruthy()
+  })
+
+  it('窗口 focus 也触发（切回浏览器时不一定发 visibilitychange）', async () => {
+    await bootStore()
+    const before = statsGets()
+
+    window.dispatchEvent(new Event('focus'))
+    await vi.waitFor(() => expect(statsGets()).toBeGreaterThan(before))
+  })
+
+  it('页面不可见时**不**拉（避免后台标签页反复请求）', async () => {
+    await bootStore()
+    const before = statsGets()
+    const spy = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+
+    document.dispatchEvent(new Event('visibilitychange'))
+    await new Promise(r => setTimeout(r, 10))
+
+    expect(statsGets()).toBe(before)
+    spy.mockRestore()
+  })
+
+  it('visibilitychange + focus 成对到达只补一次（2s 去重）', async () => {
+    await bootStore()
+    const before = statsGets()
+
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('focus'))      // 紧接着的成对事件
+    await new Promise(r => setTimeout(r, 20))
+
+    expect(statsGets() - before).toBe(1)
+  })
+
+  it('dispose() 摘掉监听器：卸载后再切前台不再请求', async () => {
+    const store = await bootStore()
+    store.dispose()
+    const before = statsGets()
+
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('focus'))
+    await new Promise(r => setTimeout(r, 20))
+
+    expect(statsGets()).toBe(before)
+  })
+
+  it('重建 store 实例不会叠加监听器（旧的没 dispose 也只补一次）', async () => {
+    // 现场：HMR 重挂 / 同一页建第二个 store 时，旧实例的监听器仍然挂在 document 上。
+    // 若每个实例各挂一份，一次切前台就会 N 个实例同时拉 —— 去重窗口只能挡时间上的重复，
+    // 挡不住"N 个实例各拉一次"。2026-11-10 就是这么被测试逮到的。
+    await bootStore()
+    await bootStore()                             // 第二个实例，第一个故意不 dispose
+    const before = statsGets()
+
+    document.dispatchEvent(new Event('visibilitychange'))
+    await new Promise(r => setTimeout(r, 20))
+
+    expect(statsGets() - before).toBe(1)
+  })
+})

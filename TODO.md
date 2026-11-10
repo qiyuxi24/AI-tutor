@@ -60,8 +60,13 @@
   - 不变量已钉进 `event_bus.publish` docstring：通知类（`graph_updated`/`quiz_ready`/`error`）走 per-user 队列；请求内 6 事件必须走 `AgentEventEmitter(queue=...)` 私有队列
   - ~~剩余缺口：同一 user 开两个标签页 = 两条 `subscribe(user_id)`，`quiz_ready` 仍随机进其一~~
     **（2026-11-10 核实：前提已过时，多标签页问题已不存在）** `event_bus.subscribe(user_id=...)` 现在是 **per-connection fan-out** —— 每次调用都新建队列并登记进 `_user_queues[user_id]` 这个 **set**（`event_bus.py:156-163` 注释明确"旧语义'同用户返回同一实例'已随多端 fan-out 废弃"）；`broadcast()` 给每条订阅队列各一份、`notify()` 同理。两个标签页各收一份，不抢。回归 `tests/test_event_bus.py:214`（多连接订阅）与 `:228`。
-  - **待决策**：~~a) 按通道分队列／b) per-connection 队列 + 路由表／c) 维持现状~~ → 已被现状实现，本条只剩"a) 按通道分队列"的**演化方向**值得保留（若将来要做"某类通知只给某个页面"）
-  - 验收：加"同一 user 多连接订阅"测试，断言通知类事件按预期投递（**已存在**，见上方回归）
+  - **本条的真正剩余物 = 三个「前端不主动问」的缺口**（2026-11-10 核实，此前 TODO 未记录）：
+    - [x] ~~**[P1] 前端没有回前台 / 多标签补偿**~~（2026-11-10 已修）：全前端原本无 `BroadcastChannel`、无 `storage` 事件监听、无 `visibilitychange`/`focus` 处理。长连接在半睡/切回后可能"看起来连着但收不到"，界面只能等下一次事件或手动刷新。**修法**：`chatStore` 新增回前台补偿 —— `visibilitychange`/`focus` → `fetchPendingNotices()` + `refreshGraph()`；2s 去重窗口 + 页面 `hidden` 时不拉。全局**只挂一份**监听器、转发给"当前活跃 store 实例"（每实例各挂一份会让 N 个实例同时拉，去重窗口挡不住）；`dispose()` 只摘自己那份。**不重连**（重连由 boot_id 那套负责，重复触发只会打架）。回归 `chatStore.lifecycle.test.js`「回前台补偿」6 例（含"重建实例不叠加监听器"）。
+    - [ ] **[P1] 对话列表的跨端变更完全无通知**：`api/v1/conversations.py` 全文 `notify`/`broadcast` **零命中** —— 另一台设备改名 / 删除 / 新建对话不产生任何事件。症状与建图那条同族（"后台改了、这边不刷新"），但**根因相反**：不是"推丢了"，而是**压根没推**。
+      - 修法方向：会话增删改补 `notify(user_id, ...)` 并发新事件类型；⚠️ 注意 `chatStore` 的 SSE 分发是**白名单**，加新类型必须同步改前端，否则静默丢弃。
+    - [ ] **[P2] 事件类型过窄**：同上 —— 前端只认 5 类（`graph_updated`/`quiz_ready`/`kb_updated`/`import_progress`/`error`），后端新增类型不改前端就静默丢弃。这是上面那条的实施约束，不是独立 bug。
+  - **待决策**：~~a) 按通道分队列／b) per-connection 队列 + 路由表／c) 维持现状~~ → 多标签页那半已被现状实现（`c`），本条只剩"a) 按通道分队列"作为**演化方向**（若将来要做"某类通知只给某个页面"）。
+  - 验收：加"同一 user 多连接订阅"测试，断言通知类事件按预期投递（**已存在**，见上方回归）；回前台补偿已能观测到"切回来就补拉了一次"。
 - [ ] **[P0] 长同步端点的结果必须走通知，不能只靠 HTTP 响应**（2026-11-10 发现并修掉建图这一处，另外几处待查）
   - 已修：`POST /kb/graph/generate`（实测 15 分钟量级，axios/Vite 代理都是 300s 超时，用户切页面/断线则永远收不到）→ 完成即 `notify(user_id, GRAPH_UPDATED, payload)`，成功/失败/取消都发。回归 `tests/test_kb_graph_generate_notify.py`。
   - 排查口径：任何**墙钟可能超过 1 分钟**的同步 HTTP 端点都属此列。已知嫌疑：`POST /kb/graph/generate`（已修）、`POST /knowledge/sections/generate`（已在完成时 `broadcast(GRAPH_UPDATED)`，但仍是同步等待）。

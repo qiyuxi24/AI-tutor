@@ -65,6 +65,38 @@ export const BACKEND_RELOADED_EVENT = 'backend-reloaded'
 const SSE_RECONNECT_BASE_MS = 5000
 const SSE_RECONNECT_MAX_MS = 60000
 
+// 回前台补偿的去重窗口：`visibilitychange` 与 `focus` 常成对到达（切标签页通常两个都发），
+// 没有它每次切换都会打两轮请求。
+// ⚠️ 必须是**模块级**状态，不能放 store 闭包：事件源是全局（document/window），
+// 而 store 实例可能不止一个（HMR 重挂、测试里每个用例新建）。放在闭包里，旧的、
+// 没 dispose 的实例会被同一次事件一起唤醒，去重也就形同虚设 —— 2026-11-10 实测踩到。
+const APPEAR_MIN_INTERVAL_MS = 2000
+let _lastAppearAt = 0   // 模块级：所有 store 实例共享同一个去重窗口
+// 全局只挂**一份**监听器，转发给"当前活跃"的 store 实例（见 _installAppearListener）。
+// 为什么不每个实例各挂一份：事件源是 document/window 这种全局对象，N 个实例就是
+// N 个监听器同时被唤醒 —— 去重窗口只能挡掉时间上的重复，挡不掉"N 个实例各拉一次"。
+let _appearTarget = null
+let _appearAttached = false
+
+function _appearDispatch() {
+  _appearTarget?.()
+}
+
+function _attachAppearOnce() {
+  if (_appearAttached) return
+  if (typeof document === 'undefined' || typeof window === 'undefined') return
+  document.addEventListener('visibilitychange', _appearDispatch)
+  window.addEventListener('focus', _appearDispatch)
+  _appearAttached = true
+}
+
+function _detachAppear() {
+  if (!_appearAttached) return
+  document.removeEventListener('visibilitychange', _appearDispatch)
+  window.removeEventListener('focus', _appearDispatch)
+  _appearAttached = false
+}
+
 // 后端 graph_middleware.SUBJECT_UNCLASSIFIED 的对应值。
 // 「未分类」= 无学科归属节点的合成分组名，不是真实学科（不出现在学科列表里，
 // 但作为一个可选分组出现在 subjectSummaries 中）。
@@ -697,6 +729,8 @@ export const useChatStore = defineStore('chat', () => {
     //  否则开发态 HMR 重挂 HomeView 后就再也连不上了）
     sseStopped = false
     connectSSE()
+    // 回前台补偿：切回标签页时补拉一次（后台冻结/睡眠期间推的事件可能没人接）
+    _installAppearListener()
   }
 
   // ─── SSE：监听后端数据变更，自动刷新图谱 ───
@@ -946,6 +980,44 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * 回前台补偿（2026-11-10，TODO §2 P1）：切回标签页时补拉一次。
+   *
+   * 为什么需要：常驻 SSE 在**后台标签页被冻结 / 系统睡眠 / 网络切换**后，可能处于
+   * "看起来还连着、其实收不到"的状态（浏览器不会立刻触发 onerror）。此时后端推的
+   * 通知就落进了 `pending_notices` 等着被取，而用户看到的界面一直停在旧数据上 ——
+   * 与本次建图 bug 是同一类体验（"它就是不动，得手动刷新"）。
+   *
+   * 只做两件最便宜的事：补拉离线通知 + 刷新图谱。**不重连**（重连由 boot_id 那套负责）：
+   * 连接若真断了，onerror 会自己走退避重连，这里重复触发只会打架。
+   */
+  async function _onAppearAgain() {
+    if (sseStopped) return
+    if (document.visibilityState !== 'visible') return
+    const now = Date.now()
+    // 成对事件去重（窗口是模块级的，见 APPEAR_MIN_INTERVAL_MS 处的说明）
+    if (now - _lastAppearAt < APPEAR_MIN_INTERVAL_MS) return
+    _lastAppearAt = now
+    await fetchPendingNotices()
+    await refreshGraph()
+  }
+
+  /** 把"当前活跃实例"登记到唯一的全局监听器上（旧实例自动失效，无需它自己清理）。 */
+  function _installAppearListener() {
+    _appearTarget = _onAppearAgain
+    _attachAppearOnce()
+    // 新的一次 init = 重新开始工作，应当允许立刻补偿一次（不受上一次会话的窗口影响）。
+    _lastAppearAt = 0
+  }
+
+  /** 只摘自己那一份：若活跃实例已经不是自己，摘掉监听器会打断别人。 */
+  function _removeAppearListener() {
+    if (_appearTarget === _onAppearAgain) {
+      _appearTarget = null
+      _detachAppear()
+    }
+  }
+
+  /**
    * 「去学习」：以某个知识点为教学内容开一轮学习 —— 新建对话 + 记下当前知识点 + 发首条消息。
    *
    * 为什么要发一条消息（而不是只设状态）：后端的小节级教学上下文（【学习模式】段落）
@@ -989,6 +1061,7 @@ export const useChatStore = defineStore('chat', () => {
    */
   function dispose() {
     disconnectSSE()
+    _removeAppearListener()
     if (sseSuppressTimer) {
       clearTimeout(sseSuppressTimer)
       sseSuppressTimer = null
