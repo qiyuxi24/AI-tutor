@@ -4,6 +4,9 @@ import com.example.myapplication.data.remote.ApiError
 import com.example.myapplication.data.remote.ApiResult
 import com.example.myapplication.data.remote.AuthApi
 import com.example.myapplication.data.remote.dto.UserDto
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -22,6 +25,10 @@ class AuthRepository(
     private val sessionStore: SessionStore,
     private val crypto: PasswordEncryptor = RsaPasswordEncryptor,
 ) {
+
+    /** 会话流：登录、主动登出、任何接口 401 时立即同步，供外层自动退回登录页。 */
+    private val _session = MutableStateFlow(sessionStore.read())
+    val sessionFlow: StateFlow<Session?> = _session.asStateFlow()
 
     /** 公钥内存缓存。进程重启后重新拉，不做磁盘持久化（公钥会随服务端密钥轮换而变）。 */
     @Volatile
@@ -45,6 +52,25 @@ class AuthRepository(
         if (name.isEmpty()) {
             return ApiResult.Failure(ApiError("E-CLIENT", "请输入用户名"))
         }
+        return authenticate(name, password) { encrypted -> authApi.login(name, encrypted) }
+    }
+
+    /** 注册并自动进入登录态（对齐 Web `LoginDialog.vue`）。 */
+    suspend fun register(username: String, password: String): ApiResult<UserDto> {
+        val name = username.trim()
+        if (name.length < MIN_USERNAME || name.length > MAX_USERNAME) {
+            return ApiResult.Failure(
+                ApiError("E-CLIENT", "用户名长度需在 $MIN_USERNAME-$MAX_USERNAME 个字符之间"),
+            )
+        }
+        return authenticate(name, password) { encrypted -> authApi.register(name, encrypted) }
+    }
+
+    private suspend fun authenticate(
+        username: String,
+        password: String,
+        remoteCall: suspend (encryptedPassword: String) -> ApiResult<com.example.myapplication.data.remote.dto.LoginResponse>,
+    ): ApiResult<UserDto> {
         // 后端对明文长度有硬校验（6–50），超了是 422。
         // 在这里先拦一道，省一次网络往返，也让提示更直白。
         if (password.length < MIN_PASSWORD) {
@@ -69,11 +95,14 @@ class AuthRepository(
             )
         }
 
-        return when (val result = authApi.login(name, encrypted)) {
+        return when (val result = remoteCall(encrypted)) {
             is ApiResult.Success -> {
-                sessionStore.write(
-                    Session(token = result.value.token, username = result.value.user.username),
+                val session = Session(
+                    token = result.value.token,
+                    username = result.value.user.username,
                 )
+                sessionStore.write(session)
+                _session.value = session
                 ApiResult.Success(result.value.user)
             }
             is ApiResult.Failure -> {
@@ -88,11 +117,13 @@ class AuthRepository(
     fun logout() {
         sessionStore.clear()
         cachedPublicKey = null
+        _session.value = null
     }
 
-    /** 401 时调用：token 已失效，清掉让 UI 回登录页。 */
+    /** 401 时调用：token 已失效，清掉让 UI 自动回到登录页。 */
     fun onUnauthorized() {
         sessionStore.clear()
+        _session.value = null
     }
 
     private suspend fun ensurePublicKey(): ApiResult<String> {
@@ -113,6 +144,9 @@ class AuthRepository(
     }
 
     companion object {
+        const val MIN_USERNAME = 3
+        const val MAX_USERNAME = 20
+
         /** 后端 `auth.py` 对明文密码长度的校验下限。 */
         const val MIN_PASSWORD = 6
 

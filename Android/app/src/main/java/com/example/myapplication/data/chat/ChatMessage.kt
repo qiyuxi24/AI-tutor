@@ -29,6 +29,8 @@ data class ChatMessage(
     val thinking: List<String> = emptyList(),
     val tools: List<ToolStep> = emptyList(),
     val failed: Boolean = false,
+    /** 失败原因说明。流式已有部分正文后再中断时，保留已收正文并通过本字段提示错误。 */
+    val errorDetail: String? = null,
     val cancelled: Boolean = false,
     /** 毫秒时间戳。 */
     val timestamp: Long = System.currentTimeMillis(),
@@ -37,6 +39,10 @@ data class ChatMessage(
 
     /** 思考/工具过程是否值得展示（用户可在界面上折叠）。 */
     val hasProcess: Boolean get() = thinking.isNotEmpty() || tools.isNotEmpty()
+
+    /** 尚未收到任何正文/思考/工具且未终止的空占位气泡。 */
+    val isPlaceholder: Boolean
+        get() = role == Role.Assistant && content.isEmpty() && !hasProcess && !failed && !cancelled
 
     companion object {
         /** 生成一个本地 ID。不用 UUID 全量是因为日志里看短一点更省地。 */

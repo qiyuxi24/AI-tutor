@@ -46,6 +46,10 @@ data class AppColors(
     val purpleLight: Color,
     /** 淡紫（环底） */
     val purplePale: Color,
+    /** 成功绿 */
+    val success: Color,
+    /** 较强边框（浮窗/按钮描边） */
+    val borderStrong: Color,
 ) {
     // 浅底标签：主色 10% / 5.5% 透明，对应预览页 `--soft` / `--soft-2`
     val soft: Color get() = purple.copy(alpha = 0.10f)
@@ -68,6 +72,8 @@ private val LightAppColors = AppColors(
     purpleDeep = Palette.PurpleDeep,
     purpleLight = Palette.PurpleLight,
     purplePale = Palette.PurplePale,
+    success = Palette.Success,
+    borderStrong = Palette.BorderStrong,
 )
 
 private val DarkAppColors = AppColors(
@@ -84,6 +90,8 @@ private val DarkAppColors = AppColors(
     purpleDeep = Palette.PurpleDeep,
     purpleLight = Palette.PurpleLight,
     purplePale = Palette.PurplePale,
+    success = Palette.SuccessDark,
+    borderStrong = Palette.BorderStrongDark,
 )
 
 /**

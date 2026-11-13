@@ -22,14 +22,19 @@ class AuthApi(private val api: ApiClient) {
     suspend fun fetchPublicKey(): ApiResult<PublicKeyResponse> =
         api.get("/api/v1/auth/public-key", PublicKeyResponse::class.java, authenticated = false)
 
-    /**
-     * 登录。`password` 必须已经是 RSA 密文的 base64（见 `RsaCrypto`）。
-     *
-     * 限流：5 次 / 60s / IP，超限 429 + `Retry-After`。
-     */
+    /** 登录。`password` 必须已经是 RSA 密文的 base64（见 `RsaCrypto`）。 */
     suspend fun login(username: String, encryptedPassword: String): ApiResult<LoginResponse> =
         api.post(
             path = "/api/v1/auth/login",
+            body = LoginRequest(username = username, password = encryptedPassword),
+            type = LoginResponse::class.java,
+            authenticated = false,
+        )
+
+    /** 注册：成功同样下发 JWT + user（由服务端校验 3–20 位用户名与密码密文）。 */
+    suspend fun register(username: String, encryptedPassword: String): ApiResult<LoginResponse> =
+        api.post(
+            path = "/api/v1/auth/register",
             body = LoginRequest(username = username, password = encryptedPassword),
             type = LoginResponse::class.java,
             authenticated = false,

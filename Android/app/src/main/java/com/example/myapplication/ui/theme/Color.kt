@@ -42,6 +42,10 @@ object Palette {
     val InputBg = Color(0xFFFAF8FF)
     /** 对话输入卡描边。 */
     val InputBorder = Color(0xFFEFE9FE)
+    /** 成功态（绿，对齐 Web `--color-success`）。 */
+    val Success = Color(0xFF10B981)
+    /** 较强边框（浮层/按钮描边，对齐 Web `--color-border-strong`）。 */
+    val BorderStrong = Color(0xFFD1D5DB)
     val White = Color(0xFFFFFFFF)
 
     // ── 中性色（深色档） ─────────────────────────────────────
@@ -56,4 +60,6 @@ object Palette {
     val TextHintDark = Color(0xFF6A6A70)
     val InputBgDark = Color(0xFF1C1826)
     val InputBorderDark = Color(0xFF2E2740)
+    val SuccessDark = Color(0xFF34D399)
+    val BorderStrongDark = Color(0xFF3F3F46)
 }

@@ -35,7 +35,11 @@ class ChatApi(
     private val sessionStore: SessionStore,
     private val client: OkHttpClient = ApiClient.defaultClient(),
     private val gson: Gson = Gson(),
+    private val onUnauthorized: (() -> Unit)? = null,
 ) {
+
+    /** 去掉尾部斜杠，防止 baseUrl 带斜杠时拼出双斜杠 URL。 */
+    private val base = baseUrl.trimEnd('/')
 
     /**
      * 发起一轮对话，返回事件流。
@@ -56,7 +60,7 @@ class ChatApi(
         messages: List<ChatMessageDto>,
         convId: String? = null,
         currentNode: String? = null,
-        kbNodeIds: List<String>? = null,
+        kbNodeIds: List<Long>? = null,
         kbNodeName: String? = null,
     ): Flow<ChatEvent> = flow {
         val payload = ChatRequest(
@@ -68,7 +72,7 @@ class ChatApi(
         )
 
         val builder = Request.Builder()
-            .url("$baseUrl/api/v1/chat/stream")
+            .url("$base/api/v1/chat/stream")
             .header("Accept", "text/event-stream")
             .post(gson.toJson(payload).toRequestBody(JSON_MEDIA))
 
@@ -83,10 +87,17 @@ class ChatApi(
         try {
             client.newCall(builder.build()).execute().use { response ->
                 if (!response.isSuccessful) {
+                    if (response.code == 401) {
+                        onUnauthorized?.invoke()
+                    }
                     // 非 2xx：body 是 JSON 错误而不是事件流，按统一格式解析后上报，
                     // 由上层转成一条可见的错误气泡（静默结束会让用户看不到原因）
                     val bodyText = response.body?.string()
-                    val error = ApiErrorParser.parse(response.code, bodyText)
+                    val error = ApiErrorParser.parse(
+                        httpStatus = response.code,
+                        body = bodyText,
+                        retryAfterHeader = response.header("Retry-After"),
+                    )
                     emit(ChatEvent.Error(error.message))
                     emit(ChatEvent.Done)
                     finished = true

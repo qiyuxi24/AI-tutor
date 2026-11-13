@@ -4,7 +4,7 @@ import com.example.myapplication.data.remote.ChatApi
 import com.example.myapplication.data.remote.dto.ChatEvent
 import com.example.myapplication.data.remote.dto.ChatMessageDto
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
+import java.util.UUID
 
 /**
  * 对话数据层。
@@ -25,7 +25,8 @@ class ChatRepository(private val chatApi: ChatApi) {
         history: List<ChatMessage>,
         convId: String? = null,
         currentNode: String? = null,
-        kbNodeIds: List<String>? = null,
+        kbNodeIds: List<Long>? = null,
+        kbNodeName: String? = null,
     ): Flow<ChatEvent> {
         val payload = history.map { msg ->
             ChatMessageDto(
@@ -43,6 +44,7 @@ class ChatRepository(private val chatApi: ChatApi) {
             convId = convId,
             currentNode = currentNode,
             kbNodeIds = kbNodeIds,
+            kbNodeName = kbNodeName,
         )
     }
 
@@ -99,4 +101,33 @@ class ChatRepository(private val chatApi: ChatApi) {
             }
         },
     )
+
+    /**
+     * 标为失败：若已有流式部分正文则保留，通过 `errorDetail` 展示失败原因；
+     * 若仍为空占位则只标记失败并写 `errorDetail`，绝不覆盖已读正文。
+     */
+    fun applyFailure(message: ChatMessage, errorMsg: String): ChatMessage =
+        message.copy(
+            failed = true,
+            errorDetail = errorMsg,
+            tools = message.tools.map { step ->
+                if (step.status == ToolStep.Status.Running) step.copy(status = ToolStep.Status.Error)
+                else step
+            },
+        )
+
+    /** 用户主动停止生成：收敛未完成的工具步骤，标记 `cancelled = true`。 */
+    fun applyCancelled(message: ChatMessage): ChatMessage =
+        message.copy(
+            cancelled = true,
+            tools = message.tools.map { step ->
+                if (step.status == ToolStep.Status.Running) step.copy(status = ToolStep.Status.Error)
+                else step
+            },
+        )
+
+    companion object {
+        /** 生成全局唯一的对话 ID（供 `conv_id` 串行锁与服务端落库关联）。 */
+        fun newConversationId(): String = UUID.randomUUID().toString()
+    }
 }

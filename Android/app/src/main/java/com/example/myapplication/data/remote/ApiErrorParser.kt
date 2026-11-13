@@ -14,12 +14,12 @@ import com.google.gson.JsonParser
  */
 internal object ApiErrorParser {
 
-    fun parse(httpStatus: Int, body: String?): ApiError {
+    fun parse(httpStatus: Int, body: String?, retryAfterHeader: String? = null): ApiError {
         val raw = body?.trim().orEmpty()
         if (raw.isEmpty()) {
             return ApiError(
                 code = ApiError.LOCAL_HTTP,
-                message = fallbackMessage(httpStatus),
+                message = fallbackMessage(httpStatus, retryAfterHeader),
                 httpStatus = httpStatus,
             )
         }
@@ -43,7 +43,7 @@ internal object ApiErrorParser {
         if (detail.isNullOrBlank()) {
             return ApiError(
                 code = ApiError.LOCAL_HTTP,
-                message = fallbackMessage(httpStatus),
+                message = fallbackMessage(httpStatus, retryAfterHeader),
                 httpStatus = httpStatus,
             )
         }
@@ -53,7 +53,8 @@ internal object ApiErrorParser {
         val match = CODE_PREFIX.find(detail)
         return if (match != null) {
             val code = match.groupValues[1]
-            val msg = detail.removePrefix(match.value).trim().ifBlank { fallbackMessage(httpStatus) }
+            val msg = detail.removePrefix(match.value).trim()
+                .ifBlank { fallbackMessage(httpStatus, retryAfterHeader) }
             ApiError(code = code, message = msg, httpStatus = httpStatus)
         } else {
             ApiError(code = ApiError.LOCAL_HTTP, message = detail, httpStatus = httpStatus)
@@ -63,11 +64,14 @@ internal object ApiErrorParser {
     /** `[E-XXX-000]` 前缀，允许模块名里带连字符与数字。 */
     private val CODE_PREFIX = Regex("""^\s*\[(E-[A-Z]+-\d+)]\s*""")
 
-    private fun fallbackMessage(httpStatus: Int): String = when (httpStatus) {
+    private fun fallbackMessage(httpStatus: Int, retryAfterHeader: String?): String = when (httpStatus) {
         401 -> "登录已过期，请重新登录"
         403 -> "没有权限执行这个操作"
         404 -> "请求的资源不存在"
-        429 -> "请求过于频繁，请稍后再试"
+        429 -> {
+            val sec = retryAfterHeader?.trim()?.toIntOrNull()?.takeIf { it > 0 }
+            if (sec != null) "请求过于频繁，请 $sec 秒后重试" else "请求过于频繁，请稍后再试"
+        }
         in 500..599 -> "服务器出错了（$httpStatus），请稍后再试"
         else -> "请求失败（HTTP $httpStatus）"
     }

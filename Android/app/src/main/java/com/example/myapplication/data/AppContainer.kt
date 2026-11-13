@@ -6,9 +6,13 @@ import com.example.myapplication.data.auth.AuthRepository
 import com.example.myapplication.data.auth.EncryptedSessionStore
 import com.example.myapplication.data.auth.SessionStore
 import com.example.myapplication.data.chat.ChatRepository
+import com.example.myapplication.data.chat.ConversationPrefs
+import com.example.myapplication.data.chat.ConversationRepository
+import com.example.myapplication.data.chat.SharedPreferencesConversationPrefs
 import com.example.myapplication.data.remote.ApiClient
 import com.example.myapplication.data.remote.AuthApi
 import com.example.myapplication.data.remote.ChatApi
+import com.example.myapplication.data.remote.ConversationApi
 
 /**
  * 手写依赖容器（不用 Hilt）。
@@ -35,6 +39,7 @@ class AppContainer(context: Context) {
         ApiClient(
             baseUrl = BuildConfig.API_BASE_URL,
             sessionStore = sessionStore,
+            onUnauthorized = { authRepository.onUnauthorized() },
         )
     }
 
@@ -47,16 +52,28 @@ class AppContainer(context: Context) {
     /**
      * 对话接口。
      *
-     * 刻意**复用 [apiClient] 的 OkHttpClient 配置**（通过默认参数拿到同一份超时口径），
-     * 但请求本身走裸 OkHttp 流式读 —— SSE 不能用 ApiClient 的 `get/post`
+     * 直接共用 [apiClient] 持有的 `OkHttpClient`（同一连接池与超时口径），
+     * 请求本身走裸 OkHttp 流式读 —— SSE 不能用 ApiClient 的 `get/post`
      * （那两个会把整个 body 读成 String，而事件流不会结束，必然卡死）。
      */
     val chatApi: ChatApi by lazy {
         ChatApi(
             baseUrl = BuildConfig.API_BASE_URL,
             sessionStore = sessionStore,
+            client = apiClient.httpClient,
+            onUnauthorized = { authRepository.onUnauthorized() },
         )
     }
 
     val chatRepository: ChatRepository by lazy { ChatRepository(chatApi) }
+
+    val conversationPrefs: ConversationPrefs by lazy {
+        SharedPreferencesConversationPrefs(appContext)
+    }
+
+    val conversationApi: ConversationApi by lazy { ConversationApi(apiClient) }
+
+    val conversationRepository: ConversationRepository by lazy {
+        ConversationRepository(api = conversationApi, prefs = conversationPrefs)
+    }
 }

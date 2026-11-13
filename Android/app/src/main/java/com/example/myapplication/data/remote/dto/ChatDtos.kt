@@ -23,7 +23,7 @@ import com.google.gson.annotations.SerializedName
 data class ChatRequest(
     @SerializedName("messages") val messages: List<ChatMessageDto>,
     @SerializedName("current_node") val currentNode: String? = null,
-    @SerializedName("kb_node_ids") val kbNodeIds: List<String>? = null,
+    @SerializedName("kb_node_ids") val kbNodeIds: List<Long>? = null,
     @SerializedName("kb_node_name") val kbNodeName: String? = null,
     /** 多端串行键：同 conv_id 的回合在服务端排队。 */
     @SerializedName("conv_id") val convId: String? = null,
@@ -135,9 +135,96 @@ sealed interface ChatEvent {
     data class Error(val message: String) : ChatEvent
 }
 
-/** `GET /api/v1/conversations` 里的一条。字段与后端 model 对应。 */
+/**
+ * `GET /api/v1/conversations` 列表项（与 `conversations.py` 的 camelCase 契约一致）。
+ *
+ * `createdAt` / `updatedAt` 在服务端是 `time.time()` 秒级浮点数，必须用 `Double`
+ * 接收（用 `Long` 会导致 Gson 解析小数抛异常），展示前经 `TimeFormat.toMs` 换算。
+ */
 data class ConversationDto(
     @SerializedName("id") val id: String,
-    @SerializedName("title") val title: String = "",
-    @SerializedName("updated_at") val updatedAt: Long = 0,
+    @SerializedName("title") val title: String = "新对话",
+    @SerializedName("createdAt") val createdAt: Double = 0.0,
+    @SerializedName("updatedAt") val updatedAt: Double = 0.0,
+    @SerializedName("messageCount") val messageCount: Int = 0,
+)
+
+/** `GET /api/v1/conversations` 响应体。 */
+data class ConversationListResponse(
+    @SerializedName("conversations") val conversations: List<ConversationDto> = emptyList(),
+    @SerializedName("tombstones") val tombstones: List<String> = emptyList(),
+)
+
+/** `GET /api/v1/conversations/{conv_id}` 详情响应体。 */
+data class ConversationDetailDto(
+    @SerializedName("id") val id: String,
+    @SerializedName("title") val title: String = "新对话",
+    @SerializedName("messages") val messages: List<ConversationMessageDto> = emptyList(),
+    @SerializedName("createdAt") val createdAt: Double = 0.0,
+    @SerializedName("updatedAt") val updatedAt: Double = 0.0,
+)
+
+data class ConversationMessageDto(
+    @SerializedName("role") val role: String,
+    @SerializedName("content") val content: String = "",
+    @SerializedName("ts") val ts: Double? = null,
+    @SerializedName("tools") val tools: List<ConversationToolDto>? = null,
+)
+
+data class ConversationToolDto(
+    @SerializedName("tool") val tool: String = "",
+    @SerializedName("args_head") val argsHead: String = "",
+    @SerializedName("round") val round: Int = 0,
+    @SerializedName("status") val status: String = "done",
+    @SerializedName("result") val result: ConversationToolResultDto? = null,
+)
+
+data class ConversationToolResultDto(
+    @SerializedName("tool") val tool: String = "",
+    @SerializedName("ok") val ok: Boolean = true,
+    @SerializedName("summary") val summary: String = "",
+    @SerializedName("duration_ms") val durationMs: Long = 0L,
+    @SerializedName("round") val round: Int = 0,
+)
+
+data class RenameConversationRequest(
+    @SerializedName("title") val title: String,
+)
+
+data class StatusResponse(
+    @SerializedName("status") val status: String = "ok",
+    @SerializedName("id") val id: String? = null,
+    @SerializedName("title") val title: String? = null,
+    // 注意：Gson 用 Unsafe 反序列化缺少字段的 JSON 时会给非空字段填 null，必须可空 + helper 兜底
+    @SerializedName("tombstones") val tombstones: List<String>? = null,
+)
+
+// ─── 知识库上下文（GET /kb/tree & POST /kb/context） ─────────────────
+
+data class KbTreeResponse(
+    @SerializedName("tree") val tree: List<KbTreeNodeDto>? = null,
+)
+
+data class KbTreeNodeDto(
+    @SerializedName("id") val id: Long,
+    @SerializedName("name") val name: String,
+    @SerializedName("type") val type: String = "file",
+    // 文件节点在后端不会返回 children 键；必须可空，否则 Gson 会注入 null 导致 NPE
+    @SerializedName("children") val children: List<KbTreeNodeDto>? = null,
+    @SerializedName("is_leaf") val isLeaf: Boolean = true,
+    @SerializedName("file_type") val fileType: String = "",
+    @SerializedName("status") val status: String = "",
+) {
+    fun childrenOrEmpty(): List<KbTreeNodeDto> = children.orEmpty()
+}
+
+data class KbContextRequest(
+    @SerializedName("node_id") val nodeId: Long,
+    @SerializedName("max_depth") val maxDepth: Int? = null,
+)
+
+data class KbContextResponse(
+    @SerializedName("node_ids") val nodeIds: List<Long>? = null,
+    @SerializedName("file_count") val fileCount: Int = 0,
+    @SerializedName("node_id") val nodeId: Long = 0L,
 )

@@ -25,7 +25,11 @@ class ApiClient(
     private val sessionStore: SessionStore,
     private val gson: Gson = Gson(),
     private val client: OkHttpClient = defaultClient(),
+    private val onUnauthorized: (() -> Unit)? = null,
 ) {
+
+    /** 暴露给 ChatApi 共用同一个 OkHttpClient 连接池与超时口径。 */
+    val httpClient: OkHttpClient get() = client
 
     /** 去掉尾部斜杠，避免拼出 `http://host//api/...`。 */
     private val base = baseUrl.trimEnd('/')
@@ -52,12 +56,51 @@ class ApiClient(
         body: Any,
         type: Class<T>,
         authenticated: Boolean = true,
+    ): ApiResult<T> = executeJson(
+        method = "POST",
+        path = path,
+        body = body,
+        type = type,
+        authenticated = authenticated,
+    )
+
+    /** 发一个 PATCH（JSON body）并解析成 [T]。 */
+    suspend fun <T> patch(
+        path: String,
+        body: Any,
+        type: Class<T>,
+        authenticated: Boolean = true,
+    ): ApiResult<T> = executeJson(
+        method = "PATCH",
+        path = path,
+        body = body,
+        type = type,
+        authenticated = authenticated,
+    )
+
+    /** 发一个 DELETE 并解析成 [T]。 */
+    suspend fun <T> delete(
+        path: String,
+        type: Class<T>,
+        authenticated: Boolean = true,
+    ): ApiResult<T> = execute(
+        requestBuilder = Request.Builder().url(base + path).delete(),
+        type = type,
+        authenticated = authenticated,
+    )
+
+    private suspend fun <T> executeJson(
+        method: String,
+        path: String,
+        body: Any,
+        type: Class<T>,
+        authenticated: Boolean,
     ): ApiResult<T> {
         val json = gson.toJson(body)
         return execute(
             requestBuilder = Request.Builder()
                 .url(base + path)
-                .post(json.toRequestBody(JSON_MEDIA)),
+                .method(method, json.toRequestBody(JSON_MEDIA)),
             type = type,
             authenticated = authenticated,
         )
@@ -80,8 +123,15 @@ class ApiClient(
                 val bodyText = response.body?.string()
 
                 if (!response.isSuccessful) {
+                    if (authenticated && response.code == 401) {
+                        onUnauthorized?.invoke()
+                    }
                     return@withContext ApiResult.Failure(
-                        ApiErrorParser.parse(response.code, bodyText),
+                        ApiErrorParser.parse(
+                            httpStatus = response.code,
+                            body = bodyText,
+                            retryAfterHeader = response.header("Retry-After"),
+                        ),
                     )
                 }
 
