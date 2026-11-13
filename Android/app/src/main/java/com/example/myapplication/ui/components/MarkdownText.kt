@@ -1,6 +1,10 @@
 package com.example.myapplication.ui.components
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,22 +16,39 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.myapplication.ui.theme.AppTheme
+import kotlinx.coroutines.delay
 
 /**
  * 渲染 Markdown 正文（AI 回复）。
@@ -71,17 +92,18 @@ fun MarkdownText(
                     // 而不是新增一整套 TextStyle 表（主题层 README 禁止第二套字号）。
                     val base = MaterialTheme.typography
                     val textStyle = when (block.level) {
-                        1 -> base.displaySmall.copy(fontSize = 26.sp, lineHeight = 34.sp)
-                        2 -> base.headlineSmall.copy(fontSize = 22.sp, lineHeight = 30.sp)
-                        3 -> base.titleMedium.copy(fontSize = 19.sp, lineHeight = 26.sp)
-                        4 -> base.titleSmall.copy(fontSize = 17.sp, lineHeight = 24.sp)
-                        5 -> base.bodyLarge.copy(fontSize = 16.sp, lineHeight = 22.sp)
+                        1 -> base.displaySmall.copy(fontSize = 24.sp, lineHeight = 32.sp)
+                        2 -> base.headlineSmall.copy(fontSize = 20.sp, lineHeight = 28.sp)
+                        3 -> base.titleMedium.copy(fontSize = 18.sp, lineHeight = 25.sp)
+                        4 -> base.titleSmall.copy(fontSize = 16.sp, lineHeight = 23.sp)
+                        5 -> base.bodyLarge.copy(fontSize = 15.sp, lineHeight = 22.sp)
                         else -> base.bodyMedium.copy(fontSize = 14.sp, lineHeight = 20.sp)
                     }
-                    Text(
-                        text = MarkdownParser.inline(block.text, mdColors),
+                    RichText(
+                        text = block.text,
+                        colors = mdColors,
+                        textColor = textColor,
                         style = textStyle.copy(fontWeight = FontWeight.Bold),
-                        color = textColor,
                     )
                 }
 
@@ -112,48 +134,16 @@ fun MarkdownText(
                     )
                 }
 
-                is MdBlock.Quote -> Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(4.dp)),
-                ) {
-                    // 左侧竖线用一条窄的 Box 模拟（比 Canvas 便宜）
-                    Spacer(
-                        modifier = Modifier
-                            .width(3.dp)
-                            .height(20.dp)
-                            .background(mdColors.secondary.copy(alpha = 0.5f)),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    // 引用里也可能有行内公式，同样要走混排
-                    RichText(
-                        text = block.text,
-                        colors = mdColors,
-                        textColor = mdColors.secondary,
-                        style = MaterialTheme.typography.bodyLarge,
-                    )
-                }
+                is MdBlock.Quote -> MdQuote(
+                    block = block,
+                    colors = mdColors,
+                )
 
-                is MdBlock.Code -> Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(mdColors.secondary.copy(alpha = 0.12f))
-                        .padding(10.dp),
-                ) {
-                    // 横向可滚动：流程图/长代码行靠空格对齐，换行会毁掉对齐。
-                    // 用 SingleLine 的 Text 会截断，所以用 basicMarquee 不合适 ——
-                    // 这里靠 horizontalScroll 让用户自己拖。
-                    Text(
-                        text = block.code,
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            fontFamily = FontFamily.Monospace,
-                        ),
-                        color = textColor,
-                        softWrap = false,
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    )
-                }
+                is MdBlock.Code -> MdCodeBlock(
+                    block = block,
+                    colors = mdColors,
+                    textColor = textColor,
+                )
 
                 is MdBlock.Table -> MdTable(
                     block = block,
@@ -198,12 +188,12 @@ private fun RichText(
     /** 公式字号。表格里给 14sp，比正文略小以便塞进一列。 */
     mathFontSize: androidx.compose.ui.unit.TextUnit = 16.sp,
 ) {
-    val segments = remember(text) { MarkdownParser.splitInlineMath(text) }
+    val segments = remember(text, colors) { MarkdownParser.inlineWithMath(text, colors) }
 
     // 没有公式 → 直接用 Text，最省（绝大多数段落都是这种）
-    if (segments.none { it.math != null }) {
+    if (segments.size == 1 && segments[0] is RichSegment.Text) {
         Text(
-            text = MarkdownParser.inline(text, colors),
+            text = (segments[0] as RichSegment.Text).text,
             style = style,
             color = textColor,
         )
@@ -217,16 +207,15 @@ private fun RichText(
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         segments.forEach { seg ->
-            if (seg.math != null) {
-                LatexInline(
-                    latex = seg.math,
+            when (seg) {
+                is RichSegment.Math -> LatexInline(
+                    latex = seg.latex,
                     textColor = textColor,
                     autoWrap = mathAutoWrap,
                     fontSize = mathFontSize,
                 )
-            } else if (seg.text.isNotBlank()) {
-                Text(
-                    text = MarkdownParser.inline(seg.text, colors),
+                is RichSegment.Text -> Text(
+                    text = seg.text,
                     style = style,
                     color = textColor,
                 )
@@ -395,4 +384,128 @@ private fun TableRow(
             .height(1.dp)
             .background(cellBorder),
     )
+}
+
+/**
+ * 多级引用块：按 `depth` 缩进并用 `drawBehind` 绘制对应数量的满高竖线。
+ *
+ * 不用 `IntrinsicSize.Min` + `fillMaxHeight`：Compose 的 `FlowRow`（[RichText] 含公式时）
+ * 在最小内在高度查询下会只测出首行高度，把引用里的后续换行整段裁掉（2026-11-13 模拟器实测复现）。
+ */
+@Composable
+private fun MdQuote(
+    block: MdBlock.Quote,
+    colors: MdColors,
+) {
+    val barCount = block.depth + 1
+    val barWidth = 3.dp
+    val barGap = 5.dp
+    val trailingGap = 8.dp
+    val leadingArea = barWidth * barCount + barGap * (barCount - 1) + trailingGap
+    val barColor = colors.secondary.copy(alpha = 0.45f)
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = (block.depth * 6).dp)
+            .drawBehind {
+                val wPx = barWidth.toPx()
+                val stepPx = (barWidth + barGap).toPx()
+                val radius = CornerRadius(2.dp.toPx(), 2.dp.toPx())
+                repeat(barCount) { index ->
+                    drawRoundRect(
+                        color = barColor,
+                        topLeft = Offset(index * stepPx, 0f),
+                        size = Size(wPx, size.height),
+                        cornerRadius = radius,
+                    )
+                }
+            }
+            .padding(start = leadingArea),
+    ) {
+        RichText(
+            text = block.text,
+            colors = colors,
+            textColor = colors.secondary,
+            style = MaterialTheme.typography.bodyLarge,
+        )
+    }
+}
+
+/** 代码块：顶部显示语言标记与一键复制，内容区横向滚动保真空格对齐。 */
+@Composable
+private fun MdCodeBlock(
+    block: MdBlock.Code,
+    colors: MdColors,
+    textColor: Color,
+) {
+    val appColors = AppTheme.colors
+    val context = LocalContext.current
+    var copied by remember { mutableStateOf(false) }
+
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(1500)
+            copied = false
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(colors.secondary.copy(alpha = 0.10f)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(colors.secondary.copy(alpha = 0.08f))
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = block.lang.ifBlank { "code" },
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.secondary,
+            )
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable(role = Role.Button) {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("code", block.code))
+                        copied = true
+                    }
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Icon(
+                    imageVector = if (copied) Icons.Outlined.Check else Icons.Outlined.ContentCopy,
+                    contentDescription = null,
+                    tint = if (copied) appColors.success else colors.secondary,
+                    modifier = Modifier.size(12.dp),
+                )
+                Text(
+                    text = if (copied) "已复制" else "复制",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (copied) appColors.success else colors.secondary,
+                )
+            }
+        }
+
+        Text(
+            text = block.code,
+            style = MaterialTheme.typography.bodyMedium.copy(
+                fontFamily = FontFamily.Monospace,
+            ),
+            color = textColor,
+            softWrap = false,
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(10.dp),
+        )
+    }
 }

@@ -1,5 +1,6 @@
 package com.example.myapplication.ui.components
 
+import androidx.compose.ui.text.font.FontWeight
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -391,6 +392,66 @@ class MarkdownParserTest {
         // 4 空格 → 2 级
         val deeper = MarkdownParser.parse("1. 一\n    1. 深一层")
         assertEquals(2, (deeper[1] as MdBlock.Bullet).depth)
+    }
+
+    @Test
+    fun `粗体内部嵌套行内代码不留反引号`() {
+        val colors = testColors()
+        val result = MarkdownParser.inline("注意 **`node_id` 字段** 的类型", colors)
+        assertEquals("注意 node_id 字段 的类型", result.text)
+    }
+
+    @Test
+    fun `转义美元符不被误拆成行内公式`() {
+        val segments = MarkdownParser.splitInlineMath("""价格从 \$5 涨到 \$10 了""")
+        assertEquals(1, segments.size)
+        assertEquals(null, segments[0].math)
+    }
+
+    @Test
+    fun `支持 LaTeX 圆括号和方括号公式语法`() {
+        val segs = MarkdownParser.splitInlineMath("""考虑 \(x^2 + y^2\) 即可""")
+        assertEquals(3, segs.size)
+        assertEquals("x^2 + y^2", segs[1].math)
+
+        val blocks = MarkdownParser.parse("\\[\nA x = b\n\\]")
+        assertEquals(1, blocks.size)
+        assertEquals("A x = b", (blocks[0] as MdBlock.MathBlock).latex)
+    }
+
+    @Test
+    fun `表格单元格保留 LaTeX 反斜杠命令并只还原转义竖线`() {
+        val md = """
+            | ${'$'}c\mathbf{a}_1 + d\mathbf{a}_2${'$'} | a \| b |
+            | --- | --- |
+            | ${'$'}\frac{1}{2}${'$'} | ${'$'}\mathbb{R}^3${'$'} |
+        """.trimIndent()
+        val table = MarkdownParser.parse(md).single() as MdBlock.Table
+        assertEquals("""${'$'}c\mathbf{a}_1 + d\mathbf{a}_2${'$'}""", table.header[0])
+        assertEquals("a | b", table.header[1])
+        assertEquals("""${'$'}\frac{1}{2}${'$'}""", table.rows[0][0])
+        assertEquals("""${'$'}\mathbb{R}^3${'$'}""", table.rows[0][1])
+    }
+
+    @Test
+    fun `跨越行内公式的粗体保留前后样式且不遗留星号`() {
+        val segs = MarkdownParser.inlineWithMath(
+            """**方程 ${'$'}Ax=b${'$'} 什么时候有解？**""",
+            testColors(),
+        )
+        assertEquals(3, segs.size)
+        val first = segs[0] as RichSegment.Text
+        val math = segs[1] as RichSegment.Math
+        val second = segs[2] as RichSegment.Text
+        assertEquals("方程 ", first.text.text)
+        assertTrue(first.text.spanStyles.any { it.item.fontWeight == FontWeight.Bold })
+        assertEquals("Ax=b", math.latex)
+        assertEquals(" 什么时候有解？", second.text.text)
+        assertTrue(second.text.spanStyles.any { it.item.fontWeight == FontWeight.Bold })
+
+        // 流式未闭合时依然保持字面量不吞字
+        val partial = MarkdownParser.inlineWithMath("""**方程 ${'$'}Ax=b${'$'} 什么时候""", testColors())
+        assertEquals("**方程 ", (partial[0] as RichSegment.Text).text.text)
     }
 
     private fun testColors() = MdColors(

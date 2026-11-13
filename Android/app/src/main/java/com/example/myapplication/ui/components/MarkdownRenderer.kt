@@ -113,6 +113,12 @@ internal data class InlineSegment(
     val math: String?,
 )
 
+/** 行内混排输出段：经 [MarkdownParser.inlineWithMath] 处理后，跨公式边界的粗体/斜体等样式完整保留。 */
+internal sealed interface RichSegment {
+    data class Text(val text: AnnotatedString) : RichSegment
+    data class Math(val latex: String) : RichSegment
+}
+
 internal object MarkdownParser {
 
     /**
@@ -143,45 +149,42 @@ internal object MarkdownParser {
         content: String,
         colors: MdColors,
     ) {
-        // 标签内部也可能有 Markdown 行内语法（**粗体**、`代码`），递归解析。
-        // 内容里已不含尖括号（正则捕获的是 [^<]*），不会无限递归。
-        val inner = inline(content, colors)
-        // 把内层已有的 span 一起带进来：直接 append(AnnotatedString) 会**丢掉样式**，
-        // 必须先记下基础偏移再逐条平移 span
-        val base = length
-        val innerSpans = inner.spanStyles
-        val plain = inner.text
-
-        when (tag) {
-            "kbd", "code" -> withStyle(
-                SpanStyle(
-                    fontFamily = FontFamily.Monospace,
-                    background = colors.secondary.copy(alpha = 0.12f),
-                ),
-            ) { append(plain) }
-            "mark" -> withStyle(
-                SpanStyle(background = colors.link.copy(alpha = 0.18f)),
-            ) { append(plain) }
-            "b", "strong" -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-                append(plain)
-            }
-            "i", "em" -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
-                append(plain)
-            }
-            "u", "ins" -> withStyle(SpanStyle(textDecoration = TextDecoration.Underline)) {
-                append(plain)
-            }
-            "s", "del" -> withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) {
-                append(plain)
-            }
-            // 上下标：Compose 没有 baselineShift 的公开 API，
-            // 用小字号近似（视觉上小一号，位置不变 —— 已知近似）
-            "sub", "sup" -> withStyle(SpanStyle(fontSize = 11.sp)) { append(plain) }
-            else -> append(plain)
+        val outerStyle = when (tag) {
+            "kbd", "code" -> SpanStyle(
+                fontFamily = FontFamily.Monospace,
+                background = colors.secondary.copy(alpha = 0.12f),
+            )
+            "mark" -> SpanStyle(background = colors.link.copy(alpha = 0.18f))
+            "b", "strong" -> SpanStyle(fontWeight = FontWeight.Bold)
+            "i", "em" -> SpanStyle(fontStyle = FontStyle.Italic)
+            "u", "ins" -> SpanStyle(textDecoration = TextDecoration.Underline)
+            "s", "del" -> SpanStyle(textDecoration = TextDecoration.LineThrough)
+            // 上下标：Compose 没有 baselineShift 的公开 API，用小字号近似
+            "sub", "sup" -> SpanStyle(fontSize = 11.sp)
+            else -> null
         }
+        appendNestedInline(content, outerStyle, colors)
+    }
 
-        // 补回内层样式（偏移平移到本段起点）
-        innerSpans.forEach { range ->
+    /**
+     * 递归解析内层 Markdown 行内语法并叠加外层 [outerStyle]（若非 null）。
+     *
+     * 共享给 `**粗体**`、`__粗体__` 与 HTML 标签复用，避免两处各写一套偏移平移。
+     */
+    private fun AnnotatedString.Builder.appendNestedInline(
+        content: String,
+        outerStyle: SpanStyle?,
+        colors: MdColors,
+    ) {
+        val inner = inline(content, colors)
+        val base = length
+        val plain = inner.text
+        if (outerStyle != null) {
+            withStyle(outerStyle) { append(plain) }
+        } else {
+            append(plain)
+        }
+        inner.spanStyles.forEach { range ->
             addStyle(range.item, base + range.start, base + range.end)
         }
     }
@@ -215,8 +218,8 @@ internal object MarkdownParser {
         RegexOption.IGNORE_CASE,
     )
 
-    /** 角括号链接 `<https://...>`。 */
-    private val ANGLE_LINK_RE = Regex("^<((?:https?|mailto):[^>\\s]+)>")
+    /** 角括号链接 `<https://...>`（无 `^` 锚点，供 `matchAt(text, i)` 零分配匹配）。 */
+    private val ANGLE_LINK_RE = Regex("<((?:https?|mailto):[^>\\s]+)>")
 
     /**
      * 整行只有一个 HTML 块级标签（`<details>`、`</details>`、`<summary>文字</summary>`
@@ -230,12 +233,12 @@ internal object MarkdownParser {
     )
 
     /**
-     * 裸链接。认到空白或下列标点为止。
+     * 裸链接。认到空白或下列标点为止（无 `^` 锚点，供 `matchAt(text, i)` 使用）。
      *
      * 结尾的句号、逗号等不在这里吃掉 —— 交给调用方 `trimEnd`，
      * 这样「见 https://a.com/x.」不会把句号算进链接。
      */
-    private val BARE_URL_RE = Regex("""^https?://[^\s<>()\[\]"']+""")
+    private val BARE_URL_RE = Regex("""https?://[^\s<>()\[\]"']+""")
 
     /**
      * 链接统一样式。
@@ -274,6 +277,7 @@ internal object MarkdownParser {
         val code = StringBuilder()
 
         var inMath = false
+        var mathCloseToken = "$$"
         val math = StringBuilder()
 
         // 表格缓冲：连续以 | 开头的行
@@ -313,34 +317,45 @@ internal object MarkdownParser {
             // 只去行尾 \r（CRLF 兼容）。**不动行尾空格** —— 见 code 的说明。
             val line = rawLine.removeSuffix("\r")
 
-            // ── 块级公式 $$ ... $$ ──
+            // ── 块级公式 $$ ... $$ 与 \[ ... \] ──
             val trimmed = line.trim()
             if (!inCode) {
-                if (trimmed == "$$" || trimmed.startsWith("$$")) {
-                    if (inMath) {
-                        // 收尾：把 $$ 之前的内容也收进来
-                        val tail = trimmed.removeSuffix("$$").removePrefix("$$").trim()
+                if (inMath) {
+                    if (trimmed.endsWith(mathCloseToken)) {
+                        val tail = trimmed.removeSuffix(mathCloseToken).trim()
                         if (tail.isNotEmpty()) math.appendLine(tail)
                         inMath = false
                         flushMath()
-                    } else if (trimmed.length > 4 && trimmed.endsWith("$$")) {
-                        // 单行写法 $$ x^2 $$
-                        flushParagraph()
-                        flushTable()
-                        blocks.add(
-                            MdBlock.MathBlock(trimmed.removePrefix("$$").removeSuffix("$$").trim()),
-                        )
                     } else {
-                        flushParagraph()
-                        flushTable()
-                        inMath = true
-                        val rest = trimmed.removePrefix("$$").trim()
-                        if (rest.isNotEmpty()) math.appendLine(rest)
+                        math.appendLine(line)
                     }
                     return@forEach
                 }
-                if (inMath) {
-                    math.appendLine(line)
+
+                val openClosePair = when {
+                    trimmed.startsWith("$$") -> "$$" to "$$"
+                    trimmed.startsWith("\\[") -> "\\[" to "\\]"
+                    else -> null
+                }
+                if (openClosePair != null) {
+                    val (openTok, closeTok) = openClosePair
+                    if (trimmed.length > openTok.length + closeTok.length && trimmed.endsWith(closeTok)) {
+                        // 单行块公式 $$ x^2 $$ 或 \[ x^2 \]
+                        flushParagraph()
+                        flushTable()
+                        blocks.add(
+                            MdBlock.MathBlock(
+                                trimmed.removePrefix(openTok).removeSuffix(closeTok).trim(),
+                            ),
+                        )
+                    } else if (trimmed == openTok || !trimmed.drop(openTok.length).contains(closeTok)) {
+                        flushParagraph()
+                        flushTable()
+                        inMath = true
+                        mathCloseToken = closeTok
+                        val rest = trimmed.removePrefix(openTok).trim()
+                        if (rest.isNotEmpty()) math.appendLine(rest)
+                    }
                     return@forEach
                 }
             }
@@ -462,7 +477,6 @@ internal object MarkdownParser {
         if (inMath) flushMath()
         flushTable()
         flushParagraph()
-        flushParagraph()
 
         return blocks
     }
@@ -501,7 +515,7 @@ internal object MarkdownParser {
         return MdBlock.Table(header = header, rows = rows)
     }
 
-    /** 切一行表格：去掉首尾竖线后按 `|` 分列；`\|` 视为普通字符。 */
+    /** 切一行表格：去掉首尾竖线后按 `|` 分列；仅 `\|` 视为字面竖线，LaTeX 反斜杠命令原样保留。 */
     private fun splitRow(raw: String): List<String> {
         var s = raw.trim()
         if (s.startsWith("|")) s = s.substring(1)
@@ -512,12 +526,21 @@ internal object MarkdownParser {
         var escaped = false
         for (ch in s) {
             when {
-                escaped -> { current.append(ch); escaped = false }
+                escaped -> {
+                    if (ch == '|') {
+                        current.append('|')
+                    } else {
+                        current.append('\\')
+                        current.append(ch)
+                    }
+                    escaped = false
+                }
                 ch == '\\' -> escaped = true
                 ch == '|' -> { cells.add(current.toString().trim()); current.setLength(0) }
                 else -> current.append(ch)
             }
         }
+        if (escaped) current.append('\\')
         cells.add(current.toString().trim())
         return if (cells.size == 1 && cells[0].isEmpty()) emptyList() else cells
     }
@@ -533,7 +556,9 @@ internal object MarkdownParser {
      * @return 段落列表；`math==null` 表示普通文本段
      */
     fun splitInlineMath(text: String): List<InlineSegment> {
-        if (!text.contains('$')) return listOf(InlineSegment(text = text, math = null))
+        if (!text.contains('$') && !text.contains("\\(")) {
+            return listOf(InlineSegment(text = text, math = null))
+        }
 
         val out = mutableListOf<InlineSegment>()
         var i = 0
@@ -547,7 +572,14 @@ internal object MarkdownParser {
         }
 
         while (i < text.length) {
-            // 行内代码里的 $ 不算公式（代码块里的美元符很常见）
+            // 转义美元符 \$ 保留给 inline() 还原成字面 $，不开启公式
+            if (text[i] == '\\' && i + 1 < text.length && text[i + 1] == '$') {
+                plain.append("\\$")
+                i += 2
+                continue
+            }
+
+            // 行内代码里的 $ 与 \( 不算公式
             if (text[i] == '`') {
                 val end = text.indexOf('`', i + 1)
                 if (end > i + 1) {
@@ -557,14 +589,31 @@ internal object MarkdownParser {
                 }
             }
 
+            // LaTeX \(...\) 行内公式写法
+            if (text.startsWith("\\(", i)) {
+                val end = text.indexOf("\\)", i + 2)
+                if (end > i + 2) {
+                    val mathBody = text.substring(i + 2, end)
+                    if (mathBody.isNotBlank() && !mathBody.contains('\n')) {
+                        flushPlain()
+                        out.add(InlineSegment(text = "", math = mathBody.trim()))
+                        i = end + 2
+                        continue
+                    }
+                }
+            }
+
             if (text[i] == '$' && (i + 1 >= text.length || text[i + 1] != '$')) {
-                val end = text.indexOf('$', i + 1)
-                // 必须闭合、且中间非空；否则当普通字符（流式中途的单个 $）
+                val end = findClosingDollar(text, i + 1)
+                // 必须闭合、不跨行且非空白；否则当普通字符（流式中途的单个 $）
                 if (end > i + 1) {
-                    flushPlain()
-                    out.add(InlineSegment(text = "", math = text.substring(i + 1, end)))
-                    i = end + 1
-                    continue
+                    val mathBody = text.substring(i + 1, end)
+                    if (mathBody.isNotBlank()) {
+                        flushPlain()
+                        out.add(InlineSegment(text = "", math = mathBody))
+                        i = end + 1
+                        continue
+                    }
                 }
             }
 
@@ -574,6 +623,70 @@ internal object MarkdownParser {
         flushPlain()
 
         return if (out.isEmpty()) listOf(InlineSegment(text = text, math = null)) else out
+    }
+
+    private fun findClosingDollar(text: String, start: Int): Int {
+        var j = start
+        while (j < text.length) {
+            val ch = text[j]
+            if (ch == '\n') return -1
+            if (ch == '\\' && j + 1 < text.length) {
+                j += 2
+                continue
+            }
+            if (ch == '$') {
+                // 跳过 $$
+                return if (j + 1 < text.length && text[j + 1] == '$') -1 else j
+            }
+            j++
+        }
+        return -1
+    }
+
+    private const val MATH_MARK_START = '\uE000'
+    private const val MATH_MARK_END = '\uE001'
+    private val MATH_MARK_RE = Regex("$MATH_MARK_START(\\d+)$MATH_MARK_END")
+
+    /**
+     * 先剥出行内公式、用私有哨兵占位后走一次 [inline]，再按哨兵切回 [RichSegment]。
+     *
+     * 这样能保留跨越 `$...$` / `\(...\)` 边界的粗体、斜体与链接样式
+     * （例如 `**方程 $Ax=b$ 什么时候有解？**`），同时保持未闭合流式星号的字面量降级。
+     */
+    fun inlineWithMath(text: String, colors: MdColors): List<RichSegment> {
+        val rawSegments = splitInlineMath(text)
+        if (rawSegments.none { it.math != null }) {
+            return listOf(RichSegment.Text(inline(text, colors)))
+        }
+
+        val maths = mutableListOf<String>()
+        val masked = StringBuilder(text.length)
+        rawSegments.forEach { seg ->
+            if (seg.math != null) {
+                masked.append(MATH_MARK_START).append(maths.size).append(MATH_MARK_END)
+                maths.add(seg.math)
+            } else {
+                masked.append(seg.text)
+            }
+        }
+
+        val styled = inline(masked.toString(), colors)
+        val out = mutableListOf<RichSegment>()
+        var cursor = 0
+        MATH_MARK_RE.findAll(styled.text).forEach { match ->
+            if (match.range.first > cursor) {
+                out.add(RichSegment.Text(styled.subSequence(cursor, match.range.first)))
+            }
+            val idx = match.groupValues[1].toIntOrNull()
+            if (idx != null && idx in maths.indices) {
+                out.add(RichSegment.Math(maths[idx]))
+            }
+            cursor = match.range.last + 1
+        }
+        if (cursor < styled.length) {
+            out.add(RichSegment.Text(styled.subSequence(cursor, styled.length)))
+        }
+        return out
     }
 
     /**
@@ -604,10 +717,8 @@ internal object MarkdownParser {
     fun inline(text: String, colors: MdColors): AnnotatedString = buildAnnotatedString {
         var i = 0
         while (i < text.length) {
-            val rest = text.substring(i)
-
             // ── 转义：\* \_ \$ \` \\ \# \[ \] 等 → 输出后面那个字面字符 ──
-            if (rest.startsWith("\\") && i + 1 < text.length) {
+            if (text[i] == '\\' && i + 1 < text.length) {
                 val next = text[i + 1]
                 if (next in ESCAPABLE) {
                     append(next)
@@ -617,7 +728,7 @@ internal object MarkdownParser {
             }
 
             // ── 行内代码（优先级最高：里面的 * 不该被当格式符）──
-            if (rest.startsWith("`")) {
+            if (text[i] == '`') {
                 val end = text.indexOf('`', i + 1)
                 if (end > i + 1) {
                     withStyle(
@@ -627,7 +738,7 @@ internal object MarkdownParser {
                             background = colors.secondary.copy(alpha = 0.12f),
                         ),
                     ) {
-                        append(text.substring(i + 1, end))
+                        append(text, i + 1, end)
                     }
                     i = end + 1
                     continue
@@ -635,50 +746,51 @@ internal object MarkdownParser {
             }
 
             // ── 粗斜体 ***xxx***（必须在 ** 与 * 之前）──
-            if (rest.startsWith("***")) {
+            if (text.startsWith("***", i)) {
                 val end = text.indexOf("***", i + 3)
                 if (end > i + 3) {
-                    withStyle(
-                        SpanStyle(
-                            fontWeight = FontWeight.Bold,
-                            fontStyle = FontStyle.Italic,
-                        ),
-                    ) {
-                        append(text.substring(i + 3, end))
-                    }
+                    appendNestedInline(
+                        text.substring(i + 3, end),
+                        SpanStyle(fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic),
+                        colors,
+                    )
                     i = end + 3
                     continue
                 }
             }
 
-            // ── 粗体 **xxx** 与 __xxx__ ──
-            if (rest.startsWith("**")) {
+            // ── 粗体 **xxx** 与 __xxx__（支持内部嵌套行内代码/斜体）──
+            if (text.startsWith("**", i)) {
                 val end = text.indexOf("**", i + 2)
                 if (end > i + 2) {
-                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-                        append(text.substring(i + 2, end))
-                    }
+                    appendNestedInline(
+                        text.substring(i + 2, end),
+                        SpanStyle(fontWeight = FontWeight.Bold),
+                        colors,
+                    )
                     i = end + 2
                     continue
                 }
             }
-            if (rest.startsWith("__")) {
+            if (text.startsWith("__", i)) {
                 val end = text.indexOf("__", i + 2)
                 if (end > i + 2) {
-                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-                        append(text.substring(i + 2, end))
-                    }
+                    appendNestedInline(
+                        text.substring(i + 2, end),
+                        SpanStyle(fontWeight = FontWeight.Bold),
+                        colors,
+                    )
                     i = end + 2
                     continue
                 }
             }
 
             // ── 删除线 ~~xxx~~ ──
-            if (rest.startsWith("~~")) {
+            if (text.startsWith("~~", i)) {
                 val end = text.indexOf("~~", i + 2)
                 if (end > i + 2) {
                     withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) {
-                        append(text.substring(i + 2, end))
+                        append(text, i + 2, end)
                     }
                     i = end + 2
                     continue
@@ -686,24 +798,18 @@ internal object MarkdownParser {
             }
 
             // ── 斜体 *xxx* / _xxx_ ──
-            // 要求：标记后紧跟非空白（避免把 "3*4*5" 的乘号当格式），
-            // 且闭合标记前一个字符非空白（"* 列表" 不该被吃）
-            if (rest.startsWith("*") && i + 1 < text.length &&
-                !text[i + 1].isWhitespace()
-            ) {
+            if (text[i] == '*' && i + 1 < text.length && !text[i + 1].isWhitespace()) {
                 val end = text.indexOf('*', i + 1)
                 if (end > i + 1 && !text[end - 1].isWhitespace()) {
                     withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
-                        append(text.substring(i + 1, end))
+                        append(text, i + 1, end)
                     }
                     i = end + 1
                     continue
                 }
             }
-            if (rest.startsWith("_") && i + 1 < text.length &&
+            if (text[i] == '_' && i + 1 < text.length &&
                 !text[i + 1].isWhitespace() &&
-                // 下划线在标识符里极常见（agent_runs、node_id），
-                // 只有"两侧都不是字母数字"时才当斜体标记
                 (i == 0 || !text[i - 1].isLetterOrDigit())
             ) {
                 val end = text.indexOf('_', i + 1)
@@ -711,7 +817,7 @@ internal object MarkdownParser {
                     (end + 1 >= text.length || !text[end + 1].isLetterOrDigit())
                 ) {
                     withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
-                        append(text.substring(i + 1, end))
+                        append(text, i + 1, end)
                     }
                     i = end + 1
                     continue
@@ -719,12 +825,8 @@ internal object MarkdownParser {
             }
 
             // ── 行内 HTML 标签：剥标签、保留内容并套近似样式 ──
-            //
-            // `<kbd>Ctrl</kbd>`、`<mark>高亮</mark>`、`<sub>`、`<sup>`、`<u>`、`<br>`。
-            // 不做真 HTML 渲染（Compose 没有对应控件，也不该为聊天内容引 WebView），
-            // 但**必须把标签剥掉**，否则用户看到一堆尖括号源码（2026-11-10 真机反馈）。
-            if (rest.startsWith("<")) {
-                val html = HTML_PAIRED_RE.find(rest)
+            if (text[i] == '<') {
+                val html = HTML_PAIRED_RE.matchAt(text, i)
                 if (html != null) {
                     val tag = html.groupValues[1].lowercase()
                     val content = html.groupValues[2]
@@ -732,31 +834,32 @@ internal object MarkdownParser {
                     i += html.value.length
                     continue
                 }
-                // 自闭合标签：<br>、<br/>、<hr>、<img ...>
-                val selfClosing = HTML_SELF_CLOSING_RE.find(rest)
+                val selfClosing = HTML_SELF_CLOSING_RE.matchAt(text, i)
                 if (selfClosing != null) {
                     when (selfClosing.groupValues[1].lowercase()) {
-                        "br" -> append('\n')
-                        "hr" -> append('\n')
-                        // <img src=...> 没有 alt 可用时给个占位
+                        "br", "hr" -> append('\n')
                         "img" -> append("［图片］")
                         else -> Unit
                     }
                     i += selfClosing.value.length
                     continue
                 }
-                // 落单的开/闭标签（如 <details>、</summary>）：直接剥掉，不吞内容
-                val loose = HTML_LOOSE_TAG_RE.find(rest)
+                val loose = HTML_LOOSE_TAG_RE.matchAt(text, i)
                 if (loose != null) {
                     i += loose.value.length
+                    continue
+                }
+                val angle = ANGLE_LINK_RE.matchAt(text, i)
+                if (angle != null) {
+                    val content = angle.groupValues[1]
+                    withStyle(LINK_STYLE(colors)) { append(content) }
+                    i += angle.value.length
                     continue
                 }
             }
 
             // ── 图片 ![alt](url)：渲染成占位文字 ──
-            // 聊天里不加载远程图片（网络、隐私、失败态都没处理好之前不引 Coil），
-            // 但必须把语法转换成可读文字，否则用户看到 `![线性变换示意图](...)`。
-            if (rest.startsWith("![")) {
+            if (text.startsWith("![", i)) {
                 val closeBracket = text.indexOf(']', i + 2)
                 if (closeBracket > i + 2 && closeBracket + 1 < text.length &&
                     text[closeBracket + 1] == '('
@@ -780,10 +883,7 @@ internal object MarkdownParser {
             }
 
             // ── 引用式链接 [文字][ref] ──
-            // 定义在别处（`[wiki]: https://...`），这里只显示文字。
-            // 不做完整的两遍解析（要先扫全文收集定义），对话场景很少用，
-            // 但**不能让它显示成方括号源码**（2026-11-10 真机反馈）。
-            if (rest.startsWith("[")) {
+            if (text[i] == '[') {
                 val firstClose = text.indexOf(']', i + 1)
                 if (firstClose > i && firstClose + 1 < text.length &&
                     text[firstClose + 1] == '['
@@ -791,7 +891,7 @@ internal object MarkdownParser {
                     val secondClose = text.indexOf(']', firstClose + 2)
                     if (secondClose > firstClose) {
                         withStyle(LINK_STYLE(colors)) {
-                            append(text.substring(i + 1, firstClose))
+                            append(text, i + 1, firstClose)
                         }
                         i = secondClose + 1
                         continue
@@ -799,24 +899,9 @@ internal object MarkdownParser {
                 }
             }
 
-            // ── 角括号链接 <https://...> ──
-            // 必须在 HTML 分支之后判断：`<https://x>` 不是标签（含 `//`），
-            // HTML 的正则匹配不到它，所以能安全落到这里。
-            if (rest.startsWith("<")) {
-                val url = ANGLE_LINK_RE.find(rest)
-                if (url != null) {
-                    val content = url.groupValues[1]
-                    withStyle(LINK_STYLE(colors)) { append(content) }
-                    i += url.value.length
-                    continue
-                }
-            }
-
             // ── 裸链接自动识别（https://... / http://...） ──
-            // 你截图里"裸链接自动识别"那行没变成链接。GFM 的 autolink 规则：
-            // 只要出现 `http(s)://` 就认到空白或标点为止。
-            if (rest.startsWith("http://") || rest.startsWith("https://")) {
-                val m = BARE_URL_RE.find(rest)
+            if (text.startsWith("http://", i) || text.startsWith("https://", i)) {
+                val m = BARE_URL_RE.matchAt(text, i)
                 if (m != null) {
                     val url = m.value.trimEnd('.', ',', ';', ':', ')', ']', '}')
                     withStyle(LINK_STYLE(colors)) { append(url) }
@@ -826,9 +911,7 @@ internal object MarkdownParser {
             }
 
             // ── 行内链接 [文字](url) ──
-            // 只着色 + 下划线，不做真跳转：Compose 里真跳转要 LinkAnnotation +
-            // 处理外部浏览器打开，对话场景极少出现，先保证不显示成方括号源码。
-            if (rest.startsWith("[")) {
+            if (text[i] == '[') {
                 val closeBracket = text.indexOf(']', i + 1)
                 if (closeBracket > i && closeBracket + 1 < text.length &&
                     text[closeBracket + 1] == '('
@@ -836,7 +919,7 @@ internal object MarkdownParser {
                     val closeParen = text.indexOf(')', closeBracket + 2)
                     if (closeParen > closeBracket) {
                         withStyle(LINK_STYLE(colors)) {
-                            append(text.substring(i + 1, closeBracket))
+                            append(text, i + 1, closeBracket)
                         }
                         i = closeParen + 1
                         continue
