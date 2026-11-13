@@ -39,6 +39,7 @@ fun LoginScreen(
     state: LoginUiState,
     onUsernameChange: (String) -> Unit,
     onPasswordChange: (String) -> Unit,
+    onToggleMode: () -> Unit,
     onSubmit: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -65,7 +66,7 @@ fun LoginScreen(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "登录后开始学习",
+            text = if (state.isRegisterMode) "注册账号，立即开始学习" else "登录后开始学习",
             style = MaterialTheme.typography.bodyMedium,
             color = colors.textSecondary,
         )
@@ -110,11 +111,25 @@ fun LoginScreen(
         Spacer(Modifier.height(16.dp))
 
         AppPrimaryButton(
-            text = "登录",
+            text = if (state.isRegisterMode) "注册并登录" else "登录",
             onClick = onSubmit,
             enabled = state.canSubmit,
             loading = state.isSubmitting,
         )
+
+        Spacer(Modifier.height(12.dp))
+
+        androidx.compose.material3.TextButton(
+            onClick = onToggleMode,
+            enabled = !state.isSubmitting,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                text = if (state.isRegisterMode) "已有账号？返回登录" else "没有账号？注册新账号",
+                style = MaterialTheme.typography.labelLarge,
+                color = colors.purple,
+            )
+        }
 
         Spacer(Modifier.height(80.dp))
     }

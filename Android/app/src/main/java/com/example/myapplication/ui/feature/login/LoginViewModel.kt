@@ -30,6 +30,29 @@ class LoginViewModel(
     )
     val uiState: StateFlow<LoginUiState> = _uiState.asStateFlow()
 
+    init {
+        // 监听 401 导致的会话失效：一旦清掉会话，立刻退回登录页并提示原因
+        viewModelScope.launch {
+            authRepository.sessionFlow.collect { session ->
+                _uiState.update { state ->
+                    val nextUser = session?.username
+                    if (state.loggedInAs != null && nextUser == null) {
+                        state.copy(
+                            loggedInAs = null,
+                            password = "",
+                            isSubmitting = false,
+                            errorMessage = state.errorMessage ?: "登录已过期，请重新登录",
+                        )
+                    } else if (nextUser != null && state.loggedInAs != nextUser) {
+                        state.copy(loggedInAs = nextUser)
+                    } else {
+                        state
+                    }
+                }
+            }
+        }
+    }
+
     fun onUsernameChange(value: String) {
         // 重新输入时清掉旧错误，否则用户改完了还看着红字
         _uiState.update { it.copy(username = value, errorMessage = null) }
@@ -37,6 +60,10 @@ class LoginViewModel(
 
     fun onPasswordChange(value: String) {
         _uiState.update { it.copy(password = value, errorMessage = null) }
+    }
+
+    fun toggleMode() {
+        _uiState.update { it.copy(isRegisterMode = !it.isRegisterMode, errorMessage = null) }
     }
 
     fun submit() {
@@ -47,7 +74,12 @@ class LoginViewModel(
         _uiState.update { it.copy(isSubmitting = true, errorMessage = null) }
 
         viewModelScope.launch {
-            when (val result = authRepository.login(state.username, state.password)) {
+            val result = if (state.isRegisterMode) {
+                authRepository.register(state.username, state.password)
+            } else {
+                authRepository.login(state.username, state.password)
+            }
+            when (result) {
                 is ApiResult.Success -> {
                     _uiState.update {
                         // 成功后把密码从内存里抹掉
@@ -69,10 +101,11 @@ class LoginViewModel(
 
     /** 退出登录后把状态复位（回到登录页）。 */
     fun logout() {
-        authRepository.logout()
+        // 先置空 UI 状态再清库，避免 sessionFlow 误判为「401 被踢出」而显示过期提示
         _uiState.update {
             it.copy(password = "", loggedInAs = null, errorMessage = null, isSubmitting = false)
         }
+        authRepository.logout()
     }
 
     companion object {

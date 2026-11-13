@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -49,6 +50,8 @@ fun ChatInputBar(
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
+    hasKbContext: Boolean = false,
+    onOpenKbPicker: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = AppTheme.colors
@@ -60,6 +63,32 @@ fun ChatInputBar(
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        if (onOpenKbPicker != null) {
+            Box(
+                modifier = Modifier
+                    .size(AppDimens.ChipHeight)
+                    .clip(CircleShape)
+                    .background(if (hasKbContext) colors.soft else colors.inputBg)
+                    .border(
+                        width = 1.dp,
+                        color = if (hasKbContext) colors.purple else colors.inputBorder,
+                        shape = CircleShape,
+                    )
+                    .clickable(
+                        enabled = !isStreaming,
+                        role = Role.Button,
+                        onClick = onOpenKbPicker,
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.FolderOpen,
+                    contentDescription = "选择知识库资料范围",
+                    tint = if (hasKbContext) colors.purple else colors.textSecondary,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -96,7 +125,7 @@ fun ChatInputBar(
                 decorationBox = { inner ->
                     if (input.isEmpty()) {
                         Text(
-                            text = if (isStreaming) "AI 正在回答…" else "发消息或按住说话",
+                            text = if (isStreaming) "AI 正在回答…" else "输入你的问题…",
                             style = MaterialTheme.typography.bodyLarge,
                             color = colors.textHint,
                         )
@@ -151,15 +180,26 @@ fun ChatSuggestions(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(androidx.compose.foundation.shape.RoundedCornerShape(14.dp))
-                    .background(AppTheme.colors.fill)
+                    .background(AppTheme.colors.card)
+                    .border(
+                        width = 1.dp,
+                        color = AppTheme.colors.line,
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                    )
                     .clickable(role = Role.Button) { onPick(text) }
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                    .padding(horizontal = 16.dp, vertical = 13.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
                     text = text,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = AppTheme.colors.textSecondary,
+                    color = AppTheme.colors.textPrimary,
+                )
+                Text(
+                    text = "→",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = AppTheme.colors.purple,
                 )
             }
         }

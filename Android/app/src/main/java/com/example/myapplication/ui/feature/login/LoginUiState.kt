@@ -18,6 +18,7 @@ package com.example.myapplication.ui.feature.login
 data class LoginUiState(
     val username: String = "",
     val password: String = "",
+    val isRegisterMode: Boolean = false,
     val isSubmitting: Boolean = false,
     val errorMessage: String? = null,
     val loggedInAs: String? = null,
