@@ -22,6 +22,7 @@ API 层只负责：参数校验、HTTP 状态控制、调用 KnowledgeGraph 方�
   DELETE /knowledge/node/{node_id}/section/{section_id}       - 删除单个小节
   GET    /knowledge/node/{node_id}/quizzes                    - 获取节点试题链接（侧边栏，含小节路由与来源）
   GET    /knowledge/source/{doc_id}/nodes                     - 反查某资料影响了哪些节点（图谱高亮用）
+  GET    /knowledge/node/{node_id}/video-sources              - 反查讲到该知识点的视频时间点（只读）
   POST   /knowledge/node                     - 创建节点（手动，ID 自动生成）
   PUT    /knowledge/node/{node_id}           - 更新节点（含 MD 内容）
   PUT    /knowledge/node/{node_id}/info      - 更新节点基本信息
@@ -60,6 +61,8 @@ from app.core.prerequisite import (
 )
 from app.core import graph_middleware
 from app.core.kb import graph_generator
+from app.core.kb import timeline as kb_timeline
+from app.core.kb.kb_manager import kb_manager
 from app.core.error_codes import ErrorCode, log_error
 from app.core.quiz.quiz_store import quiz_manager
 from app.core.auth import get_current_user, get_current_user_from_token
@@ -71,6 +74,7 @@ from app.models.schemas import (
 )
 
 router = APIRouter()
+logger = logging.getLogger("ai-tutor")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -109,6 +113,20 @@ class SectionLearnRequest(BaseModel):
     mark: str | None = Field(default=None, description="unknown | understood | confused")
     read: bool | None = Field(default=None, description="用户是否已读完本节")
     passed: bool | None = Field(default=None, description="出题验证是否通过")
+
+
+class SectionContentUpdate(BaseModel):
+    """小节正文覆盖（`PUT /knowledge/node/{node_id}/section/{sid}`）。
+
+    只一个字段：整节 Markdown 全文。**空串合法**（清空一节是合法操作），
+    但超长直接 400 —— 静默截断等于数据丢失。
+    """
+    content: str = Field(..., description="该小节的完整 Markdown 正文")
+
+
+# 单节正文上限：与知识库文件的 `KB_EDIT_MAX_CHARS` 同量级。一节写 200 万字只可能是
+# 误粘贴（整本书贴进一节），拦住比让它进检索索引更好。
+SECTION_EDIT_MAX_CHARS = 2_000_000
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -452,6 +470,59 @@ async def get_node_section(node_id: str, section_id: str,
         kg.close()
 
 
+@router.put("/knowledge/node/{node_id}/section/{section_id}")
+async def update_node_section(node_id: str, section_id: str,
+                              req: SectionContentUpdate,
+                              user_id: int = Depends(get_current_user)):
+    """覆盖**单个小节**的正文（节点详情阅读器的「保存」）。
+
+    为什么需要这个端点：小节化之后，一个节点的正文分散在多个平行 MD 里，没有
+    「主文件」可以写 —— 既有的 `PUT /knowledge/node/{id}`（`update_node_content`）
+    只会写 `nodes/{id}.md`，对有小节的节点写下去是**孤儿文件**，谁都不会读它。
+    所以小节正文必须有自己的一条写路径。
+
+    行为：
+      · `write_section` 同时把该节标 `filled`、刷新 `updated_at`（正文有了就不再是骨架）；
+      · 写完 `flush` 索引 —— 否则按需检索里一直是旧正文（与既有正文写入同一口径）；
+      · `broadcast(GRAPH_UPDATED)`：节点详情的 `updated_at`/`content_status` 会变，
+        图谱与看板要能看到。
+
+    **不新建小节、不改标题/kind**：那些是生成管线与小节管理的事，本端点只管正文。
+
+    返回：`{"status","node_id","section_id","chars","total_chars"}`；
+    节点/小节不存在 → 404；超长 → 400。
+    """
+    if len(req.content) > SECTION_EDIT_MAX_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"小节正文过长（{len(req.content)} 字符，上限 {SECTION_EDIT_MAX_CHARS}）",
+        )
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        if kg.get_node(node_id) is None:
+            raise HTTPException(status_code=404, detail=f"节点不存在：{node_id}")
+        try:
+            kg.write_section(node_id, section_id, req.content)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+        # 正文变了 → 该节点的检索索引必须跟上（写路径只登记 dirty，flush 由调用方做）
+        from app.core.rag.node_indexer import flush
+        await flush(user_id, kg)
+
+        broadcast(GRAPH_UPDATED)
+        total = len(req.content)
+        return {
+            "status": "ok",
+            "node_id": node_id,
+            "section_id": section_id,
+            "chars": total,
+            "total_chars": total,
+        }
+    finally:
+        kg.close()
+
+
 @router.post("/knowledge/node/{node_id}/sections/generate")
 async def generate_node_sections(node_id: str,
                                  req: GenerateSectionsRequest | None = Body(default=None),
@@ -516,6 +587,45 @@ async def get_nodes_by_source(doc_id: int, user_id: int = Depends(get_current_us
         return {"doc_id": doc_id, "subjects": subjects, "nodes": nodes}
     finally:
         kg.close()
+
+
+@router.get("/knowledge/node/{node_id}/video-sources")
+async def get_node_video_sources(node_id: str,
+                                 user_id: int = Depends(get_current_user)):
+    """反查「哪些视频讲到这个知识点」（节点详情 → 视频出处，只读、零副作用）。
+
+    数据来源 = `lecture_segments WHERE node_id = ?`（每用户 kb.db）join `lectures`
+    （拿视频 URL / 标题）与 `nodes`（拿文件名）。`t_url` 由后端拼好，
+    前端直接放进 `<a href>` —— 时间戳 URL 的重写规则只该有一份实现。
+
+    ⚠️ 这张表的 `node_id` 是**跨库软引用**（`kb.db` 与 `knowledge.db` 是两个库，
+    SQLite 建不了 FK）；权威关系仍在 `doc_node_marks`。所以：
+    **节点不存在 → 返回空 `sources`，不 404** ——「这个知识点没有视频出处」和
+    「节点不存在」在 UI 上都是"没有可显示的出处"，为前者编一个错误码只会让前端多写分支。
+
+    返回: `{"sources": [{doc_id, doc_name, locator, t_label, t_url, title}]}`，
+    按（资料, 时间）升序；`t_url` 在视频没有 URL 时是空串。
+    """
+    sources: list[dict] = []
+    try:
+        store = kb_manager.store(user_id)
+        for seg in store.find_segments_by_node(node_id):
+            lecture = store.get_lecture(seg["doc_id"]) or {}
+            doc_node = store.get_node(seg["doc_id"]) or {}
+            start = float(seg["t_start"] or 0)
+            url = lecture.get("url") or ""
+            sources.append({
+                "doc_id": seg["doc_id"],
+                "doc_name": doc_node.get("name") or "",
+                "locator": f"t={int(start)}",
+                "t_label": kb_timeline.fmt_ts(start),
+                "t_url": kb_timeline.timestamp_url(url, start) if url else "",
+                "title": seg.get("title") or "",
+            })
+    except Exception as e:                     # noqa: BLE001 —— 只读端点降级成空列表
+        logger.warning("视频出处反查失败 node=%s user=%s: %s", node_id, user_id, e)
+        return {"sources": []}
+    return {"sources": sources}
 
 
 @router.post("/knowledge/node/{node_id}/section/{section_id}/quiz")
@@ -1066,17 +1176,74 @@ async def get_next_to_learn(user_id: int = Depends(get_current_user)):
         kg.close()
 
 
+@router.get("/knowledge/nodes")
+async def search_nodes(q: str = Query("", description="按名称/摘要模糊匹配，空串 = 按学科列全部"),
+                       subject: str | None = Query(None, description="可选：只在某学科内找"),
+                       limit: int = Query(20, ge=1, le=100),
+                       user_id: int = Depends(get_current_user)):
+    """
+    知识点选择器（对话输入框的 @ 面板）用的**轻量**检索。
+
+    为什么不在前端过滤：前端只持有**当前学科**的切片（`store.knowledgeNodes`），
+    而选知识点不该被"你现在在看哪个学科"限制 —— 用户可能在 A 学科对话里引用 B 学科
+    的知识点。所以给一个后端端点，按 user_id 全量找。
+
+    与 `GET /knowledge/graph` 的分工：那个返回节点+边+切片元信息（画布要用），
+    这个只返回"够填一个候选列表"的字段（id/name/subject/board/summary/mastery）。
+
+    排序：名称完全匹配 > 前缀匹配 > 包含匹配 > 摘要命中，再做掌握度升序
+    （先推他没掌握的，参考系契约 I2：「当前应学的」优先）。纯内存匹配当且仅当
+    用户的知识点规模在千级以内 —— 超过就该上索引，目前最大的图也就百余节点。
+    """
+    kw = (q or "").strip().lower()
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        items = []
+        for node in (kg.get_nodes_by_subject(subject) if subject else kg.nodes):
+            name = (node.get("name") or "")
+            summary = (node.get("summary") or "")
+            name_l = name.lower()
+            if kw:
+                if kw == name_l:
+                    rank = 0
+                elif name_l.startswith(kw):
+                    rank = 1
+                elif kw in name_l:
+                    rank = 2
+                elif kw in summary.lower():
+                    rank = 3
+                else:
+                    continue
+            else:
+                rank = 0
+            items.append((rank, node))
+        # 同 rank 内：掌握度低在前（该学的先出现），再按名称稳定排序
+        items.sort(key=lambda p: (p[0], p[1].get("mastery") or 0, p[1].get("name") or ""))
+        return {
+            "nodes": [{
+                "id": n.get("id"),
+                "name": n.get("name") or "",
+                "subject": n.get("subject") or "",
+                "board": n.get("board") or "",
+                "summary": (n.get("summary") or "")[:120],
+                "mastery": n.get("mastery") or 0,
+                "kind": "knowledge",
+            } for _, n in items[:limit]],
+            "total": len(items),
+        }
+    finally:
+        kg.close()
+
+
 @router.get("/knowledge/stats")
 async def get_stats(subject: str | None = Query(None, description="可选：只统计指定学科，如'数据结构'"),
                     user_id: int = Depends(get_current_user)):
-    """
-    学习进度聚合统计（仪表盘数据源）。
+    """学科分量聚合（学科侧栏 / 跨学科汇总行数据源，单一数据源 = 图谱 mastery）。
 
-    数据全部从图谱 mastery 聚合而来（单一数据源），不建独立进度表：
-        - overall:        全局（或指定学科）聚合
-        - by_subject:     按学科分组（subject=None 时返回）
-        - weak_points:    薄弱点 Top3（mastery=0，按难度降序）
-        - next_to_learn:  下一步学习推荐（复用已有逻辑）
+    不建独立进度表：
+        - overall:     全局（或指定学科）聚合，含四档计数 + mastery_avg / completion_rate
+        - by_subject:  按学科分组（subject=None 时返回；含「未分类」合成项）
+    2026-11-15 撤「学习进度」仪表盘整页后，薄弱点 Top3 / 下一步推荐不再由此返回。
     """
     kg = KnowledgeGraph(user_id=user_id)
     try:

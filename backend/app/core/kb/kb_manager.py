@@ -38,6 +38,14 @@ from app.core.hybrid_search.fusion import DEFAULT_ALPHA, fuse
 logger = logging.getLogger("ai-tutor")
 
 MIN_SCORE = 0.25
+# 不限范围（没选任何资料）时的**加严**阈值：全局检索最容易"动不动就把整个知识库翻一遍"，
+# 一次沾边的词面命中就能把一堆无关片段塞进提示词（噪声代价高，Chroma 实测 1 个干扰项即有害）。
+# 用户**显式选了范围**时不加严 —— 那是他自己圈定的资料，宁多勿漏。
+UNSCOPED_MIN_SCORE = 0.40        # 向量腿余弦下限（范围化时用 MIN_SCORE=0.25）
+# BM25 腿不能套绝对下限：`min(1, s/(s+1))` 把 s≫1 全压到 0.9+（实测同一查询的三条命中
+# 是 0.8783/0.8755/0.8750），绝对阈值分不开"真相关"和"只共享一个 bigram"（实测
+# "排序算法复杂度" 会带出 0.8032 的死锁文档）。故用**相对阈值**：只留 ≥ 最优分 × 该比例。
+UNSCOPED_BM25_REL_RATIO = 0.90   # 范围化时 = 1.0（有词面匹配即算，不做相对裁剪）
 # B2.3 入库文本质量下限：解析文本低于该长度视为「图片型/扫描件/不可解析」，拒绝入库
 MIN_PARSE_TEXT_LEN = 200
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".gif")
@@ -69,6 +77,24 @@ def _match_heading(line: str) -> Optional[tuple[int, str]]:
     if _BOOK_CHAPTER_RE.match(s):
         return 1, s
     return None
+
+
+def _top_relative_ids(results: list[dict], ratio: float) -> set:
+    """
+    取「分数 ≥ 最优分 × ratio」的 chunk_id 集合（相对阈值）。
+
+    为什么不用绝对阈值：BM25 的 `min(1, s/(s+1))` 把 s≫1 全压到 0.9+，实测同一查询的
+    三条命中也只差 0.003（0.8783/0.8755/0.8750），而"只共享一个 bigram"的噪声能到
+    0.80 —— 绝对下限卡在两者之间既不可靠也不可维护（语料一变位置就漂）。
+    相对阈值只表达一件事：**和这次查询的最佳命中差太远的，别进上下文**。
+    """
+    if not results:
+        return set()
+    best = max((r.get("score", 0.0) or 0.0) for r in results)
+    if best <= 0:
+        return set()
+    floor = best * ratio
+    return {r.get("chunk_id") for r in results if (r.get("score", 0.0) or 0.0) >= floor}
 
 
 def _iter_paragraphs(text: str) -> list[tuple[str, Optional[int], tuple[str, ...], bool]]:
@@ -405,6 +431,38 @@ class KbManager:
             return 0
         return await self._index_document(user_id, node_id, text, vectorize=vectorize)
 
+    def write_document_text(self, user_id: int, node_id: int, text: str) -> int:
+        """
+        覆盖某文件节点的正文（不动索引），返回写入的字节数。
+
+        正文有**两份真相**，必须一起写（2026-11-15，编辑器保存路径）：
+          1. `documents.extract_text` —— 检索/预览/AI 读取的唯一来源；
+          2. 原件 `data/kb/{uid}/files/{id}{ext}` —— 「在浏览器中打开」与真预览读它。
+        只写一份就会分叉：改了正文但原件还是旧的（下载下来是旧内容），或反过来。
+        历史文件没有原件时这里会**补建**一份（`_save_raw` 自己建目录）。
+
+        索引**不在这里重建**：调用方随后 `await reindex_file(...)`（可放后台任务，
+        分钟级大文件不该卡住保存响应）。分开是为了让"正文已落库"这件事先确定下来。
+
+        参数:
+            user_id: 用户 ID
+            node_id: 文件节点 ID（调用方须已校验归属与可编辑格式）
+            text:    新正文（调用方负责长度上限）
+
+        返回:
+            写入的 UTF-8 字节数；节点无文档记录时抛 ValueError。
+        """
+        store = self._get_store(user_id)
+        doc = store.get_document(node_id)
+        if doc is None:
+            raise ValueError("该节点没有文档记录，无法保存正文")
+
+        payload = text.encode("utf-8")
+        store.update_document_text(node_id, text, len(payload))
+        # 原件与正文同步：历史文件没原件的，这里补建（get_raw_path 之后就有值了）
+        self._save_raw(user_id, node_id, doc.get("file_type") or ".md", payload)
+        return len(payload)
+
     # ────────────────────────────────────────────
     #  原件（预览 / 下载用）
     # ────────────────────────────────────────────
@@ -522,6 +580,11 @@ class KbManager:
         融合策略定夺（2026-09-23，真实嵌入实测）：CMRC2018 / 1000 query 下加权融合
         R@1 0.9790 / MRR 0.9878 优于 RRF 的 0.9710 / 0.9828，故生产默认由 RRF 切为加权；
         RRF 保留在 `fusion.py`（多查询/多路融合时"只看排名、对分数尺度不敏感"仍有用）。
+
+        阈值松紧**跟着有没有范围走**（2026-11-15）：`node_ids is None`（没选资料）时加严
+        —— 向量腿守 `UNSCOPED_MIN_SCORE`、BM25 腿守 `UNSCOPED_BM25_REL_RATIO` 相对阈值，
+        免得"动不动把整个知识库翻一遍"；选了范围则退回原来的宽口径（那是用户圈定的资料，
+        宁多勿漏）。
         证据：`backend/eval_data/report_api.json`（详见 docs/RAG 下的评测报告）。
 
         参数:
@@ -533,7 +596,8 @@ class KbManager:
 
         返回:
             [{chunk_id, node_id, content, heading, score, path}, ...]
-            按融合分数降序，且分数 >= MIN_SCORE。
+            按融合分数降序；通过质量闸门（范围化 = 原口径，不限范围 = 加严口径，
+            见常量 `MIN_SCORE` / `UNSCOPED_MIN_SCORE` / `UNSCOPED_BM25_REL_RATIO`）。
             每个命中项的 content 已做"父级扩展"：命中子 chunk 时回溯拼接相邻块
             形成更完整的上下文（受 PARENT_EXPAND_CHARS 预算约束）。
         """
@@ -565,9 +629,20 @@ class KbManager:
         # alpha 或 (1-alpha) 的份额（"只有 BM25 命中"最高才 0.4），卡融合分会把整条
         # 腿误杀 —— 这正是从 RRF 切到加权融合后回归测出的坑。BM25 侧有词面匹配即算
         # 有效（分尺度与余弦不可比，不套余弦阈值），向量侧仍守 MIN_SCORE。
-        bm25_ids = {r.get("chunk_id") for r in sparse_results}
-        vec_ok = {r.get("chunk_id") for r in vec_results if r.get("score", 0) >= MIN_SCORE}
-        results = [r for r in fused if r.get("chunk_id") in bm25_ids or r.get("chunk_id") in vec_ok]
+        #
+        # 不限范围时**加严**（2026-11-15）：没选任何资料时最怕"动不动把整个知识库翻一遍"，
+        # 一个常见 bigram 的词面命中就能带出一堆无关片段塞进提示词。用户显式选了范围则
+        # 不加严 —— 那是他自己圈定的资料，宁多勿漏（范围内本来就没几条）。
+        unscoped = node_ids is None
+        if unscoped:
+            # BM25 用相对阈值（见 UNSCOPED_BM25_REL_RATIO 注释：绝对阈值分不开噪声）
+            bm25_ok = _top_relative_ids(sparse_results, UNSCOPED_BM25_REL_RATIO)
+            vec_min = UNSCOPED_MIN_SCORE
+        else:
+            bm25_ok = {r.get("chunk_id") for r in sparse_results}
+            vec_min = MIN_SCORE
+        vec_ok = {r.get("chunk_id") for r in vec_results if r.get("score", 0) >= vec_min}
+        results = [r for r in fused if r.get("chunk_id") in bm25_ok or r.get("chunk_id") in vec_ok]
         results = results[:top_k]
 
         # 附加来源路径（溯源）：为每个命中片段计算其在目录树中的完整路径
@@ -823,6 +898,38 @@ class KbManager:
             正文文本；节点不存在 / 无文档记录时返回 ""
         """
         return self._get_store(user_id).get_document_text(node_id)
+
+    def iter_files(self, user_id: int, file_node_ids: list[int]):
+        """
+        **惰性**逐篇产出整篇正文（"用户点名选中、直接全部注入"这一路专用）。
+
+        与 `search()` 的分工：`search` 是"不确定要看哪段，按 query 捞相关片段"；
+        本方法是"用户已经点名了这几份，别再挑片段了" —— 所以不过检索、不卡阈值、
+        不做父级扩展，直接给全文，由调用方按预算截断（`chat_service` 侧负责）。
+
+        为什么是生成器而不是 list：调用方有 token 预算，塞满就 break。若先读成 list，
+        用户选中一个含 50 份 PDF 的文件夹时，会把几十兆正文全读进内存再丢掉 45 份。
+
+        ⚠ 只接受**文件节点 ID**（调用方先用 `collect_files` 把文件夹展开）。目录 ID
+        在这里会读到空串，静默返回一坨空片段比报错更难查，故显式跳过。
+
+        产出: {node_id, name, path, content, chars} —— 按传入顺序，读不到正文的跳过。
+        """
+        store = self._get_store(user_id)
+        for nid in file_node_ids:
+            node = store.get_node(nid)
+            if not node or node.get("type") != "file":
+                continue
+            text = store.get_document_text(nid)
+            if not text or not text.strip():
+                continue
+            yield {
+                "node_id": nid,
+                "name": node.get("name") or "",
+                "path": store.get_node_path(user_id, nid) or node.get("name") or "",
+                "content": text,
+                "chars": len(text),
+            }
 
     def stats(self, user_id: int) -> dict:
         store = self._get_store(user_id)

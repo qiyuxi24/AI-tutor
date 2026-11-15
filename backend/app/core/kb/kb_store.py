@@ -68,6 +68,89 @@ class KbStore:
                 "CREATE INDEX IF NOT EXISTS idx_nodes_user ON nodes (user_id)"
             )
             self._create_import_tables()
+            self._create_lecture_tables()
+
+    def _create_lecture_tables(self) -> None:
+        """结构化讲义：视频资产（`lectures`）+ 知识点切片（`lecture_segments`）。
+
+        为什么要有“视频资产”这一层：原先视频只有**导入任务**（`import_items` 是排队
+        记录，可取消可清理），转写正文被覆盖进 `documents.extract_text` 就没了原样 ——
+        改一次提示词就要重花一次 ASR 的钱，而且**视频链接根本没存**（原先只在正文头部
+        写一行 `来源：B站 AI 总结`，没有 URL），时间定位只是正文里的 `[hh:mm:ss]` 文本，
+        程序读不了。
+
+        两张表的分工：
+        - `lectures`：一集视频的**身份与原料**。`doc_id` 就是 `documents.node_id`（同库
+          同 ID，不需要额外映射列）；`raw_timeline` 是未校对 cues 的 JSONL（原始时间线，
+          **只追加不改**）—— 重跑结构化直接读它，不再重新取词/ASR；`structured_at` 为
+          NULL 表示还没结构化（前端据此区分“有视频资产”和“已是结构化讲义”）。
+        - `lecture_segments`：知识点切片（时间区间 + 标题 + 该点讲解 Markdown + 可选截图 +
+          可选图谱节点）。`(doc_id, seq)` 是主键，`replace_lecture_segments` 先删后插保证幂等。
+
+        ⚠️ `lecture_segments.node_id` 是**跨库软引用**：`kb.db` 与 `knowledge.db` 是两个
+        独立的 SQLite 文件，建不了外键。**权威关系在 `doc_node_marks`**（图谱侧的
+        「资料 → 节点」账本）；这张表的 `node_id` 只是**时间轴 UI 的缓存**，读取时校验一次，
+        悬空就降级成 `node_ok: false`，绝不据此做删除/级联。
+        """
+        with self._conn:
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS lectures (
+                    doc_id        INTEGER PRIMARY KEY,   -- = documents.node_id
+                    url           TEXT NOT NULL DEFAULT '',
+                    platform      TEXT NOT NULL DEFAULT '',   -- bilibili / youtube / local
+                    video_id      TEXT NOT NULL DEFAULT '',   -- BV1xx
+                    page          INTEGER NOT NULL DEFAULT 1,
+                    title         TEXT NOT NULL DEFAULT '',
+                    uploader      TEXT NOT NULL DEFAULT '',
+                    duration      REAL NOT NULL DEFAULT 0,
+                    source_kind   TEXT NOT NULL DEFAULT '',   -- bilibili-track / ... / asr
+                    raw_timeline  TEXT NOT NULL DEFAULT '',   -- 未校对 cues 的 JSONL
+                    prompt_key    TEXT NOT NULL DEFAULT '',   -- 提示词指纹（续跑不重发付费请求）
+                    structured_at TEXT                       -- NULL = 未结构化
+                )
+            """)
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS lecture_segments (
+                    doc_id   INTEGER NOT NULL,
+                    seq      INTEGER NOT NULL,
+                    title    TEXT NOT NULL,
+                    kind     TEXT NOT NULL DEFAULT 'custom',
+                    brief    TEXT NOT NULL DEFAULT '',
+                    content  TEXT NOT NULL DEFAULT '',   -- 该知识点的讲解 Markdown
+                    t_start  REAL NOT NULL,
+                    t_end    REAL NOT NULL,
+                    slide    TEXT NOT NULL DEFAULT '',   -- 截图文件名
+                    node_id  TEXT NOT NULL DEFAULT '',   -- 图谱节点（跨库软引用，见 docstring）
+                    PRIMARY KEY (doc_id, seq)
+                )
+            """)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_lecture_segments_node"
+                " ON lecture_segments (node_id)"
+            )
+            # 老库补列（同 documents.asset_key 的道理：CREATE TABLE IF NOT EXISTS 不给老表加字段）。
+            # 本表是新增的，但补列循环让"表已存在、列还没加"的中间态也能自愈。
+            cols = {row["name"] for row in
+                    self._conn.execute("PRAGMA table_info(lectures)").fetchall()}
+            for column, ddl in (
+                ("prompt_key", "TEXT NOT NULL DEFAULT ''"),
+                ("structured_at", "TEXT"),
+            ):
+                if column not in cols:
+                    self._conn.execute(
+                        f"ALTER TABLE lectures ADD COLUMN {column} {ddl}")
+            seg_cols = {row["name"] for row in
+                        self._conn.execute("PRAGMA table_info(lecture_segments)").fetchall()}
+            for column, ddl in (
+                ("kind", "TEXT NOT NULL DEFAULT 'custom'"),
+                ("brief", "TEXT NOT NULL DEFAULT ''"),
+                ("content", "TEXT NOT NULL DEFAULT ''"),
+                ("slide", "TEXT NOT NULL DEFAULT ''"),
+                ("node_id", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if column not in seg_cols:
+                    self._conn.execute(
+                        f"ALTER TABLE lecture_segments ADD COLUMN {column} {ddl}")
 
     def _create_import_tables(self) -> None:
         """视频导入队列（持久化：进程重启后按 status 续跑）。
@@ -130,6 +213,119 @@ class KbStore:
                 if column not in cols:
                     self._conn.execute(
                         f"ALTER TABLE import_items ADD COLUMN {column} {ddl}")
+
+    # ────────────────────────────────────────────
+    #  结构化讲义（视频资产 + 知识点切片，见 _create_lecture_tables）
+    # ────────────────────────────────────────────
+
+    # `upsert_lecture` 接受的列（白名单）：SQL 列名不能来自调用方输入
+    _LECTURE_FIELDS = ("url", "platform", "video_id", "page", "title", "uploader",
+                       "duration", "source_kind", "raw_timeline", "prompt_key",
+                       "structured_at")
+
+    def upsert_lecture(self, doc_id: int, **fields) -> None:
+        """写入/更新一集视频的资产行（`doc_id` = 文件节点 ID）。
+
+        **幂等 upsert**：只更新调用方明确给出的列，没给的列保持原值 —— 这样
+        "导入时只写 url/title/raw_timeline" 与"结构化时只写 structured_at"
+        可以各写一次，不会互相清空。未知列名直接忽略（不让调用方拼 SQL）。
+        """
+        payload = {k: v for k, v in fields.items() if k in self._LECTURE_FIELDS}
+        if not payload:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO lectures (doc_id) VALUES (?)", (int(doc_id),))
+            return
+        columns = ", ".join(payload)
+        placeholders = ", ".join("?" * len(payload))
+        updates = ", ".join(f"{key} = excluded.{key}" for key in payload)
+        with self._conn:
+            self._conn.execute(
+                f"INSERT INTO lectures (doc_id, {columns}) VALUES (?, {placeholders})"
+                f" ON CONFLICT(doc_id) DO UPDATE SET {updates}",
+                (int(doc_id), *payload.values()),
+            )
+
+    def get_lecture(self, doc_id: int) -> Optional[dict]:
+        """取视频资产行；没有（普通文件）→ None。"""
+        row = self._conn.execute(
+            "SELECT * FROM lectures WHERE doc_id = ?", (int(doc_id),)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def find_lecture_by_url(self, url: str) -> Optional[dict]:
+        """按视频链接反查已有的视频资产（幂等导入：同一集不重复建第二个文件）。
+
+        只比 `lectures.url` 精确串（归一化由调用方用 `bili_urls.normalize` 做好）——
+        在 SQL 里做模糊匹配会把 `?p=2` 与 `?p=21` 认成同一条。
+        """
+        if not url:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM lectures WHERE url = ? ORDER BY doc_id LIMIT 1", (url,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def replace_lecture_segments(self, doc_id: int, segments: list[dict]) -> int:
+        """整批替换某集的知识点切片（**先删后插**，幂等）；返回写入条数。
+
+        为什么整批替换而不是增量 upsert：切片是**一次结构化的完整产物**，
+        重跑时新结果可能与旧结果在数量/序号上都不同；增量合并会留下上一版
+        多出来的尾巴（用户看到"删不掉的知识点"）。`seq` 由调用方给（从 1 起）。
+        """
+        rows = [dict(seg) for seg in (segments or [])]
+        with self._conn:
+            self._conn.execute("DELETE FROM lecture_segments WHERE doc_id = ?", (int(doc_id),))
+            for index, seg in enumerate(rows, start=1):
+                self._conn.execute(
+                    "INSERT INTO lecture_segments"
+                    " (doc_id, seq, title, kind, brief, content, t_start, t_end,"
+                    "  slide, node_id)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (int(doc_id), int(seg.get("seq") or index),
+                     str(seg.get("title") or ""),
+                     str(seg.get("kind") or "custom"),
+                     str(seg.get("brief") or ""),
+                     str(seg.get("content") or ""),
+                     float(seg.get("t_start") or 0.0),
+                     float(seg.get("t_end") or 0.0),
+                     str(seg.get("slide") or ""),
+                     str(seg.get("node_id") or "")),
+                )
+        return len(rows)
+
+    def list_lecture_segments(self, doc_id: int) -> list[dict]:
+        """某集的知识点切片，按 `seq` 升序（= 时间轴顺序）。"""
+        rows = self._conn.execute(
+            "SELECT * FROM lecture_segments WHERE doc_id = ? ORDER BY seq",
+            (int(doc_id),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def find_segments_by_node(self, node_id: str) -> list[dict]:
+        """反查「哪些视频切片讲到这个图谱节点」（节点详情 → 视频出处）。
+
+        ⚠️ `node_id` 是跨库软引用（见 `_create_lecture_tables` 的说明），所以这里
+        只做**只读**反查，不据此做任何级联；调用方要自己校验节点是否存在。
+        """
+        if not node_id:
+            return []
+        rows = self._conn.execute(
+            "SELECT * FROM lecture_segments WHERE node_id = ?"
+            " ORDER BY doc_id, seq", (node_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_lecture_docs(self) -> list[int]:
+        """哪些 doc_id 有视频资产（批量读取时先筛一遍，省掉逐条查询）。"""
+        return [row["doc_id"] for row in self._conn.execute(
+            "SELECT doc_id FROM lectures ORDER BY doc_id").fetchall()]
+
+    def delete_lecture(self, doc_id: int) -> None:
+        """删掉某集的视频资产与全部切片（切片先删）。"""
+        with self._conn:
+            self._conn.execute("DELETE FROM lecture_segments WHERE doc_id = ?", (int(doc_id),))
+            self._conn.execute("DELETE FROM lectures WHERE doc_id = ?", (int(doc_id),))
 
     def close(self) -> None:
         self._conn.close()
@@ -250,6 +446,20 @@ class KbStore:
                 "UPDATE documents SET status = ? WHERE node_id = ?", (status, node_id)
             )
 
+    def update_document_text(self, node_id: int, text: str, file_size: int) -> None:
+        """覆盖文件的解析正文（用户在阅读器里改过之后回写）。
+
+        正文的真相只有 `documents.extract_text` 一份（读出口 = `get_document_text`），
+        所以编辑保存必须走这里，而不是在调用方另开一条读路径。`file_size` 同步成
+        新正文的字节数 —— 原件与正文由 `KbManager.save_document_text` 保证一致。
+        """
+        with self._conn:
+            self._conn.execute(
+                "UPDATE documents SET extract_text = ?, file_size = ?, status = 'parsed' "
+                "WHERE node_id = ?",
+                (text, file_size, node_id),
+            )
+
     def collect_descendant_files(self, user_id: int, node_id: int,
                                  max_depth: Optional[int] = None) -> list[int]:
         """
@@ -297,7 +507,13 @@ class KbStore:
         self._collect_ids(user_id, node_id, to_delete)
 
         with self._conn:
-            # 先删 documents（外键），再删 nodes
+            # 先删 lecture_segments / lectures：两者都以 doc_id 关联 documents.node_id，
+            # 不跟着删就是**悬空数据**（时间轴接口会对着一个不存在的文件返回切片）。
+            for nid in to_delete:
+                self._conn.execute("DELETE FROM lecture_segments WHERE doc_id = ?", (nid,))
+            for nid in to_delete:
+                self._conn.execute("DELETE FROM lectures WHERE doc_id = ?", (nid,))
+            # 再删 documents（外键），最后删 nodes
             for nid in to_delete:
                 self._conn.execute("DELETE FROM documents WHERE node_id = ?", (nid,))
             for nid in to_delete:
@@ -316,7 +532,19 @@ class KbStore:
 
         返回:
             [{id, name, type, children: [...], is_leaf}]
+
+        文件节点另带 `lecture`：该文件是不是**已结构化的视频讲义**（有切片）。
+        前端据此决定要不要显示「看讲义」—— 不给这个标记的话，前端要么对每个
+        文件都试一次 `/kb/lecture/{id}` 拿 404 判断（目录几十项就是几十个请求），
+        要么干脆没有入口。这里用一次 JOIN 批量取，代价可忽略。
         """
+        # 一次查全用户的已结构化 doc_id（而不是在递归里逐叶子查）
+        try:
+            structured = {row["doc_id"] for row in self._conn.execute(
+                "SELECT doc_id FROM lectures WHERE structured_at IS NOT NULL")}
+        except sqlite3.OperationalError:      # 老库还没建这两张表
+            structured = set()
+
         children = self.get_children(user_id, parent_id)
         tree = []
         for child in children:
@@ -334,6 +562,7 @@ class KbStore:
                 doc = self.get_document(child["id"])
                 item["file_type"] = doc["file_type"] if doc else ""
                 item["status"] = doc["status"] if doc else ""
+                item["lecture"] = child["id"] in structured
             tree.append(item)
         return tree
 

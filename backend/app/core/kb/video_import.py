@@ -64,6 +64,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -78,6 +79,7 @@ from app.core.kb.parsers.subtitle import (
     compose_lecture,
     cue_paragraphs,
     dedupe_rolling,
+    file_cues,
     to_paragraphs,
 )
 from app.core.llm.transcribe import transcribe_audio
@@ -558,12 +560,32 @@ async def _make_slides(url: str, workdir: Path, slide_dir: Path | None,
         _slides_from_video, video, workdir, slide_dir, url_prefix)
 
 
+def _slide_frames(slides: list[tuple[float, str]]) -> list[dict]:
+    """`[(秒, Markdown 图片)]` → 时间线用的 `[{t, image}]`（image = 文件名）。
+
+    为什么从 Markdown 里抠文件名：图片落盘与正文都由 `_slides_from_video` 一次产出，
+    而时间线要的是**可拼 URL 的文件名**（`slides/{asset_key}/{n}.jpg`），
+    为它再改一遍那个函数的返回值不值得 —— 解析同一次产出的链接最省事。
+    """
+    out: list[dict] = []
+    for sec, markup in slides or ():
+        match = re.search(r"\]\(([^)]+)\)", markup or "")
+        if not match:
+            continue
+        out.append({"t": float(sec), "image": match.group(1).rsplit("/", 1)[-1]})
+    return out
+
+
 def _platform_paragraphs(ref: bili_urls.VideoRef, cookie: str
-                         ) -> tuple[list[tuple[float, str]], str, str, str] | None:
-    """B 站平台直取：返回 `(段落, 来源标志, 标题, UP主)`；拿不到 → None。
+                         ) -> tuple[list[tuple[float, str]], str, str, str,
+                                    list[tuple[float, float, str]]] | None:
+    """B 站平台直取：返回 `(段落, 来源标志, 标题, UP主, 原始 cues)`；拿不到 → None。
 
     **不依赖 yt-dlp / ffmpeg**（只发 HTTP）：这是三条取词路里唯一"零安装、零成本"的，
     所以它必须能被独立调用 —— 混在"下载类"函数里就会被迫一起被依赖门禁挡住。
+
+    第 5 个返回值是**去重后的原始 cues**（未分段的字幕条）：时间线（`kb/timeline.py`）
+    与"重跑结构化不重花 ASR 的钱"都要它，而 `to_paragraphs` 的产物已经把时间抹平了。
     """
     problems: list[str] = []
     pick = bili_subtitle.fetch_subtitle(
@@ -574,25 +596,29 @@ def _platform_paragraphs(ref: bili_urls.VideoRef, cookie: str
                     "；".join(problems) or "无说明")
         return None
     # 平台条目也可能重复（AI 总结按段生成，常有"新段 = 上段 + 增量"），幂等去重
-    paras = to_paragraphs(dedupe_rolling(list(pick.cues)))
+    cues = dedupe_rolling(list(pick.cues))
+    paras = to_paragraphs(cues)
     if not paras:
         return None
-    return paras, f"bilibili-{pick.source}", pick.title, pick.uploader
+    return paras, f"bilibili-{pick.source}", pick.title, pick.uploader, cues
 
 
 def _file_paragraphs(ref: bili_urls.VideoRef, workdir: Path, languages
-                     ) -> tuple[list[tuple[float, str]], str, str, str] | None:
+                     ) -> tuple[list[tuple[float, str]], str, str, str,
+                                list[tuple[float, float, str]]] | None:
     """yt-dlp 字幕文件（非 B 站的主路，也是 B 站平台字幕拿不到时的降级路）。
 
-    与平台直取产出**同一种段落形态**（`to_paragraphs` 统一分段），下游不必区分来源。
+    与平台直取产出**同一种段落形态**（`to_paragraphs` 统一分段），下游不必区分来源；
+    第 5 个值同样是去重后的原始 cues（见 `_platform_paragraphs`）。
     """
     sub = _download_subtitles(ref.url, workdir, languages)
     if sub is None:
         return None
-    paras = cue_paragraphs(sub.read_bytes())
+    cues = file_cues(sub.read_bytes())
+    paras = to_paragraphs(cues)
     if not paras:
         return None
-    return paras, "ytdlp-subtitle", "", ""
+    return paras, "ytdlp-subtitle", "", "", cues
 
 
 def _split_audio(audio: Path, workdir: Path,
@@ -663,7 +689,12 @@ async def fetch_lecture(url: str, workdir: Path, *, user_id: int | None = None,
     """把课程链接取成讲义正文。
 
     返回 `(正文, meta)`；meta = `{"source", "source_label", "title", "file", "chars",
-    "slides"}`（slides = 截图张数）。
+    "slides"}`（slides = 截图张数），另有**两个可选键**：
+    - `meta["cues"]` = `[{start, end, text}]`（去重后的原始字幕条，来自 `parse_cues`）；
+    - `meta["frames"]` = `[{t, image}]`（截图文件名；只在抽了截图时才有）。
+    两者是"重跑结构化不重花 ASR 的钱"的原料（落 `lectures.raw_timeline`）；
+    **老调用方读不到就当没有** —— 签名与五个必选键一个没变。
+
     失败一律抛异常（由调用方转成用户可见提示），不返回半成品。
 
     参数:
@@ -695,7 +726,7 @@ async def fetch_lecture(url: str, workdir: Path, *, user_id: int | None = None,
         else:
             picked = await asyncio.to_thread(_file_paragraphs, ref, workdir, languages)
         if picked is not None:
-            paras, source, title, uploader = picked
+            paras, source, title, uploader, cues = picked
             slides = []
             if capture_slides:
                 slides = await _make_slides(ref.url, workdir, slide_dir, slide_url_prefix)
@@ -703,9 +734,13 @@ async def fetch_lecture(url: str, workdir: Path, *, user_id: int | None = None,
             text = compose_lecture(paras, title=title or ref.filename_stem,
                                    source=SOURCE_LABELS.get(source, source),
                                    uploader=uploader, images=slides)
-            return text, {"source": source, "source_label": SOURCE_LABELS.get(source, source),
-                          "title": title or ref.filename_stem, "file": "",
-                          "chars": len(text), "slides": len(slides)}
+            meta = {"source": source, "source_label": SOURCE_LABELS.get(source, source),
+                    "title": title or ref.filename_stem, "file": "",
+                    "chars": len(text), "slides": len(slides),
+                    "cues": _cue_dicts(cues)}
+            if slides:
+                meta["frames"] = _slide_frames(slides)
+            return text, meta
         if transcript_source == "subtitle":
             raise RuntimeError("该链接没有可用字幕（可改用 transcript_source=asr 走语音转写）")
 
@@ -738,9 +773,38 @@ async def fetch_lecture(url: str, workdir: Path, *, user_id: int | None = None,
     _report(on_progress, STAGE_COMPOSE)
     title = ref.filename_stem or "课程讲义"
     text = compose_lecture(paras, title=title, source=SOURCE_LABELS["asr"], images=slides)
-    return text, {"source": "asr", "source_label": SOURCE_LABELS["asr"],
-                  "title": title, "file": audio.name, "chars": len(text),
-                  "slides": len(slides)}
+    meta = {"source": "asr", "source_label": SOURCE_LABELS["asr"],
+            "title": title, "file": audio.name, "chars": len(text),
+            "slides": len(slides), "cues": _paragraph_cues(paras)}
+    if slides:
+        meta["frames"] = _slide_frames(slides)
+    return text, meta
+
+
+def _cue_dicts(cues) -> list[dict]:
+    """`(start, end, text)` 元组 → 时间线用的 `{start, end, text}` 字典列表。
+
+    `raw` 在这里**不填**：字幕轨本身就是平台给的原文，没有"校对前的 ASR 原文"这一说；
+    语音转写路径才需要它（见 `_paragraph_cues`）。不填就不放这个键。
+    """
+    return [{"start": float(start), "end": float(end), "text": text or ""}
+            for start, end, text in (cues or ())]
+
+
+def _paragraph_cues(paras: list[tuple[float, str]]) -> list[dict]:
+    """语音转写的段落 → cues（**近似的时间条**）。
+
+    转写按固定段长切音频（`ASR_SEGMENT_SECS`），每段只有起点没有终点：这里用
+    "下一段起点"当本段终点，最后一段补一个段长。这是**已知的近似**（真实句内时间
+    要 ASR 返回词级时间戳），但它比"没有时间线"强得多，且 `raw` 保留了原文，
+    校对/切片时可以整段重算。
+    """
+    out: list[dict] = []
+    for index, (start, text) in enumerate(paras or ()):
+        following = paras[index + 1][0] if index + 1 < len(paras) else start + ASR_SEGMENT_SECS
+        out.append({"start": float(start), "end": float(following),
+                    "text": text or "", "raw": text or ""})
+    return out
 
 
 def _slides_from_video(video: Path, workdir: Path, slide_dir: Path | None,

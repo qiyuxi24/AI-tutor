@@ -12,6 +12,7 @@
   E-COMM-xxx  : 前后端通信（axios 超时、网络断连、HTTP 错误等）
   E-GRAPH-xxx : 图谱分析器（JSON 解析、分析失败等）
   E-KG-xxx    : 知识图谱核心（节点/边操作、文件读写等）
+  E-KB-xxx    : 知识库（结构化讲义：视频资产 / 时间轴 / 知识点切片）
   E-CHAT-xxx  : 对话服务层（提示词构建、流程编排等）
   E-EVENT-xxx : 事件总线（SSE 推送、队列异常等）
   E-QUIZ-xxx  : 出题模块（生成失败、格式异常、判分失败等）
@@ -57,6 +58,13 @@ class ErrorCode:
     KG_EDGE_NOT_FOUND    = ("E-KG-005", "目标关系边不存在")
     KG_EDGE_DUPLICATE    = ("E-KG-006", "关系边已存在")
     KG_INVALID_OPERATION = ("E-KG-007", "无效的图谱操作")
+
+    # ── 知识库 / 结构化讲义层 (E-KB) ──
+    # 只用于「这不是一集视频 / 没有时间线」这类**用户可理解**的语义区分：
+    # 前端据错误码决定"当普通文件处理"还是"提示重跑结构化"。
+    KB_NOT_LECTURE      = ("E-KB-001", "这不是结构化讲义")
+    KB_EMPTY_TIMELINE   = ("E-KB-002", "该视频没有可用的时间线")
+    KB_RESTRUCTURE_BUSY = ("E-KB-003", "该视频正在重跑结构化，请稍后再试")
 
     # ── 对话服务层 (E-CHAT) ──
     CHAT_PROMPT_BUILD_FAILED = ("E-CHAT-001", "提示词构建失败")
