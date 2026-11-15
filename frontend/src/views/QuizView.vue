@@ -25,12 +25,20 @@ import {
 /**
  * Props（均为可选，默认值即原行为）：
  *   initialSubject: String      — 挂载时预填出题主题（仅在原为空时覆盖，不覆盖用户已输入）
+ *   graphNodeId: String         — 图谱节点 id（从节点详情跳来时带）。出题时透传给后端，
+ *                                 题目入库的 knowledge_point 记成它 → 判分能把掌握度写回该节点
  *   focusQuestionId: Number|null — 有值时挂载后拉取该题并直接渲染（供"从节点详情跳转看某题"）
+ *
+ * emits:
+ *   mastery-changed — 判分后掌握度/小节状态确实被写回时触发（父级据此刷新图谱颜色）
  */
 const props = defineProps({
   initialSubject: { type: String, default: '' },
+  graphNodeId: { type: String, default: '' },
   focusQuestionId: { type: Number, default: null },
 })
+
+const emit = defineEmits(['mastery-changed'])
 
 // ─── 出题配置 ───
 const subject = ref('')               // 主题/知识点
@@ -115,6 +123,9 @@ async function handleGenerate() {
       question_count: questionCount.value,
       difficulty: difficulty.value,
       question_types: questionTypes.value,
+      // 从节点详情进来时带上图谱节点 id：入库的 knowledge_point 记成它，
+      // 判分才能把掌握度回写到这个节点（不带则是纯出题，行为与原来一致）。
+      graph_node_id: props.graphNodeId || '',
     })
     const d = res.data || {}
     // 后端返回 questions + question_ids（存库后的数据库 id），一一对应
@@ -174,13 +185,19 @@ async function handleGrade(q) {
   submittingId.value = q.localIdx
   try {
     const res = await gradeQuizQuestion(q.dbId, normalizeAnswer(q, a))
+    const d = res.data || {}
     results.value[q.localIdx] = {
-      score: res.data.score,
-      max_score: res.data.max_score,
-      correct: res.data.correct,
-      comment: res.data.comment,
-      analysis: res.data.analysis,
+      score: d.score,
+      max_score: d.max_score,
+      correct: d.correct,
+      comment: d.comment,
+      analysis: d.analysis,
+      // 掌握度回写结果（只有题目关联了图谱节点时后端才返回这些字段）
+      masteryNote: d.mastery_note || '',
+      sectionNote: d.section_note || '',
     }
+    // 图谱真被改了才让父级刷新 —— 纯出题（无 graphNodeId）永远不带这些字段
+    if (d.mastery_note || d.section_note) emit('mastery-changed')
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '判分失败')
   } finally {
@@ -349,10 +366,7 @@ onMounted(() => {
       <div class="page-inner">
         <header class="page-head">
           <div class="qc-header-main">
-            <h2 class="page-title">AI 出题</h2>
-            <p class="page-sub">
-              AI 基于你上传的教材 / 例题 / 真题（知识库）出题，只依据真实材料，避免凭空乱出。支持单选 / 多选 / 判断 / 填空 / 简答，自动判分并给出解析。
-            </p>
+            <h2 class="page-title">出题</h2>
           </div>
           <el-button class="history-entry" @click="openHistory">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -402,22 +416,22 @@ onMounted(() => {
 
         <!-- 出题说明 / 空态 -->
         <section v-if="!questions.length && !generating" class="quiz-empty">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9 11l3 3L22 4" />
-            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-          </svg>
-          <p>输入主题并点击「开始出题」，AI 会先从你的教材知识库检索依据，再生成题目。</p>
-          <p class="empty-tip">共 {{ stats.total_questions || 0 }} 道已存题目</p>
+          <p>填主题，点「开始出题」。</p>
+          <p class="empty-tip">已存 {{ stats.total_questions || 0 }} 道</p>
         </section>
 
-        <!-- 出题结果统计 -->
+        <!-- 出题结果统计：只留用户关心的数量，过滤/依据等过程信息进 title -->
         <div v-if="questions.length" class="quiz-meta">
-          <span>本次生成 <b>{{ questions.length }}</b> 道</span>
-          <span v-if="requestedCount > questions.length" class="meta-shortfall">
-            ，请求 <b>{{ requestedCount }}</b> 道（差 <b>{{ requestedCount - questions.length }}</b> 道）
-          </span>
-          <span v-if="rejectedCount">，过滤不合格 <b>{{ rejectedCount }}</b> 道</span>
-          <span v-if="materialsUsed">，依据知识库 {{ materialsUsed }} 个片段</span>
+          <span>本次 {{ questions.length }} 道</span>
+          <span
+            v-if="requestedCount > questions.length || rejectedCount || materialsUsed"
+            class="meta-shortfall"
+            :title="[
+              requestedCount > questions.length ? `请求 ${requestedCount} 道，实得 ${questions.length} 道` : '',
+              rejectedCount ? `过滤不合格 ${rejectedCount} 道` : '',
+              materialsUsed ? `依据知识库 ${materialsUsed} 个片段` : '',
+            ].filter(Boolean).join('；')"
+          >· 详情</span>
         </div>
 
         <!-- 试卷导出：出过题导出这套题，否则按主题导出题库 -->
@@ -425,8 +439,8 @@ onMounted(() => {
           <span class="export-title">导出试卷</span>
 
           <el-radio-group v-model="withAnswer" size="small">
-            <el-radio-button :value="true">教师卷（含答案解析）</el-radio-button>
-            <el-radio-button :value="false">学生卷（仅题目）</el-radio-button>
+            <el-radio-button :value="true">含答案</el-radio-button>
+            <el-radio-button :value="false">仅题目</el-radio-button>
           </el-radio-group>
 
           <el-tooltip
@@ -448,7 +462,7 @@ onMounted(() => {
           </el-tooltip>
 
           <span class="export-hint">
-            {{ questions.length ? '导出当前这次生成的题目' : `导出主题「${subject.trim()}」的题库题目` }}
+            {{ questions.length ? '本次题目' : `主题「${subject.trim()}」的题库` }}
           </span>
         </div>
 
@@ -566,6 +580,13 @@ onMounted(() => {
                 <div v-if="results[q.localIdx].analysis" class="q-result-analysis">
                   解析：{{ results[q.localIdx].analysis }}
                 </div>
+                <!-- 掌握度回写：判分不再只留分数，结果要当场反映到图谱上 -->
+                <div
+                  v-if="results[q.localIdx].masteryNote || results[q.localIdx].sectionNote"
+                  class="q-result-mastery"
+                >
+                  {{ results[q.localIdx].masteryNote || results[q.localIdx].sectionNote }}
+                </div>
               </div>
             </div>
           </div>
@@ -578,7 +599,6 @@ onMounted(() => {
       <div v-loading="historyLoading" class="history-list">
         <div v-if="!historyLoading && !batches.length" class="history-empty">
           <p>还没有出题记录</p>
-          <p class="history-empty-tip">输入主题点「开始出题」，之后每次出题都会记录在这里</p>
         </div>
         <div
           v-for="b in batches"
@@ -676,11 +696,6 @@ onMounted(() => {
   text-align: center;
   padding: 60px 20px;
   color: var(--color-text-tertiary);
-}
-.quiz-empty svg {
-  color: var(--color-text-tertiary);
-  margin-bottom: 12px;
-  opacity: 0.6;
 }
 .quiz-empty p {
   margin: 4px 0;
@@ -834,6 +849,13 @@ onMounted(() => {
   padding: 8px 12px;
 }
 
+/* 掌握度回写提示（判分 → 图谱节点颜色当场变化） */
+.q-result-mastery {
+  margin-top: 4px;
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+
 /* 出题历史抽屉 */
 .history-list {
   min-height: 120px;
@@ -848,10 +870,6 @@ onMounted(() => {
 
 .history-empty p {
   margin: 4px 0;
-}
-
-.history-empty-tip {
-  font-size: 12px;
 }
 
 .history-item {

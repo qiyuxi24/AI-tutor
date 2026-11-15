@@ -58,6 +58,41 @@ MASTERY_CORRECT_GAIN = 20
 SECTION_RETRY_BEFORE_DOWNGRADE = 1
 
 
+def resolve_node_id(kg: KnowledgeGraph, *candidates: str) -> str:
+    """
+    把题目上记的「关联知识点」解析成**图谱节点 id**，解析不到返回 `""`。
+
+    为什么必须有这一层（2026-11-15 实测，user 5 / 47 题）：
+        判分回写只认图谱节点 id（`kg.get_node(id)`），而**独立出题页**的
+        `knowledge_point` 是 LLM 自己编的中文知识点名（`generator.py` 的输出 schema
+        里就写着"关联知识点"）。实测 35 个唯一值里只有 2 个能命中节点，
+        **44/47 道题（93.6%）判分后掌握度静默不动** —— 学生答对了，图谱一点颜色没变。
+
+    解析顺序（由调用方给候选，按可靠性排）：
+        1. 就是节点 id → `get_node` 直接命中（对话内出题走这条，本来传的就是 id）
+        2. 是节点**名字**（含登记过的别名）→ `find_node_by_name`
+        3. 都不到 → `""`（**如实返回空、不假装成功**）：
+           `subject="线性代数"` 这种对应几十个节点，硬归到某一个就是编造。
+           实测靠 subject 兜底能救回 42/47 = 89%，剩下 5 道如实放弃。
+
+    解析异常（图谱写坏了）也返回 `""` —— 判分绝不能被回写拖垮。
+    """
+    for raw in candidates:
+        v = (raw or "").strip()
+        if not v:
+            continue
+        try:
+            if kg.get_node(v) is not None:
+                return v
+            node = kg.find_node_by_name(v)
+        except Exception as e:                  # noqa: BLE001 —— 回写是增强项
+            logger.warning(f"解析知识点 {v!r} 失败（判分照常返回）: {e}")
+            continue
+        if node and node.get("id"):
+            return str(node["id"])
+    return ""
+
+
 def apply_section_after_answer(kg: KnowledgeGraph, *, node_id: str, section_id: str,
                                correct: bool, evidence: str = "") -> dict:
     """
@@ -129,11 +164,16 @@ def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
     读当前值，天然免疫。
 
     参数:
+        node_id:  图谱节点 id。传进来的是知识点**名字**也接受（`resolve_node_id`
+                  解析一次）—— 从活动栏出的题记的就是名字，不该因此丢分。
         evidence: 证据引用（题目 id），随掌握度事件落库（KG-D4）→ 可回溯"这 20 分哪来的"。
 
     返回一句给模型看的状态描述（空字符串 = 没更新）。
     """
-    if not node_id or not correct:
+    if not correct:
+        return ""
+    node_id = resolve_node_id(kg, node_id)
+    if not node_id:
         return ""
     node = kg.get_node(node_id)
     if node is None:
@@ -235,22 +275,29 @@ async def grade_pending(user_answer: str, *, kg=None, store=None,
     # 答对只将本节置为通过，不再给节点加 20 分（用户口径：全部小节通过才置 100）
     node_id = q.get("knowledge_point") or ""
     section_id = q.get("section_id") or ""
+    subject = q.get("subject") or ""
     mastery_note = ""
     section_note = ""
     next_action = ""
     if kg is not None:
-        if section_id:
+        # 独立出题页的 knowledge_point 常是 LLM 编的中文名（见 resolve_node_id），
+        # 先解析出真正的节点 id，再决定走小节口径还是节点口径。
+        resolved = resolve_node_id(kg, node_id, subject)
+        if resolved and section_id:
             sec = apply_section_after_answer(
-                kg, node_id=node_id, section_id=section_id,
+                kg, node_id=resolved, section_id=section_id,
                 correct=bool(result["correct"]), evidence=f"question:{q['id']}",
             )
             section_note = sec.get("note", "")
             next_action = sec.get("action", "")
             mastery_note = section_note
-        else:
+            node_id = resolved
+        elif resolved:
             mastery_note = apply_mastery_after_answer(
-                kg, node_id, bool(result["correct"]), evidence=f"question:{q['id']}",
+                kg, resolved, bool(result["correct"]),
+                evidence=f"question:{q['id']}",
             )
+            node_id = resolved
 
     return {
         "ok": True,

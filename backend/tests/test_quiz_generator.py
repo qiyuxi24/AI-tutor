@@ -597,3 +597,24 @@ def test_generate_quiz_isolates_failed_batch(monkeypatch):
     assert len(result["questions"]) == 5            # 没有因为一批失败而整次失败
     assert result["requested"] == 5
     assert [q["id"] for q in result["questions"]] == [f"q{i}" for i in range(1, 6)]
+
+
+def test_generate_batch_turns_thinking_off(monkeypatch):
+    """出题批量调用必须 thinking=False。
+
+    M3 的思考与正文共享 max_tokens：开着思考会既慢（实测出题 30.9s）又偶发
+    "思考吃满预算 → 正文空 → E-LLM-006"（2026-09-14 真机，3 批里 1 批空回复
+    就把整次出题拖垮）。graph_generator / section_generator 的同类批量抽取
+    早已显式关闭，出题这里漏了。
+    """
+    seen = {}
+
+    async def fake_call_llm(system, messages, **kw):
+        seen.update(kw)
+        return json.dumps([_q_dict(1)])
+
+    monkeypatch.setattr(generator, "call_llm", fake_call_llm)
+    out = _run(generator._generate_batch("sys", "user", "首批 1/1"))
+
+    assert len(out) == 1
+    assert seen["thinking"] is False

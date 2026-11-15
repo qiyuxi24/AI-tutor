@@ -64,6 +64,11 @@ class QuizGenerateRequest(BaseModel):
         default_factory=lambda: ["single", "multiple", "judge", "fill", "short_answer"],
         description="题型列表",
     )
+    graph_node_id: str = Field(
+        "",
+        description="出题针对的图谱节点 id（从节点详情进来时传）。入库时覆盖题目的 "
+                    "knowledge_point，判分据此回写该节点掌握度；空=不关联图谱",
+    )
 
 
 class QuizGradeRequest(BaseModel):

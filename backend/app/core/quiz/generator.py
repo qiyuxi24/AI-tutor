@@ -263,6 +263,8 @@ async def _generate_batch(system_prompt: str, user_prompt: str,
                 system_prompt,
                 [{"role": "user", "content": user_prompt}],
                 max_tokens=QUIZ_BATCH_MAX_TOKENS,
+                thinking=False,   # 批量出题不需要思考：思考与正文共享 max_tokens
+                                  # （2026-11-15 实测 35~39s → 7~9s，见 .dsh_local/aic_defense/probe_thinking_ab.py）
                 kind="quiz_generate",
             )
         except Exception as e:

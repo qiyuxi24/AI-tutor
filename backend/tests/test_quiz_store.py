@@ -302,3 +302,34 @@ def test_legacy_db_gets_source_docs_column(tmp_path):
                                source_docs=[{"doc_id": 3, "doc_name": "书.md"}])[0]
     assert store.get_question(qid)["source_docs"] == [{"doc_id": 3, "doc_name": "书.md"}]
     store.close()
+
+
+# ── 判分幂等（2026-11-15）────────────────────────────────────────
+
+def test_find_attempt_matches_same_question_and_answer(tmp_path):
+    """同题同答案 → 能查到历史作答（判分端点据此幂等，不再重复加分）。"""
+    store = QuizStore(tmp_path)
+    qid = store.save_questions([_make_question()])[0]
+    assert store.find_attempt(qid, "A") is None
+
+    store.record_attempt(question_id=qid, user_answer="A", score=10,
+                         max_score=10, correct=True, comment="回答正确")
+
+    got = store.find_attempt(qid, "A")
+    assert got is not None
+    assert got["score"] == 10
+    assert got["correct"] == 1
+    store.close()
+
+
+def test_find_attempt_distinguishes_answer_and_question(tmp_path):
+    """换答案或换题 = 不同作答，不该命中幂等。"""
+    store = QuizStore(tmp_path)
+    qid = store.save_questions([_make_question()])[0]
+    other = store.save_questions([_make_question(id="q2")])[0]
+    store.record_attempt(question_id=qid, user_answer="A", score=10,
+                         max_score=10, correct=True, comment="回答正确")
+
+    assert store.find_attempt(qid, "B") is None
+    assert store.find_attempt(other, "A") is None
+    store.close()

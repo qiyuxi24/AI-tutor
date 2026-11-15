@@ -60,6 +60,19 @@ def test_fuzzy_match_multiple_answers():
     assert _fuzzy_match("O(1)", ["O(n)", "O(n^2)"]) is False
 
 
+def test_fuzzy_match_rejects_negated_answer():
+    """否定句不能判对：`'不是栈'` 里有 '栈' 但语义相反（2026-11-15 实测假阳性）。"""
+    assert _fuzzy_match("不是栈", ["栈"]) is False
+    assert _fuzzy_match("队列不是栈", ["栈"]) is False
+    assert _fuzzy_match("没有用到栈", ["栈"]) is False
+
+
+def test_fuzzy_match_still_accepts_plain_explanation():
+    """补否定词守卫不能误伤正常作答（'栈是一种LIFO结构' 仍算对）。"""
+    assert _fuzzy_match("栈是一种LIFO结构", ["栈"]) is True
+    assert _fuzzy_match("栈溢出", ["栈"]) is True
+
+
 # ─── _grade_single ───────────────────────────────────────────────
 
 def test_grade_single_correct():
@@ -133,6 +146,20 @@ def test_grade_multiple_case_insensitive():
     assert r["correct"] is True
 
 
+def test_grade_multiple_ignores_letters_inside_words():
+    """夹带文字时不能把英文单词的字母当成选项（2026-11-15 实测 `'选A因为它是LIFO'` → 误选 4 个）。"""
+    r = _grade_multiple("选A因为它是LIFO", ["A"], 10)
+    assert r["correct"] is True
+    assert r["score"] == 10
+
+
+def test_grade_multiple_partial_with_explanation():
+    """带解释的部分答案仍按命中率算分，且不会把解释里的字母算成误选。"""
+    r = _grade_multiple("我选A，因为stack是LIFO", ["A", "C"], 10)
+    assert r["score"] == 5
+    assert r["correct"] is False
+
+
 # ─── _grade_judge ────────────────────────────────────────────────
 
 def test_grade_judge_correct_right():
@@ -156,6 +183,22 @@ def test_grade_judge_incorrect():
 def test_grade_judge_no_answer():
     r = _grade_judge("", ["对"], 10)
     assert r["score"] == 0
+
+
+def test_grade_judge_accepts_common_synonyms():
+    """学生按常识写「正确 / 错误 / T / F / √ / ×」，不该被规则判错（2026-11-15 实测全是 0 分）。"""
+    for user, answer in [("正确", "对"), ("对", "对"), ("T", "对"), ("true", "对"),
+                         ("√", "对"), ("是", "对"), ("错误", "错"), ("错", "错"),
+                         ("F", "错"), ("false", "错"), ("×", "错"), ("否", "错"),
+                         ("不对", "错"), ("不正确", "错"), ("没错", "对")]:
+        r = _grade_judge(user, [answer], 10)
+        assert r["correct"] is True, f"{user!r} 对 {answer!r} 应判对"
+
+
+def test_grade_judge_still_rejects_mismatch():
+    """同义词归一不能把相反答案判对。"""
+    assert _grade_judge("正确", ["错"], 10)["correct"] is False
+    assert _grade_judge("错误", ["对"], 10)["correct"] is False
 
 
 # ─── _grade_fill ─────────────────────────────────────────────────
@@ -250,6 +293,19 @@ def test_grade_short_answer_llm_json_with_extra_text(monkeypatch):
 
     result = asyncio.run(_grade_short_answer("题", "答", 10, "参考", ""))
     assert result["score"] == 7
+
+
+def test_grade_short_answer_disables_thinking(monkeypatch):
+    """判分只输出 {"score","comment"} 一小段 JSON → 思考纯浪费（M3 思考与正文共享 max_tokens）"""
+    seen = {}
+    async def fake_call_llm(system, messages, **kw):
+        seen.update(kw)
+        return json.dumps({"score": 6, "comment": "尚可"})
+    monkeypatch.setattr("app.core.quiz.grader.call_llm", fake_call_llm)
+
+    asyncio.run(_grade_short_answer("题", "答", 10, "参考", ""))
+
+    assert seen.get("thinking") is False
 
 
 # ─── grade_question (入口) ───────────────────────────────────────

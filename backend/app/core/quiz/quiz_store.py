@@ -330,6 +330,23 @@ class QuizStore:
         return {"total_questions": row["total"] if row else 0}
 
     # ── 作答记录 ──
+    def find_attempt(self, question_id: int, user_answer: str) -> Optional[dict]:
+        """查「这道题 + 这个答案」是否已经判过（判分幂等的唯一判据）。
+
+        为什么需要（2026-11-15）：判分端点原先每调一次就 `record_attempt` 一次，
+        掌握度也跟着 `+20` 一次 —— 实测 q2 同一道题被判对两次 = 白送 40 分。
+        界面刷新 / 学生手滑重复点 / 前端重放都会触发，必须在服务端拦。
+
+        幂等键刻意是 **(question_id, user_answer)** 而不是只 question_id：
+        同一道题换个答案再答一次（订正）是**新**作答，应该照常判分并留痕。
+        """
+        row = self._conn.execute(
+            "SELECT * FROM attempts WHERE question_id = ? AND user_answer = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (question_id, user_answer),
+        ).fetchone()
+        return dict(row) if row else None
+
     def record_attempt(self, question_id: int, user_answer: str,
                        score: int, max_score: int, correct: bool,
                        comment: str) -> int:

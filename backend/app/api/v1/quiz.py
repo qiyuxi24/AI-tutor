@@ -21,10 +21,14 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from app.core.auth import get_current_user
 from app.core.error_codes import ErrorCode, log_error
+from app.core.knowledge_graph import KnowledgeGraph
+from app.core.quiz.chat_grade import (
+    apply_mastery_after_answer, apply_section_after_answer, resolve_node_id,
+)
 from app.core.quiz.schema import QuizGenerateRequest, QuizGradeRequest
 from app.core.quiz.generator import generate_quiz
 from app.core.quiz.grader import grade_question
@@ -33,6 +37,72 @@ from app.core.quiz.exporter import export_quiz as build_export
 
 logger = logging.getLogger("ai-tutor")
 router = APIRouter()
+
+
+def _touch_graph(user_id: int, *, node_id: str, section_id: str,
+                 question_id: int, subject: str = "",
+                 correct: Optional[bool] = None) -> dict:
+    """
+    判分后回写掌握度；`correct=None` 时只**读**当前值、不写（幂等重复提交用）。
+
+    为什么需要回写（2026-11-15）：对话内出题答对会 `add_mastery(+20)`
+    （`chat_grade.grade_pending`），但独立出题页原先只写 `attempts`、完全不碰图谱，
+    学生判完分回图谱看节点颜色一点不变 —— 反馈闭环断裂。
+
+    口径与对话内完全一致：
+      · 题带 `section_id` → 小节口径（答对置本节通过；全部小节通过才置 100）
+      · 否则 → 节点口径（答对 +20，答错不变、不扣分）
+
+    ⚠️ `node_id` 不一定真的是节点 id：独立出题页的 `knowledge_point` 是 LLM 编的
+    中文知识点名（实测 44/47 命中不了节点）。解析交给 `chat_grade.resolve_node_id`
+    （节点 id → 节点名 → subject），解析不到就**如实返回空 dict**，不假装成功。
+
+    为什么 `correct=None` 必须走同一函数：幂等的语义是"这次什么都没发生"，
+    重复提交不能再 `add_mastery`（实测刷新几次就把掌握度刷满），但响应里仍要
+    给出与首次一致的展示字段。
+
+    图谱写/读失败**绝不影响判分结果**（学生已经答完，分数必须返回）。
+    """
+    out: dict = {}
+    kg = None
+    try:
+        kg = KnowledgeGraph(user_id=user_id)
+        resolved = resolve_node_id(kg, node_id, subject)
+        if not resolved:
+            return out
+        out["node_id"] = resolved
+        if correct is None:                     # ← 只读
+            if section_id:
+                passed = bool((kg.get_section_learn(resolved, section_id) or {}).get("passed"))
+                out.update({"section_id": section_id,
+                            "next_action": "passed" if passed else "none"})
+            else:
+                out["mastery"] = int((kg.get_node(resolved) or {}).get("mastery") or 0)
+            return out
+        evidence = f"quiz:{question_id}"
+        if section_id:
+            r = apply_section_after_answer(kg, node_id=resolved, section_id=section_id,
+                                           correct=correct, evidence=evidence)
+            out.update({
+                "section_id": section_id,
+                "next_action": r.get("action", "none"),
+                "section_note": r.get("note", ""),
+            })
+        else:
+            note = apply_mastery_after_answer(kg, resolved, correct, evidence=evidence)
+            out.update({"mastery_note": note,
+                        "mastery": int((kg.get_node(resolved) or {}).get("mastery") or 0)})
+    except Exception as e:                      # 图谱坏了也不该吞掉分数
+        logger.warning(f"判分回写图谱失败（{node_id}）: {e}")
+        out.pop("node_id", None)
+        out.setdefault("mastery_note", "")
+    finally:
+        if kg is not None:
+            try:
+                kg.close()
+            except Exception:
+                pass
+    return out
 
 
 @router.post("/quiz/generate")
@@ -77,11 +147,31 @@ async def create_quiz(req: QuizGenerateRequest,
 
     # 题目入库
     store = quiz_manager._get_store(user_id)
+    # 从节点详情进来时把图谱节点 id 写进 knowledge_point —— 判分要靠它回写掌握度。
+    # 与对话内出题同一做法（chat_quiz.py：knowledge_point 是字符串字段，正好装图谱节点 id；
+    # questions.node_id 是 INTEGER，装不下）。
+    source_docs: list[dict] = []
+    if req.graph_node_id:
+        for q in result["questions"]:
+            q["knowledge_point"] = req.graph_node_id
+        # 题目血统：这份题依据的是该节点名下的哪几份**文件**。
+        # 直接复用 chat_quiz 的实现（同一份口径：节点 sources），别在这里再写一遍。
+        # 读不到（老节点无溯源 / 图谱写坏）→ 空列表，不影响入库。
+        try:
+            kg = KnowledgeGraph(user_id=user_id)
+            try:
+                from app.core.quiz.chat_quiz import _source_docs_for
+                source_docs = _source_docs_for(kg, req.graph_node_id, "")
+            finally:
+                kg.close()
+        except Exception as e:                  # noqa: BLE001 —— 血统是附加信息
+            logger.warning(f"出题取来源文件失败（忽略）: {e}")
     question_ids = store.save_questions(
         result["questions"],
         subject=req.subject,
         node_id=req.node_id,
         difficulty=req.difficulty,
+        source_docs=source_docs,
     )
     return {
         "status": "ok",
@@ -127,16 +217,44 @@ async def grade(question_id: int,
     对库中已保存的题目判分。
 
     user_answer 通过 query 传入。客观题规则判分，简答题 LLM 判分。
-    判分结果写入 attempts 表。
+    判分结果写入 attempts 表；题目关联了图谱节点时**顺带回写掌握度**
+    （响应里的 `node_id` / `mastery` / `mastery_note` 或 `section_id` / `next_action`）。
+
+    **幂等**（2026-11-15）：同一道题 + 同一个答案重复提交 → 返回上次结果并置
+    `idempotent=true`，**不再记一次 attempt、也不再加掌握度**。前端刷新 / 学生手滑
+    重复点 / 重放都会触发，不拦的话掌握度会被白送上去（实测 q2 被判对两次 = +40）。
 
     返回:
         {"status": "ok", "score": int, "max_score": int, "correct": bool,
-         "comment": str, "detail": str, "analysis": str}
+         "comment": str, "detail": str, "analysis": str,
+         "node_id": str, "mastery": int, "mastery_note": str,   # 仅关联图谱时
+         "idempotent": true}                                    # 仅重复提交时
     """
     store = quiz_manager._get_store(user_id)
     q = store.get_question(question_id)
     if not q:
         raise HTTPException(status_code=404, detail=ErrorCode.user_message(ErrorCode.QUIZ_NOT_FOUND))
+
+    # 幂等：同题同答案已判过 → 直接回放，不重复记账
+    previous = store.find_attempt(question_id, user_answer)
+    if previous is not None:
+        resp = {
+            "status": "ok",
+            "score": previous["score"],
+            "max_score": previous["max_score"],
+            "correct": bool(previous["correct"]),
+            "comment": previous["comment"],
+            "detail": "",
+            "analysis": q["analysis"],
+            "idempotent": True,
+        }
+        node_id = q.get("knowledge_point") or ""
+        if node_id:
+            # 只读当前值回报，**不再回写**（幂等的意义就是"这次什么都没发生"）
+            resp.update(_touch_graph(
+                user_id, node_id=node_id, section_id=q.get("section_id") or "",
+                question_id=question_id, subject=q.get("subject") or ""))
+        return resp
 
     req = QuizGradeRequest(
         question_id=question_id,
@@ -163,11 +281,20 @@ async def grade(question_id: int,
         correct=result["correct"],
         comment=result["comment"],
     )
-    return {
+
+    resp = {
         "status": "ok",
         **result,
         "analysis": q["analysis"],
     }
+    # 回写图谱（老题没有 knowledge_point → 跳过，行为与改动前一致）
+    node_id = q.get("knowledge_point") or ""
+    if node_id:
+        resp.update(_touch_graph(
+            user_id, node_id=node_id, section_id=q.get("section_id") or "",
+            question_id=question_id, subject=q.get("subject") or "",
+            correct=result["correct"]))
+    return resp
 
 
 @router.get("/quiz/batches")
