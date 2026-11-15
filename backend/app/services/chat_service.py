@@ -192,6 +192,12 @@ RETRIEVAL_HIT_OVERHEAD = 20            # 每条片段的标题行等固定开销
 # query 双端放置（框架 §4.2，Lost in the Middle：KV 检索 45.6%→100%，代价 ~50 token）
 RETRIEVAL_QUERY_ECHO_MAX_CHARS = 300
 
+# 用户**点名选中**资料时的整篇注入预算（2026-11-15，方案 A）。
+# 为什么比 RETRIEVAL_SEGMENT_MAX_TOKENS 大一个量级：检索是"不确定要看哪段"时的兜底，
+# 只能给最相关的几条；而用户已经点名"就这几份"，缺正文就是答非所问，此时省 token
+# 反而是错的。上限取 12K（≈ 预算 48K 的 1/4），再高会把图谱结构与历史一起挤掉。
+SELECTED_DOCS_MAX_TOKENS = 12_000
+
 
 def _trim_hits(hits: list, max_tokens: int) -> tuple[list, int]:
     """按相关性降序（pipeline 已排序）保留放得下的片段，至少留 1 条。
@@ -216,6 +222,136 @@ def _truncation_note(shown: int, dropped: int) -> str:
         return ""
     return (f"\n\n> 说明：本区块为控制上下文体量已截断，仅展示最相关的 {shown} 条"
             f"（共 {shown + dropped} 条）；需要更多依据时可再次检索。")
+
+
+def _build_selected_docs(user_id: int, kb: dict | None,
+                         max_tokens: int = SELECTED_DOCS_MAX_TOKENS) -> tuple[str, bool]:
+    """
+    把用户**点名选中**的资料整篇注入（方案 A，2026-11-15）。
+
+    与 `_build_retrieval_context` 是两条不同的路，别合并：
+    - 检索路：不知道用户要看哪段 → 按 query 捞最相关的几条（有阈值、有截断、会漏）
+    - 本函数：用户已经点名"就这几份" → **整篇给**，不再挑片段（挑错就是答非所问）
+
+    所以这里**不过检索、不卡阈值、不做父级扩展**，只做一件事：按预算依次塞入全文，
+    塞不下的在尾部标注（不标会让模型以为读完了，比不注入更糟）。
+
+    参数:
+        kb: 前端传来的范围 {node_ids, name}；node_ids 可以是文件夹 ID（内部展开）。
+            None / 空列表 → 返回 ("", False)（没有选中就没有额外注入）。
+
+    返回:
+        (格式化 Markdown 区块, 是否因预算截断)；无正文可注入时返回 ("", False)。
+        调用方据「截断与否」决定还要不要跑知识库检索腿（未截断 = 全文已在，检索是重复）。
+    """
+    from app.core.kb.kb_manager import kb_manager
+
+    node_ids = list((kb or {}).get("node_ids") or [])
+    if not node_ids:
+        return "", False
+
+    file_ids: list[int] = []
+    for nid in node_ids:
+        file_ids.extend(kb_manager.collect_files(user_id, nid))
+    file_ids = list(dict.fromkeys(file_ids))     # 去重保序（{node_ids} 可能含同族目录）
+    if not file_ids:
+        return "", False
+
+    kb_name = (kb or {}).get("name") or "我的知识库"
+    header = [
+        f"## 已选资料全文（来自「{kb_name}」）",
+        "以下是用户**本轮明确选中**的知识库资料全文，回答时请优先以此为依据；"
+        "资料中没写的内容不要编造，需要补充时说明依据来自哪里。",
+    ]
+
+    parts: list[str] = ["\n".join(header)]
+    used = 0
+    shown = 0
+    truncated = False
+    # 惰性迭代：预算塞满就 break，不把整个文件夹的正文先读进内存
+    for doc in kb_manager.iter_files(user_id, file_ids):
+        body = doc["content"]
+        cost = count_tokens(body)
+        # 一条都还没放时允许超预算（下限保护：否则长文档一条都进不来）
+        if shown and used + cost > max_tokens:
+            truncated = True
+            break
+        if cost > max_tokens:                       # 单篇就超预算 → 截断正文
+            body = body[: max_tokens * 3]           # 3 字符 ≈ 1 token 的保守换算
+            truncated = True
+        parts.append(f"### 资料 {shown + 1}：{doc['path'] or doc['name']}\n{body}")
+        used += count_tokens(body)
+        shown += 1
+
+    if shown == 0:
+        return "", False                            # 全都读不到正文 → 不注入空区块
+    if truncated:
+        rest = len(file_ids) - shown
+        parts.append(
+            f"> 说明：本次共选中 {len(file_ids)} 份资料，为控制上下文体量只完整注入了前 {shown} 份"
+            f"（其余 {max(rest, 0)} 份未被读取）；回答时不要假定读过未列出的资料。"
+        )
+    return "\n\n".join(parts), truncated
+
+
+def _build_selected_nodes(kg: KnowledgeGraph, node_ids: list[str] | None,
+                          max_tokens: int = SELECTED_DOCS_MAX_TOKENS) -> tuple[str, bool]:
+    """
+    把用户**点名选中**的知识点整篇注入（2026-11-15，与 `_build_selected_docs` 并列）。
+
+    为什么知识点也要整篇：用户在一句话里 @ 了「快速排序」，意思是"就讲这个"，
+    此时再走检索（按问句捞最相关的片段）反而可能漏掉他点名的那一节 —— 点名本身就是
+    最强的相关性信号，不该再猜。
+
+    正文出口必须走 `kg.node_content_text`（小节优先）：直读 `{id}.md` 在老的小节化
+    节点上会拿到骨架占位「待完善...」，注入等于告诉模型这个知识点是空的。
+
+    参数:
+        node_ids: 图谱节点 ID 列表；None/空 → ("", False)。不存在的 ID 静默跳过
+                  （对话不该因为一个被删掉的知识点而失败）。
+    返回: (Markdown 区块, 是否截断)
+    """
+    ids = [n for n in (node_ids or []) if n]
+    if not ids:
+        return "", False
+
+    blocks: list[str] = []
+    used = 0
+    shown = 0
+    truncated = False
+    for node_id in ids:
+        node = kg.get_node(node_id)
+        if not node:
+            continue
+        body = (kg.node_content_text(node_id) or "").strip()
+        if not body:
+            continue
+        cost = count_tokens(body)
+        if shown and used + cost > max_tokens:
+            truncated = True
+            break
+        if cost > max_tokens:
+            body = body[: max_tokens * 3]
+            truncated = True
+        label = f"{node.get('name') or node_id}（{node_id}）"
+        subject = node.get("subject") or ""
+        if subject:
+            label += f" · {subject}"
+        blocks.append(f"### 知识点：{label}\n{body}")
+        used += count_tokens(body)
+        shown += 1
+
+    if not blocks:
+        return "", False
+    header = (
+        "## 已选知识点全文\n"
+        "以下是用户**本轮明确选中**的知识点正文，回答时以此为准；"
+        "如果与本轮问题无关，说明一下即可，不要硬扯。"
+    )
+    parts = [header] + blocks
+    if truncated:
+        parts.append("> 说明：选中的知识点较多，为控制上下文体量只注入了其中一部分。")
+    return "\n\n".join(parts), truncated
 
 
 def _last_user_text(messages: list) -> str:
@@ -714,6 +850,7 @@ def ensure_section_quiz_scheduled(kg: KnowledgeGraph, result, *, store=None) -> 
 async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
                               inject_tools: bool = False, current_node: str = "",
                               kb: dict | None = None,
+                              context_node_ids: list[str] | None = None,
                               tool_specs: list[dict] | None = None) -> tuple[str, str]:
     """
     构建系统提示词（合并原 _build_stream_prompt / _build_chat_prompt）。
@@ -724,7 +861,10 @@ async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
                       已无生产调用点，保留给"纯教学、不给工具"的实验）
         current_node: 当前教学位置的知识点 ID（可选；不存在时位置段写「未指定」）
         kb: 知识库上下文范围 {node_ids: [...], name: str}，可选；
-            传入后在所选目录范围内检索文档片段注入提示词
+            传入后：① 在该范围内检索（收窄）；② **整篇注入**这些文件的正文
+            （用户点名选中 = 别再挑片段，见 `_build_selected_docs`）
+        context_node_ids: 用户选中的**知识点**（图谱节点 ID）列表，可选；
+            与 kb 一样按"点名 = 整篇注入"处理（`_build_selected_nodes`）
         tool_specs: 本轮实际发给模型的工具 spec（由 `specs_for_plan(plan)` 给出）。
             None=全量（逐字节等于改动前）；[]=本轮禁工具 → 不注入指南。
     返回: (system_prompt, last_user_message)
@@ -748,15 +888,37 @@ async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
         else "未指定（由本次对话内容推断，推断出后固定在同一知识点上）"
     )
 
+    # 用户点名选中的资料/知识点：**整篇注入**（方案 A，2026-11-15）
+    # 这两条先算，因为它们决定还要不要跑对应的检索腿（见下方 sources）。
+    selected_docs, docs_truncated = _build_selected_docs(kg.user_id, kb)
+    selected_nodes, nodes_truncated = _build_selected_nodes(kg, context_node_ids)
+
     # 注入检索上下文（RAG 是增强而非必需：检索失败或为空时不影响主提示词）
     # 去耦合：检索编排统一走 rag_pipeline，一次 run 按数据源分组生成图谱/知识库两个区块
     # usage_mode 由上面同一个 profile 实例带下来，避免一次请求重复读画像文件
     # 检索块先取一次：下面拼装要用，且降级重建时不重复检索
     # ⚠ 必须在图谱注入**之前**：P1-1 用本次检索命中的节点当"焦点"（复用已有结果，
     #   不新增任何检索/LLM 调用）。
+    #
+    # 某一路的正文已**完整**注入时，就把对应的检索腿关掉：全文已经包含那些材料的每一段，
+    # 再检索一遍只会把同样的内容以"片段"形式重复注入（模型会误当成两份依据），
+    # 还白花配额。只有正文被预算截断时才保留检索 —— 那时"哪几段相关"才是有用信息。
+    #
+    # `sources` 的语义是"**保留**哪些普通源"（None = 全部），不是"丢掉哪些"。
+    # 两条腿都保留时必须回 None —— 传 {"graph","kb"} 虽然等价，但会让
+    # `eval_graph_injection.py` 那种"用 sources 隔离变量"的调用方看不出区别。
+    _ALL_RETRIEVAL_SOURCES = {"graph", "kb"}
+    dropped: set[str] = set()
+    if selected_docs and not docs_truncated:
+        dropped.add("kb")
+    if selected_nodes and not nodes_truncated:
+        dropped.add("graph")
+    kept = _ALL_RETRIEVAL_SOURCES - dropped
+    retrieval_sources = None if kept == _ALL_RETRIEVAL_SOURCES else kept
     graph_focus_out: list[str] = []
     retrieval = await _build_retrieval_context(last_user_msg, kg.user_id, kb,
                                               usage_mode=profile.get_usage_mode(),
+                                              sources=retrieval_sources,
                                               focus_out=graph_focus_out)
 
     # P1-1 焦点（query）三档，全部零额外 LLM：
@@ -792,6 +954,10 @@ async def _build_system_prompt(messages: list, kg: KnowledgeGraph,
             user_profile=profile_text,
             current_position=current_position,
         )
+        if selected_nodes:
+            prompt += "\n\n" + selected_nodes
+        if selected_docs:
+            prompt += "\n\n" + selected_docs
         if retrieval:
             prompt += retrieval
         if learn_block:
@@ -1057,6 +1223,7 @@ async def _index_applied_nodes(applied_list: list[dict], user_id: int, kg) -> No
 async def process_message(user_id: int, messages: list,
                         current_node: str = "",
                         kb: dict | None = None,
+                        context_node_ids: list[str] | None = None,
                         conv_id: str | None = None) -> tuple[str, dict]:
     """
     处理一条学生消息。
@@ -1066,6 +1233,8 @@ async def process_message(user_id: int, messages: list,
         messages:     对话历史。**有 `conv_id` 时只取最后一条 user**，其余从库里读
                       （服务端权威，见 `_resolve_history`）；无 `conv_id` 才整份采信
         current_node: 当前教学位置的知识点 ID
+        kb:           知识库上下文范围（选中的文件/文件夹）；收窄检索 + 整篇注入
+        context_node_ids: 用户选中的知识点 ID 列表（整篇注入）
         conv_id:      前端对话 ID（服务端据此读历史 + 落库 + 关联 agent_runs）
 
     返回:
@@ -1100,6 +1269,7 @@ async def process_message(user_id: int, messages: list,
         #    **同一份** resolve 后的历史，而不是某个内部函数的附带产物。
         system_prompt, _ = await _build_system_prompt(
             messages, kg, inject_tools=True, current_node=current_node, kb=kb,
+            context_node_ids=context_node_ids,
             tool_specs=specs_for_plan(plan),
         )
         last_user_msg = _last_user_text(messages)
@@ -1165,6 +1335,7 @@ async def process_message_stream(
     user_id: int,
     current_node: str = "",
     kb: dict | None = None,
+    context_node_ids: list[str] | None = None,
     conv_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """
@@ -1207,6 +1378,7 @@ async def process_message_stream(
         tool_prompt, _ = await _build_system_prompt(
             messages, kg, inject_tools=True,
             current_node=current_node, kb=kb,
+            context_node_ids=context_node_ids,
             tool_specs=specs_for_plan(plan),
         )
         # 本轮提问自己取（理由同非流式路径）：落库与图谱分析共用同一份 resolve 结果

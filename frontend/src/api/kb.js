@@ -30,11 +30,20 @@ export const deleteKbNode = (nodeId) =>
 
 /**
  * 读取文件节点已解析的正文（只读预览，不改库）
- * resp: { status, node_id, name, markdown, chars, total_chars, truncated }
- * 超长正文被截断到后端 KB_PREVIEW_MAX_CHARS：chars < total_chars 即"看到的不是全文"
+ * resp: { status, node_id, name, markdown, chars, total_chars, truncated, editable }
+ * 默认截断到后端 KB_PREVIEW_MAX_CHARS：chars < total_chars 即"看到的不是全文"。
+ * `full=true` 返回全文 —— **编辑器必须用它**，截断的正文一旦保存就是数据丢失。
  */
-export const getKbNodeText = (nodeId) =>
-  apiClient.get(`/api/v1/kb/node/${nodeId}/text`)
+export const getKbNodeText = (nodeId, full = false) =>
+  apiClient.get(`/api/v1/kb/node/${nodeId}/text`, { params: full ? { full: true } : {} })
+
+/**
+ * 覆盖文件节点的正文（知识库阅读器保存）
+ * 后端只允许 .md/.markdown/.txt；同时写库（extract_text）与原件字节，索引在后台重建
+ * resp: { status, node_id, name, chars, total_chars, bytes, truncated }
+ */
+export const saveKbNodeText = (nodeId, content) =>
+  apiClient.put(`/api/v1/kb/node/${nodeId}/text`, { content })
 
 /**
  * 读取文件节点上传时的**原件字节**（真预览：PDF / Word / Excel / 图片用它渲染）
@@ -153,6 +162,17 @@ export const deleteNodeSection = (nodeId, sectionId) =>
   apiClient.delete(`/api/v1/knowledge/node/${nodeId}/section/${sectionId}`)
 
 /**
+ * 覆盖单个小节的正文（节点详情阅读器保存）
+ *
+ * 为什么不能用 `PUT /knowledge/node/{id}`：那条写的是 `nodes/{id}.md`，对有小节的节点
+ * 来说是**没人会读的孤儿文件**（小节化后正文在多个平行 MD 里，没有主文件）。
+ * 后端 `write_section` 同时把该节标 filled、刷新 updated_at，并触发节点重索引。
+ * resp: { status, node_id, section_id, chars, total_chars }；节点/小节不存在 → 404，超长 → 400
+ */
+export const saveNodeSection = (nodeId, sectionId, content) =>
+  apiClient.put(`/api/v1/knowledge/node/${nodeId}/section/${sectionId}`, { content })
+
+/**
  * 列出节点下的试题（懒加载：打开节点详情时才请求，不随图谱列表批量拉）
  * resp: { node_id, quizzes: [{ id, type, question, difficulty, knowledge_point,
  *         section_id, source_docs, created_at }] }
@@ -191,3 +211,44 @@ export const updateSectionLearn = (nodeId, sectionId, payload) =>
  */
 export const fetchSourceNodes = (docId) =>
   apiClient.get(`/api/v1/knowledge/source/${docId}/nodes`)
+
+// ═══ 视频课时页（一课 = 一串知识点，每点带时间锚点 + 幻灯片截图）═══
+//
+// 契约要点（前端据此写死，改动需与后端同步）：
+//   · `t_label`（`12:34` / `1:02:05`）与 `t_url`（B站 `?p=N&t=S` / YouTube `?t=S` 的差异）
+//     **都由后端算好**，前端直接用，不自己拼时间参数；
+//   · `slide_url` 是需要鉴权的接口，`<img src>` 带不上 JWT → 必须走 objectURL
+//     （写法见 components/KbTextPreviewDialog.vue 的 hydrateImages）；
+//   · `structured=false` 时 `segments` 为空数组但 `watch_url` 仍可能有值 ——
+//     页面要给「结构化这集」入口，而不是白屏。
+
+/**
+ * 课时详情（主接口）
+ * resp: { doc_id, title, url, platform, uploader, duration, structured, watch_url,
+ *         segments: [{ seq, title, kind, brief, t_start, t_end, t_label, t_url,
+ *                      slide_url, node_id, node_ok, content? }] }
+ */
+export const getLectureDetail = (docId) => apiClient.get(`/api/v1/kb/lecture/${docId}`)
+
+/**
+ * 原始时间线（调试 / 转录对照用）
+ * resp: { cues: [{ start, end, text, raw }], frames: [{ t, image }] }
+ * `raw` 是 ASR 原文、`text` 是校对后文本（两者可能不同，对照视图的看点就在差异）
+ */
+export const getLectureTimeline = (docId) => apiClient.get(`/api/v1/kb/lecture/${docId}/timeline`)
+
+/**
+ * 重跑结构化（后台任务）
+ * resp: { status: 'accepted' } —— **长任务，结果不从响应返回**：
+ * 调用方必须轮询 `getLectureDetail` 直到 `structured` 变 true（或超时退出）。
+ */
+export const restructureLecture = (docId) =>
+  apiClient.post(`/api/v1/kb/lecture/${docId}/restructure`)
+
+/**
+ * 反查「这个知识节点出现在哪些视频的哪一分钟」
+ * resp: { sources: [{ doc_id, doc_name, locator, t_label, t_url, title }] }
+ * `t_url` 可能是空串（该资料没有视频链接，如普通 PDF）→ 只显示文字，不给链接
+ */
+export const getNodeVideoSources = (nodeId) =>
+  apiClient.get(`/api/v1/knowledge/node/${encodeURIComponent(nodeId)}/video-sources`)

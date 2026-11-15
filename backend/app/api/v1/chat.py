@@ -33,6 +33,9 @@ def _build_kb_context(request: ChatRequest) -> dict | None:
     本函数返回什么**都不会**影响"知识库源是否参与"：那是源自证的事
     （`KbRagSource.should_query` 查"有没有已索引资料"）。曾经这里返回 None 就等于
     静默关掉整个知识库源 —— 一个漏传的业务参数不该有这种权力。
+
+    注意同一个 `kb_node_ids` 在 `chat_service` 里被**消费两次**（有意的）：一次收窄
+    检索范围，一次整篇注入（用户点名了就别再挑片段）。
     """
     if not request.kb_node_ids:
         return None
@@ -82,6 +85,7 @@ async def handle_chat(request: ChatRequest, raw_request: Request,
             messages=request.messages,
             current_node=request.current_node,
             kb=kb,
+            context_node_ids=request.context_node_ids,
             conv_id=request.conv_id,
         )
     return ChatResponse(reply=reply, graph_analysis=graph_analysis)
@@ -109,6 +113,7 @@ async def handle_chat_stream(request: ChatRequest, raw_request: Request,
                 user_id=user_id,
                 current_node=request.current_node,
                 kb=kb,
+                context_node_ids=request.context_node_ids,
                 conv_id=request.conv_id,
             ):
                 yield sse_chunk

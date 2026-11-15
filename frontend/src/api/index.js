@@ -156,21 +156,26 @@ export const activateLlmModel = (modelId) =>
  * @param {Function} callbacks.onDone - 流式完成时调用 (fullReply: string)
  * @param {Function} callbacks.onError - 出错时调用 (error: string)
  * @param {string} currentNode - 当前教学位置的知识点 ID（可选）
- * @param {Object|null} kb - 知识库上下文范围 {nodeIds: [], name: string}
+ * @param {Object|null} sel - 对话选区（见 chatStore.buildSelectionPayload）
+ *   `{kb_node_ids, kb_node_name, context_node_ids}`；null = 未选任何资料/知识点
  * @param {string} convId - 前端对话 ID（多端登录下按对话串行；缺省 = 不串行）
  * @returns {AbortController} 用于取消请求
  */
-export const sendMessageStream = (messages, callbacks = {}, currentNode = '', kb = null, convId = '') => {
+export const sendMessageStream = (messages, callbacks = {}, currentNode = '', sel = null, convId = '') => {
   const controller = new AbortController()
   const { onToken, onThinking, onToolStart, onToolResult, onAgentStart, onAgentDone, onDone, onError } = callbacks
 
   const token = localStorage.getItem('ai_tutor_token')
 
+  // 空数组必须原样发：后端把 `kb_node_ids: []` 定义成"选了范围但里面没文件 → 检索不到
+  // 任何东西"，而 `null` 是"不限范围"。旧实现写 `kb?.nodeIds || null`，正好把两者搞反
+  // （清空选区反而变成全库检索）。`??` 只兜 null/undefined，不吞空数组。
   const body = JSON.stringify({
     messages,
     current_node: currentNode,
-    kb_node_ids: kb?.nodeIds || null,
-    kb_node_name: kb?.name || null,
+    kb_node_ids: sel?.kb_node_ids ?? null,
+    kb_node_name: sel?.kb_node_name ?? null,
+    context_node_ids: sel?.context_node_ids ?? null,
     conv_id: convId || null,
   })
 

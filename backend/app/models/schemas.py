@@ -15,6 +15,10 @@ class ChatRequest(BaseModel):
     current_node: Optional[str] = None  # 当前教学位置的知识点 ID（可选）
     kb_node_ids: Optional[List[int]] = None  # 知识库上下文范围：选中的文件/文件夹节点 ID
     kb_node_name: Optional[str] = None       # 当前选中的知识库范围名称（用于提示词）
+    # 用户选进输入框的**知识点**（图谱节点 ID）。与 kb_node_ids 是两个不同的东西：
+    # kb_node_ids 是知识库文件节点（int，来源是他上传的资料），这里是图谱节点（str，
+    # 来源是他自己的知识图谱）。两者都按"点名选中 = 整篇注入"处理，但取正文的出口不同。
+    context_node_ids: Optional[List[str]] = None
     conv_id: Optional[str] = None            # 前端对话 ID：多端登录下按对话串行（不传 = 不串行）
 
 class ChatResponse(BaseModel):
