@@ -145,7 +145,7 @@ function pathTo(node, id, acc = []) {
   return null
 }
 
-/** 聚焦某知识点（搜索 / 任务栏「在图谱中定位」）：展开祖先链后把它移到视野中心 */
+/** 聚焦某知识点（搜索 / 学习路径「在图谱中定位」）：展开祖先链后把它移到视野中心 */
 function focusNode(nodeId) {
   if (!nodeId || !svg) return
   for (const id of pathTo(tree.value, nodeId) || []) collapsed.delete(id)
@@ -216,8 +216,8 @@ watch([() => props.nextNodeId, () => props.sourceNodes], () => {
     <div v-if="loading && !nodes.length" class="mm-overlay">图谱加载中…</div>
     <div v-else-if="error" class="mm-overlay is-error">{{ error }}</div>
     <div v-else-if="!nodes.length" class="mm-overlay">
-      <p>该学科暂无知识点</p>
-      <p class="mm-hint">在对话里让 AI 建图，或从知识库上传资料建图</p>
+      <p>该学科还没有知识点</p>
+      <p class="mm-hint">右键空白处新建，或让 AI 从资料建图</p>
     </div>
 
     <button v-if="nodes.length" class="mm-reset" title="缩放到刚好放下整棵树" @click="fit">适应窗口</button>

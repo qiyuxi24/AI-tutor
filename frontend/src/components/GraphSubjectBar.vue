@@ -145,8 +145,8 @@ async function handleDelete() {
       </div>
 
       <p v-if="!subjectSummaries.length" class="subject-empty">
-        暂无学科<br />
-        <span class="subject-empty-hint">在右侧知识库勾选教材后一键生成，或直接和 AI 对话建知识点</span>
+        还没有学科<br />
+        <span class="subject-empty-hint">在右侧知识库勾选教材生成，或直接对话建知识点</span>
       </p>
     </div>
 

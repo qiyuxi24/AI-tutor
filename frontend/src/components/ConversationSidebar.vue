@@ -142,7 +142,7 @@ async function handleDelete() {
           />
         </div>
       </template>
-      <div v-if="!store.hasConversations" class="empty-hint">暂无历史对话</div>
+      <div v-if="!store.hasConversations" class="empty-hint">还没有对话</div>
     </nav>
 
     <!-- 条目菜单：容器与图谱侧栏共用 -->

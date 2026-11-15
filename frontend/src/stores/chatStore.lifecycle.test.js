@@ -329,6 +329,24 @@ describe('对话持久化与流式收口（缺陷 A/B/C 回归）', () => {
     expect(assistant.content).toBe('你好')   // 非空 → 刷新不丢正文
   })
 
+  it('思考逐片下发 → 拼回一块（否则折叠面板里一行一个碎片）', async () => {
+    sendMessageStream.mockImplementation((_msgs, cbs) => {
+      // 后端 loop 的 on_reasoning 会按 chunk 推多帧 thinking（2026-11-15）
+      cbs.onThinking('先看用户问的')
+      cbs.onThinking('是二重积分，')
+      cbs.onThinking('需要先画区域。')
+      cbs.onAgentDone({ rounds: 1 })
+      return { abort: vi.fn() }
+    })
+    const store = useChatStore()
+
+    await store.send('这题怎么做')
+
+    const conv = store.conversations.find(c => c.id === store.currentId)
+    const assistant = conv.messages.find(m => m.role === 'assistant')
+    expect(assistant.thinking).toEqual(['先看用户问的是二重积分，需要先画区域。'])
+  })
+
   it('C-4：adoptRemote 识别 snake_case 的 updated_at（远程较新时覆盖本地）', async () => {
     vi.useFakeTimers()
     localStorage.setItem(CONV_KEY, JSON.stringify([
@@ -592,6 +610,126 @@ describe('建图结果由 graph_updated 通知收口（不靠 HTTP 响应）', (
     await new Promise(r => setTimeout(r, 0))   // 让可能的异步链走完（真定时器）
 
     expect(countGets('/api/v1/knowledge/stats')).toBe(before)
+  })
+})
+
+describe('刷新后恢复「生成中」（TODO §11.3/§11.4-B）', () => {
+  // 背景：建图已后台化（后端 `runtime.spawn`），刷新**不再取消**它。
+  // 但前端 `graphGenerating` 是纯内存 ref —— 刷新后归零，按钮显示"一键生成图谱"，
+  // 用户再点一次就撞 409「上一次建图尚未完成」，且不知道什么时候能好。
+  // 故 init 时问一次后端 GET /kb/graph/status，把"还在跑"接回来。
+
+  async function bootStore() {
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+    await store.init()
+    return store
+  }
+
+  /** 让 status 端点返回指定 payload（其余 GET 走默认空对象）。 */
+  function mockStatus(payload) {
+    apiClient.get.mockImplementation((url) => {
+      if (url === '/api/v1/kb/graph/status') return Promise.resolve({ data: payload })
+      return Promise.resolve({ data: {} })
+    })
+  }
+
+  it('后端仍在建图 → 恢复学科名，按钮继续转（避免再点一次撞 409）', async () => {
+    mockStatus({ building: true, subject: '数据结构', progress: { total: 10, filled: 4, percent: 40 } })
+
+    const store = await bootStore()
+
+    expect(store.graphGenerating).toBe('数据结构')
+  })
+
+  it('后端已建完 → 保持空闲，不误显示"生成中"', async () => {
+    mockStatus({ building: false, subject: '', progress: null })
+
+    const store = await bootStore()
+
+    expect(store.graphGenerating).toBe('')
+  })
+
+  it('status 查询失败 → 静默降级（不能把 init 整个挂掉）', async () => {
+    apiClient.get.mockImplementation((url) => {
+      if (url === '/api/v1/kb/graph/status') return Promise.reject(new Error('network'))
+      return Promise.resolve({ data: {} })
+    })
+
+    const store = await bootStore()
+
+    expect(store.graphGenerating).toBe('')
+    expect(store.knowledgeNodes).toEqual([])   // init 的其余部分照常跑完
+  })
+
+  it('学科名缺失（老数据 / 刚占位）→ 仍算生成中，只是不带名字', async () => {
+    mockStatus({ building: true, subject: '', progress: null })
+
+    const store = await bootStore()
+
+    // 不能是「生成中」：KbPanel 的按钮文案是 `生成中（${graphGenerating}）`，
+    // 套上去会变成"生成中（生成中）"。
+    expect(store.graphGenerating).toBe('上次任务')
+  })
+})
+
+describe('建图进度轮询（TODO §11.4-B 剩余项：进度条）', () => {
+  // 背景：`GET /kb/graph/status` 一直下发 progress{total,filled,percent}，
+  // 但前端只在 init 问一次 —— 那只是个快照，建图是分钟级任务，用户要看到"还在动"。
+  // 轮询**只更新进度数字**，完成判定仍以 graph_updated 通知为准（不越权改按钮状态）。
+
+  async function bootStore() {
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+    await store.init()
+    return store
+  }
+
+  function mockStatus(payload) {
+    apiClient.get.mockImplementation((url) => {
+      if (url === '/api/v1/kb/graph/status') return Promise.resolve({ data: payload })
+      return Promise.resolve({ data: {} })
+    })
+  }
+
+  it('建图进行中 → 恢复时就有进度，且后续轮询会刷新它', async () => {
+    vi.useFakeTimers()
+    mockStatus({ building: true, subject: '数据结构', progress: { total: 10, filled: 4, percent: 40 } })
+    const store = await bootStore()
+
+    expect(store.graphBuildProgress).toEqual({ total: 10, filled: 4, percent: 40 })
+
+    // 后端继续推进 → 下一拍（3s）刷新
+    mockStatus({ building: true, subject: '数据结构', progress: { total: 10, filled: 7, percent: 70 } })
+    await vi.advanceTimersByTimeAsync(3000)
+
+    expect(store.graphBuildProgress).toEqual({ total: 10, filled: 7, percent: 70 })
+    store.dispose()
+  })
+
+  it('轮询发现建完 → 停表并清空进度，但不擅自清「生成中」', async () => {
+    vi.useFakeTimers()
+    mockStatus({ building: true, subject: '数据结构', progress: { total: 10, filled: 4, percent: 40 } })
+    const store = await bootStore()
+
+    mockStatus({ building: false, subject: '', progress: null })
+    await vi.advanceTimersByTimeAsync(3000)
+
+    expect(store.graphBuildProgress).toBeNull()
+    // 按钮状态归 graph_updated 通知收口：轮询只负责进度，不抢这个职责
+    expect(store.graphGenerating).toBe('数据结构')
+    store.dispose()
+  })
+
+  it('dispose() 停掉轮询（不残留定时器）', async () => {
+    vi.useFakeTimers()
+    mockStatus({ building: true, subject: '数据结构', progress: { total: 3, filled: 1, percent: 33 } })
+    const store = await bootStore()
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+
+    store.dispose()
+
+    expect(vi.getTimerCount()).toBe(0)
   })
 })
 

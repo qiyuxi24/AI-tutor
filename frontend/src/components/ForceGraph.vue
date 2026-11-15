@@ -6,7 +6,7 @@
  * 本组件只负责：
  *   1. 把 store 的可见图与高亮态喂给内核；
  *   2. 右键菜单 → 编辑弹窗 / 展开合并 / 建边删边 的交互编排；
- *   3. 覆盖层：加载 / 错误 / 空态、缩放控件、图例 + 学习任务栏入口、更新提示。
+ *   3. 覆盖层：加载 / 错误 / 空态、缩放控件、更新提示（掌握度图例在左侧栏底部）。
  *
  * 设计风格：Obsidian 极简 —— 纯色节点、细线边、无光晕/渐变/装饰。
  *
@@ -314,7 +314,7 @@ defineExpose({ focusNode })
     <!-- 加载状态 -->
     <div v-if="loading && props.nodes.length === 0" class="loading-overlay">
       <div class="spinner"></div>
-      <p>图谱加载中...</p>
+      <p>图谱加载中…</p>
     </div>
 
     <!-- 错误状态 -->
@@ -332,8 +332,8 @@ defineExpose({ focusNode })
           <circle cx="12" cy="12" r="3.5" />
         </svg>
       </div>
-      <p>知识图谱暂无内容</p>
-      <p class="empty-hint">右键空白区域创建第一个节点</p>
+      <p>该学科还没有知识点</p>
+      <p class="empty-hint">右键空白处新建，或让 AI 从资料建图</p>
     </div>
 
     <!-- 缩放控制 -->
@@ -361,14 +361,8 @@ defineExpose({ focusNode })
       </button>
     </div>
 
-    <!-- 掌握度图例（左下角）。「学习路径」开关已上收到图谱页左侧「学科导航」栏，
-         三种布局下都有入口，不再只挂在力导向视图里。 -->
-    <div v-if="props.nodes.length > 0" class="graph-legend">
-      <span class="legend-item"><span class="legend-dot dot-unstarted"></span>未开始</span>
-      <span class="legend-item"><span class="legend-dot dot-weak"></span>薄弱</span>
-      <span class="legend-item"><span class="legend-dot dot-learning"></span>学习中</span>
-      <span class="legend-item"><span class="legend-dot dot-mastered"></span>已掌握</span>
-    </div>
+    <!-- 掌握度图例已挪到图谱页左侧栏底部（HomeView .graph-nav-legend）：三种布局共用、
+         不再压在画布左下角与侧栏重叠。 -->
 
     <!-- 图谱更新提示 -->
     <transition name="fade">
@@ -562,28 +556,6 @@ defineExpose({ focusNode })
 .zoom-btn:hover { background: var(--color-bg-surface); color: var(--color-text-primary); border-color: var(--color-border); }
 .zoom-reset { margin-top: 4px; border-top: 1px solid var(--color-border-subtle); padding-top: 8px; }
 .zoom-level { font-size: 11px; color: var(--color-text-muted); user-select: none; padding: 2px 0; }
-
-/* ================================================================
-   科技树掌握度图例（左下角）；「学习路径」开关在图谱页左侧导航栏
-   ================================================================ */
-.graph-legend {
-  position: absolute; bottom: 16px; left: 16px;
-  display: flex; align-items: center; gap: 10px;
-  padding: 6px 12px;
-  background: var(--color-bg-primary);
-  border: 1px solid var(--color-border-subtle);
-  border-radius: 6px;
-  font-size: var(--font-size-xs);
-  color: var(--color-text-secondary);
-  z-index: 20;
-  user-select: none;
-}
-.legend-item { display: flex; align-items: center; gap: 5px; }
-.legend-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-.dot-unstarted { background: var(--color-graph-node); }
-.dot-weak { background: var(--color-red); }
-.dot-learning { background: var(--color-yellow); }
-.dot-mastered { background: var(--color-green); }
 
 /* 薄弱点脉冲环：推荐节点扩散动画 */
 .node-pulse { transform-origin: center; transform-box: fill-box; animation: nodePulse 2.2s ease-out infinite; }

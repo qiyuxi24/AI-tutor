@@ -45,12 +45,20 @@ import KbPanel from '../components/KbPanel.vue'
 import QuizView from './QuizView.vue'
 import KbView from './KbView.vue'
 import LectureImportView from './LectureImportView.vue'
+import LectureDetailView from './LectureDetailView.vue'
 import SettingsView from './SettingsView.vue'
 import DashboardView from './DashboardView.vue'
 
 const store = useChatStore()
 const authStore = useAuthStore()
 const viewMode = ref('chat')
+
+/**
+ * 活动栏高亮用哪个 id：课时页是「视频导入」的下钻子页，不是一级页面
+ * （它没有自己的导航项）。不做这层映射的话，进课时页时左栏会**一个都不亮**，
+ * 看起来像"没选中任何页面"。
+ */
+const activityView = computed(() => (viewMode.value === 'lecture-detail' ? 'lecture' : viewMode.value))
 
 // ─── 图谱布局（力导向 / 思维导图 / 大括号）───
 // 真值源 = utils/graphLayout.js 的模块级单例，**唯一切换入口在设置页「知识图谱 · 布局」**。
@@ -67,8 +75,26 @@ const graphNavWidth = ref(240)
 const kbCollapsed = ref(false)
 const kbWidth = ref(320)
 
-// 学习任务栏宽度：必须与下方 .graph-path-board 的 width 一致（画布缩放控件按它让位）
-const PATH_BOARD_WIDTH = 360
+// ─── 左侧导航的两个 tab（学科分类 / 学习路径）───
+// 同一块位置二选一显示：学习路径原本从右侧弹出、与知识库栏抢同一条右边缘，
+// 现在收进左栏，右侧那一条边只留给知识库。
+// 语义上是"看关系" vs "看顺序"，同一批知识点的两种读法，所以放同一个容器里切换最自然。
+const graphNavTab = ref('subject')   // 'subject' | 'path'
+
+// 学习路径并入左侧导航后，右侧只剩知识库一条边 —— 画布让位只由它决定。
+const rightReserve = computed(() => (kbCollapsed.value ? 0 : kbWidth.value))
+
+/**
+ * 学习路径数据只在切到「学习路径」tab 时拉；开着的时候切学科要跟着重算
+ * （否则表里是上一个学科的知识点，和画布对不上）。
+ * 注：曾多监听一个 `store.currentBoard`，但 store 里没这个状态（前端无板块选择器），
+ * 恒为 undefined 且会让 fetchPathBoard 内部报错 —— 2026-09-29 一并清掉。
+ */
+watch(
+  () => [graphNavTab.value, store.currentSubject],
+  ([tab]) => { if (tab === 'path') store.fetchPathBoard() },
+  { immediate: true }
+)
 
 // ─── 开发态：后端代码改动 → 自动局部刷新 ───
 // 后端 uvicorn --reload 重启会掐断 SSE（见 chatStore.connectSSE），重连成功即"已重载"；
@@ -81,7 +107,7 @@ function handleBackendReloaded() {
   viewEpoch.value += 1
   // 图谱 / 学科列表 / 统计在 store 里，不走子视图重挂，得单独重拉
   store.refreshGraph()
-  notifyInfo('后端已重载，页面数据已同步')
+  notifyInfo('后端已重载')
   console.info('[dev] 检测到后端重载，已局部刷新当前视图')
 }
 
@@ -91,57 +117,18 @@ const graphSearchRef = ref(null)
 const forceGraphRef = ref(null)
 const onboardingRef = ref(null)
 
-// ─── 右侧「学习任务栏」───
-// 路径不画在图上（图上一淡出就丢上下文），改成右侧弹出的分层看板。
-const showPathBoard = ref(false)
-
-/**
- * 任务栏与知识库栏争同一条右边缘 → 开任务栏时收起知识库（反之展开知识库时
- * 关任务栏，见下方 watch）。两边都能搌开、又都不遮对方，比堆叠更好预测。
- */
-function togglePathBoard() {
-  showPathBoard.value = !showPathBoard.value
-  if (showPathBoard.value) kbCollapsed.value = true
-}
-
-// 用户手动展开知识库 → 让位（否则两张卡片在同一位置重叠）
-watch(kbCollapsed, (collapsed) => {
-  if (!collapsed) showPathBoard.value = false
-})
-
-/**
- * 画布要向右让出多少：知识库栏（或任务栏）占用的那一条。
- * 两边互斥，所以取当前实际占位的那一个；都收起则为 0。
- */
-const rightReserve = computed(() => {
-  if (!kbCollapsed.value) return kbWidth.value
-  return showPathBoard.value ? PATH_BOARD_WIDTH : 0
-})
-
-/**
- * 任务栏数据只在面板打开时拉、且打开着的时候切学科要跟着重算
- * （否则表里是上一个学科的知识点，和画布对不上）。
- * 注：曾多监听一个 `store.currentBoard`，但 store 里没这个状态（前端无板块选择器），
- * 恒为 undefined 且会让 fetchPathBoard 内部报错 —— 2026-09-29 一并清掉。
- */
-watch(
-  () => [showPathBoard.value, store.currentSubject],
-  ([open]) => { if (open) store.fetchPathBoard() },
-  { immediate: true }
-)
-
-/** 任务栏「在图谱中定位」：把画布视角移到该节点（引擎自带平滑聚焦） */
+/** 学习路径「在图谱中定位」：把画布视角移到该节点（引擎自带平滑聚焦） */
 function handlePathBoardFocus(nodeId) {
   forceGraphRef.value?.focusNode(nodeId)
 }
 
-/** 任务栏「修改掌握度」：复用节点详情弹窗（掌握度滑块在那儿，不做第二套入口） */
+/** 学习路径「详情」：复用节点详情弹窗，不做第二套入口 */
 async function handlePathBoardEdit(nodeId) {
   await handleNodeDblClick(nodeId)
 }
 
 /**
- * 「去学习」（节点详情 / 任务栏都走这里）：切到对话视图，以该知识点为教学内容开一轮学习。
+ * 「去学习」（节点详情 / 学习路径都走这里）：切到对话视图，以该知识点为教学内容开一轮学习。
  *
  * 顺序要求：**先切视图再发消息** —— 消息会立刻渲染在当前对话里，
  * 若还在图谱页，学生只会看到"消息莫名跑到别处去了"。
@@ -154,17 +141,44 @@ function handleGoLearn(nodeId) {
   store.startLearning(nodeId, name)
 }
 
+// ─── 视频课时页（导入页「看讲义」/ 节点详情「视频出处」进来）───
+// 课时页是从导入页/节点详情下钻的**子页面**，不占左栏导航项：
+// 左栏的 'lecture' 仍指向导入页，返回时回那里 —— 用户的心智模型是"我进去看了下细节"，
+// 而不是"我换了个一级页面"。
+const lectureDocId = ref(0)
+const lectureTitle = ref('')
+const lectureAt = ref(null)      // 落点（秒）：来自「视频出处」的 locator；null = 从头开始
+
+/**
+ * 打开某节课的课时页。
+ * @param {number} docId KB 文件节点 id（接口的 {doc_id}）
+ * @param {string} [title] 加载期间先显示的标题
+ * @param {number|null} [at] 落到第几秒（缺省 = 第一段）
+ */
+function openLecture(docId, title = '', at = null) {
+  if (!docId) return
+  lectureDocId.value = Number(docId) || 0
+  lectureTitle.value = title || ''
+  lectureAt.value = Number.isFinite(at) ? at : null
+  viewMode.value = 'lecture-detail'
+}
+
 // ─── 节点详情弹窗 ───
 const nodeDetailModal = ref(null)
 const nodeDetailVisible = ref(false)
 const nodeDetailLoading = ref(false)
 
 // ─── 节点详情 → 出题页跳转 ───
-// quizTarget = { nodeName, questionId }；questionId 为空表示只按节点名预填主题
+// quizTarget = { nodeName, graphNodeId, questionId }
+//   graphNodeId：图谱节点 id —— 出题时带给后端，题目入库的 knowledge_point 记成它，
+//                判分才能回写这个节点的掌握度（否则判完分回图谱颜色不变）。
+//   questionId：为空表示只按节点名预填主题。
 const quizTarget = ref(null)
 // 目标变化时重建 QuizView（v-if 在外层视图切换时已重挂，此 key 兜住"已在出题页再跳题"）
 const quizViewKey = computed(() =>
-  quizTarget.value ? `${quizTarget.value.nodeName}#${quizTarget.value.questionId ?? ''}` : 'quiz'
+  quizTarget.value
+    ? `${quizTarget.value.nodeName}#${quizTarget.value.graphNodeId ?? ''}#${quizTarget.value.questionId ?? ''}`
+    : 'quiz'
 )
 
 onMounted(async () => {
@@ -249,10 +263,11 @@ function closeNodeDetail() {
 /**
  * NodeDetail 侧边栏「试题」/「去出题」→ 跳到出题页。
  * 带 questionId 则聚焦该题；不带则只按节点名预填出题主题。
+ * nodeId（图谱节点 id）必须透传 —— 出题与判分靠它把结果回写到这个节点的掌握度。
  * 需先关闭详情弹窗，否则全屏遮罩挡住出题页。
  */
-function handleOpenQuiz({ nodeName, questionId = null }) {
-  quizTarget.value = { nodeName, questionId }
+function handleOpenQuiz({ nodeId = '', nodeName, questionId = null }) {
+  quizTarget.value = { nodeName, graphNodeId: nodeId, questionId }
   nodeDetailVisible.value = false
   viewMode.value = 'quiz'
 }
@@ -280,8 +295,8 @@ async function refreshGraph() {
       nodeDetailModal.value = await store.fetchNodeDetail(nodeDetailModal.value.id)
     } catch { /* ignore */ }
   }
-  // 任务栏打开时一并重算：改完掌握度要立刻看到解锁状态与追溯结果变化
-  if (showPathBoard.value) store.fetchPathBoard()
+  // 学习路径 tab 开着时一并重算：改完掌握度要立刻看到建议顺序与追溯结果变化
+  if (graphNavTab.value === 'path') store.fetchPathBoard()
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -353,7 +368,7 @@ async function handleShowInGraph({ docId, docName }) {
     const { data } = await fetchSourceNodes(docId)
     const nodes = data?.nodes || []
     if (!nodes.length) {
-      notifyInfo(`「${docName}」还没有关联的知识点（只有用它建过图才会有）`)
+      notifyInfo(`「${docName}」没有关联的知识点`)
       return
     }
 
@@ -373,8 +388,8 @@ async function handleShowInGraph({ docId, docName }) {
     }
     forceGraphRef.value?.focusNode(ids[0])
     notifyInfo(ids.length < nodes.length
-      ? `「${docName}」涉及 ${nodes.length} 个知识点，已切到「${subject}」并高亮其中 ${ids.length} 个`
-      : `已高亮「${docName}」关联的 ${ids.length} 个知识点`)
+      ? `「${docName}」涉及 ${nodes.length} 个知识点，已切到「${subject}」并高亮 ${ids.length} 个`
+      : `已高亮 ${ids.length} 个知识点`)
   } catch (e) {
     notifyError(formatError(e, { action: '在图谱中显示' }))
   }
@@ -496,7 +511,7 @@ const slideTransition = {
   <div class="app-container">
     <!-- ═══ 活动栏 + 内容区域（无顶部栏，全沉浸） ═══ -->
     <ActivityBar
-      :active-view="viewMode"
+      :active-view="activityView"
       @select="handleActivitySelect"
       @open-profile="showUserProfile = true"
       @switch-account="openAccountSwitch"
@@ -532,8 +547,8 @@ const slideTransition = {
           data-view="graph"
           :style="{ '--kb-w': rightReserve + 'px' }"
         >
-          <!-- 左侧导航：搜索 + 学科列表，一次只渲染一个学科（避免图谱无限生长）。
-               整张卡片的外观/折叠/拖宽/拖高都由 SidePanel 统一提供，收起时搜索栏一起收起。 -->
+          <!-- 左侧导航：搜索 + （学科列表 / 学习路径）二选一。
+               外观/折叠/拖宽都由 SidePanel 统一提供（贴左缘、满高），收起时整个导航一起收起。 -->
           <SidePanel
             class="graph-nav"
             side="left"
@@ -543,7 +558,6 @@ const slideTransition = {
             storage-key="graphNav"
             v-model:width="graphNavWidth"
             v-model:collapsed="graphNavCollapsed"
-            resizable-height
           >
             <div class="graph-nav-search">
               <GraphSearch
@@ -553,24 +567,70 @@ const slideTransition = {
               />
             </div>
 
-            <!-- 「学习路径」入口收进左侧导航（原来浮在画布底部，既占地方又难看）。
-                 点开 = 右侧弹出学习任务栏（与知识库栏互斥，见 togglePathBoard）。 -->
-            <button
-              class="graph-nav-path"
-              :class="{ active: showPathBoard }"
-              :title="showPathBoard ? '收起学习任务栏' : '打开学习任务栏（分层列出知识点与前置）'"
-              @click="togglePathBoard"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="6" cy="19" r="3" />
-                <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
-                <circle cx="18" cy="5" r="3" />
-              </svg>
-              <span class="graph-nav-path-label">学习路径</span>
-            </button>
+            <!-- 两个 tab：同一块位置二选一。
+                 「学科分类」= 看关系（有哪些学科、推进到哪）；「学习路径」= 看顺序（先学什么）。
+                 学习路径原先是右侧浮动面板（与知识库栏抢同一条右边缘），现已并入此处。 -->
+            <div class="graph-nav-tabs" role="tablist">
+              <button
+                class="graph-nav-tab"
+                role="tab"
+                :class="{ active: graphNavTab === 'subject' }"
+                :aria-selected="graphNavTab === 'subject'"
+                title="按学科浏览知识图谱"
+                @click="graphNavTab = 'subject'"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" />
+                  <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" />
+                  <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />
+                </svg>
+                <span>学科分类</span>
+              </button>
+              <button
+                class="graph-nav-tab"
+                role="tab"
+                :class="{ active: graphNavTab === 'path' }"
+                :aria-selected="graphNavTab === 'path'"
+                title="按先修关系分层，看该先学什么"
+                @click="graphNavTab = 'path'"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="6" cy="19" r="3" />
+                  <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+                  <circle cx="18" cy="5" r="3" />
+                </svg>
+                <span>学习路径</span>
+              </button>
+            </div>
 
-            <GraphSubjectBar class="graph-panel" />
+            <GraphSubjectBar v-if="graphNavTab === 'subject'" class="graph-panel" />
+
+            <!-- 学习路径：与「学科分类」共用这块位置，所以学科跟着当前选中走
+                 （切换入口在「学科分类」tab，本面板只读不切） -->
+            <div v-else class="graph-nav-path-body">
+              <PathBoard
+                :items="store.pathBoard.items"
+                :recommended="store.pathBoard.recommended"
+                :loading="store.pathBoardLoading"
+                :subject="store.pathBoard.subject || ''"
+                :board="store.pathBoard.board || ''"
+                @focus-node="handlePathBoardFocus"
+                @edit-node="handlePathBoardEdit"
+                @learn-node="handleGoLearn"
+                @switch-tab="graphNavTab = 'subject'"
+              />
+            </div>
+
+            <!-- 掌握度四色图例：从画布左下角的浮动框挪到侧栏底部常驻。
+                原来那个框正好被贴左满高的侧栏盖住（重叠）；放这里三种布局都看得到、也不压画布。 -->
+            <div v-if="store.displayNodes.length" class="graph-nav-legend">
+              <span class="gnl-item"><i class="gnl-dot d-unstarted"></i>未开始</span>
+              <span class="gnl-item"><i class="gnl-dot d-weak"></i>薄弱</span>
+              <span class="gnl-item"><i class="gnl-dot d-learning"></i>学习中</span>
+              <span class="gnl-item"><i class="gnl-dot d-mastered"></i>已掌握</span>
+            </div>
           </SidePanel>
           <!-- 三种画法共用同一份 store.displayNodes/Edges：只换渲染层，不换数据（方案 §5.1）。
                ref 三处同名没问题 —— 同一时刻只挂载一个，forceGraphRef 永远指向当前那个，
@@ -613,7 +673,7 @@ const slideTransition = {
           <!-- 「在图谱中显示」时的来源高亮提示条（可手动取消） -->
           <div v-if="sourceHighlight" class="source-hl-chip">
             <span class="source-hl-text">
-              来源高亮：{{ sourceHighlight.docName }}
+              {{ sourceHighlight.docName }}
               · {{ sourceHighlight.nodeIds.length }} 个知识点
             </span>
             <button type="button" class="source-hl-close" title="取消高亮"
@@ -625,7 +685,7 @@ const slideTransition = {
             </button>
           </div>
 
-          <!-- 右侧知识库栏（统一 SidePanel）：宽度经 --kb-w 驱动画布缩放控件让位 -->
+          <!-- 右侧知识库栏（统一 SidePanel，贴右缘满高）：宽度经 --kb-w 驱动画布缩放控件让位 -->
           <SidePanel
             class="graph-kb"
             side="right"
@@ -635,38 +695,21 @@ const slideTransition = {
             storage-key="kb"
             v-model:width="kbWidth"
             v-model:collapsed="kbCollapsed"
-            resizable-height
           >
             <KbPanel :key="viewEpoch" @show-in-graph="handleShowInGraph" />
           </SidePanel>
-
-          <!-- 右侧：学习任务栏（分层看板；点图例里的「学习路径」开关）
-               与知识库栏互斥（见 togglePathBoard） -->
-          <Transition name="view-fade">
-            <PathBoard
-              v-if="showPathBoard"
-              class="graph-path-board"
-              :items="store.pathBoard.items"
-              :recommended="store.pathBoard.recommended"
-              :stats="store.pathBoard.stats"
-              :loading="store.pathBoardLoading"
-              :subject="store.pathBoard.subject || ''"
-              :board="store.pathBoard.board || ''"
-              @close="showPathBoard = false"
-              @focus-node="handlePathBoardFocus"
-              @edit-node="handlePathBoardEdit"
-              @learn-node="handleGoLearn"
-            />
-          </Transition>
         </div>
       </Transition>
 
-      <!-- 知识库独立页：与图谱页右侧栏挂同一个 KbPanel（两处功能重复是有意的，
-           侧栏窄、只够边看图边挑资料；集中管理走这个宽页） -->
+      <!-- 知识库独立页：左栏文件树（KbPanel）+ 右侧常驻阅读/编辑区（DocWorkspace）。
+           与图谱页右侧栏共用同一份 KbPanel，但两处职责不同：侧栏窄、只够边看图边挑资料
+           （单击选中 / 双击弹只读预览），独立页是集中阅读与修改（单击即送正文到右侧，
+           .md/.markdown/.txt 可直接编辑保存）。DocWorkspace 与节点详情弹窗共用同一个组件。 -->
       <KbView
         v-if="viewMode === 'kb'"
         :key="viewEpoch"
         @show-in-graph="handleShowInGraph"
+        @open-lecture="(e) => openLecture(e.docId, e.title)"
       />
 
       <!-- 视频课程导入（链接 → 讲义 → 知识库；依赖探测在组件 setup 里，故挂 viewEpoch） -->
@@ -674,6 +717,19 @@ const slideTransition = {
         v-if="viewMode === 'lecture'"
         :key="viewEpoch"
         @go-kb="handleGoKb"
+        @open-lecture="(e) => openLecture(e.docId, e.title)"
+      />
+
+      <!-- 视频课时页：从导入页「看讲义」或节点详情「视频出处」下钻进来。
+           key 里带 docId —— 换一集必须整体重挂（标题/时间轴/选中项都换），
+           再带上 viewEpoch 才能享受开发态后端重载后的自动刷新。 -->
+      <LectureDetailView
+        v-if="viewMode === 'lecture-detail'"
+        :key="'lecture-' + lectureDocId + ':' + viewEpoch"
+        :doc-id="lectureDocId"
+        :title="lectureTitle"
+        :at="lectureAt"
+        @back="viewMode = 'lecture'"
       />
 
       <!-- 出题页（可从节点详情侧边栏「试题」跳入并聚焦某题；无跳转时行为与原来一致） -->
@@ -681,7 +737,9 @@ const slideTransition = {
         v-if="viewMode === 'quiz'"
         :key="quizViewKey + ':' + viewEpoch"
         :initial-subject="quizTarget?.nodeName || ''"
+        :graph-node-id="quizTarget?.graphNodeId || ''"
         :focus-question-id="quizTarget?.questionId || null"
+        @mastery-changed="refreshGraph"
       />
 
       <!-- 学习进度仪表盘 -->
@@ -712,6 +770,7 @@ const slideTransition = {
       @navigate-to-node="handleNodeDetailNavigate"
       @open-quiz="handleOpenQuiz"
       @go-learn="handleGoLearn"
+      @open-lecture="(e) => { nodeDetailVisible = false; openLecture(e.docId, '', e.at) }"
     />
 
     <!-- 用户画像面板 -->
@@ -759,10 +818,7 @@ const slideTransition = {
   left: 0;
 }
 
-/* 对话历史侧栏：统一 SidePanel，外边距即悬浮卡片的留白 */
-.conv-panel {
-  margin: 12px 0 12px 12px;
-}
+/* 对话历史侧栏：统一 SidePanel，贴左缘满高，不留外边距 */
 
 /* 图谱布局 */
 .graph-layout {
@@ -780,72 +836,104 @@ const slideTransition = {
   border-bottom: 1px solid var(--color-border);
 }
 
-/* ── 侧栏「学习路径」入口（原来浮在画布底部，收进导航更整洁） ── */
-.graph-nav-path {
+/* ── 侧栏顶部两个 tab（学科分类 / 学习路径）：同一块位置二选一 ──
+   与搜索栏一样常驻不缩，下面的内容区自己滚；选中态沿用条目那套「强调色底 + 文字变深」。 */
+.graph-nav-tabs {
   flex-shrink: 0;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 9px 10px;
-  border: none;
   border-bottom: 1px solid var(--color-border);
+  padding: 6px 8px;
+  gap: 4px;
+}
+.graph-nav-tab {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  /* 内边距压到刚够：侧栏能拖到 180px，两个 4 字标签 + 图标要挤得下（放不下才省略号） */
+  padding: 6px 6px;
+  border: none;
+  border-radius: 7px;
   background: transparent;
   color: var(--color-text-secondary);
   font-family: inherit;
-  font-size: 13px;
-  text-align: left;
+  font-size: var(--font-size-xs);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
-.graph-nav-path:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
-.graph-nav-path.active { color: var(--color-accent); background: var(--color-accent-light); }
-.graph-nav-path svg { flex-shrink: 0; opacity: 0.6; }
-.graph-nav-path.active svg { opacity: 1; }
-.graph-nav-path-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.graph-nav-tab span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.graph-nav-tab:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
+.graph-nav-tab.active {
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+  font-weight: 600;
+}
+.graph-nav-tab svg { flex-shrink: 0; opacity: 0.65; }
+.graph-nav-tab.active svg { opacity: 1; }
 
-/* ── 图谱左侧两级导航（学科 + 知识板块）／右侧知识库 ──
-   两者都是浮在画布上的卡片：外观与交互（抽屉把手、拖宽热区、折叠动画）统一由
-   SidePanel 提供，这里只给各自的定位；卡片内的分区与滚动交给子面板自己。
+/* 学习路径面板：吃掉 tab 以下的全部高度，内部自己滚（PathBoard 是 flex 列，不自带卡片外观） */
+.graph-nav-path-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
 
-   高度：**随内容自适应，最多到画布四边各留 12px**（不是无条件撑满）——
-   内容少时卡片就是实际需要的高度，不高高地空出一条；内容多到封顶后由内部列表滚动。 */
+/* 掌握度图例：侧栏底部常驻条（原是画布左下角浮动框，被侧栏盖住 → 重叠）。
+   flex-shrink:0 让它钉在 .sp-content 最下，上方可滚内容吃掉剩余高度。 */
+.graph-nav-legend {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--color-border);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  user-select: none;
+}
+.gnl-item { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.gnl-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.d-unstarted { background: var(--color-graph-node); }
+.d-weak { background: var(--color-red); }
+.d-learning { background: var(--color-yellow); }
+.d-mastered { background: var(--color-green); }
+
+/* ── 图谱左侧导航／右侧知识库 ──
+   外观与交互（折叠按钮、拖宽热区）统一由 SidePanel 提供：**贴画布边缘、满高**，
+   这里只给定位；卡片内的分区与滚动交给子面板自己。 */
 .graph-nav {
   position: absolute;
-  top: 12px;
-  left: 12px;
-  max-height: calc(100% - 24px);
+  top: 0;
+  bottom: 0;
+  left: 0;
   z-index: 20;
 }
 
-/* ── 图谱右侧「学习任务栏」（分层看板）──
-   与 .graph-kb 同一条右边缘、同一套定位口径（top/right 12px + 最多留 12px 边界），
-   但两者**互斥**（见 togglePathBoard）：同时开会在同一位置重叠。 */
-.graph-path-board {
+.graph-kb {
   position: absolute;
-  top: 12px;
-  right: 12px;
-  max-height: calc(100% - 24px);
-  width: 360px;
-  z-index: 21;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  z-index: 20;
 }
 
-/* 左栏卡片里有搜索下拉（绝对定位，会超出卡片边界），卡片与内容都要放开裁切；
+/* 左栏里有搜索下拉（绝对定位，会超出面板边界），面板与内容都要放开裁切；
    收起时的隐藏靠 SidePanel 的透明度，不依赖裁切。 */
 .graph-nav :deep(.sp-body),
 .graph-nav :deep(.sp-content) {
   overflow: visible;
 }
 
-.graph-kb {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  max-height: calc(100% - 24px);
-  z-index: 20;
-}
-
-/* 两级面板只负责内部布局，外观统一交给外层卡片。
+/* 两级面板只负责内部布局，外观统一交给外层容器。
    选择器带 .graph-nav 前缀以覆盖子组件根元素自带的 border/圆角/宽度。 */
 .graph-nav .graph-panel {
   width: 100%;
@@ -884,7 +972,7 @@ const slideTransition = {
 .source-hl-close:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
 
 /* 画布右下角的缩放控件同样要给右栏让位（它原来贴 right:16px）；
-   rightReserve 把知识库栏与学习任务栏一起算进去（两边互斥）。 */
+   rightReserve 把知识库栏算进去（学习路径已并入左侧导航，右侧只留知识库）。 */
 .graph-layout :deep(.zoom-controls) {
   right: calc(32px + var(--kb-w, 0px));
   transition: right 0.28s cubic-bezier(0.4, 0, 0.2, 1);
@@ -892,5 +980,3 @@ const slideTransition = {
 
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
-.fade-enter-to, .fade-leave-from { opacity: 1; }
-</style>

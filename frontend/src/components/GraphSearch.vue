@@ -21,7 +21,7 @@ import { ref, computed, watch, nextTick } from 'vue'
    ================================================================ */
 const props = defineProps({
   nodes: { type: Array, default: () => [] },
-  placeholder: { type: String, default: '搜索知识点...' },
+  placeholder: { type: String, default: '搜索知识点' },
 })
 
 /* ================================================================

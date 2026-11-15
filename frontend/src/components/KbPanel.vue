@@ -1,23 +1,55 @@
 <template>
   <div class="kb-panel">
-    <!-- 顶部工具栏 -->
+    <!-- 顶部工具栏：看图时变成「返回 + 文件名」。
+         侧栏本来就窄，另起一行放返回键会白白吃掉正文高度，所以复用这一行。 -->
     <div class="kb-toolbar">
-      <div class="kb-title">知识库</div>
-      <div class="kb-actions">
-        <el-tooltip content="新建文件夹" placement="top">
-          <button class="kb-icon-btn" @click="openCreateFolder">
-            <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
-          </button>
-        </el-tooltip>
-        <el-tooltip content="上传文件" placement="top">
-          <label class="kb-icon-btn" :class="{ 'is-busy': uploading }">
-            <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
-            <input ref="fileInputRef" type="file" hidden multiple :accept="acceptTypes" @change="handleUpload">
-          </label>
-        </el-tooltip>
-      </div>
+      <template v-if="inlineFile">
+        <button type="button" class="kb-back-btn" title="返回文件列表（Esc）" @click="closeInlineFile">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+          返回
+        </button>
+        <span class="kb-file-name" :title="inlineFile.name">{{ inlineFile.name }}</span>
+      </template>
+      <template v-else>
+        <div class="kb-title">知识库</div>
+        <div class="kb-actions">
+          <el-tooltip content="新建文件夹" placement="top">
+            <button class="kb-icon-btn" @click="openCreateFolder">
+              <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+            </button>
+          </el-tooltip>
+          <el-tooltip content="上传文件" placement="top">
+            <label class="kb-icon-btn" :class="{ 'is-busy': uploading }">
+              <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
+              <input ref="fileInputRef" type="file" hidden multiple :accept="acceptTypes" @change="handleUpload">
+            </label>
+          </el-tooltip>
+        </div>
+      </template>
     </div>
 
+    <!-- 图谱页：单击 / 双击文件 → **在侧栏内直接展示**，不再弹只读弹窗。
+         独立页（pageMode）不走这里：那边右侧本来就是常驻工作区，本组件只发 open-file。
+         用同一个 DocWorkspace，所以这里看到的样式与阅读体验与独立页、节点详情完全一致；
+         能编辑就顺带能编辑（.md/.markdown/.txt，后端同一套校验）。 -->
+    <div v-if="inlineFile" class="kb-file-view">
+      <DocWorkspace
+        ref="inlineRef"
+        bare
+        :doc="inlineFile"
+        :load-text="loadInlineText"
+        :save-text="saveInlineText"
+        :load-raw="loadInlineRaw"
+      />
+    </div>
+
+    <!-- 列表区用 v-show 而非 v-if：看图时 el-tree 只是隐藏、不被销毁，
+         点「返回」能回到原来的展开/勾选状态（v-if 会把展开的文件夹全部折叠回去）。
+         外层 div 承担原来 template 直接当 flex 子项的职责，所以要补 flex 纵向布局。 -->
+    <div v-show="!inlineFile" class="kb-list-view">
     <!-- 上传进度：串行上传+向量化是分钟级的，必须有常驻提示（ElMessage 3 秒就没了） -->
     <div v-if="uploading" class="kb-uploading">{{ uploadStatus }}</div>
 
@@ -37,8 +69,22 @@
         :disabled="!tree.length || (!!store.graphGenerating && !submitting)"
         @click="handleGenerate"
       >
-        {{ store.graphGenerating ? `生成中（${store.graphGenerating}）...` : '一键生成图谱' }}
+        {{ store.graphGenerating ? `生成中（${store.graphGenerating}）…` : '生成图谱' }}
       </el-button>
+    </div>
+
+    <!-- 建图进度：分钟级后台任务，只有"生成中…"用户不知道还要等多久（TODO §11.4-B）。
+         后端 progress 是**增量补全**口径（已有学科会并轨，百分比不从 0 开始）
+         → 必须同时给 filled/total 绝对数，否则 60% 看着像"快完了"其实才刚开始。 -->
+    <div v-if="store.graphBuildProgress" class="kb-gen-progress">
+      <el-progress
+        :percentage="store.graphBuildProgress.percent || 0"
+        :stroke-width="6"
+        :show-text="false"
+      />
+      <span class="kb-gen-progress-text">
+        {{ store.graphBuildProgress.filled || 0 }} / {{ store.graphBuildProgress.total || 0 }} 个知识点
+      </span>
     </div>
 
     <!-- 目录树：勾选 = 生成来源；条目三点 = 单个文件的操作 -->
@@ -71,22 +117,22 @@
       </el-tree>
     </div>
     <div v-else class="kb-empty">
-      <p>暂无文件，点击右上角上传文件或新建文件夹</p>
-      <p class="kb-empty-sub">支持 PDF / Word / PPT / Markdown / 代码 / 图片OCR 等</p>
+      <p>还没有文件</p>
     </div>
 
-    <!-- 当前上下文范围 -->
-    <div v-if="contextLabel" class="kb-context">
-      <div class="kb-context-label">当前检索范围</div>
-      <div class="kb-context-item">
-        <span>{{ contextLabel }}</span>
-        <button class="kb-clear-btn" @click="clearContext">清除</button>
+    <!-- 当前对话上下文（每对话绑定，读 store.selection） -->
+    <div v-if="selDocs.length" class="kb-context">
+      <div class="kb-context-label">当前对话上下文</div>
+      <div v-for="d in selDocs" :key="d.id" class="kb-context-item">
+        <span>{{ d.name }}{{ d.type === 'folder' && d.fileCount ? `（${d.fileCount} 个文件）` : '' }}</span>
+        <button class="kb-clear-btn" @click="store.toggleSelectionItem('docs', d)">移除</button>
       </div>
     </div>
 
     <!-- 索引统计 -->
     <div v-if="stats.files" class="kb-stats">
       {{ stats.files }} 个文件 · {{ stats.chunks }} 个向量分块
+    </div>
     </div>
 
     <!-- 条目菜单：单个文件 / 文件夹的操作 -->
@@ -100,7 +146,7 @@
                 <path d="M12 5v14" /><path d="M5 12h14" />
               </svg>
             </span>
-            放入对话上下文
+            加入对话上下文
           </div>
           <template v-if="menuNode.type === 'file'">
             <div class="menu-item" @click="close(); emitShowInGraph(menuNode)">
@@ -114,7 +160,7 @@
               </span>
               在图谱中显示
             </div>
-            <div class="menu-item" @click="close(); openPreview(menuNode)">
+            <div class="menu-item" @click="close(); openFromMenu(menuNode)">
               <span class="menu-icon">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                      stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -176,19 +222,6 @@
         <el-button type="primary" :loading="creating" @click="createFolder">创建</el-button>
       </template>
     </el-dialog>
-
-    <!-- 文件预览（只读）：PDF/Word/Excel/图片渲染原件，其余渲染解析正文 -->
-    <KbTextPreviewDialog
-      v-model:visible="previewVisible"
-      :name="preview.name"
-      :file-type="previewExt"
-      :raw-blob="previewBlob"
-      :markdown="preview.markdown"
-      :chars="preview.chars"
-      :total-chars="preview.totalChars"
-      :truncated="preview.truncated"
-      :loading="previewLoading"
-    />
   </div>
 </template>
 
@@ -197,17 +230,26 @@
  * KbPanel.vue — 知识库侧栏（知识图谱页右侧，展开/收起由 HomeView 的容器控制）
  *
  * 职责：
- *   - 目录树：建文件夹 / 上传 / 勾选（生成来源）/ 条目三点菜单（预览 · 在浏览器中打开 · 放入上下文 · 删除）
+ *   - 目录树：建文件夹 / 上传 / 勾选（生成来源）/ 条目三点菜单（预览 · 在浏览器中打开 · 加入对话上下文 · 删除）
  *   - 顶部一键生成：勾选文件或文件夹 → 输入学科名 → 生成该学科知识图谱
- *   - 底部：当前检索范围（写进 chatStore.kbContext，对话据此带 kb_node_ids）
+ *   - 底部：当前对话已引用的资料（读 `chatStore.selection`，**每对话绑定** ——
+ *     本面板只是它的第二个入口，主入口在输入框的引用按钮）
  *
  * 数据流：本组件直接读写 store（与 GraphSubjectBar 同款），
  * 不向父级转发动作——HomeView 只管它的展开与收起。
  *
  * 为什么文件操作收在三点菜单里：侧栏窄，逐个平铺按钮既挤压文件名又易误触，
  * 一个常驻三点按钮足够。
+ *
+ * 看文件正文的两种形态（2026-11-15 起）：
+ *   - **图谱页（默认）**：单击文件即在**本侧栏内**展开阅读/编辑区（`DocWorkspace`，
+ *     与知识库独立页、节点详情同一个组件），点「返回」回到目录树。
+ *     不再弹 `KbTextPreviewDialog` 模态 —— 侧栏本身就有空间，弹窗还会挡住背后的图谱，
+ *     而这页的用途恰恰是"边看图边翻资料"。
+ *   - **知识库独立页（pageMode）**：只发 `open-file` 事件，正文交给右侧常驻工作区。
+ *     （那里右侧的屏比这里宽得多，塞进窄栏反而更差。）
  */
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '../utils/feedback'
 import {
@@ -219,18 +261,28 @@ import {
   getKbNodeText,
   getKbNodeRaw,
   getKbStats,
+  saveKbNodeText,
 } from '../api/kb.js'
-import KbTextPreviewDialog from './KbTextPreviewDialog.vue'
+import DocWorkspace from './DocWorkspace.vue'
 import ContextMenu from './ContextMenu.vue'
 import ItemMoreButton from './ItemMoreButton.vue'
 import { useContextMenu } from '../utils/contextMenu.js'
-import { previewKindOf } from '../utils/filePreview.js'
 import { useChatStore } from '../stores/chatStore.js'
 
 const store = useChatStore()
 
 /* 「在图谱中显示」要切图谱视图并驱动画布高亮 —— 那是 HomeView 的职责，本组件只发意图 */
-const emit = defineEmits(['show-in-graph'])
+const emit = defineEmits(['show-in-graph', 'open-file'])
+
+/**
+ * pageMode：知识库独立页的左栏形态。
+ * 独立页把「读正文」交给右侧常驻工作区（DocWorkspace），本组件退化成纯目录树 ——
+ * 单击文件即发 `open-file`。图谱页（默认）没有第二块屏，所以正文就在本侧栏内展开
+ * （见文件头的「看文件正文的两种形态」）。
+ */
+const props = defineProps({
+  pageMode: { type: Boolean, default: false },
+})
 
 const treeRef = ref(null)
 const fileInputRef = ref(null)
@@ -240,9 +292,10 @@ const showCreateDialog = ref(false)
 const newFolderName = ref('')
 const creating = ref(false)
 
-// 当前放入上下文的范围（单个文件或文件夹）
-const contextNode = ref(null)
-const contextLabel = ref('')
+// 对话上下文选区**直接读 store**（每对话绑定，见 chatStore.selection）。
+// 曾经这里是两个组件内 ref（contextNode/contextLabel）→ 切对话后底部条还显示
+// 上一个对话的范围，与真正发出去的请求不一致。
+const selDocs = computed(() => store.selection?.docs || [])
 
 // 索引统计（文件数 / 向量分块数）
 const stats = ref({ files: 0, chunks: 0 })
@@ -266,12 +319,31 @@ const {
   close: closeMenu,
 } = useContextMenu()
 
-// 文件预览（只读弹窗）：rawBlob 有值 = 渲染原件，否则渲染解析正文
-const previewVisible = ref(false)
-const previewLoading = ref(false)
-const previewExt = ref('')
-const previewBlob = ref(null)
-const preview = ref({ name: '', markdown: '', chars: 0, totalChars: 0, truncated: false })
+/* 侧栏内联阅读/编辑区（图谱页）：非空 = 正在看这个文件，目录树让位给正文。
+   与独立页共用同一个 DocWorkspace，所以三个适配器函数与 KbView 里那三个同义。 */
+const inlineFile = ref(null)
+const inlineRef = ref(null)
+
+/** 读正文：`doc.full` 由工作区在进入编辑时置上（编辑必须拿全文，预览保持默认截断） */
+async function loadInlineText(doc) {
+  const { data } = await getKbNodeText(doc.id, !!doc.full)
+  return {
+    text: data?.markdown || '',
+    totalChars: data?.total_chars ?? 0,
+    truncated: !!data?.truncated,
+    editable: !!data?.editable,
+  }
+}
+
+async function saveInlineText(doc, text) {
+  await saveKbNodeText(doc.id, text)
+}
+
+/** 原件字节（PDF/Word/Excel/图片真预览）；历史文件 404 → 工作区静默回落正文 */
+async function loadInlineRaw(doc) {
+  const { data } = await getKbNodeRaw(doc.id)
+  return data
+}
 
 const treeProps = {
   children: 'children',
@@ -301,11 +373,38 @@ async function loadStats() {
 
 function handleNodeClick(data) {
   selectedNode.value = data
+  // 单击文件就看正文：独立页送到右侧工作区，图谱页在本侧栏内展开（见文件头两种形态）
+  if (data?.type === 'file') openFile(data)
 }
 
-/** 双击文件 = 看正文（与图谱里双击节点看详情的习惯一致）；文件夹双击不做事 */
+/** 双击 = 与单击同一动作（保留双击是因为"双击打开"是通用习惯，不该失效） */
 function handleNodeDblClick(data) {
-  if (data?.type === 'file') openPreview(data)
+  if (data?.type !== 'file') return
+  openFile(data)
+}
+
+/**
+ * 打开一个文件看正文（单击 / 双击 / 菜单「预览」三个入口共用这一条）。
+ *
+ * 已开着同一个文件时直接返回 —— DocWorkspace 的 watch 是按 id 触发的，重复赋值
+ * 会白重读一遍正文；而切到别的文件前必须问一句「脏不脏」（编辑中的修改不能丢）。
+ */
+function openFile(data) {
+  if (!data || data.type !== 'file') return
+  selectedNode.value = data
+  if (props.pageMode) {
+    emit('open-file', data)
+    return
+  }
+  if (inlineFile.value?.id === data.id) return
+  if (inlineFile.value && inlineRef.value?.canLeave?.() === false) return
+  inlineFile.value = data
+}
+
+/** 返回目录树（编辑中有未保存修改时先确认） */
+function closeInlineFile() {
+  if (inlineRef.value?.canLeave?.() === false) return
+  inlineFile.value = null
 }
 
 /**
@@ -318,35 +417,9 @@ function emitShowInGraph(data) {
   emit('show-in-graph', { docId: data.id, docName: data.name })
 }
 
-/**
- * 拉取并弹出文件预览（只读；node_id 来自目录树，天然按用户隔离）。
- *
- * 有原件渲染器的格式（PDF/Word/Excel/图片）拉 `/raw` 出真件，
- * 其余走 `/text` 出解析正文；`data.file_type` 就是 documents.file_type，不用从文件名猜。
- * 历史文件（改动前上传）没存原件 → `/raw` 404，**静默回退**正文预览（有解析文本可看，
- * 弹「原件不存在」的报错对用户毫无帮助）。
- */
-async function openPreview(data) {
-  if (!data || data.type !== 'file') return
-  const ext = data.file_type || ''
-  preview.value = { name: data.name, markdown: '', chars: 0, totalChars: 0, truncated: false }
-  previewExt.value = ext
-  previewBlob.value = null
-  previewVisible.value = true
-
-  if (previewKindOf(ext) !== 'text') {
-    previewLoading.value = true
-    try {
-      const res = await getKbNodeRaw(data.id)
-      previewBlob.value = res.data
-      return
-    } catch {
-      // 落到下面的正文预览
-    } finally {
-      previewLoading.value = false
-    }
-  }
-  await loadPreviewText(data)
+/** 菜单「预览」：与单击同一动作（两个入口一份意图） */
+function openFromMenu(data) {
+  openFile(data)
 }
 
 /**
@@ -374,26 +447,6 @@ async function openInBrowser(data) {
     ElMessage.warning(e.response?.status === 404
       ? '该文件没有原件（历史数据），无法在浏览器中打开'
       : (e.message || '打开失败'))
-  }
-}
-
-async function loadPreviewText(data) {
-  previewLoading.value = true
-  try {
-    const res = await getKbNodeText(data.id)
-    const d = res.data || {}
-    preview.value = {
-      name: d.name || data.name,
-      markdown: d.markdown || '',
-      chars: d.chars || 0,
-      totalChars: d.total_chars || 0,
-      truncated: !!d.truncated,
-    }
-  } catch (e) {
-    previewVisible.value = false
-    ElMessage.warning(e.response?.data?.detail || e.message || '读取正文失败')
-  } finally {
-    previewLoading.value = false
   }
 }
 
@@ -492,7 +545,7 @@ async function handleGenerate() {
   }
 }
 
-/** 把节点设为对话检索范围（写进 store，对话请求据此带 kb_node_ids） */
+/** 把节点设为对话上下文（写进 store 的**当前对话选区**，对话请求据此带上它） */
 async function setContext(data) {
   if (!data) return
   try {
@@ -502,24 +555,18 @@ async function setContext(data) {
       ElMessage.warning('该节点下没有文件')
       return
     }
-    contextNode.value = data
-    contextLabel.value = data.type === 'folder'
-      ? `${data.name}/ (${fileCount} 个文件)`
-      : data.name
-    store.setKbContext({
-      nodeIds: res.data.node_ids || [],   // 实际检索的文件节点 ID 列表
+    // 选区是"每对话绑定"的（见 chatStore.selection）：直接塞进当前对话，
+    // 切对话即自动跟着走 —— 旧实现写的是一个全局 ref，切对话既不清空也不恢复。
+    store.toggleSelectionItem('docs', {
+      id: data.id,
       name: data.name,
+      type: data.type,
+      fileCount,
     })
-    ElMessage.success(`已设置检索范围：${contextLabel.value}`)
+    ElMessage.success(`已加入对话上下文：${data.name}${data.type === 'folder' ? `（${fileCount} 个文件）` : ''}`)
   } catch (e) {
     ElMessage.error('设置失败：' + (e.response?.data?.detail || e.message))
   }
-}
-
-function clearContext() {
-  contextNode.value = null
-  contextLabel.value = ''
-  store.setKbContext(null)
 }
 
 async function confirmDelete(data) {
@@ -532,18 +579,38 @@ async function confirmDelete(data) {
   try {
     await deleteKbNode(data.id)
     ElMessage.success('已删除')
-    if (contextNode.value?.id === data.id) clearContext()
+    // 被删的如果还在对话选区里，得一并摘掉 —— 否则下一条消息会带着一个已不存在的
+    // node_id 过去（后端 collect_files 返回空 → 选区整体变成空，模型什么依据都没有）。
+    const sel = store.selection
+    if (sel?.docs?.some(d => d.id === data.id)) {
+      store.toggleSelectionItem('docs', { id: data.id })
+    }
     loadTree()
     loadStats()
+    // 正在看的就是被删的那个文件 → 退回列表（否则正文区停在已不存在的节点上）
+    if (inlineFile.value?.id === data.id) inlineFile.value = null
   } catch (e) {
     ElMessage.error('删除失败：' + (e.response?.data?.detail || e.message))
   }
 }
 
+/**
+ * Esc 返回目录树。
+ * 挂在 window 上而不是面板上：焦点通常在正文/编辑器里，事件冒泡不到面板容器。
+ * 编辑器正在用时让给它 —— Vditor 自己也吃 Esc（退全屏编辑、关浮层）。
+ */
+function handleKeydown(e) {
+  if (e.key !== 'Escape' || !inlineFile.value) return
+  if (document.activeElement?.closest?.('.vditor')) return
+  closeInlineFile()
+}
+
 onMounted(() => {
   loadTree()
   loadStats()
+  window.addEventListener('keydown', handleKeydown)
 })
+onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
 </script>
 
 <style scoped>
@@ -608,6 +675,92 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
+/* ── 侧栏内联阅读/编辑区（图谱页单击文件） ──
+   工具栏那一行已被复用成「返回 + 文件名」（见模板），所以这里只让正文吃掉剩余高度。
+   DocWorkspace 用 bare 模式：外框与底色由本面板给，别在窄栏里再嵌一层卡片。 */
+.kb-file-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 列表区（上传 / 生成 / 目录树 / 上下文 / 统计）：看图时整体隐藏但**不销毁**。
+   这些子块原本直接挂在 .kb-panel 的 flex 列里，包了一层就得把同样的布局补在包装上。 */
+.kb-list-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.kb-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 3px 8px 3px 5px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.kb-back-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+/* 文件名：窄栏里唯一的标题，超出用省略号（完整名在 title 里） */
+.kb-file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+/* 窄栏里的编辑器：Vditor 工具栏按钮多，560px 下会换行成两三排，
+   这里把它压成单排横向滚动（比让它撑高、把正文挤没了好）。 */
+.kb-file-view :deep(.vditor-toolbar) {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.kb-file-view :deep(.vditor-toolbar::-webkit-scrollbar) {
+  height: 0;
+}
+
+/* 窄栏的呼吸感：DocWorkspace 的默认左右留白（24px）是按独立页的大屏定的，
+   在 240–560px 的侧栏里会把正文挤成窄条，这里收一半。 */
+.kb-file-view :deep(.doc-pane) {
+  padding: 12px 14px 24px;
+}
+.kb-file-view :deep(.doc-edit) {
+  padding: 6px 8px 10px;
+}
+.kb-file-view :deep(.doc-docx),
+.kb-file-view :deep(.doc-sheet) {
+  padding: 10px 12px 20px;
+}
+.kb-file-view :deep(.doc-state) {
+  padding: 8px 14px;
+}
+/* 编辑动作行（bare 头部）在窄栏里不需要上下的额外留白与分隔线 ——
+   文件名那一行（本面板的工具栏）已经提供了视觉分隔。 */
+.kb-file-view :deep(.doc-head--bare) {
+  padding: 0 0 6px 0;
+  border-bottom: none;
+}
+
 /* ── 一键生成区（侧栏顶部） ── */
 .kb-gen {
   display: flex;
@@ -621,6 +774,17 @@ onMounted(() => {
 }
 .kb-gen :deep(.el-button) {
   flex-shrink: 0;
+}
+/* 建图进度条（常驻，随轮询更新；建图结束由 store 清空） */
+.kb-gen-progress {
+  padding: 2px 12px 6px;
+  flex-shrink: 0;
+}
+.kb-gen-progress-text {
+  display: block;
+  margin-top: 4px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
 }
 .kb-gen-hint {
   margin: 6px 12px 8px;
@@ -694,10 +858,6 @@ onMounted(() => {
   color: var(--color-text-tertiary);
   font-size: 13px;
   text-align: center;
-}
-.kb-empty-sub {
-  font-size: 12px;
-  color: var(--color-text-muted);
 }
 
 .kb-context {

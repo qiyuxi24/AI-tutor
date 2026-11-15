@@ -179,8 +179,8 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
   let destroyed = false
 
   /* ---------- 高亮态（下一步推荐节点） ----------
-     学习路径已从图上撤出、改到右侧「学习任务栏」（PathBoard.vue）：图上淡出+
-     起点环看不到前后文，反而不如一张分层的表。这里只留"下一步学什么"的脉冲环。 */
+     学习路径已从图上撤出、改到左侧导航的「学习路径」tab（PathBoard.vue）：图上淡出+
+     起点环看不到前后文，不如一条按先修关系排好的依赖脊。这里只留"下一步学什么"的脉冲环。 */
 
   /** 边默认样式（供初始渲染与 hover 恢复共用）
    *  - 归属边（锚点 → 子节点）：细虚线，表达"归属"而非关系；

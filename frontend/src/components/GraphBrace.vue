@@ -56,7 +56,7 @@ function ancestry(node, id, acc = []) {
 }
 
 /**
- * 聚焦某知识点（供 HomeView 的搜索 / 任务栏「在图谱中定位」复用）：
+ * 聚焦某知识点（供 HomeView 的搜索 / 学习路径「在图谱中定位」复用）：
  * 先展开祖先链，再把它滚进视野。
  */
 async function focusNode(nodeId) {
@@ -75,8 +75,8 @@ defineExpose({ focusNode })
     <div v-if="loading && !nodes.length" class="brace-overlay">图谱加载中…</div>
     <div v-else-if="error" class="brace-overlay is-error">{{ error }}</div>
     <div v-else-if="!nodes.length" class="brace-overlay">
-      <p>该学科暂无知识点</p>
-      <p class="brace-hint">在对话里让 AI 建图，或从知识库上传资料建图</p>
+      <p>该学科还没有知识点</p>
+      <p class="brace-hint">右键空白处新建，或让 AI 从资料建图</p>
     </div>
     <div v-else class="brace-tree">
       <GraphBraceNode v-for="c in tree.children" :key="c.id" :node="c" :ctx="ctx" />

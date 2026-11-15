@@ -361,8 +361,7 @@ onBeforeUnmount(() => {
 })
 
 const greetingMessages = [
-  '你好！我是你的 AI 学习助手，有什么想学的内容吗？',
-  '可以把问题告诉我，我来陪你一起把思路理顺～',
+  '说出你想学的，我从你的图谱接着讲。',
 ]
 </script>
 
@@ -394,27 +393,9 @@ const greetingMessages = [
           />
         </template>
 
-        <!-- 空白欢迎 -->
+        <!-- 空白欢迎：一行标题即可，不铺功能介绍（解释该由状态与输入框承担） -->
         <div v-else class="welcome">
-          <!-- 描边 SVG 图标（lucide sparkles），替代原来的 🧠 emoji -->
-          <div class="welcome-icon">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
-              <path d="M5 3v4" />
-              <path d="M19 17v4" />
-              <path d="M3 5h4" />
-              <path d="M17 19h4" />
-            </svg>
-          </div>
-          <h3>有什么想学的？</h3>
+          <h3>今天想学什么？</h3>
           <p v-for="(g, i) in greetingMessages" :key="i">{{ g }}</p>
         </div>
       </main>
@@ -753,19 +734,7 @@ const greetingMessages = [
   color: var(--color-text-muted);
 }
 
-/* 欢迎图标：描边 SVG，颜色随主题主色（原为 56px emoji 字号） */
-.welcome-icon {
-  display: inline-flex;
-  margin-bottom: 16px;
-  color: var(--color-primary);
-  opacity: 0.9;
-}
-
-.welcome-icon svg {
-  width: 48px;
-  height: 48px;
-}
-
+/* 欢迎区：只留标题与一行引导，图标已移除（空态不需要装饰） */
 .welcome h3 {
   font-size: 22px;
   font-weight: 600;

@@ -71,6 +71,9 @@ const SSE_RECONNECT_MAX_MS = 60000
 // 而 store 实例可能不止一个（HMR 重挂、测试里每个用例新建）。放在闭包里，旧的、
 // 没 dispose 的实例会被同一次事件一起唤醒，去重也就形同虚设 —— 2026-11-10 实测踩到。
 const APPEAR_MIN_INTERVAL_MS = 2000
+// 建图进度轮询间隔。建图是分钟级任务，3 秒足够"看得出在动"又不会打爆后端
+// （后端每次要算一遍 content_status 计数，是纯 SQLite 查询）。
+const GRAPH_STATUS_POLL_MS = 3000
 let _lastAppearAt = 0   // 模块级：所有 store 实例共享同一个去重窗口
 // 全局只挂**一份**监听器，转发给"当前活跃"的 store 实例（见 _installAppearListener）。
 // 为什么不每个实例各挂一份：事件源是 document/window 这种全局对象，N 个实例就是
@@ -102,7 +105,7 @@ function _detachAppear() {
 // 但作为一个可选分组出现在 subjectSummaries 中）。
 const UNCLASSIFIED_SUBJECT = '未分类'
 
-// 学习任务栏空值（分层看板）：未选学科 / 拉取失败时用它。
+// 学习路径空值（建议顺序看板）：未选学科 / 拉取失败时用它。
 // 冻结：消费方（PathBoard.vue）永远拿到同一结构，不会有人就地改它。
 const EMPTY_PATH_BOARD = Object.freeze({
   items: [], recommended: [], stats: {}, subject: null, board: null,
@@ -135,8 +138,9 @@ export const useChatStore = defineStore('chat', () => {
   const currentId = ref(null)
   const currentNode = ref('')  // 当前教学位置的知识点 ID（可选）
   const loading = ref(false)
-  // 知识库上下文范围（用户选择放进对话上下文的文件/文件夹）
-  const kbContext = ref(null)
+  // 对话上下文选区（用户选进输入框的知识库资料/知识点）不在这里 —— 它挂在对话对象上
+  // （`conv.selection`），由下方 `selection` computed 暴露。放在这里的任何全局 ref 都会
+  // 让 A 对话的选区串到 B 对话去（旧 `kbContext` 就是这么错的）。
   // 知识库变更序号：视频课程导入等**后台长任务**完成后由 SSE 递增，
   // 知识库面板 watch 它来重新拉目录树（导入是分钟级任务，请求早已返回，只能靠推送）
   const kbEpoch = ref(0)
@@ -146,6 +150,9 @@ export const useChatStore = defineStore('chat', () => {
   // 正在建图的学科名（空串 = 没有在建图）。**只用于 UI 状态**（按钮转圈/文案），
   // 不承担"结果是否到达"——结果一律以 `graph_updated` 通知为准（见 generateSubjectGraph）。
   const graphGenerating = ref('')
+  // 建图进度 {total, filled, percent}（null = 没有在建图 / 还没拿到）。
+  // 只由 `GET /kb/graph/status` 轮询喂，**不承担完成判定**（同 graphGenerating）。
+  const graphBuildProgress = ref(null)
 
   // ─── 知识图谱状态 ───
   const knowledgeNodes = ref([])
@@ -158,9 +165,9 @@ export const useChatStore = defineStore('chat', () => {
   const subjectSummaries = ref([])   // 学科 + 分量统计 [{subject, node_count, mastered_count, mastery_avg}]
   const currentSubject = ref(null)   // 当前选中学科；null = 未选（画布空态，不拉全量）
 
-  // 学习进度维度：科技树联动数据（下一步推荐 + 分层看板）
-  // 学习任务栏（右侧分层看板）：切片内全部知识点 + 前置 / 解锁 / 向前追溯。
-  // 只在面板打开时拉取（fetchPathBoard），不在 fetchGraph 里预取 —— 大图会白跑一次。
+  // 学习进度维度：科技树联动数据（下一步推荐 + 建议顺序看板）
+  // 「学习路径」（图谱页左侧导航的一个 tab）：一条完整建议顺序 + 每个知识点的前置 / 追溯软提示。
+  // 只在 tab 打开时拉取（fetchPathBoard），不在 fetchGraph 里预取 —— 大图会白跑一次。
   const pathBoard = ref(EMPTY_PATH_BOARD)
   const pathBoardLoading = ref(false)
   const nextToLearn = ref(null)    // 下一步推荐节点 {node_id, name, mastery, reason}
@@ -171,6 +178,8 @@ export const useChatStore = defineStore('chat', () => {
 
   // CRUD 操作后 3 秒内忽略 SSE 的 graph_updated 事件，避免双重刷新
   let sseSuppressTimer = null
+  // 建图进度轮询句柄（null = 没在轮询）。**必须在 dispose 里清**（A3-3）。
+  let graphPollTimer = null
 
   // ─── 与服务端对齐（只在 init 跑一次） ───
   // 真相归属 = 服务端（2026-10-31，P0-1）：常规对话由 `/chat*` 落库，这里上传本地副本
@@ -328,7 +337,7 @@ export const useChatStore = defineStore('chat', () => {
       graphLoaded.value = true
       graphError.value = ''
       // 图谱变更 → 下一步推荐 / 统计随之刷新（单一数据源 = 图谱）
-      // 注：路径类数据（分层看板）改在面板打开时按需拉（fetchPathBoard）——
+      // 注：路径类数据（建议顺序）改在「学习路径」tab 打开时按需拉（fetchPathBoard）——
       // 原先这里无条件拉全量拓扑序（每个节点的 name/mastery/summary），
       // 而消费它的图内高亮已撑销 → 白跑一次请求。
       fetchNextToLearn()
@@ -339,11 +348,11 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 获取「学习任务栏」数据：当前切片的分层看板。
+   * 获取「学习路径」分层看板数据：当前切片的先修分层。
    *
-   * 切片口径**必须与 fetchGraph 一致**（同一 subject/board），否则任务栏里会出现
+   * 切片口径**必须与 fetchGraph 一致**（同一 subject/board），否则面板里会出现
    * 画布上没有的知识点、而画布上的又不在表里。
-   * 只在面板打开时调（见 HomeView 的 watch），不做预取。
+   * 只在切到「学习路径」tab 时调（见 HomeView 的 watch），不做预取。
    */
   async function fetchPathBoard() {
     if (!currentSubject.value) {
@@ -354,7 +363,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       // 只按学科切片。**不要**在这里引用 currentBoard：store 里根本没有这个状态
       // （前端目前没有板块选择器），引用它会在请求发出前就抛 ReferenceError —— 而下面的
-      // catch 会把它当成“拉取失败”静默降级 —— 表现为任务栏永远是空态。
+      // catch 会把它当成“拉取失败”静默降级 —— 表现为学习路径面板永远是空态。
       // 2026-09-29 实测：/knowledge/path-board 本身 200、返回 9 条，store 却始终是 EMPTY_PATH_BOARD。
       // 后端的 board 参数继续保留，将来加了板块选择器再把这里补上。
       const { data } = await apiClient.get('/api/v1/knowledge/path-board', {
@@ -364,7 +373,7 @@ export const useChatStore = defineStore('chat', () => {
     } catch (e) {
       // 拉取失败不影响图谱使用：降级为空表（面板自己显示空态），但要留痕 ——
       // 静默吞错会让这种“永远空态”极难定位。
-      console.warn('[path-board] 拉取失败，任务栏降级为空表', e)
+      console.warn('[path-board] 拉取失败，学习路径降级为空表', e)
       pathBoard.value = EMPTY_PATH_BOARD
     } finally {
       pathBoardLoading.value = false
@@ -482,6 +491,8 @@ export const useChatStore = defineStore('chat', () => {
    */
   async function generateSubjectGraph(subject, nodeIds) {
     graphGenerating.value = subject
+    graphBuildProgress.value = null
+    startGraphStatusPoll()   // 进度条从"还在跑"就开始喂，别等刷新
     try {
       const { data } = await apiClient.post('/api/v1/kb/graph/generate', {
         subject,
@@ -557,6 +568,30 @@ export const useChatStore = defineStore('chat', () => {
   async function fetchNodeDetail(nodeId) {
     const { data } = await apiClient.get(`/api/v1/knowledge/node/${nodeId}`)
     return data
+  }
+
+  /**
+   * 搜知识点（对话输入框 @ 面板用）。
+   *
+   * 为什么必须走后端：前端手上只有**当前学科**的切片（`knowledgeNodes` 是
+   * `GET /knowledge/graph?subject=…` 的结果）。在输入框里选知识点不该被"我现在在看
+   * 哪个学科"限制 —— 用户可能想引用另一个学科的点。
+   *
+   * 失败返回空数组而不是抛：候选面板是增强项，搜不到就让他继续打字，别弹错误框。
+   *
+   * @param {string} q - 关键词（空串 = 列最近该学的若干）
+   * @param {number} limit
+   * @returns {Promise<Array<{id,name,subject,board,summary,mastery}>>}
+   */
+  async function searchKnowledgeNodes(q = '', limit = 20) {
+    try {
+      const { data } = await apiClient.get('/api/v1/knowledge/nodes', {
+        params: { q, limit },
+      })
+      return data?.nodes || []
+    } catch {
+      return []
+    }
   }
 
   // ════════════════════════════════════════════════════════════════
@@ -659,6 +694,66 @@ export const useChatStore = defineStore('chat', () => {
     conversations.value.some(c => c.messages.length > 0)
   )
 
+  /**
+   * 刷新后把「建图还在跑」这个状态接回来（TODO §11.3 / §11.4-B）。
+   *
+   * 为什么需要：建图已后台化（后端 `runtime.spawn`，见 `api/v1/kb.py::generate_graph`），
+   * 刷新/关页**不再取消**它 —— 但 `graphGenerating` 是纯内存 ref，刷新后归零，
+   * 按钮显示"一键生成图谱"。用户再点一次会撞 409「上一次建图尚未完成」，
+   * 而且完全不知道还要等多久。旧实现在这里靠"任务被取消"掩盖了问题，现在瞒不住了。
+   *
+   * 只问一次、失败静默：状态查询是锦上添花，**绝不能**把 init 搞挂
+   * （后端没升级 / 网络抖动 / 未登录都当"没有在跑"）。
+   *
+   * 拿到 building=true 后**顺手开轮询**（`GRAPH_STATUS_POLL_MS`）—— 一次快照只能
+   * 说明"在跑"，分钟级任务用户要看到数字在动；进度只喂 `graphBuildProgress`，
+   * 完成与否仍由 `graph_updated` 通知收口。
+   */
+  async function restoreGraphBuildStatus() {
+    let data = null
+    try {
+      ({ data } = await apiClient.get('/api/v1/kb/graph/status'))
+    } catch { return }
+    if (!data?.building) return
+    // 学科名可能为空（刚占位、老调用方没传学科）→ 仍要算"生成中"。
+    // 占位文案选「上次任务」而不是「生成中」：按钮模板是
+    // `生成中（${graphGenerating}）`（KbPanel.vue），套「生成中」会变成"生成中（生成中）"。
+    graphGenerating.value = data.subject || '上次任务'
+    graphBuildProgress.value = data.progress || null
+    startGraphStatusPoll()
+  }
+
+  /** 停掉建图进度轮询（幂等）。dispose / 建图完成时都要调。 */
+  function stopGraphStatusPoll() {
+    if (graphPollTimer) {
+      clearInterval(graphPollTimer)
+      graphPollTimer = null
+    }
+  }
+
+  /**
+   * 开始轮询建图进度（幂等：已在轮询就不重复挂）。
+   *
+   * 后端 `GET /kb/graph/status` 的 `progress` 是**增量补全**口径 —— 已有学科会并轨，
+   * 所以百分比不是从 0 开始，UI 必须同时显示 `filled/total` 绝对数。
+   * `building` 翻 false 就停表：再轮询没有意义（完成提示由 `graph_updated` 给）。
+   */
+  function startGraphStatusPoll() {
+    if (graphPollTimer) return
+    graphPollTimer = setInterval(async () => {
+      let data = null
+      try {
+        ({ data } = await apiClient.get('/api/v1/kb/graph/status'))
+      } catch { return }   // 抖动不惩罚：下一拍继续问
+      if (!data?.building) {
+        graphBuildProgress.value = null
+        stopGraphStatusPoll()
+        return
+      }
+      graphBuildProgress.value = data.progress || null
+    }, GRAPH_STATUS_POLL_MS)
+  }
+
   // ─── 分组历史（按日期）───
   // 只展示有内容的对话，空对话不出现在历史列表中
   const groupedConversations = computed(() => {
@@ -724,6 +819,8 @@ export const useChatStore = defineStore('chat', () => {
     await fetchSubjects()
     await ensureSubjectSelected()
     await fetchGraph()
+    // 建图是后台任务：刷新后要问一次"还在跑吗"，否则按钮显示空闲、用户再点撞 409。
+    await restoreGraphBuildStatus()
     // 连接 SSE，后端数据变更时自动刷新图谱
     // （init = "开始工作"的唯一入口，顺带解除 dispose/disconnectSSE 的永久断开，
     //  否则开发态 HMR 重挂 HomeView 后就再也连不上了）
@@ -934,6 +1031,9 @@ export const useChatStore = defineStore('chat', () => {
     if (!isGraphBuild && sseSuppressTimer) return   // 自身 CRUD 的重复通知，照旧抑制
     if (isGraphBuild) {
       graphGenerating.value = ''
+      // 建图结束（成功 / 失败 / 中断都算）→ 停表并清进度
+      stopGraphStatusPoll()
+      graphBuildProgress.value = null
       if (data.ok) {
         const parts = [`新增 ${data.created_nodes || 0} 个知识点`]
         if (data.created_edges) parts.push(`${data.created_edges} 条关系`)
@@ -1062,6 +1162,7 @@ export const useChatStore = defineStore('chat', () => {
   function dispose() {
     disconnectSSE()
     _removeAppearListener()
+    stopGraphStatusPoll()
     if (sseSuppressTimer) {
       clearTimeout(sseSuppressTimer)
       sseSuppressTimer = null
@@ -1194,9 +1295,71 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  // ─── 设置知识库上下文范围 ───
-  function setKbContext(ctx) {
-    kbContext.value = ctx // ctx: { nodeIds: [], name: string } 或 null
+  // ─── 对话上下文选区（知识库资料 + 知识点）───
+  //
+  // 为什么挂在对话对象上而不是一个全局 ref：选区**决定下一次请求带什么**，如果它是全局的，
+  // 切对话后 A 对话的选区会悄悄作用到 B 对话（旧实现就是这样 —— `kbContext` 是个裸 ref，
+  // 切对话既不清空也不恢复，且没有任何 UI 渲染它）。`conv.nodeId` 已经是"每对话绑定"
+  // 的既有范式，这里照抄。
+  //
+  // 选区是**跨轮次常驻**的（不是只对下一条生效）：用户选了三份资料就是"这段对话都看这三份"，
+  // 每问一句都要重新选一遍会很烦。要撤销就点 chip 上的 ×。
+  const selection = computed(() => currentConversation.value?.selection || null)
+
+  /**
+   * 改当前对话的选区。传 null / 空选区 = 清空。
+   * @param {{docs?: Array, nodes?: Array}|null} sel
+   *   docs:  [{id, name, path?, type, fileCount?}] 知识库文件/文件夹（id 为数字）
+   *   nodes: [{id, name, subject?}] 图谱知识点（id 为字符串）
+   */
+  function setSelection(sel) {
+    const conv = currentConversation.value
+    if (!conv) return
+    const docs = (sel?.docs || []).filter(d => d && d.id != null)
+    const nodes = (sel?.nodes || []).filter(n => n && n.id)
+    if (!docs.length && !nodes.length) {
+      delete conv.selection
+    } else {
+      conv.selection = { docs, nodes }
+    }
+    persist()
+  }
+
+  /** 往选区里加/去重一条（chip 是逐个加的，重复选同一项不该出现两个 chip）。 */
+  function toggleSelectionItem(kind, item) {
+    const conv = currentConversation.value
+    if (!conv) return
+    const cur = conv.selection || {}
+    const list = [...(cur[kind] || [])]
+    const idx = list.findIndex(x => x.id === item.id)
+    if (idx === -1) list.push(item)
+    else list.splice(idx, 1)
+    setSelection({ ...cur, [kind]: list })
+  }
+
+  function clearSelection() {
+    setSelection(null)
+  }
+
+  /**
+   * 把选区翻译成请求参数。
+   *
+   * `kb_node_ids` 是**后端已经有的字段**（原本只表达"检索范围"），现在承担两件事：
+   * 收窄检索 + 整篇注入（见 backend `chat_service._build_selected_docs`）。
+   * 空数组**必须原样发**（不能 `|| null`）：后端把 `[]` 定义成"选了范围但里面没文件 →
+   * 检索不到任何东西"，而 `null` 是"不限范围"。旧实现 `kb?.nodeIds || null` 正好把
+   * 这两种语义搞反了 —— 用户清空选区后反而变成全库检索。
+   */
+  function buildSelectionPayload() {
+    const sel = selection.value
+    if (!sel) return { kb_node_ids: null, kb_node_name: null, context_node_ids: null }
+    const docIds = (sel.docs || []).map(d => d.id)
+    const nodeIds = (sel.nodes || []).map(n => n.id)
+    return {
+      kb_node_ids: docIds.length ? docIds : null,
+      kb_node_name: (sel.docs || []).map(d => d.name).join('、') || null,
+      context_node_ids: nodeIds.length ? nodeIds : null,
+    }
   }
 
   // ─── 流式请求的 AbortController（用于取消） ───
@@ -1316,7 +1479,11 @@ export const useChatStore = defineStore('chat', () => {
         onThinking: (text) => {
           patchLastAssistant(conv, (msg) => {
             const thinking = msg.thinking || []
-            thinking.push(text)
+            // 后端自 2026-11-15 起按 chunk **逐片**推思考（原先整段调用结束才推一帧），
+            // 这里拼回同一块：`MessageBubble` 是 `v-for` 渲染 thinking 数组、
+            // 一片一个 `.thinking-block`，逐片 push 会变成一行一个碎片。
+            if (thinking.length) thinking[thinking.length - 1] += text
+            else thinking.push(text)
             return { thinking }
           })
           throttledPersist()
@@ -1376,9 +1543,38 @@ export const useChatStore = defineStore('chat', () => {
       // 以**对话绑定**为准（缺陷 B-1）：否则切走再切回、或刷新后 currentNode 丢失时，
       // 会带着错误的知识点（或空）去请求。
       conv.nodeId || currentNode.value || '',
-      kbContext.value,
+      // 选区也以**当前对话**为准（同 B-1 的理由）：切对话后不能带上另一个对话的选区。
+      buildSelectionPayload(),
       conv.id, // 多端串行键：同一对话的请求在后端排队，避免两端同时改同一份历史
     )
+  }
+
+  /**
+   * 主动停止本轮生成（输入区"停止"按钮）。
+   *
+   * 与 `dispose()` 的区别：那个是登出/卸载时的收尾（连 SSE、定时器一起拆），
+   * 这里只掐掉当前这条流并收口 UI —— 用户点"停止"之后还要继续问下一句。
+   *
+   * 占位气泡里已经流出来的正文**保留**：那是用户已经看到的内容，抹掉等于"我读的
+   * 一半凭空消失"。只在完全没收到 token 时补一句提示，免得留一个空气泡。
+   */
+  function stopGenerating() {
+    if (!loading.value) return
+    const conv = currentConversation.value
+    if (streamController) {
+      streamController.abort()
+      streamController = null
+    }
+    loading.value = false
+    if (conv) {
+      const last = conv.messages[conv.messages.length - 1]
+      if (last && last.role === 'assistant' && !last.content) {
+        last.content = '（已停止生成）'
+        last.failed = false
+      }
+      conv.updatedAt = Date.now()
+    }
+    persist()
   }
 
   /**
@@ -1404,10 +1600,15 @@ export const useChatStore = defineStore('chat', () => {
     currentId,
     currentNode,
     loading,
-    kbContext,
+    selection,
+    setSelection,
+    toggleSelectionItem,
+    clearSelection,
+    buildSelectionPayload,
     kbEpoch,
     importProgress,
     graphGenerating,
+    graphBuildProgress,
     currentConversation,
     currentMessages,
     currentTitle,
@@ -1419,8 +1620,8 @@ export const useChatStore = defineStore('chat', () => {
     switchConversation,
     deleteConversation,
     renameConversation,
-    setKbContext,
     send,
+    stopGenerating,
     retryLast,
     startLearning,
     // 生命周期（A3）：登出 / 卸载时释放 SSE、定时器与在途流
@@ -1440,6 +1641,7 @@ export const useChatStore = defineStore('chat', () => {
     fetchGraph,
     refreshGraph,
     fetchNodeDetail,
+    searchKnowledgeNodes,
     fetchSubjects,
     setSubject,
     generateSubjectGraph,

@@ -105,7 +105,7 @@ watch(
     <!-- ═══ 加载 / 空状态 ═══ -->
     <div v-if="statsLoading && !stats" class="dash-loading">正在汇总图谱进度…</div>
     <div v-else-if="!overall" class="dash-empty">
-      <p>暂无图谱数据。先去对话中让 AI 生成知识图谱，或进入「知识图谱」手动创建知识点。</p>
+      <p>还没有知识图谱</p>
       <button class="dash-go-btn" @click="emit('go-graph', '')">前往知识图谱</button>
     </div>
 
@@ -126,7 +126,7 @@ watch(
         </div>
         <div class="dash-stat-card dash-stat-red" title="掌握度 1–29">
           <span class="dash-stat-value">{{ overall.weak_count }}</span>
-          <span class="dash-stat-label">待巩固</span>
+          <span class="dash-stat-label">薄弱</span>
         </div>
         <div class="dash-stat-card dash-stat-muted">
           <span class="dash-stat-value">{{ overall.unstarted_count }}</span>
@@ -146,12 +146,6 @@ watch(
               <span class="dash-dist-seg seg-weak" :style="{ width: dist.weak + '%' }" :title="`薄弱 ${dist.weak}%`"></span>
               <span class="dash-dist-seg seg-unstarted" :style="{ width: dist.unstarted + '%' }" :title="`未开始 ${dist.unstarted}%`"></span>
             </div>
-            <div class="dash-dist-legend">
-              <span><i class="legend-dot" style="background: var(--color-green)"></i>已掌握 {{ dist.mastered }}%</span>
-              <span><i class="legend-dot" style="background: var(--color-yellow)"></i>学习中 {{ dist.learning }}%</span>
-              <span><i class="legend-dot" style="background: var(--color-red)"></i>薄弱 {{ dist.weak }}%</span>
-              <span><i class="legend-dot" style="background: var(--color-graph-node)"></i>未开始 {{ dist.unstarted }}%</span>
-            </div>
             <div class="dash-meta-row">
               <span>平均掌握度 <b>{{ overall.mastery_avg }}</b> / 100</span>
               <span>完成率 <b>{{ pct(overall.mastered_count, overall.node_count) }}%</b></span>
@@ -161,7 +155,7 @@ watch(
           <!-- 学科进度列表 -->
           <section class="dash-panel">
             <h3 class="dash-panel-title">学科进度</h3>
-            <div v-if="bySubject.length === 0" class="dash-panel-empty">暂无学科数据</div>
+            <div v-if="bySubject.length === 0" class="dash-panel-empty">还没有学科</div>
             <div
               v-for="s in bySubject"
               :key="s.subject"
@@ -178,7 +172,6 @@ watch(
               </div>
               <div class="dash-subject-sub">
                 <span>共 {{ s.node_count }} 个知识点</span>
-                <span>已掌握 {{ s.mastered_count }} · 学习中 {{ s.learning_count }} · 薄弱 {{ s.weak_count }} · 未开始 {{ s.unstarted_count }}</span>
               </div>
             </div>
           </section>
@@ -196,13 +189,13 @@ watch(
                 <button class="dash-go-btn" @click="emit('go-node', nextToLearn.node_id, nextToLearn.subject)">去图谱学习</button>
               </div>
             </template>
-            <div v-else class="dash-panel-empty">所有知识点都已掌握，继续保持。</div>
+            <div v-else class="dash-panel-empty">全部已掌握</div>
           </section>
 
           <!-- 薄弱点 Top3 -->
           <section class="dash-panel">
             <h3 class="dash-panel-title">{{ weakPoints.length ? `薄弱点 Top${weakPoints.length}` : '薄弱点' }}</h3>
-            <div v-if="weakPoints.length === 0" class="dash-panel-empty">没有薄弱点，继续保持！</div>
+            <div v-if="weakPoints.length === 0" class="dash-panel-empty">没有薄弱点</div>
             <div
               v-for="(w, i) in weakPoints"
               :key="w.id"
@@ -311,9 +304,6 @@ watch(
 .seg-learning { background: var(--color-yellow); }
 .seg-weak { background: var(--color-red); }
 .seg-unstarted { background: var(--color-graph-node); }
-.dash-dist-legend { display: flex; gap: 16px; font-size: 12px; color: var(--color-text-secondary); margin-bottom: 12px; }
-.dash-dist-legend span { display: flex; align-items: center; gap: 5px; }
-.legend-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .dash-meta-row { display: flex; gap: 20px; flex-wrap: wrap; font-size: 12px; color: var(--color-text-tertiary); }
 .dash-meta-row b { color: var(--color-text-primary); font-weight: 600; }
 

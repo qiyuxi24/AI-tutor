@@ -638,10 +638,6 @@ onBeforeUnmount(() => {
 .bw-body :deep(.input-area) {
   padding: 10px 12px 12px;
 }
-.bw-body :deep(.welcome-icon) {
-  font-size: 38px;
-  margin-bottom: 8px;
-}
 .bw-body :deep(.welcome h3) {
   font-size: 17px;
 }

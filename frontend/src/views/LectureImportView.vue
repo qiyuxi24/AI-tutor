@@ -27,7 +27,7 @@ import {
 import { subtitleLanguages, useLectureSettings } from '../utils/lectureSettings.js'
 import KbTextPreviewDialog from '../components/KbTextPreviewDialog.vue'
 
-const emit = defineEmits(['go-kb'])
+const emit = defineEmits(['go-kb', 'open-lecture'])
 
 const store = useChatStore()
 const settings = useLectureSettings()
@@ -358,6 +358,24 @@ const preview = reactive({
   visible: false, loading: false, name: '', markdown: '', chars: 0, totalChars: 0, truncated: false,
 })
 
+/**
+ * 课时页入口的 doc_id。
+ * 契约上「课时详情」按 KB 文件节点 id 取，而导入队列里这一集的落点记在 `node_id`
+ * （讲义就是那个 KB 文件节点）；后端若另给 `doc_id` 则以它为准。
+ * 两者都取不到 → 返回 null，按钮置灰而不是给个点了没反应的链接。
+ */
+function itemDocId(item) {
+  const id = item?.doc_id ?? item?.node_id
+  return id == null || id === '' ? null : id
+}
+
+/** 「看讲义」：跳到课时页（知识点时间轴 + 截图 + 一键回跳原视频） */
+function openLectureView(item) {
+  const docId = itemDocId(item)
+  if (!docId) return
+  emit('open-lecture', { docId, title: item.title || '' })
+}
+
 async function openPreview(item) {
   if (!item.node_id) return
   preview.visible = true
@@ -569,6 +587,11 @@ onBeforeUnmount(() => {
               <span class="li-item-actions">
                 <button v-if="it.status === 'done' && it.node_id" type="button"
                         class="li-link" @click="openPreview(it)">预览</button>
+                <button v-if="it.status === 'done'" type="button"
+                        class="li-link"
+                        :disabled="!itemDocId(it)"
+                        :title="itemDocId(it) ? '打开课时页（知识点时间轴）' : '这一集还没有可打开的讲义'"
+                        @click="openLectureView(it)">看讲义</button>
                 <button v-if="it.status === 'failed'" type="button"
                         class="li-link" @click="actItem(t, it, 'retry')">重试</button>
                 <button v-if="it.status === 'pending'" type="button"
@@ -626,6 +649,11 @@ onBeforeUnmount(() => {
               <span class="li-item-actions">
                 <button v-if="it.status === 'done' && it.node_id" type="button"
                         class="li-link" @click="openPreview(it)">预览</button>
+                <button v-if="it.status === 'done'" type="button"
+                        class="li-link"
+                        :disabled="!itemDocId(it)"
+                        :title="itemDocId(it) ? '打开课时页（知识点时间轴）' : '这一集还没有可打开的讲义'"
+                        @click="openLectureView(it)">看讲义</button>
                 <button v-if="it.status === 'failed'" type="button"
                         class="li-link" @click="actItem(t, it, 'retry')">重试</button>
               </span>
@@ -716,6 +744,13 @@ onBeforeUnmount(() => {
 }
 .li-link:hover { text-decoration: underline; }
 .li-link.danger { color: var(--color-danger); }
+/* 置灰态（如「看讲义」拿不到 doc_id）：不可点也不变色，避免误以为能进 */
+.li-link:disabled {
+  color: var(--color-text-placeholder);
+  opacity: 0.6;
+  cursor: default;
+  text-decoration: none;
+}
 
 .li-hint {
   font-size: var(--font-size-xs);

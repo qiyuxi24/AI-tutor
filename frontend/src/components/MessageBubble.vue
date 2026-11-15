@@ -76,8 +76,8 @@ onBeforeUnmount(() => {
 const hasTools = computed(() => !isUser.value && props.message.tools?.length > 0)
 const hasThinking = computed(() => !isUser.value && props.message.thinking?.length > 0)
 const showThinking = ref(false)
-// 工具面板展开态：有工具正在执行时默认展开，全部完成后可折叠查看步骤与入参/结果摘要
-const showTools = ref(false)
+// 工具面板展开态：null = 跟随状态（执行中 / 有失败自动展开），用户点过则以用户为准
+const toolsOpen = ref(null)
 const expandedToolIdx = ref(-1)
 
 const TOOL_NAMES = {
@@ -150,19 +150,26 @@ const toolStats = computed(() => {
   const running = list.find((t) => t.status === 'running') || null
   const errorCount = list.filter((t) => t.status === 'error').length
   const totalMs = list.reduce((sum, t) => sum + (Number(t.result?.duration_ms) || 0), 0)
-  // 去重后的工具名标签（折叠态概览用，最多展示 3 个）
-  const uniqueNames = [...new Set(list.map((t) => getToolDisplayName(t.tool)))]
   return {
-    total: list.length,
     running,
     errorCount,
     totalDuration: formatDuration(totalMs),
-    uniqueNames,
   }
 })
 
 function toggleToolDetail(idx) {
   expandedToolIdx.value = expandedToolIdx.value === idx ? -1 : idx
+}
+
+/** 工具面板是否展开：用户未干预时，执行中或存在失败 → 自动展开，否则收起 */
+const toolsExpanded = computed(() =>
+  toolsOpen.value === null
+    ? (!!toolStats.value.running || toolStats.value.errorCount > 0)
+    : toolsOpen.value,
+)
+
+function toggleTools() {
+  toolsOpen.value = !toolsExpanded.value
 }
 
 const renderedContent = computed(() => {
@@ -257,7 +264,7 @@ watch(renderedContent, () => {
           <button
             type="button"
             class="tool-header"
-            @click="showTools = !showTools"
+            @click="toggleTools"
           >
             <!-- 状态指示：执行中转圈 / 有失败标红 / 全部成功勾号 -->
             <span v-if="toolStats.running" class="tool-spinner" />
@@ -294,36 +301,28 @@ watch(renderedContent, () => {
               <polyline points="20 6 9 17 4 12" />
             </svg>
 
+            <!-- 标题只说结论；工具名/参数/结果是点开后的证据，不常驻 -->
             <span class="tool-head-title">
               <template v-if="toolStats.running">
                 正在{{ getToolDisplayName(toolStats.running.tool) }}…
               </template>
-              <template v-else>
-                已调用 {{ toolStats.total }} 个工具
+              <template v-else-if="toolStats.errorCount">
+                {{ toolStats.errorCount }} 个步骤失败
               </template>
-            </span>
-
-            <!-- 折叠态工具胶囊概览 -->
-            <span v-if="!showTools && !toolStats.running" class="tool-chips">
-              <span
-                v-for="name in toolStats.uniqueNames.slice(0, 3)"
-                :key="name"
-                class="tool-chip"
-              >{{ name }}</span>
-              <span v-if="toolStats.uniqueNames.length > 3" class="tool-chip">
-                +{{ toolStats.uniqueNames.length - 3 }}
-              </span>
+              <template v-else>
+                已完成
+              </template>
             </span>
 
             <span v-if="toolStats.totalDuration" class="tool-head-duration">
               {{ toolStats.totalDuration }}
             </span>
 
-            <span class="thinking-arrow" :class="{ expanded: showTools || !!toolStats.running }">▾</span>
+            <span class="thinking-arrow" :class="{ expanded: toolsExpanded }">▾</span>
           </button>
 
-          <!-- 展开的步骤时间线（执行中自动展开，完成后可点开查看每一步） -->
-          <div v-show="showTools || !!toolStats.running" class="tool-steps">
+          <!-- 展开的步骤时间线：执行中或有失败时自动展开 -->
+          <div v-show="toolsExpanded" class="tool-steps">
             <div
               v-for="(tool, idx) in message.tools"
               :key="idx"
@@ -379,7 +378,7 @@ watch(renderedContent, () => {
         <!-- 思考折叠面板 -->
         <div v-if="hasThinking" class="thinking-panel">
           <button class="thinking-toggle" @click="showThinking = !showThinking">
-            <span class="thinking-label">AI 思考过程</span>
+            <span class="thinking-label">思考</span>
             <span class="thinking-arrow" :class="{ expanded: showThinking }">▾</span>
           </button>
           <div v-show="showThinking" class="thinking-content">
@@ -627,21 +626,6 @@ watch(renderedContent, () => {
 .tool-head-title {
   font-weight: 500;
   color: var(--color-text-primary);
-}
-
-.tool-chips {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.tool-chip {
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--color-bg-tertiary);
-  color: var(--color-text-secondary);
-  font-size: 11px;
-  line-height: 1.4;
 }
 
 .tool-head-duration {

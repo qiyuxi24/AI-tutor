@@ -2,29 +2,46 @@
 /**
  * NodeDetail.vue — 节点详情弹窗
  *
- * 职责：展示节点详情 + 编辑 Markdown 内容。
+ * 职责：展示节点详情 + 阅读/编辑正文（老节点单 MD / 小节化节点的某一节）。
  *
- * 去耦设计：
- *   - 保存操作通过 emit('save-content', { nodeId, content }) 通知父组件
- *   - 父组件（HomeView）调用 Store.updateNodeContent() 执行保存
- *   - 组件不直接调用 apiClient
+ * 正文的阅读与编辑**不再由本组件实现**：交给 `DocWorkspace`（与知识库页共用同一个组件，
+ * 也是全站唯一的 Markdown 编辑入口，编辑器为开源 Vditor）。本组件只负责：
+ *   · 左侧栏（小节列表 + 试题分组）与「哪一节被选中」；
+ *   · 把「当前这节的正文」包装成 DocWorkspace 要的 doc 对象 + 三个适配器；
+ *   · 节点特有的东西：去学习 / 前置知识 / 相关节点 / 小节学习状态条。
+ *
+ * 为什么小节也要能编辑：小节化（2026-09-27）之后正文在多个平行 MD 里，没有主文件，
+ * 于是旧的「编辑」按钮对这类节点直接隐藏 —— 结果是**大部分节点根本没编辑入口**。
+ * 2026-11-15 补上 `PUT /knowledge/node/{id}/section/{sid}` 后两处口径一致。
+ *
+ * 去耦设计（保留）：
+ *   - 老节点的正文保存仍通过 emit('save-content', { nodeId, content, onResult }) 交给父组件
+ *     （父组件走 Store → 刷新图谱）；小节正文直接走 `saveNodeSection`（与 fetchNodeSection 同层，
+ *     都是 kb.js 的封装，不裸调 apiClient）。
+ *   - 组件不 import store。
  *
  * Props:
  *   nodeInfo: Object  — 节点详情数据
  *   visible: Boolean  — 弹窗显示状态
+ *   sourceDocId: Number|String — 当前在图谱里高亮的资料 doc_id（命中来源的小节/题目加醒目样式）
  *
  * Emits:
  *   close: ()                  — 关闭弹窗
  *   refresh: ()                — 请求父组件刷新数据
- *   save-content: ({ nodeId, content }) — 保存节点内容（父组件调用 Store）
+ *   save-content: ({ nodeId, content, onResult }) — 保存老节点单 MD（父组件调用 Store）
+ *   navigate-to-node: (nodeId) — 跳到另一个知识点
+ *   open-quiz: ({...})         — 去出题页
+ *   go-learn: (nodeId)         — 带着这个节点去对话里学习
+ *   open-lecture: ({ docId, at }) — 从「视频出处」跳到课时页（父组件负责切视图）
  */
 
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { renderMarkdown } from '../utils/markdown.js'
 // ★ 保存操作由父组件通过 Store 处理；此处只读小节正文/试题列表与触发生成（走 kb.js 封装，不裸调 apiClient）
-import { fetchNodeSection, fetchNodeQuizzes, generateSectionQuiz, updateSectionLearn } from '../api/kb.js'
+import { fetchNodeSection, fetchNodeQuizzes, generateSectionQuiz, saveNodeSection, updateSectionLearn } from '../api/kb.js'
 import { formatError } from '../utils/errorCodes.js'
 import { useDetailPrefs } from '../utils/detailPrefs.js'
+import DocWorkspace from './DocWorkspace.vue'
+import VideoSourceCard from './VideoSourceCard.vue'
 
 const props = defineProps({
   nodeInfo: { type: Object, default: null },
@@ -34,12 +51,10 @@ const props = defineProps({
   sourceDocId: { type: [Number, String], default: null },
 })
 
-const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node', 'open-quiz', 'go-learn'])
+const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node', 'open-quiz', 'go-learn', 'open-lecture'])
 
-const mode = ref('view')        // 'view' | 'edit'
-const editContent = ref('')
-const saving = ref(false)
-const saveError = ref('')
+/** 全屏：把模态撑满视口（阅读长讲义/写长文时的唯一诉求，不换路由也不换组件） */
+const fullscreen = ref(false)
 
 /* 节点小节化：仅 nodeInfo.has_sections === true 时启用（老节点行为完全不变） */
 const hasSections = computed(() => props.nodeInfo?.has_sections === true)
@@ -52,10 +67,64 @@ const LEGACY_DOC = { id: '__content__', title: '正文', kind: 'custom', status:
 const docList = computed(() => (hasSections.value ? sections.value : [LEGACY_DOC]))
 const activeSectionId = ref('')
 const sidebarCollapsed = ref(false)     // 侧栏可伸缩：收起后只剩一条 36px 窄边 + 展开按钮
-const sectionContent = ref('')          // 当前选中节正文（懒加载）
-const sectionHtml = computed(() => renderMarkdown(sectionContent.value))
-const sectionLoading = ref(false)
-const sectionError = ref('')
+
+/* ── 正文交给共用工作区（DocWorkspace）──
+   本组件不再渲染正文/编辑器，只回答三个问题：现在该看哪一节、正文从哪读、存到哪。
+   这两组适配器就是"知识节点小节"与"知识库文件"的全部差别（见 DocWorkspace 的注释）。 */
+const workspaceRef = ref(null)
+
+/** 当前要展示的文档：有小节 = 选中那一节；老节点 = 唯一那篇「正文」 */
+const wsDoc = computed(() => {
+  const info = props.nodeInfo
+  if (!info) return null
+  if (!hasSections.value) {
+    return { id: info.id, nodeId: info.id, sectionId: '', name: '正文', legacy: true }
+  }
+  if (!activeSectionId.value) return null
+  const s = sections.value.find(x => x.id === activeSectionId.value)
+  return {
+    // id 参与工作区的 watch：换节即重读（同一节点的不同小节必须是不同 id）
+    id: `${info.id}:${activeSectionId.value}`,
+    nodeId: info.id,
+    sectionId: activeSectionId.value,
+    name: s?.title || activeSectionId.value,
+  }
+})
+
+/** 读正文：小节走 GET .../section/{sid}（懒加载，点开哪节读哪节）；老节点直接用详情里的 content */
+async function wsLoadText(doc) {
+  if (doc.legacy) {
+    return { text: props.nodeInfo?.content || '', editable: true }
+  }
+  const { data } = await fetchNodeSection(doc.nodeId, doc.sectionId)
+  return {
+    text: data?.content || '',
+    // 小节一律可编辑（后端 write_section 无格式限制，正文就是这节 MD 全文）
+    editable: true,
+  }
+}
+
+/**
+ * 存正文。
+ * · 小节：直接 PUT 该节（写库 + 标 filled + 重索引都在后端一次做完），成功后通知父级刷新；
+ * · 老节点：仍走 emit('save-content') —— 父组件经 Store 保存并刷新图谱，这条链路没变。
+ * 失败**必须抛**：DocWorkspace 靠捕获异常把 detail 显示在编辑区。
+ */
+async function wsSaveText(doc, text) {
+  if (doc.legacy) {
+    await new Promise((resolve, reject) => {
+      emit('save-content', {
+        nodeId: doc.nodeId,
+        content: text,
+        onResult: (error) => (error ? reject(new Error(error)) : resolve()),
+      })
+    })
+    return
+  }
+  await saveNodeSection(doc.nodeId, doc.sectionId, text)
+  // 节点详情的 updated_at / content_status 变了 → 让父级重拉（图谱与看板跟着新）
+  emit('refresh')
+}
 
 /* 试题分组：与小节同侧边栏，懒加载（打开节点详情时请求一次；任意节点都展示） */
 const quizzes = ref([])
@@ -128,15 +197,15 @@ function learnTag(s) {
   if (st.passed) return { text: '通过', cls: 'lp-passed', title: '已通过出题验证' }
   if (st.mark === 'understood') {
     return st.mark_by === 'ai'
-      ? { text: '已懂', cls: 'lp-understood lp-ai', title: 'AI 讲完后自动记为「已懂」—— 还要出题答对才算通过' }
-      : { text: '已懂', cls: 'lp-understood', title: '你标记了「已懂」，进对话时会先出题验证' }
+      ? { text: '已懂', cls: 'lp-understood lp-ai', title: 'AI 讲完后自动标记，需出题答对才算通过' }
+      : { text: '已懂', cls: 'lp-understood', title: '已标记，进对话时先出题验证' }
   }
   if (st.mark === 'confused') {
     return st.mark_by === 'ai'
-      ? { text: '不懂', cls: 'lp-confused lp-ai', title: '连续两次没答对，已自动标为「不懂」，接下来按不懂讲' }
-      : { text: '不懂', cls: 'lp-confused', title: '你标记了「不懂」，进对话时从这里开始讲' }
+      ? { text: '不懂', cls: 'lp-confused lp-ai', title: '连续两次答错，系统已自动标记' }
+      : { text: '不懂', cls: 'lp-confused', title: '已标记，进对话时从这里讲' }
   }
-  if (st.read) return { text: '已读', cls: 'lp-read', title: '你标记了「我已读完」' }
+  if (st.read) return { text: '已读', cls: 'lp-read', title: '已标记为读完' }
   return { text: '', cls: 'lp-none', title: '未标记' }
 }
 
@@ -243,13 +312,13 @@ const KIND_ICONS = {
   _default: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M16 13H8"/><path d="M16 17H8"/>',
 }
 
-/** 侧边栏点击：有 manifest → 懒加载该小节；老节点 → 只有「正文」一项，右侧直接渲染 nodeInfo.content */
+/** 侧边栏点击：有 manifest → 切到该小节；老节点 → 只有「正文」一项（正文已在详情里） */
 function selectDoc(s) {
-  if (!hasSections.value) {
-    activeSectionId.value = LEGACY_DOC.id
-    return
-  }
-  selectSection(s.id)
+  const nextId = hasSections.value ? s.id : LEGACY_DOC.id
+  if (nextId === activeSectionId.value) return
+  // 未保存的修改不能因为点一下左侧就没了（判断在 DocWorkspace 里）
+  if (workspaceRef.value?.canLeave?.() === false) return
+  activeSectionId.value = nextId
 }
 
 /** 按 kind 返回内联 SVG 字符串（硬编码常量，无用户输入） */
@@ -258,75 +327,82 @@ function kindIconSvg(kind) {
   return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`
 }
 
-/**
- * 切换小节：按需请求正文（懒加载）。快速连点时的过期响应会被丢弃。
- * 副作用：更新 activeSectionId / sectionContent / sectionLoading / sectionError。
- */
-async function selectSection(id) {
-  if (id === activeSectionId.value && sectionContent.value) return
-  activeSectionId.value = id
-  sectionContent.value = ''
-  sectionError.value = ''
-  sectionLoading.value = true
-  try {
-    const { data } = await fetchNodeSection(props.nodeInfo.id, id)
-    if (activeSectionId.value !== id) return   // 已被更晚的点击取代
-    sectionContent.value = data?.content || ''
-  } catch (e) {
-    if (activeSectionId.value !== id) return
-    sectionError.value = formatError(e, { action: '加载小节' })
-  } finally {
-    if (activeSectionId.value === id) sectionLoading.value = false
-  }
-}
-
 /* 面板尺寸 / 正文字号来自设置页（模块级单例，改设置即时生效）。
-   阅读模式带左侧栏，面板放宽；编辑模式仍是双栏编辑器，维持原宽。 */
+   全屏时不参与尺寸计算（inset:0 铺满），阅读模式带左侧栏故比编辑态宽。 */
 const { prefs: detailPrefs } = useDetailPrefs()
-const panelStyle = computed(() => ({
-  width: `min(${Math.round((mode.value === 'edit' ? 680 : 880) * detailPrefs.value.scale)}px, 95vw)`,
-  maxHeight: `${Math.min(85 * detailPrefs.value.scale, 95)}vh`,
-  '--detail-font-size': `${detailPrefs.value.fontSize}px`,
-}))
+const panelStyle = computed(() => {
+  if (fullscreen.value) {
+    return {
+      width: '100vw',
+      maxWidth: '100vw',
+      height: '100vh',
+      maxHeight: '100vh',
+      borderRadius: '0',
+      '--detail-font-size': `${detailPrefs.value.fontSize}px`,
+    }
+  }
+  return {
+    width: `min(${Math.round(880 * detailPrefs.value.scale)}px, 95vw)`,
+    maxHeight: `${Math.min(85 * detailPrefs.value.scale, 95)}vh`,
+    '--detail-font-size': `${detailPrefs.value.fontSize}px`,
+  }
+})
 
-const htmlContent = computed(() => renderMarkdown(props.nodeInfo?.content))
-// 编辑模式右侧实时预览（与阅读模式共用同一渲染管线）
-const previewHtml = computed(() => renderMarkdown(editContent.value))
+/* 换节点 / 数据刷新：`nodeInfo` 是父级每次 fetch 都新建的对象，
+   **保存小节后 emit('refresh') 也会走这里** —— 所以不能无条件重置，
+   否则用户改完第 3 节、保存，视图会跳回第 1 节（真实 bug，2026-11-15 发现）。
 
-watch(() => props.nodeInfo, (val) => {
-  if (val) {
-    mode.value = 'view'
-    editContent.value = val.content || ''
-    saveError.value = ''
-    // 小节模式：重置本地状态；有则默认载入第一节（懒加载，正文另行请求）
-    // 老节点落在「正文」项上（侧边栏恒在，只是只有一项）
-    activeSectionId.value = val.has_sections ? '' : LEGACY_DOC.id
-    sectionContent.value = ''
-    sectionError.value = ''
-    // 试题分组：换节点即重置并按需重新拉取（任意节点都渲染该分组）
+   判据：节点 id 变了才算"换节点"，才回到默认小节；同节点刷新只保留当前小节
+   （若它已被删掉，才回落到第一节）。 */
+watch(() => props.nodeInfo, (val, old) => {
+  if (!val) return
+  const sameNode = old && old.id === val.id
+  if (!sameNode) fullscreen.value = false
+
+  // 试题分组：换节点才重置并重拉（同节点刷新不动，免得每次保存都闪一下）
+  if (!sameNode) {
     quizzes.value = []
     quizzesError.value = ''
     quizzesLoading.value = false
     sectionQuiz.value = ''
     sectionQuizError.value = ''
     loadQuizzes()
-    // 来源高亮时优先打开**第一个属于该资料**的小节（否则默认第一节）
-    const hit = (val.sections || []).find(s => sectionHasSource(s))
-    if (hit) selectSection(hit.id)
-    else if (val.has_sections && val.sections?.length) selectSection(val.sections[0].id)
   }
+
+  if (!val.has_sections) {
+    activeSectionId.value = LEGACY_DOC.id
+    return
+  }
+
+  const ids = (val.sections || []).map(s => s.id)
+  // 当前小节还在就留着（刷新不该挪动用户的位置）
+  if (sameNode && ids.includes(activeSectionId.value)) return
+
+  // 来源高亮时优先打开**第一个属于该资料**的小节（否则默认第一节）
+  const hit = (val.sections || []).find(s => sectionHasSource(s))
+  if (hit) activeSectionId.value = hit.id
+  else if (ids.length) activeSectionId.value = ids[0]
+  else activeSectionId.value = ''
 })
 
 // 弹窗开着时在图谱里换了一份高亮资料 → 直接跳到该资料的第一个小节
 watch(() => props.sourceDocId, () => {
   const hit = (props.nodeInfo?.sections || []).find(s => sectionHasSource(s))
-  if (hit) selectSection(hit.id)
+  if (hit) activeSectionId.value = hit.id
 })
 
 /* Esc 关闭弹窗：window 上挂一次即可（不用 watch(visible) 反复绑/解绑）。
-   只在 visible 为真时响应，弹窗关着时不抢别的组件的 Esc。 */
+   只在 visible 为真时响应，弹窗关着时不抢别的组件的 Esc。
+   全屏时 Esc 先退全屏（一次 Esc 直接关掉正在读的长文太粗暴）。 */
 function handleKeydown(e) {
-  if (e.key === 'Escape' && props.visible) emit('close')
+  if (e.key !== 'Escape' || !props.visible) return
+  // 编辑器自己也会用 Esc（退出全屏编辑/关弹层），正在编辑时让给它
+  if (document.activeElement?.closest?.('.vditor')) return
+  if (fullscreen.value) {
+    fullscreen.value = false
+    return
+  }
+  emit('close')
 }
 onMounted(() => window.addEventListener('keydown', handleKeydown))
 onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
@@ -334,38 +410,6 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
 function displayName(id) {
   if (!id) return ''
   return id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-}
-
-/**
- * 保存节点内容：通过 emit 将保存意图传递给父组件（HomeView），
- * 父组件调用 Store.updateNodeContent() 完成后通过 callback 通知结果。
- *
- * 去耦设计：
- *   - emit('save-content', { nodeId, content, onResult }) —— 传递数据和回调
- *   - 父组件保存成功 → 调用 onResult(null) → 切回 view 模式
- *   - 父组件保存失败 → 调用 onResult(errorMessage) → 显示错误，保持 edit 模式
- */
-async function handleSave() {
-  saving.value = true
-  saveError.value = ''
-
-  // ★ 通过回调让父组件通知保存结果，emit 本身是同步的不会抛异常
-  emit('save-content', {
-    nodeId: props.nodeInfo.id,
-    content: editContent.value,
-    onResult: (error) => {
-      saving.value = false
-      if (error) {
-        // 保存失败：保持编辑模式，显示错误
-        saveError.value = error
-      } else {
-        // 保存成功：切回阅读模式，通知父组件刷新
-        saveError.value = ''
-        mode.value = 'view'
-        emit('refresh')
-      }
-    },
-  })
 }
 
 /* 掌握程度不再由节点详情手动调整：主信号是出题判分（grade_answer） */
@@ -381,9 +425,8 @@ async function handleSave() {
           <div class="modal-actions">
             <!-- 去学习：切到对话视图，后端按小节教学（见 chat_service._build_learn_block） -->
             <button
-              v-if="mode === 'view'"
               class="action-btn learn-btn"
-              title="去学习：AI 按小节带你过这个知识点"
+              title="按小节带你过一遍这个知识点"
               @click="emit('go-learn', nodeInfo.id)"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -393,31 +436,24 @@ async function handleSave() {
               </svg>
               去学习
             </button>
-            <!-- 阅读/编辑切换（小节模式无单一正文可编辑 → 隐藏入口） -->
+            <!-- 全屏：读长讲义/写长文的唯一诉求。只改面板尺寸，不换路由也不换组件 -->
             <button
-              v-if="mode === 'view' && !hasSections"
-              class="action-btn edit-btn"
-              @click="mode = 'edit'; editContent = nodeInfo.content || ''"
-              title="编辑"
+              class="action-btn"
+              :title="fullscreen ? '退出全屏（Esc）' : '全屏阅读'"
+              @click="fullscreen = !fullscreen"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                    stroke-linecap="round" stroke-linejoin="round">
-                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                <template v-if="fullscreen">
+                  <polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/>
+                  <line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>
+                </template>
+                <template v-else>
+                  <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
+                  <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
+                </template>
               </svg>
-              编辑
-            </button>
-            <button v-else-if="mode === 'edit'" class="action-btn save-btn" :disabled="saving" @click="handleSave">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                   stroke-linecap="round" stroke-linejoin="round">
-                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
-                <polyline points="17 21 17 13 7 13 7 21"/>
-                <polyline points="7 3 7 8 15 8"/>
-              </svg>
-              {{ saving ? '保存中...' : '保存' }}
-            </button>
-            <button v-if="mode === 'edit'" class="action-btn cancel-btn" @click="mode = 'view'">
-              取消
+              {{ fullscreen ? '退出全屏' : '全屏' }}
             </button>
             <button class="action-btn close-btn" @click="emit('close')" title="关闭">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
@@ -429,20 +465,8 @@ async function handleSave() {
           </div>
         </div>
 
-        <!-- 编辑模式：Markdown 源码 + 实时预览（分屏） -->
-        <div v-if="mode === 'edit'" class="edit-area">
-          <textarea
-            v-model="editContent"
-            class="edit-textarea"
-            placeholder="Markdown 格式内容，右侧实时预览..."
-          ></textarea>
-          <div class="markdown-body edit-preview" v-html="previewHtml"></div>
-          <!-- ponytail: 独立成行，故 grid-column 铺满两列 -->
-          <p v-if="saveError" class="save-error">{{ saveError }}</p>
-        </div>
-
-        <!-- 阅读模式：左侧栏（有 manifest → 小节列表；老节点 → 单项「正文」）+ 右侧正文 -->
-        <div v-else-if="mode === 'view'" class="sections-layout">
+        <!-- 主体：左侧栏（有 manifest → 小节列表；老节点 → 单项「正文」）+ 右侧共用工作区 -->
+        <div class="sections-layout">
           <!-- 侧栏外观走设计系统（styles/components.css 的 .sidebar / .sidebar-body /
                .sidebar-nav / .sidebar-item），本组件只补宽度、折叠与状态色 -->
           <aside class="sidebar section-sidebar" :class="{ collapsed: sidebarCollapsed }">
@@ -524,7 +548,7 @@ async function handleSave() {
                     </li>
                   </ul>
                   <div v-else class="quiz-empty">
-                    <span>该节点还没有试题</span>
+                    <span>还没有试题</span>
                     <button type="button" class="quiz-goto-btn" @click="openQuizCreator">去出题</button>
                   </div>
                 </template>
@@ -542,14 +566,14 @@ async function handleSave() {
                   type="button" class="slb-btn"
                   :class="{ on: activeLearn.mark === 'understood' }"
                   :disabled="learnBusy === activeSectionId"
-                  title="标记为已懂 —— 进对话时会先出一题验证，答对方算通过"
+                  title="标记为已懂，进对话时先出题验证"
                   @click="markLearn(activeSectionId, { mark: 'understood' })"
                 >已懂</button>
                 <button
                   type="button" class="slb-btn"
                   :class="{ on: activeLearn.mark === 'confused' }"
                   :disabled="learnBusy === activeSectionId"
-                  title="标记为不懂 —— 去学习时按顺序从这类小节开始讲"
+                  title="标记为不懂，去学习时从这里开始讲"
                   @click="markLearn(activeSectionId, { mark: 'confused' })"
                 >不懂</button>
                 <label class="slb-read">
@@ -559,16 +583,16 @@ async function handleSave() {
                     :disabled="learnBusy === activeSectionId"
                     @change="markLearn(activeSectionId, { read: $event.target.checked })"
                   >
-                  我已读完
+                  已读完
                 </label>
-                <span v-if="activeLearn.passed" class="slb-passed">✓ 已通过出题验证</span>
+                <span v-if="activeLearn.passed" class="slb-passed">✓ 已通过</span>
                 <span
                   v-else-if="activeLearn.mark === 'understood' && activeLearn.mark_by === 'ai'"
                   class="slb-ai-mark"
-                  title="AI 讲完后自动记为「已懂」—— 还要出题答对才算通过"
-                >AI 讲完已记为「已懂」，待出题验证</span>
+                  title="AI 讲完后自动标记，需出题答对才算通过"
+                >待验证</span>
                 <span v-if="learnProgress" class="slb-progress">
-                  已通过 {{ learnProgress.passed }}/{{ learnProgress.total }} 节
+                  {{ learnProgress.passed }}/{{ learnProgress.total }} 节
                 </span>
               </div>
               <p v-if="learnError" class="save-error section-gen-error">{{ learnError }}</p>
@@ -578,15 +602,29 @@ async function handleSave() {
                 <span v-for="(s, i) in activeSources" :key="i">{{ sourceLabel(s) }}<span
                   v-if="i < activeSources.length - 1">、</span></span>
               </p>
-              <p v-if="sectionLoading" class="section-hint">加载中…</p>
-              <p v-else-if="sectionError" class="save-error section-content-error">{{ sectionError }}</p>
-              <div v-else class="markdown-body section-md" v-html="sectionHtml"></div>
             </template>
-            <!-- 老节点：无 manifest，右侧直接渲染单 MD（行为不变），侧栏只列「正文」 -->
-            <template v-else>
-              <div v-if="nodeInfo.content" class="markdown-body section-md" v-html="htmlContent"></div>
-              <p v-else class="empty-content">暂无详细内容</p>
-            </template>
+
+            <!-- 视频出处：这个知识点在课堂视频的哪一分钟讲过（反查 /knowledge/node/{id}/video-sources）。
+                 放在小节溯源之后、正文之前 —— 溯源信息聚在一起，读正文前先知道"这话从哪来"。
+                 无视频出处的节点**整卡不渲染**（组件内 v-if），所以绝大多数节点看不到它，
+                 不会凭空多出一条空区块。 -->
+            <VideoSourceCard
+              v-if="nodeInfo?.id"
+              :node-id="String(nodeInfo.id)"
+              @open-lecture="emit('open-lecture', $event)"
+            />
+
+            <!-- 正文：阅读/编辑都交给共用工作区（与知识库页同一个组件、同一个编辑器）。
+                 节点侧只提供三个适配器：读这节正文 / 存这节正文 / 没有原件。 -->
+            <DocWorkspace
+              ref="workspaceRef"
+              bare
+              :doc="wsDoc"
+              :load-text="wsLoadText"
+              :save-text="wsSaveText"
+              empty-title="这个节点还没有正文"
+              empty-hint="可以让 AI 在对话里补全，或让它重新做一次小节化"
+            />
           </div>
         </div>
 
@@ -606,9 +644,9 @@ async function handleSave() {
           </div>
         </div>
 
-        <!-- 相关节点 -->
+        <!-- 相关知识点 -->
         <div v-if="nodeInfo.related_nodes?.length" class="relations-section">
-          <h3>相关节点</h3>
+          <h3>相关知识点</h3>
           <div class="relation-list">
             <button
               v-for="rid in nodeInfo.related_nodes"
@@ -660,12 +698,6 @@ async function handleSave() {
   white-space: nowrap;
 }
 .action-btn:hover { background: var(--color-bg-hover); border-color: var(--color-border-light); }
-.edit-btn { color: var(--color-accent); border-color: var(--color-accent-light); }
-.edit-btn:hover { background: var(--color-accent-light); }
-.save-btn { color: var(--color-green); border-color: var(--color-green-light); }
-.save-btn:hover { background: var(--color-green-light); }
-.save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.cancel-btn { color: var(--color-text-secondary); }
 .close-btn { border: none; background: transparent; color: var(--color-text-muted); padding: 6px; }
 .close-btn:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
 
@@ -681,46 +713,14 @@ async function handleSave() {
 .section-sidebar.collapsed { width: 36px; min-width: 36px; }
 .section-sidebar.collapsed .section-sidebar-body { display: none; }
 
-/* 编辑区：左源码 / 右实时预览 */
-.edit-area {
-  flex: 1; min-height: 0; display: grid;
-  grid-template-columns: 1fr 1fr; gap: 12px;
-  padding: 16px 24px;
+/* 正文区：内部是 DocWorkspace（阅读 + 编辑），这里只给它一个能撑满的高度容器。
+   排版样式（.markdown-body）原先由本组件维护，已随编辑器一起搬进 DocWorkspace —— 
+   两个组件各写一套 Markdown 排版正是这次要消除的重复。 */
+.section-content {
+  flex: 1; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
 }
-.edit-textarea {
-  width: 100%; height: 100%; min-height: 320px; padding: 14px;
-  border: 1px solid var(--color-border); border-radius: 10px;
-  font-family: 'Consolas', 'Courier New', monospace;
-  font-size: var(--detail-font-size, 14px); line-height: 1.6; resize: vertical;
-  color: var(--color-text-primary); background: var(--color-bg-secondary);
-}
-.edit-textarea:focus { outline: none; border-color: var(--color-accent); }
-.edit-preview {
-  min-height: 320px; padding: 14px; overflow-y: auto;
-  border: 1px solid var(--color-border); border-radius: 10px;
-  background: var(--color-bg-secondary);
-}
-@media (max-width: 760px) {
-  .edit-area { grid-template-columns: 1fr; }
-}
-.save-error { grid-column: 1 / -1; color: var(--color-red); font-size: 13px; margin: 0; }
-
-/* Markdown —— 字号来自设置页（--detail-font-size），标题/代码用相对单位同步缩放 */
-.markdown-body {
-  flex: 1; overflow-y: auto; padding: 20px 24px;
-  font-size: var(--detail-font-size, 14px); line-height: 1.7; color: var(--color-text-primary);
-}
-.markdown-body :deep(p) { margin: 0 0 10px; }
-.markdown-body :deep(strong) { font-weight: 600; }
-.markdown-body :deep(code) { background: var(--color-bg-surface); padding: 2px 6px; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 0.93em; }
-.markdown-body :deep(pre) { background: var(--color-bg-tertiary); color: var(--color-text-primary); padding: 14px 16px; border-radius: 10px; overflow-x: auto; margin: 12px 0; font-size: 0.93em; }
-.markdown-body :deep(pre code) { background: transparent; padding: 0; color: inherit; }
-.markdown-body :deep(h1), .markdown-body :deep(h2), .markdown-body :deep(h3) { margin: 18px 0 8px; font-weight: 600; color: var(--color-text-primary); }
-.markdown-body :deep(h1) { font-size: 1.43em; }
-.markdown-body :deep(h2) { font-size: 1.21em; }
-.markdown-body :deep(blockquote) { border-left: 3px solid var(--color-accent); padding-left: 14px; margin: 12px 0; color: var(--color-text-secondary); }
-.markdown-body :deep(ul), .markdown-body :deep(ol) { padding-left: 20px; margin: 8px 0; }
-.empty-content { color: var(--color-text-muted); font-style: italic; text-align: center; padding: 40px 0; }
+.save-error { color: var(--color-red); font-size: 13px; margin: 0; }
 
 /* 小节模式：左列表 / 右正文。
    侧栏的壳 / 滚动区 / 列表 / 列表项外观全部来自设计系统（styles/components.css 的
@@ -782,8 +782,6 @@ async function handleSave() {
 }
 .quiz-goto-btn:hover { background: var(--color-bg-hover); border-color: var(--color-border-light); color: var(--color-text-primary); }
 
-.section-content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.section-md { flex: 1; }
 /* 小节级溯源：正文上方一行浅色来源标注 */
 .section-sources {
   margin: 0; padding: 8px 24px; flex-shrink: 0;
@@ -792,7 +790,6 @@ async function handleSave() {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .section-hint { padding: 16px 24px; margin: 0; font-size: 13px; color: var(--color-text-muted); }
-.section-content-error { padding: 16px 24px; margin: 0; font-size: 13px; }
 @media (max-width: 560px) { .section-sidebar { width: 140px; min-width: 140px; } }
 
 /* 关系 */
