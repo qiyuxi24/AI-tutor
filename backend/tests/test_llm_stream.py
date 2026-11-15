@@ -148,6 +148,44 @@ def test_accumulates_reasoning_details(monkeypatch):
     assert [r["text"] for r in rd] == ["用户问的是", "二重积分。"]
 
 
+def test_calls_on_reasoning_per_chunk(monkeypatch):
+    """思考也逐片回调 on_reasoning（首屏"AI 正在思考"的来源）。
+
+    原先 reasoning_details 只累积、不回调 → 思考内容要等整次调用返回才以一条
+    THINKING 事件下发，用户在前 4–5 秒里看到的是一片空白（实测 TTFT 12–18s）。
+    """
+    calls, thoughts = [], []
+    _install(monkeypatch, [[
+        _chunk(reasoning=[{"type": "reasoning.text", "text": "先看用户问的"}]),
+        _chunk(reasoning=[{"type": "reasoning.text", "text": "是二重积分。"}]),
+        _chunk(content="答案。", finish="stop"),
+    ]], calls)
+
+    resp = asyncio.run(stream_mod.chat_create_stream(
+        messages=[], temperature=0.3, on_reasoning=thoughts.append))
+
+    assert thoughts == ["先看用户问的", "是二重积分。"]
+    assert resp.choices[0].message.content == "答案。"
+    # 累积结果不受影响（证据里仍是全文）
+    rd = resp.choices[0].message.reasoning_details
+    assert [r["text"] for r in rd] == ["先看用户问的", "是二重积分。"]
+
+
+def test_on_reasoning_tolerates_non_text_elements(monkeypatch):
+    """reasoning 元素可能不带 text（如 reasoning.summary）→ 跳过而不是抛 KeyError。"""
+    calls, thoughts = [], []
+    _install(monkeypatch, [[
+        _chunk(reasoning=[{"type": "reasoning.summary"}]),      # 无 text
+        _chunk(reasoning=[{"type": "reasoning.text", "text": "有字"}]),
+        _chunk(content="答案。", finish="stop"),
+    ]], calls)
+
+    asyncio.run(stream_mod.chat_create_stream(
+        messages=[], temperature=0.3, on_reasoning=thoughts.append))
+    assert thoughts == ["有字"]
+
+
+
 # ── 4. stream_options 被拒（400）→ 去掉重开 ─────────────────────────
 
 def test_stream_options_400_degrades_without_usage(monkeypatch):

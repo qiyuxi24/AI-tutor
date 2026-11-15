@@ -55,7 +55,7 @@ def _install_fake_chat(monkeypatch, responses: list, received: list):
 
     async def fake_chat(api_messages, *, temperature, tools=None,
                         tool_choice=None, max_tokens=2000, user_id=None,
-                        on_delta=None):
+                        on_delta=None, on_reasoning=None):
         received.append({
             "messages": copy.deepcopy(api_messages),
             "tools": copy.deepcopy(tools),
@@ -153,7 +153,7 @@ def test_no_tools_falls_back_when_gateway_rejects_tool_choice(monkeypatch):
 
     async def fake_chat(api_messages, *, temperature, tools=None,
                         tool_choice=None, max_tokens=2000, user_id=None,
-                        on_delta=None):
+                        on_delta=None, on_reasoning=None):
         # ⚠️ `user_id` 必须留在签名里：合并 origin/main 后 `_chat_once` 会带
         # `user_id=user_id`（用户级模型链），少了它 → TypeError 被当成"网关拒绝" → 降级路径假绿。
         calls["n"] += 1
@@ -365,7 +365,7 @@ def test_force_finish_llm_error_fallback(monkeypatch):
 
     async def fake_chat(api_messages, *, temperature, tools=None,
                         tool_choice=None, max_tokens=2000, user_id=None,
-                        on_delta=None):
+                        on_delta=None, on_reasoning=None):
         item = queue.pop(0)
         if item is None:
             raise RuntimeError("[E-LLM-001] 模拟超时")
@@ -459,7 +459,7 @@ def _install_streaming_chat(monkeypatch, rounds, received=None):
     queue = list(rounds)
 
     async def fake_chat(api_messages, *, temperature, tools=None, tool_choice=None,
-                        max_tokens=2000, user_id=None, on_delta=None):
+                        max_tokens=2000, user_id=None, on_delta=None, on_reasoning=None):
         if received is not None:
             received.append({"on_delta": on_delta, "tool_choice": tool_choice,
                              "tools": tools})
@@ -540,6 +540,81 @@ def test_no_deltas_falls_back_to_single_full_text(monkeypatch):
                                kg=object(), emitter=fake))
 
     assert _text_deltas(fake) == ["完整回答。"]
+
+
+# ─── 思考流式下发（2026-11-15，TODO「TTFT 12–18s 里前几秒只有思考」）────
+# 思考型模型先产思考再产正文；原先思考只在**整次调用返回后**合成一条 THINKING
+# 下发 → 用户在那几秒里看到一片空白。现在逐片推，与正文同一套"推过就不补"规则。
+
+def _install_thinking_chat(monkeypatch, rounds):
+    """rounds = [(think_chunks, text_chunks, tool_calls), ...]：模拟 llm/stream.py
+    把思考逐片回调 `on_delta.on_reasoning`（思考泵与正文泵是同一个对象）。"""
+    queue = list(rounds)
+
+    async def fake_chat(api_messages, *, temperature, tools=None, tool_choice=None,
+                        max_tokens=2000, user_id=None, on_delta=None, on_reasoning=None):
+        think, chunks, tool_calls = queue.pop(0)
+        for t in think:
+            on_delta.on_reasoning(t)
+        for c in chunks:
+            on_delta(c)
+        return _resp(_msg(content="".join(chunks), tool_calls=tool_calls))
+
+    monkeypatch.setattr(agent_loop, "_chat_once", fake_chat)
+
+
+def _thinking_texts(fake):
+    return [d["text"] for t, d in fake.events if t == THINKING]
+
+
+def test_thinking_streams_per_chunk(monkeypatch):
+    """思考**逐片**推 THINKING（不是等整次调用返回后合成一条）。"""
+    _install_thinking_chat(monkeypatch, [(["先看用户问的", "是二重积分。"], ["答案。"], None)])
+    _install_fake_execute(monkeypatch)
+    fake = _CollectEmitter()
+
+    asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}],
+                               kg=object(), emitter=fake))
+
+    assert _thinking_texts(fake) == ["先看用户问的", "是二重积分。"]
+    assert _text_deltas(fake) == ["答案。"]      # 正文不受影响
+
+
+def test_thinking_falls_back_to_single_aggregate(monkeypatch):
+    """没有逐片回调（非流式 / 旧测试桩）→ 仍补一条整段 THINKING，思考不丢。"""
+    rd = [{"type": "reasoning.text", "text": "用户问的是"},
+          {"type": "reasoning.text", "text": "二重积分。"}]
+    msg = SimpleNamespace(content="答案。", tool_calls=None, reasoning_details=rd)
+    received = []
+    _install_fake_chat(monkeypatch, [_resp(msg)], received)
+    _install_fake_execute(monkeypatch)
+    fake = _CollectEmitter()
+
+    asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}],
+                               kg=object(), emitter=fake))
+
+    assert _thinking_texts(fake) == ["用户问的是 二重积分。"]
+
+
+def test_thinking_does_not_duplicate_when_streamed(monkeypatch):
+    """逐片推过之后，收尾处**不再**补一条整段（否则前端思考面板出现重复文本）。"""
+    rd = [{"type": "reasoning.text", "text": "先看用户问的"}]
+    msg = SimpleNamespace(content="答案。", tool_calls=None, reasoning_details=rd)
+
+    async def fake_chat(api_messages, *, temperature, tools=None, tool_choice=None,
+                        max_tokens=2000, user_id=None, on_delta=None, on_reasoning=None):
+        on_delta.on_reasoning("先看用户问的")
+        on_delta("答案。")
+        return _resp(msg)
+
+    monkeypatch.setattr(agent_loop, "_chat_once", fake_chat)
+    _install_fake_execute(monkeypatch)
+    fake = _CollectEmitter()
+
+    asyncio.run(run_agent_loop("sys", [{"role": "user", "content": "x"}],
+                               kg=object(), emitter=fake))
+
+    assert _thinking_texts(fake) == ["先看用户问的"]     # 只有流式那一帧
 
 
 # ─── S8 Tool Result Clearing 的接线（P1-③）───────────────────
@@ -745,7 +820,7 @@ def test_plan_structured_finish_records_sections(monkeypatch):
     received = []
 
     async def fake_chat(api_messages, *, temperature, tools=None, tool_choice=None,
-                        max_tokens=2000, user_id=None, on_delta=None):
+                        max_tokens=2000, user_id=None, on_delta=None, on_reasoning=None):
         received.append(copy.deepcopy(api_messages))
         return queue.pop(0)
 
@@ -812,7 +887,7 @@ def test_midloop_llm_error_degrades_instead_of_raising(monkeypatch):
     calls = {"n": 0}
 
     async def fake_chat(api_messages, *, temperature, tools=None, tool_choice=None,
-                        max_tokens=2000, user_id=None, on_delta=None):
+                        max_tokens=2000, user_id=None, on_delta=None, on_reasoning=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return _resp(_msg(tool_calls=[_tc("rag_search", {"query": "q"}, tc_id="c1")]))
@@ -838,7 +913,7 @@ def test_cancelled_run_persisted(tmp_path, monkeypatch):
     否则用户说"卡住了"时这一轮在库里根本不存在（CancelledError 绕过 except Exception）。
     """
     async def hang(api_messages, *, temperature, tools=None, tool_choice=None,
-                   max_tokens=2000, user_id=None, on_delta=None):
+                   max_tokens=2000, user_id=None, on_delta=None, on_reasoning=None):
         await asyncio.sleep(30)
 
     monkeypatch.setattr(agent_loop, "_chat_once", hang)

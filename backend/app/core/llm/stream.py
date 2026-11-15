@@ -68,8 +68,9 @@ def _to_response(*, model, usage, finish, content, reasoning, tool_slots):
     )
 
 
-async def _accumulate(stream, on_delta) -> SimpleNamespace:
-    """消费 chunk 流：正文逐片回调 `on_delta`，返回同形响应对象。"""
+async def _accumulate(stream, on_delta, on_reasoning=None) -> SimpleNamespace:
+    """消费 chunk 流：正文逐片回调 `on_delta`、思考逐片回调 `on_reasoning`，
+    返回同形响应对象。"""
     content_parts: list[str] = []
     reasoning: list = []
     tool_slots: dict = {}
@@ -96,6 +97,11 @@ async def _accumulate(stream, on_delta) -> SimpleNamespace:
         rd = getattr(delta, "reasoning_details", None)
         if rd:
             reasoning.extend(rd if isinstance(rd, list) else [rd])
+            if on_reasoning is not None:
+                for r in (rd if isinstance(rd, list) else [rd]):
+                    piece = r.get("text") if isinstance(r, dict) else None
+                    if piece:
+                        on_reasoning(piece)
         tcs = getattr(delta, "tool_calls", None)
         if tcs:
             _collect_tool_deltas(tool_slots, tcs)
@@ -105,7 +111,8 @@ async def _accumulate(stream, on_delta) -> SimpleNamespace:
                         tool_slots=tool_slots)
 
 
-async def chat_create_stream(*, user_id: int | None = None, on_delta=None, **kwargs):
+async def chat_create_stream(*, user_id: int | None = None, on_delta=None,
+                             on_reasoning=None, **kwargs):
     """流式对话调用（`chat_create` 的流式变体）。
 
     用法：不传 `model`（`chat_create` 按候选链注入 `model` 并做瞬时重试）；
@@ -113,6 +120,8 @@ async def chat_create_stream(*, user_id: int | None = None, on_delta=None, **kwa
 
     参数:
         on_delta: `(text: str) -> None`，正文每片回调一次（首屏延迟的来源）。
+        on_reasoning: `(text: str) -> None`，思考每片回调一次。思考型模型前几秒只产思考，
+            不回调它 = 用户在那几秒里看到空白（实测 TTFT 12–18s）。
         user_id:  透传 `chat_create`（走该用户自有模型链，未配置则回落系统默认档）。
 
     返回:
@@ -133,4 +142,4 @@ async def chat_create_stream(*, user_id: int | None = None, on_delta=None, **kwa
         if not (isinstance(cause, APIStatusError) and cause.status_code in (400, 422)):
             raise
         stream = await chat_create(user_id=user_id, **call_kwargs)   # 降级：丢 usage
-    return await _accumulate(stream, on_delta)
+    return await _accumulate(stream, on_delta, on_reasoning)

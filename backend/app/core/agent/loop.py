@@ -194,18 +194,23 @@ def _estimate_send(api_messages: list[dict], *, user_id: int | None,
 
 
 class _DeltaPump:
-    """一次 `_chat_once` 的正文增量泵：逐 chunk 推 TEXT_DELTA，并记住推过几片。
+    """一次 `_chat_once` 的增量泵：正文逐 chunk 推 TEXT_DELTA、思考逐片推 THINKING，
+    并各自记住推过几片。
 
     收尾处据 `count` 决定要不要再补一帧整段：**推过就不补**（补了 = 正文重复），
     一片都没推（模型无正文 / 网关不支持流 / 测试桩）才补 —— 等价旧行为，
     保证"没有任何一片时前端仍拿得到完整文本"这条不变量不破。
+
+    思考同理（`reasoning_count`）：思考型模型前几秒只产思考，原先要等整次调用返回
+    才合成一条 THINKING 下发 → 用户在那几秒里看到一片空白（实测 TTFT 12–18s）。
     """
 
-    __slots__ = ("emitter", "count")
+    __slots__ = ("emitter", "count", "reasoning_count")
 
     def __init__(self, emitter: "AgentEventEmitter") -> None:
         self.emitter = emitter
         self.count = 0
+        self.reasoning_count = 0
 
     def __call__(self, text: str) -> None:
         if not text:
@@ -213,12 +218,20 @@ class _DeltaPump:
         self.count += 1
         self.emitter.emit(TEXT_DELTA, text=text)
 
+    def on_reasoning(self, text: str) -> None:
+        """思考片回调（签名对齐 `llm/stream.py` 的 `on_reasoning`）。"""
+        if not text:
+            return
+        self.reasoning_count += 1
+        self.emitter.emit(THINKING, text=text)
+
 
 async def _chat_once(api_messages: list[dict], *, temperature: float,
                      tools: list | None = None, tool_choice: str | None = None,
                      max_tokens: int = AGENT_MAX_TOKENS,
                      user_id: int | None = None,
-                     on_delta: Callable[[str], None] | None = None):
+                     on_delta: Callable[[str], None] | None = None,
+                     on_reasoning: Callable[[str], None] | None = None):
     """单次 LLM 调用封装（瞬时重试 + 错误码映射 + 模型静默降级到备用）。
 
     tool_choice 透传给 chat_create：强制收尾用 "none"（保留 tools 块以维持缓存前缀，
@@ -229,6 +242,9 @@ async def _chat_once(api_messages: list[dict], *, temperature: float,
     on_delta（首屏延迟 = 首 chunk 时间，而非整段生成时间）；返回值仍是**与非流式同形**
     的响应对象（content / tool_calls / reasoning_details / usage / model 齐全），
     所以调用点后面的逻辑一行都不用分叉。on_delta=None 保持原非流式行为（测试桩）。
+
+    on_reasoning 非空 = 思考也逐片回调（2026-11-15）；与 on_delta 一起给才算真流式，
+    只给 on_delta 时思考仍要等整次返回（见 `_loop_core` 的兜底 emit）。
     """
     kwargs = {
         "messages": api_messages,
@@ -241,7 +257,8 @@ async def _chat_once(api_messages: list[dict], *, temperature: float,
     if tool_choice is not None:
         kwargs["tool_choice"] = tool_choice
     if on_delta is not None:
-        return await _chat_create_stream(user_id=user_id, on_delta=on_delta, **kwargs)
+        return await _chat_create_stream(user_id=user_id, on_delta=on_delta,
+                                         on_reasoning=on_reasoning, **kwargs)
     return await _chat_create(user_id=user_id, **kwargs)
 
 
@@ -403,7 +420,7 @@ async def _finish_without_tools(ctx: AgentContext, *, temperature: float,
         resp = await _chat_once(ctx.messages, temperature=temperature,
                                 tools=tools, tool_choice="none" if tools else None,
                                 user_id=getattr(emitter, "user_id", None),
-                                on_delta=pump)
+                                on_delta=pump, on_reasoning=pump.on_reasoning)
     except Exception as e:
         rlog.log("loop", "finish_tool_choice_unsupported",
                  "网关拒绝 tool_choice=none，降级为不带 tools 的旧收尾行为",
@@ -412,7 +429,7 @@ async def _finish_without_tools(ctx: AgentContext, *, temperature: float,
             attempts += 1
             resp = await _chat_once(ctx.messages, temperature=temperature,   # 降级：不带 tools
                                     user_id=getattr(emitter, "user_id", None),
-                                    on_delta=pump)
+                                    on_delta=pump, on_reasoning=pump.on_reasoning)
         except Exception as e2:
             rlog.log("loop", "force_finish_failed", "强制收尾 LLM 调用失败，退化为固定文案",
                      level="WARNING", error=str(e2), stop_reason=stop_reason)
@@ -571,7 +588,8 @@ async def _loop_core(
                     resp = await _chat_once(ctx.messages, temperature=temperature,
                                             tools=tool_arg or None,
                                             tool_choice="none" if tool_arg else None,
-                                            user_id=user_id, on_delta=pump)
+                                            user_id=user_id, on_delta=pump,
+                                            on_reasoning=pump.on_reasoning)
                 except Exception as e:      # noqa: BLE001 —— 网关差异，降级而非报错
                     rlog.log("loop", "no_tools_choice_unsupported",
                              "网关拒绝 tool_choice=none（本轮禁工具），降级为不带 tools",
@@ -579,11 +597,13 @@ async def _loop_core(
                     # 降级必须**连 tools 一起丢掉**：只丢 tool_choice 等于把工具还给它，
                     # "本轮禁工具"就名存实亡（缓存前缀这一次认栽）。
                     resp = await _chat_once(ctx.messages, temperature=temperature,
-                                            user_id=user_id, on_delta=pump)
+                                            user_id=user_id, on_delta=pump,
+                                            on_reasoning=pump.on_reasoning)
             else:
                 resp = await _chat_once(ctx.messages, temperature=temperature,
                                         tools=tool_arg or None,
-                                        user_id=user_id, on_delta=pump)
+                                        user_id=user_id, on_delta=pump,
+                                        on_reasoning=pump.on_reasoning)
         except asyncio.CancelledError:
             raise
         except Exception as e:      # noqa: BLE001 —— 中途失败，能救则救
@@ -627,11 +647,14 @@ async def _loop_core(
             msg.tool_calls = None
 
         # 思考内容 → 实时事件（截断 200 字友好展示）+ 证据 step（全文保留）
+        # 流式已逐片推过（reasoning_count > 0）→ 不再补整条（否则前端思考面板重复）；
+        # 没推过（非流式 / 旧测试桩 / 网关不给 reasoning delta）才补一条整段。
         rd = getattr(msg, "reasoning_details", None)
         if rd:
             rd_text = " ".join(r.get("text", "") for r in (rd if isinstance(rd, list) else [rd]))
             if rd_text:
-                emitter.emit(THINKING, text=rd_text[:200])
+                if pump.reasoning_count == 0:
+                    emitter.emit(THINKING, text=rd_text[:200])
                 steps.append({"ts": time.time(), "kind": "thinking", "text": _clip(rd_text)})
 
         # 自然终止：模型不再请求工具
