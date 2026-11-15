@@ -927,6 +927,18 @@ async def _run_restructure(user_id: int, doc_id: int, doc_name: str) -> None:
         result = lecture_structurer.structure(sections,
                                              float(lecture.get("duration") or 0))
         segments = result["segments"]
+        if segments and result.get("degraded"):
+            # 兜底切片的正文是 ASR 口语，机械截句当标题等于没有标题 ——
+            # 让模型在**既定边界**上起名并写一句导语（不改边界，成本一次调用）。
+            # 失败返回空字典，保留机械标题、导语留空，不阻断。
+            named = await lecture_structurer.name_segments(
+                lecture.get("title") or "", segments, user_id=user_id)
+            for seg in segments:
+                got = named.get(seg["seq"]) or {}
+                if got.get("title"):
+                    seg["title"] = got["title"]
+                if got.get("brief"):
+                    seg["brief"] = got["brief"]
         if not segments:
             error = ErrorCode.user_message(ErrorCode.KB_EMPTY_TIMELINE)
         else:

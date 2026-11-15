@@ -173,27 +173,110 @@ def degraded_segments(sections: Sequence[Section],
         end = round(total if index == count - 1 else (index + 1) * step, 3)
         events = _window_speech(sections, start, end) or _window_speech(
             sections, 0.0, total)   # 整集都没有事件时才退回全量
-        text = ""
+        # 正文按**语音条**分段，而不是拼成一整块：ASR 出来的每条 cue 本来就是
+        # 一口气说完的一小段（实测 20-40 字），拼成一整块 400 字无标点的黑墙
+        # 完全没法读。条内仍走 `join_text`（CJK 不插空格）。
+        paras: list[str] = []
         for event in events:
-            text = join_text(text, event.text)
-        text = text.strip()
+            part = (event.text or "").strip()
+            if not part:
+                continue
+            if paras and len(paras[-1]) < 60:
+                # 极短的 cue（"对吧""然后呢"）并到上一段，避免一行两三个字
+                paras[-1] = join_text(paras[-1], part)
+            else:
+                paras.append(part)
+        text = "\n\n".join(paras).strip()
         title = _fallback_title(text, index + 1, count)
-        # 相邻段首句撞车（口语里"那么我们"开头极常见）时补上序号区分 ——
-        # 时间轴上一列同名条目等于没有标题，右栏也分不清自己在看哪一段。
+        # 相邻段机械标题撞车（口语里"那么""对吧"开头极常见）时补序号区分 ——
+        # 时间轴上一列同名条目等于没有标题。LLM 起名成功时会被覆盖，但模型
+        # 调用失败（断网/欠费）时这一层是唯一的兜底。
         if title in used_titles and count > 1:
             title = f"{title}（{index + 1}）"
         used_titles.add(title)
+        # brief 是**导语**，不是正文摘抄 —— 正文首句原样搬过来只会在页面上
+        # 与下面那段一字不差地重复（实测最扎眼的一处）。这里留空，由
+        # `name_segments` 用模型给的一句话概括填上；拿不到就空着（前端 `v-if` 不渲染）。
         out.append(_segment(
             seq=index + 1,
             title=title,
             kind="fallback",
-            brief=text[:BRIEF_CHARS],
+            brief="",
             content=text,
             t_start=start,
             t_end=end,
             slide=_window_image(sections, start, end),
         ))
     return out
+
+
+NAMING_SYSTEM = """你在整理一份大学数学网课的转写稿。
+
+给你的是同一节课按时间等分切出的若干段（每段有编号、时间范围、正文）。
+这些边界是机械切出来的，不是真的知识点边界 —— 所以你**不要**修改边界，
+只做一件事：给每一段起一个**名词性短语**的小标题。
+
+要求：
+1. 标题必须是名词性短语（"拉普拉斯变换的微分性质"、"用留数计算定积分"），
+   不能是句子或口语（禁止"今天我们来看"、"对吧所以"、"第三题"这类）。
+2. 只依据该段正文里确实讲到的内容，不要编造。
+3. 标题不超过 14 个汉字，不加序号、不加书名号、不加句号。
+4. 同一节课里不同段的标题必须能区分开。
+5. 如果某段只是承上启下、没有实质内容，标题写"过渡与小结"。
+
+输出严格 JSON：{"titles": [{"seq": 1, "title": "……", "brief": "……"}, ...]}，不改 seq。
+其中 `brief` 是该段内容的一句话概括（不超过 40 个汉字，说明这段讲了什么），
+不要照抄正文原句。"""
+
+# 单段喂给模型的正文字数上限：兜底段本来是 90s 一段，1200 字足够覆盖，
+# 再长只是把整节课塞进去（那等于让模型做语义切片，不是它的职责）
+NAMING_BODY_CHARS = 1200
+NAMING_MAX_TOKENS = 1200
+
+
+async def name_segments(lecture_title: str, segments: list[dict],
+                        *, user_id: int | None = None) -> dict[int, dict]:
+    """给兜底切片起知识点名 + 一句话导语。返回 `{seq: {"title", "brief"}}`；
+    失败返回空字典（调用方保留机械标题、`brief` 留空）。
+
+    为什么名字必须由 LLM 出：兜底切片的正文是 ASR 口语（"那么今天我们要来看的呢是…"），
+    从里面截句子当标题，结果是一列看不出区别的碎片 —— 时间轴最有价值的那一屏
+    （"扫一眼知道这集讲什么"）就废了。实测同一批数据，机械截句得到
+    "今天我们要来看的呢是利用拉普拉斯变换来求解微分方…"，模型给的是
+    "拉普拉斯变换解微分方程"。这一步只是在**已有边界**上起名，不改边界，
+    所以成本远低于真正的语义切片（一次调用、1200 输出上限）。
+
+    `brief` 也一并要：正文是转写稿无法压缩，页面上「导语 + 正文」如果取自同一句
+    就是肉眼可见的重复；让模型概括一句话才让这里真的像讲义。
+    """
+    from app.core.llm import call_llm                      # 延迟导入：模块顶层不拉 LLM 依赖
+    from app.core.llm.json_extract import extract_json
+
+    parts = [f"课程：{lecture_title or ''}", ""]
+    for seg in segments:
+        parts.append(f"## 第 {seg['seq']} 段"
+                     f"（{int(seg['t_start'])}s - {int(seg['t_end'])}s）")
+        parts.append((seg.get("content") or "").strip()[:NAMING_BODY_CHARS]
+                     or "（无内容）")
+        parts.append("")
+    try:
+        raw = await call_llm(NAMING_SYSTEM,
+                             [{"role": "user", "content": "\n".join(parts)}],
+                             max_tokens=NAMING_MAX_TOKENS, thinking=False,
+                             kind="kb_lecture_title", user_id=user_id)
+        data = extract_json(raw) or {}
+        out: dict[int, dict] = {}
+        for item in data.get("titles") or []:
+            if not item.get("seq") or not item.get("title"):
+                continue
+            out[int(item["seq"])] = {
+                "title": str(item["title"]).strip(),
+                "brief": str(item.get("brief") or "").strip()[:BRIEF_CHARS],
+            }
+        return out
+    except Exception:                                      # noqa: BLE001
+        # 起名是锦上添花：失败就用手上的机械标题，绝不让它挡住"能不能看"
+        return {}
 
 
 def structure(sections: Sequence[Section], duration: float) -> dict:
@@ -226,7 +309,9 @@ def structure(sections: Sequence[Section], duration: float) -> dict:
 __all__ = [
     "MIN_SEGMENT_SECS",
     "BRIEF_CHARS",
+    "NAMING_SYSTEM",
     "structurer_hook",
     "degraded_segments",
+    "name_segments",
     "structure",
 ]

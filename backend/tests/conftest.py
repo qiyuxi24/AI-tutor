@@ -100,3 +100,42 @@ def _isolate_notices_db(monkeypatch):
         return real_connect(db_dir)
 
     monkeypatch.setattr(notices_mod, "_connect", guarded)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_llm(monkeypatch):
+    """默认禁止测试打真实 LLM（付费、每次几秒）。
+
+    动机与 `_isolate_rag_index` 相同，但后果更重：`lecture_structurer.name_segments`
+    这类"顺带调一下模型"的路径会在**无人察觉**的情况下变成每跑一次测试就付一次钱。
+    实测 `test_kb_lecture_api.py` 接了起名钩子后，同 38 个用例从 16s 涨到 36s ——
+    那 20s 全是真实网络往返。
+
+    做法：把 `clients.client` / `clients.fallback_client` 换成"调用即抛错"的假客户端，
+    并清掉 `LLM_CANDIDATES` 让默认候选链基于它们重建。**不替换 `default_candidates`
+    函数本身** —— 那样会盖掉测试自己 `monkeypatch.setattr(llm_client, "LLM_CANDIDATES", …)`
+    设的假候选链（`test_llm_fallback.py` / `test_user_model_routing.py` 就是这么测降级的），
+    结果是那些用例全部假失败。
+
+    被调用方自己写了兜底的路径（如起名失败保留机械标题）因此走**降级分支**——
+    这正是生产里网络挂掉时的行为，测起来更真实。需要真打模型的用例标
+    `@pytest.mark.llm_api`（`-m "not llm_api"` 本来就会筛掉）。
+    """
+    from app.core.llm import clients as clients_mod
+    from app.core.llm import fallback as fallback_mod
+
+    class _ExplodingCompletions:
+        async def create(self, *args, **kwargs):
+            raise RuntimeError("测试隔离：禁止真实 LLM 调用（请 monkeypatch 打桩）")
+
+    class _ExplodingChat:
+        completions = _ExplodingCompletions()
+
+    class _ExplodingClient:
+        chat = _ExplodingChat()
+
+    monkeypatch.setattr(clients_mod, "client", _ExplodingClient())
+    monkeypatch.setattr(clients_mod, "fallback_client", None)
+    # 缓存清空 → 下次 default_candidates() 用上面这两个假客户端重建
+    monkeypatch.setattr(fallback_mod, "LLM_CANDIDATES", None)
+    monkeypatch.setattr(fallback_mod, "_CLIENT_CACHE", {})
