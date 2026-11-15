@@ -36,6 +36,7 @@ import { kindLabel, pickSegment, sortSegments, formatClock, platformLabel } from
 import { useSlideAssets } from '../utils/slideAssets.js'
 import { renderMarkdown } from '../utils/markdown.js'
 import LectureTimeline from '../components/LectureTimeline.vue'
+import AppIcon from '../components/AppIcon.vue'
 
 const props = defineProps({
   docId: { type: Number, required: true },
@@ -219,10 +220,7 @@ onBeforeUnmount(stopPoll)
     <!-- ── 顶部：来源与「看原视频」是这页的主操作 ── -->
     <header class="ld-head">
       <button type="button" class="ld-back" title="返回视频导入" @click="emit('back')">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <polyline points="15 18 9 12 15 6" />
-        </svg>
+        <AppIcon name="chevronLeft" :size="16" />
         <span>返回</span>
       </button>
 

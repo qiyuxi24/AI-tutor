@@ -2,7 +2,7 @@
 /**
  * HomeView.vue — 主视图（编排层）
  *
- * 布局：左侧活动栏 + 内容区（对话 / 学习进度 / 图谱 / 知识库 / 视频导入 / 出题 / 设置），无顶部栏（沉浸式）。
+ * 布局：左侧活动栏 + 内容区（对话 / 图谱 / 知识库 / 视频导入 / 出题 / 设置），无顶部栏（沉浸式）。
  * 资源采集已改为后端 AI 工具（`search_resources` / `collect_resources`），前端入口下线：
  * CollectorView.vue 保留但不再挂载。
  * 知识库有两个入口、同一个组件 KbPanel：独立页（KbView）与图谱页右侧可收起的侧栏
@@ -47,7 +47,7 @@ import KbView from './KbView.vue'
 import LectureImportView from './LectureImportView.vue'
 import LectureDetailView from './LectureDetailView.vue'
 import SettingsView from './SettingsView.vue'
-import DashboardView from './DashboardView.vue'
+import AppIcon from '../components/AppIcon.vue'
 
 const store = useChatStore()
 const authStore = useAuthStore()
@@ -384,7 +384,7 @@ async function handleShowInGraph({ docId, docName }) {
     }
     if (subject && subject !== store.currentSubject) {
       await store.setSubject(subject)
-      await new Promise(r => setTimeout(r, 450))   // 等新学科的力导向图渲染完（同 switchSubjectAndFocus）
+      await new Promise(r => setTimeout(r, 450))   // 等新学科的力导向图渲染完
     }
     forceGraphRef.value?.focusNode(ids[0])
     notifyInfo(ids.length < nodes.length
@@ -411,71 +411,6 @@ async function handleGraphSearchSelect(nodeId) {
     await new Promise(r => setTimeout(r, 450))
   }
   forceGraphRef.value?.focusNode(nodeId)
-}
-
-// ════════════════════════════════════════════════════════════════
-//  仪表盘联动：点击学科/薄弱点/推荐节点 → 切图谱并聚焦
-// ════════════════════════════════════════════════════════════════
-
-/**
- * 切到目标节点所在学科（若与当前不同），等待重渲染后再聚焦。
- *
- * 图谱一次只渲染一个学科，跨学科聚焦（仪表盘推荐/薄弱点、节点详情里的
- * 前置与关联节点）必须先切学科，否则目标节点根本不在画布上。
- *
- * @param {string} nodeId
- * @param {string} [subject] - 目标学科；空值表示未知，不切换
- */
-async function switchSubjectAndFocus(nodeId, subject) {
-  if (subject && subject !== store.currentSubject) {
-    await store.setSubject(subject)
-    // 等新学科的力导向图完成渲染
-    await new Promise(r => setTimeout(r, 450))
-  }
-  forceGraphRef.value?.focusNode(nodeId)
-}
-
-/** 仪表盘点击学科 → 切换学科并进入图谱视图 */
-async function handleDashboardGoGraph(subject) {
-  viewMode.value = 'graph'
-  if (subject) {
-    await store.setSubject(subject)
-  } else {
-    // 空值 = "不指定学科"（如空状态页的"前往知识图谱"）→ 沿用/自动选中，不停在空画布
-    await store.ensureSubjectSelected()
-  }
-}
-
-/** 仪表盘点击节点（薄弱点/推荐）→ 进入图谱并聚焦该节点 */
-async function handleDashboardGoNode(nodeId, subject) {
-  if (viewMode.value !== 'graph') {
-    viewMode.value = 'graph'
-    // 切视图后等待布局/渲染完成再聚焦
-    await new Promise(r => setTimeout(r, 450))
-  }
-  await switchSubjectAndFocus(nodeId, subject)
-}
-
-/**
- * NodeDetail 中点击前置知识/相关节点 → 关闭弹窗并聚焦目标节点
- */
-async function handleNodeDetailNavigate(nodeId) {
-  nodeDetailVisible.value = false
-  nodeDetailLoading.value = true
-  let targetSubject = ''
-  try {
-    nodeDetailModal.value = await store.fetchNodeDetail(nodeId)
-    targetSubject = nodeDetailModal.value.subject || ''
-    nodeDetailVisible.value = true
-  } catch {
-    nodeDetailModal.value = { id: nodeId, name: '加载失败', content: clientError('NODE_LOAD') }
-    nodeDetailVisible.value = true
-  } finally {
-    nodeDetailLoading.value = false
-  }
-  if (viewMode.value === 'graph') {
-    await switchSubjectAndFocus(nodeId, targetSubject)
-  }
 }
 
 // ─── 视图切换动画 ───
@@ -579,12 +514,7 @@ const slideTransition = {
                 title="按学科浏览知识图谱"
                 @click="graphNavTab = 'subject'"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" />
-                  <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" />
-                  <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />
-                </svg>
+                <AppIcon name="layers" :size="14" />
                 <span>学科分类</span>
               </button>
               <button
@@ -595,12 +525,7 @@ const slideTransition = {
                 title="按先修关系分层，看该先学什么"
                 @click="graphNavTab = 'path'"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <circle cx="6" cy="19" r="3" />
-                  <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
-                  <circle cx="18" cy="5" r="3" />
-                </svg>
+                <AppIcon name="route" :size="14" />
                 <span>学习路径</span>
               </button>
             </div>
@@ -642,7 +567,6 @@ const slideTransition = {
             :edges="store.displayEdges"
             :loading="!store.graphLoaded"
             :error="store.graphError"
-            :next-node-id="store.nextToLearn?.node_id || ''"
             :source-nodes="sourceNodes"
             @node-dblclick="handleNodeDblClick"
             @graph-action="handleGraphAction"
@@ -654,7 +578,6 @@ const slideTransition = {
             :edges="store.displayEdges"
             :loading="!store.graphLoaded"
             :error="store.graphError"
-            :next-node-id="store.nextToLearn?.node_id || ''"
             :source-nodes="sourceNodes"
             :root-label="store.currentSubject || ''"
             @open-node="handleNodeDblClick"
@@ -665,7 +588,6 @@ const slideTransition = {
             :nodes="store.displayNodes"
             :loading="!store.graphLoaded"
             :error="store.graphError"
-            :next-node-id="store.nextToLearn?.node_id || ''"
             :source-nodes="sourceNodes"
             @open-node="handleNodeDblClick"
           />
@@ -678,10 +600,7 @@ const slideTransition = {
             </span>
             <button type="button" class="source-hl-close" title="取消高亮"
                     @click="sourceHighlight = null">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                   stroke-width="2.5" stroke-linecap="round">
-                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
+              <AppIcon name="x" :size="12" />
             </button>
           </div>
 
@@ -742,14 +661,6 @@ const slideTransition = {
         @mastery-changed="refreshGraph"
       />
 
-      <!-- 学习进度仪表盘 -->
-      <DashboardView
-        v-if="viewMode === 'dashboard'"
-        :key="viewEpoch"
-        @go-graph="handleDashboardGoGraph"
-        @go-node="handleDashboardGoNode"
-      />
-
       <!-- 设置页 -->
       <SettingsView
         v-if="viewMode === 'settings'"
@@ -767,7 +678,6 @@ const slideTransition = {
       @close="closeNodeDetail"
       @refresh="refreshGraph"
       @save-content="handleNodeDetailSave"
-      @navigate-to-node="handleNodeDetailNavigate"
       @open-quiz="handleOpenQuiz"
       @go-learn="handleGoLearn"
       @open-lecture="(e) => { nodeDetailVisible = false; openLecture(e.docId, '', e.at) }"
@@ -855,7 +765,7 @@ const slideTransition = {
   /* 内边距压到刚够：侧栏能拖到 180px，两个 4 字标签 + 图标要挤得下（放不下才省略号） */
   padding: 6px 6px;
   border: none;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
   font-family: inherit;
@@ -957,7 +867,7 @@ const slideTransition = {
   left: 50%; top: 16px;
   transform: translateX(calc(-50% - var(--kb-w, 0px) / 2));
   display: flex; align-items: center; gap: 8px;
-  padding: 6px 8px 6px 12px; border-radius: 16px;
+  padding: 6px 8px 6px 12px; border-radius: var(--radius-xl);
   background: var(--color-bg-secondary); border: 1px solid var(--color-accent-light);
   color: var(--color-text-secondary); font-size: 12px;
   box-shadow: var(--shadow-popup);
@@ -980,3 +890,5 @@ const slideTransition = {
 
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
+.fade-enter-to, .fade-leave-from { opacity: 1; }
+</style>

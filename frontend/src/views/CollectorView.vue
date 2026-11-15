@@ -503,7 +503,7 @@ onUnmounted(() => stopPoll())
   font-size: 12px;
   font-weight: 600;
   padding: 4px 12px;
-  border-radius: 999px;
+  border-radius: var(--radius-xl);
 }
 .mode-pill.personal {
   background: var(--color-green-light);
@@ -518,7 +518,7 @@ onUnmounted(() => stopPoll())
 .cc-card {
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   padding: 16px 18px;
   margin-bottom: 18px;
 }
@@ -555,7 +555,7 @@ onUnmounted(() => stopPoll())
   font-size: 11px;
   font-weight: 600;
   padding: 2px 9px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   border: 1px solid transparent;
 }
 .lic-badge.small { font-size: 10px; padding: 1px 7px; }
@@ -581,7 +581,7 @@ onUnmounted(() => stopPoll())
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--color-border-light);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
@@ -629,7 +629,7 @@ onUnmounted(() => stopPoll())
   justify-content: space-between;
   margin-bottom: 10px;
 }
-.task-status { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 10px; }
+.task-status { font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: var(--radius-lg); }
 .task-status.running, .task-status.queued { background: var(--color-accent-light); color: var(--color-accent); }
 .task-status.completed { background: var(--color-green-light); color: var(--color-green); }
 .task-status.cancelled { background: var(--color-bg-hover); color: var(--color-text-secondary); }
@@ -649,7 +649,7 @@ onUnmounted(() => stopPoll())
 .cov-stages { display: flex; flex-direction: column; gap: 16px; }
 .cov-stage {
   border: 1px solid var(--color-border-light);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 12px 14px;
 }
 .cov-stage-head {

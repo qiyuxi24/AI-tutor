@@ -165,16 +165,15 @@ export const useChatStore = defineStore('chat', () => {
   const subjectSummaries = ref([])   // 学科 + 分量统计 [{subject, node_count, mastered_count, mastery_avg}]
   const currentSubject = ref(null)   // 当前选中学科；null = 未选（画布空态，不拉全量）
 
-  // 学习进度维度：科技树联动数据（下一步推荐 + 建议顺序看板）
-  // 「学习路径」（图谱页左侧导航的一个 tab）：一条完整建议顺序 + 每个知识点的前置 / 追溯软提示。
+  // 学习路径（图谱页左侧导航的一个 tab）：一条完整建议顺序 + 每个知识点的前置 / 追溯软提示。
   // 只在 tab 打开时拉取（fetchPathBoard），不在 fetchGraph 里预取 —— 大图会白跑一次。
+  // 「下一步」的唯一真值 = pathBoard.recommended 的首项，不再另设全图推荐状态。
   const pathBoard = ref(EMPTY_PATH_BOARD)
   const pathBoardLoading = ref(false)
-  const nextToLearn = ref(null)    // 下一步推荐节点 {node_id, name, mastery, reason}
 
-  // 学习进度统计（仪表盘）：聚合自图谱 mastery，单一数据源
-  const stats = ref(null)          // {overall, by_subject, weak_points, next_to_learn, total_nodes}
-  const statsLoading = ref(false)
+  // 跨学科总览（学科侧栏顶部汇总行）：/knowledge/stats 无参响应的 overall，
+  // 在 fetchSubjects() 里顺手带出，零额外请求。
+  const graphOverall = ref(null)   // {node_count, mastered_count, mastery_avg, ...} | null
 
   // CRUD 操作后 3 秒内忽略 SSE 的 graph_updated 事件，避免双重刷新
   let sseSuppressTimer = null
@@ -336,12 +335,10 @@ export const useChatStore = defineStore('chat', () => {
       knowledgeEdges.value = normalizeEdges(data.edges)
       graphLoaded.value = true
       graphError.value = ''
-      // 图谱变更 → 下一步推荐 / 统计随之刷新（单一数据源 = 图谱）
       // 注：路径类数据（建议顺序）改在「学习路径」tab 打开时按需拉（fetchPathBoard）——
       // 原先这里无条件拉全量拓扑序（每个节点的 name/mastery/summary），
-      // 而消费它的图内高亮已撑销 → 白跑一次请求。
-      fetchNextToLearn()
-      fetchStats(currentSubject.value)
+      // 而消费它的图内高亮已撤掉 → 白跑一次请求。
+      // 学科分量统计由 refreshGraph → fetchSubjects 刷新（那里也发 GET /knowledge/stats）。
     } catch (e) {
       graphError.value = clientError('GRAPH_LOAD')
     }
@@ -381,50 +378,20 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 获取当前最应该学习的下一个知识点（后端拓扑排序 + 掌握度推荐）。
-   */
-  async function fetchNextToLearn() {
-    try {
-      const { data } = await apiClient.get('/api/v1/knowledge/next-to-learn')
-      nextToLearn.value = data
-    } catch {
-      nextToLearn.value = null
-    }
-  }
-
-  /**
-   * 获取学习进度聚合统计（仪表盘数据源）。
-   * 数据从图谱 mastery 聚合而来；图谱变更后应调用此方法刷新仪表盘。
-   * @param {string|null} subject - 学科名；null = 全局统计
-   */
-  async function fetchStats(subject = null) {
-    statsLoading.value = true
-    try {
-      const { data } = await apiClient.get('/api/v1/knowledge/stats', {
-        params: subject ? { subject } : {},
-      })
-      stats.value = data
-    } catch {
-      stats.value = null
-    } finally {
-      statsLoading.value = false
-    }
-  }
-
-  /**
-   * 获取学科列表 + 每个学科的分量统计（学科收藏栏数据源）。
+   * 获取学科列表 + 每个学科的分量统计（学科侧栏数据源）。
    *
    * 单请求来源：/knowledge/stats 的 by_subject 已含全部学科及聚合
    * （唯一实现 = graph_middleware.compute_stats），因此不必再设 subjects 接口。
+   * 同一响应的 overall 顺手存进 graphOverall（跨学科汇总行用），零额外请求。
    *
    * by_subject 可能含「未分类」（无学科归属节点的合成项）：保留在
-   * subjectSummaries 供收藏栏渲染，但从 subjects 剔除——subjects 的契约是
-   * "真实学科名列表"，DashboardView 等下拉框直接消费。
+   * subjectSummaries 供侧栏渲染，但从 subjects 剔除——subjects 的契约是
+   * "真实学科名列表"（不含「未分类」）。
    */
   async function fetchSubjects() {
     try {
       const { data } = await apiClient.get('/api/v1/knowledge/stats')
-      // unclassified 标记「未分类」合成项，供收藏栏做差异化渲染（无需组件再认字符串）
+      // unclassified 标记「未分类」合成项，供侧栏做差异化渲染（无需组件再认字符串）
       subjectSummaries.value = (data.by_subject || []).map(s => ({
         ...s,
         unclassified: s.subject === UNCLASSIFIED_SUBJECT,
@@ -432,6 +399,7 @@ export const useChatStore = defineStore('chat', () => {
       subjects.value = subjectSummaries.value
         .map(s => s.subject)
         .filter(s => s && s !== UNCLASSIFIED_SUBJECT)
+      graphOverall.value = data.overall || null
     } catch {
       // 静默失败
     }
@@ -1647,16 +1615,12 @@ export const useChatStore = defineStore('chat', () => {
     generateSubjectGraph,
     deleteSubjectGraph,
     renameSubject,
-    // 学习进度（科技树联动）
+    // 学习路径（建议顺序看板）
     pathBoard,
     pathBoardLoading,
-    nextToLearn,
     fetchPathBoard,
-    fetchNextToLearn,
-    // 学习进度统计（仪表盘）
-    stats,
-    statsLoading,
-    fetchStats,
+    // 跨学科总览（学科侧栏顶部汇总行）
+    graphOverall,
     // 图谱 CRUD（统一入口）
     createNode,
     updateNodeInfo,

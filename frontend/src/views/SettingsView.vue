@@ -16,50 +16,39 @@ import GraphPane from '../components/settings/GraphPane.vue'
 import GuidePane from '../components/settings/GuidePane.vue'
 import CopyrightPane from '../components/settings/CopyrightPane.vue'
 import FloatingBallPane from '../components/settings/FloatingBallPane.vue'
+import AppIcon from '../components/AppIcon.vue'
 
 const emit = defineEmits(['replay-onboarding', 'switch-account'])
 
-// icon 是硬编码的 SVG 内容串（非用户输入），用 v-html 注入避免每个 tab 手写一遍 <svg>
+// icon 是 utils/icons.js 的键名，由 <AppIcon> 渲染（与活动栏同一份图形）
 // 导航按「模块」分组：「节点详情」与「知识图谱」同属看图链路，已合并进 GraphPane。
 const GROUPS = [
   {
     title: '通用',
     items: [
-      { key: 'account', label: '账号', comp: AccountPane, icon:
-        '<circle cx="12" cy="8" r="4"/><path d="M5 20c1.5-3.5 4-5 7-5s5.5 1.5 7 5"/>' },
-      { key: 'appearance', label: '外观', comp: AppearancePane, icon:
-        '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>' },
-      { key: 'ball', label: '悬浮球', comp: FloatingBallPane, icon:
-        '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/>' },
+      { key: 'account', label: '账号', comp: AccountPane, icon: 'user' },
+      { key: 'appearance', label: '外观', comp: AppearancePane, icon: 'pencil' },
+      { key: 'ball', label: '悬浮球', comp: FloatingBallPane, icon: 'target' },
     ],
   },
   {
     title: '学习',
     items: [
-      { key: 'models', label: '模型', comp: ModelsPane, icon:
-        '<rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/>' +
-        '<line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/>' },
-      { key: 'lecture', label: '视频导入', comp: LecturePane, icon:
-        '<polygon points="5 3 19 12 5 21 5 3"/>' },
+      { key: 'models', label: '模型', comp: ModelsPane, icon: 'server' },
+      { key: 'lecture', label: '视频导入', comp: LecturePane, icon: 'play' },
     ],
   },
   {
     title: '知识图谱',
     items: [
-      { key: 'graph', label: '图谱与节点详情', comp: GraphPane, icon:
-        '<circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/>' +
-        '<line x1="8.6" y1="7.6" x2="10.6" y2="15.5"/><line x1="15.4" y1="7.6" x2="13.4" y2="15.5"/>' },
+      { key: 'graph', label: '图谱与节点详情', comp: GraphPane, icon: 'graph' },
     ],
   },
   {
     title: '帮助与关于',
     items: [
-      { key: 'guide', label: '引导', comp: GuidePane, icon:
-        '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>' +
-        '<line x1="12" y1="17" x2="12.01" y2="17"/>' },
-      { key: 'copyright', label: '资源与版权', comp: CopyrightPane, icon:
-        '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/>' +
-        '<line x1="12" y1="15" x2="12" y2="3"/>' },
+      { key: 'guide', label: '引导', comp: GuidePane, icon: 'help' },
+      { key: 'copyright', label: '资源与版权', comp: CopyrightPane, icon: 'download' },
     ],
   },
 ]
@@ -87,11 +76,7 @@ const current = computed(() =>
             :aria-current="activeKey === t.key ? 'page' : undefined"
             @click="activeKey = t.key"
           >
-            <svg
-              width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-              stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-              v-html="t.icon"
-            ></svg>
+            <AppIcon :name="t.icon" :size="18" />
             {{ t.label }}
           </button>
         </div>
