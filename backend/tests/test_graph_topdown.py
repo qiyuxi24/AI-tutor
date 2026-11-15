@@ -197,6 +197,99 @@ def test_write_concept_tree_creates_skeleton_and_sources(monkeypatch, kg):
     assert pending[0]["primary_book_id"] == 7
 
 
+def test_concept_board_name_is_persisted(monkeypatch, kg):
+    """概念树的 `boards[].name` 必须落进 `nodes.board`（主题分组，2026-11-15）。
+
+    背景：`boards[]` 是 LLM 给出的**一级主题分组**（提示词见 `graph_generator.py:157`
+    「板块名与现有板块相同时请沿用同名」），但落库时被拍平成一个 nodes 列表、
+    只把单个 folder 名当 board 传给 `_write_skeleton` → 概念所属板块名整批丢失
+    （线上实测 user 5 的 116 个节点 board 全空，备份里也没有，补不回来）。
+    """
+    gen = gg.GraphGenerator(user_id=1)
+    monkeypatch.setattr(gen, "_find_dedup_candidates", _async({}))
+    monkeypatch.setattr(gen, "_confirm_synonyms", _async({}))
+    result = {"boards": [
+        {"name": "线性结构", "concepts": [
+            {"id": "stack", "name": "栈"}, {"id": "queue", "name": "队列"}]},
+        {"name": "树结构", "concepts": [
+            {"id": "btree", "name": "二叉树"}]},
+    ], "edges": []}
+
+    asyncio.run(gen._write_concept_tree(kg, "数据结构", result, all_units=[]))
+
+    assert kg.get_node("stack")["board"] == "线性结构"
+    assert kg.get_node("queue")["board"] == "线性结构"
+    assert kg.get_node("btree")["board"] == "树结构"
+
+
+def test_explicit_folder_board_wins_over_concept_board(monkeypatch, kg):
+    """显式传入的 folder 名（`board=` 参数）优先；概念树板块只做兜底。
+
+    理由：`_resolve_files` 拿文件夹名当 board 是既有语义（一次上传 = 一个板块），
+    不能被模型自拟的板块名盖掉。
+    """
+    gen = gg.GraphGenerator(user_id=1)
+    monkeypatch.setattr(gen, "_find_dedup_candidates", _async({}))
+    monkeypatch.setattr(gen, "_confirm_synonyms", _async({}))
+    result = {"boards": [
+        {"name": "模型自拟板块", "concepts": [{"id": "stack", "name": "栈"}]},
+    ], "edges": []}
+
+    asyncio.run(gen._write_concept_tree(kg, "数据结构", result,
+                                        board="第一章 绪论", all_units=[]))
+
+    assert kg.get_node("stack")["board"] == "第一章 绪论"
+
+
+def test_meta_concept_nodes_are_rejected(monkeypatch, kg):
+    """GQ-7 入库侧：元概念名（「…概览 / …分类 / …总结」）不建节点。
+
+    判据不是自创的 —— 提示词 `graph_generator.py:167` 早已写明"禁止把本章小结/
+    复习回顾/章节导读当概念"，但入库侧从未执行（TODO.md GQ-7「只剩入库侧一半」）。
+    标准依据 = W3C SKOS：Collection（分组标签）与 Concept 互斥，分组标签本身
+    不是概念（SKOS Primer §4.1 的经典例：「milk by source animal」不是概念）。
+
+    线上危害实测（user 5）：这类节点成了假枢纽 —— 「矩阵理论概览」入度 10、
+    「常见数据结构的分类与概览」在学习序里排第 9/122（「下一步学什么」会推荐它），
+    且被当作「KNN 的距离度量」的 prerequisite（概览不可能是学 KNN 的前置）。
+    """
+    gen = gg.GraphGenerator(user_id=1)
+    monkeypatch.setattr(gen, "_find_dedup_candidates", _async({}))
+    monkeypatch.setattr(gen, "_confirm_synonyms", _async({}))
+    result = {"boards": [{"name": "线性结构", "concepts": [
+        {"id": "stack", "name": "栈"},
+        {"id": "ds_overview", "name": "常见数据结构的分类与概览"},
+        {"id": "sorting_summary", "name": "排序算法比较与总结"},
+    ]}], "edges": [
+        {"from": "ds_overview", "to": "stack", "relation": "prerequisite"},
+    ]}
+
+    stats = asyncio.run(gen._write_concept_tree(kg, "数据结构", result, all_units=[]))
+
+    assert kg.get_node("stack") is not None, "正常概念照常落库"
+    assert kg.get_node("ds_overview") is None, "元概念（…概览）不建节点"
+    assert kg.get_node("sorting_summary") is None, "元概念（…总结）不建节点"
+    # SKOS：Collection 不进层级关系 → 触及被拦节点的边也不落库
+    assert [e for e in kg.edges if "ds_overview" in (e["from_node"], e["to_node"])] == []
+    # 不静默：报告点名，供 aggregate 透出给前端/日志
+    assert [m["name"] for m in stats["dropped_meta"]] == [
+        "常见数据结构的分类与概览", "排序算法比较与总结"]
+
+
+def test_meta_concept_rule_does_not_hit_real_concepts():
+    """判据必须保守：这些名字含「分类/历史/应用」但是**真概念**，不得拦。
+
+    （命中面实测：全库 151 节点只命中 7 个元概念，下面是其中的近似名反例。）
+    """
+    for name in ("加权最近邻分类器", "算法的分类方法与设计范式",
+                 "线性代数历史：19世纪矩阵与向量空间的奠基",
+                 "矩阵理论的主要分支与应用", "K近邻算法（KNN）的原理与分类回归机制"):
+        assert not gg.is_meta_concept_name(name), f"{name} 是真概念，不该被拦"
+    for name in ("矩阵理论概览", "算法的实现方法分类", "排序算法比较与总结",
+                 "常见数据结构的分类与概览", "行列式与线性方程组求解的历史"):
+        assert gg.is_meta_concept_name(name), f"{name} 是元概念，应被拦"
+
+
 def test_fill_nodes_is_one_llm_call_per_concept(monkeypatch, kg):
     """GQ-23：一次一个概念、独立成文（不把多个概念一次批量喂给 LLM）"""
     gen = gg.GraphGenerator(user_id=1)

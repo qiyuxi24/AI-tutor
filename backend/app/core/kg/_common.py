@@ -160,6 +160,29 @@ def is_fragment_name(name: str) -> bool:
     return normalize_node_name(name) != plain
 
 
+# 元概念尾词（GQ-7 入库侧）：这类名字**不是知识点**，而是「分组标签」。
+# 标准依据 = W3C SKOS：Collection（分组）与 Concept 互斥 —— 分组标签本身不是概念
+# （SKOS Primer §4.1 的经典例：「milk by source animal」不是概念，cow milk / goat milk 才是），
+# 且 Collection 不参与层级关系（对应本项目的 prerequisite），只能建关联关系（related）。
+# 项目内依据 = `kb/graph_generator.py` 的概念树提示词第 167 行**早已写明**
+# 「禁止把本章小结/复习回顾/章节导读/学习目标当概念」，但入库侧从未执行（TODO.md GQ-7）。
+# 只收「以该词**结尾**」—— 实测反例：「加权最近邻分类器」「算法的分类方法与设计范式」
+# 「线性代数历史：19世纪矩阵与向量空间的奠基」都是真概念，不该被拦。
+# 「入门/简介/应用/基础」刻意不收：它们常是**学科级**节点名（「德语入门」「烹饪入门」）。
+_META_CONCEPT_SUFFIX_RE = re.compile(
+    r"(?:概览|综述|概述|总览|导论|导读|分类|分支|总结|小结|回顾|摘要|历史)\s*$")
+
+
+def is_meta_concept_name(name: str) -> bool:
+    """名字是否是「元概念 / 分组标签」（「…概览」「…分类」「…总结」）—— GQ-7 入库拦截。
+
+    判据只看**结尾**，且不含「入门/简介/应用/基础」（会误伤学科级节点名）。
+    用法：建图落库前拦下这类概念，把分组意图交给 `board`（= SKOS Collection）。
+    """
+    plain = re.sub(r"\s+", "", unicodedata.normalize("NFKC", name or ""))
+    return bool(plain) and bool(_META_CONCEPT_SUFFIX_RE.search(plain))
+
+
 # 难度档标签（历史遗留）：graph_generator 曾把 difficulty∈{1,2,3} 映射成这三个标签。
 # KG-D2 起不再写入，仅保留在解析侧排除它们 —— 用于兼容存量老数据。
 _DIFFICULTY_TAGS = ("一级", "二级", "三级")
@@ -177,18 +200,23 @@ def subject_from_tags(tags) -> str:
 
 
 # ── L0 溯源（GQ-18）：节点的 `sources` JSON 数组 ──────────────────────
-# 元素固定五键，唯一真值见 docs/知识图谱/知识图谱_外部调研_论文开源与多源融合.md §4 L0。
-# 去重键 = (doc_id, chunk_id, section)：同一资料的同一段落反复抽取只留一条
-# （幂等键的落地形态，供 GQ-19 的「按资料增量」复用）。
+# 元素固定**六键**（前五个自 2026-09-26，`locator` 自 2026-11-15 视频导入二期）：
+# `doc_id` / `doc_name` / `section` / `chunk_id` / `extracted_at` / `locator`。
+# `locator` 是可选的时间定位（形如 `"t=754"`），让"同一个知识点被 3 集视频讲过"
+# 自然长出 3 条各带时间点的出处 —— 不用为此另建表。
+# 去重键 = (doc_id, chunk_id, section)：**故意不含 locator** —— 老数据没有它时行为
+# 逐字节一致，`add_sources` 的幂等语义（同一资料同一段落只留一条）也不变。
 SOURCE_ID_KEY = ("doc_id", "chunk_id", "section")
 
 
 def normalize_source_entry(raw) -> Optional[dict]:
-    """把一条来源规范成 L0 五键字典；非法条目返回 None（调用方静默跳过）。
+    """把一条来源规范成 L0 六键字典；非法条目返回 None（调用方静默跳过）。
 
     - `doc_id` 必须可转 int（幂等键主体）→ 不可转则该条无效；
     - 缺 `chunk_id` / `section` → None / ""；`chunk_id` 空串归一为 None；
-    - 缺 `extracted_at` → 用当前时间（首次见到该段落的时间）。
+    - 缺 `extracted_at` → 用当前时间（首次见到该段落的时间）；
+    - 缺 `locator` → **不出现在结果里**（不是空串）：老数据逐字节不变，
+      读取侧 `entry.get("locator")` 同样拿到 None。
     """
     if not isinstance(raw, dict):
         return None
@@ -199,13 +227,17 @@ def normalize_source_entry(raw) -> Optional[dict]:
     chunk_id = raw.get("chunk_id")
     if chunk_id == "":
         chunk_id = None
-    return {
+    entry = {
         "doc_id": doc_id,
         "doc_name": str(raw.get("doc_name") or ""),
         "section": str(raw.get("section") or ""),
         "chunk_id": chunk_id,
         "extracted_at": str(raw.get("extracted_at") or datetime.now().isoformat()),
     }
+    locator = raw.get("locator")
+    if locator not in (None, ""):
+        entry["locator"] = str(locator)
+    return entry
 
 
 def _parse_sources(raw) -> list[dict]:
@@ -288,6 +320,7 @@ __all__ = [
     "read_learn_state",
     "normalize_node_name",
     "is_fragment_name",
+    "is_meta_concept_name",
     "subject_from_tags",
     "SOURCE_ID_KEY",
     "normalize_source_entry",

@@ -21,6 +21,8 @@
 调用方：
 * `KnowledgeGraph.topological_sort()` —— Kahn 每次从"当前可学集合"里挑这个键最小的；
 * `graph_middleware.path_board()` 的 `recommended` —— 同一个键（前面加层号）。
+  ⚠️ `prereq_unmastered` 在这里是**排序**信号、不是过滤门槛：前置未掌握的节点仍在路径里
+  （用户可跳级），只是排到同层更后；见 `path_board` 的 docstring（2026-11-15）。
 
 `MASTERY_NEXT_THRESHOLD` 也住在这里：它同时是"还没学会"（推荐 / 主路径 / 前置是否达标）的
 唯一阈值。以前 `50` 写在三个地方（`knowledge_graph.py` 两处 + `graph_middleware.py` 一处），

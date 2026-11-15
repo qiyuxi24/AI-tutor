@@ -15,7 +15,7 @@
     list_boards     → 指定学科下的板块列表（含节点数/掌握度统计）
     slice_graph     → 整学科图（只给 subject）/ 板块局部子图（subject + board）
     main_path       → 当前切片内的一条主路径（prerequisite 最长链 + 起点）
-    path_board      → 当前切片的分层学习看板（前置 / 解锁 / 向前追溯）
+    path_board      → 当前切片的学习路径（完整建议顺序 + 前置软提示 / 向前追溯）
     SUBJECT_UNCLASSIFIED → 无学科归属的节点及其边（见该常量）
 """
 
@@ -243,7 +243,7 @@ def main_path(kg, subject: Optional[str] = None,
 
 
 # ══════════════════════════════════════════════════════════════════
-#  学习任务栏（分层看板 + 向前追溯）
+#  学习路径（建议顺序 + 前置软提示 + 向前追溯）
 # ══════════════════════════════════════════════════════════════════
 
 # 注：MASTERY_MASTERED / MASTERY_WEAK / mastery_bucket 定义在下方「学习进度统计」段
@@ -448,11 +448,16 @@ def _trace_back(node_id: str, preds: dict, nodes_by_id: dict) -> Optional[dict]:
 def path_board(kg, subject: Optional[str] = None,
                board: Optional[str] = None) -> dict:
     """
-    学习任务栏的数据源：把当前切片排成「分层看板」。
+    学习路径的数据源：把当前切片排成**一条建议顺序** + 每个知识点的前置 / 追溯结果。
 
     与 `main_path` 的分工：main_path 只给**一条**最长链（图上一眼看清该走哪条）；
-    看板要**全部**知识点都列出来，每个带自己的前置 / 解锁 / 追溯结果 ——
-    由此才能表达"哪些是起点（并排在最上面）、哪些还没解锁、卡住的根源在哪"。
+    路径要把**全部**知识点都列出来，每个带自己的前置 / 解锁 / 追溯结果 ——
+    由此才能表达"哪些是起点（并排在最上面）、哪些有前置待补、卡住的根源在哪"。
+
+    ⚠️ 前置**不是硬门槛**（2026-11-15）：用户可以不铺垫直接跳级。`blocked_by` / `hint` /
+    `trace` 都只是"建议先补谁"的软提示，**不**把节点从 `recommended` 里剔除；前置未掌握
+    只让该节点在同层里**排后**（`order_key(prereq_unmastered=True)`）。因此 `blocked_by`
+    用的 70 分掌握线不再决定"能不能学"，只影响"建议先学谁"的排序。
 
     分层口径（2026-09-29 补充）：
       · 有 prerequisite 的节点 → 层号 = 最长前置链（`_layers`）；
@@ -470,10 +475,12 @@ def path_board(kg, subject: Optional[str] = None,
                 level,                                     # 0 = 第 1 层（无前置）
                 prerequisites: [{id, name, mastery, status}],
                 unlocks:       [{id, name, mastery, status}],
-                blocked_by:    [node_id, ...],             # 未掌握的直接前置 → 卡片"待解锁"
+                blocked_by:    [node_id, ...],             # 未掌握的直接前置 → 软提示"建议先补"
                 trace: {focus_id, focus_ids, chain, unmastered_count} | None,
-                hint: str,                                 # 一句人话建议                "related": [{id, name, mastery, status, relation, relation_label}, ...],            }, ...],                                       # 按 (层号, id) 排 → 卡片位置稳定
-            "recommended": [{id, name, mastery, level}, ...],  # 已解锁且未掌握，按层号排
+                hint: str,                                 # 一句人话建议（软提示，非门槛）
+                "related": [{id, name, mastery, status, relation, relation_label}, ...],
+            }, ...],                                       # 按 (层号, id) 排 → 卡片位置稳定
+            "recommended": [{id, name, mastery, level}, ...],  # 全部未掌握节点的完整建议全序
             "stats": {total, mastered, learning, weak, unstarted, locked},
             "subject" / "board": str | None,
         }
@@ -515,7 +522,7 @@ def path_board(kg, subject: Optional[str] = None,
         if mastery >= MASTERY_MASTERED:
             hint = ""
         elif blocked_by:
-            hint = "先学完：" + "、".join(nodes_by_id[p].get("name") or p for p in blocked_by)
+            hint = "建议先补：" + "、".join(nodes_by_id[p].get("name") or p for p in blocked_by)
         elif trace and trace["focus_id"] != nid:
             hint = f"最根源的缺口：「{brief(trace['focus_id'])['name']}」"
         elif nid not in prereq_touched and related:
@@ -544,17 +551,19 @@ def path_board(kg, subject: Optional[str] = None,
         })
 
     # 排序：层号优先，其次 id —— 卡片位置必须稳定（学会一个就乱跳会让人找不到东西）
-    # 注：这里**刻意不按掌握度**排（看板卡片要稳定）；掌握度只影响 recommended（下一段）。
+    # 注：这里**刻意不按掌握度**排（items 是稳定的全量切片）；掌握度只影响 recommended（下一段）。
     items.sort(key=lambda it: (it["level"], it["id"]))
 
-    # 推荐：已解锁且未掌握 → 层号 → **同层口径**（前置达标优先 → 掌握度升序 → id）。
+    # 建议路径：**全部**未掌握节点按 (层号, 同层口径) 的完整全序，不截断。
+    # 前置未掌握**不是门槛**（用户可跳级），只让 `order_key(prereq_unmastered=True)` 把它
+    # 排到同层更后 —— 这正让下方口径里原本被 filter 变成死代码的第一排序键真正生效。
     # 口径的唯一实现是 `graph_order.order_key`，与 `KnowledgeGraph.topological_sort`
     # 的 Kahn 取键同源（B3-1）—— 别在这里再写一遍 (mastery, id)。
     recommended = sorted(
-        (it for it in items if not it["blocked_by"] and it["mastery"] < MASTERY_MASTERED),
+        (it for it in items if it["mastery"] < MASTERY_MASTERED),
         key=lambda it: (it["level"],) + order_key(
             it, prereq_unmastered=bool(it["blocked_by"])),
-    )[:5]
+    )
 
     stats = {"total": len(items), "locked": 0}
     for bucket in ("mastered", "learning", "weak", "unstarted"):
@@ -575,13 +584,13 @@ def path_board(kg, subject: Optional[str] = None,
 
 
 # ══════════════════════════════════════════════════════════════════
-#  学习进度统计（仪表盘聚合）
+#  掌握度分档 / 学科分量聚合（学科侧栏 + 跨学科汇总行数据源）
 # ══════════════════════════════════════════════════════════════════
 
 # 掌握度分档阈值 —— 「四档口径」的唯一真值源。
-# 前端节点配色（ForceGraph.masteryLevel）与统计分布（DashboardView）必须与此一致。
+# 前端节点配色（ForceGraph.masteryLevel）与学科侧栏进度条必须与此一致。
 # 历史坑：后端曾只有三档（1~69 统称 learning），导致 1~29 分的节点在图谱上显示为
-# 红色"薄弱"、在仪表盘里被计入"学习中"；本模块注释当时还谎称"与前端四色一致"。
+# 红色"薄弱"、在统计里被计入"学习中"；本模块注释当时还谎称"与前端四色一致"。
 # 详见 docs/归档/知识图谱/知识图谱_模块结构与封装调研.md P0-2。
 MASTERY_WEAK = 30         # 1 ~ 29 薄弱（已开始学但未入门）
 MASTERY_MASTERED = 70     # ≥70 已掌握
@@ -641,8 +650,12 @@ def _subject_stats(kg, nodes: list[dict], subject: str | None) -> dict:
 
 
 def compute_stats(kg, subject: str | None = None) -> dict:
-    """
-    学习进度聚合统计（仪表盘数据源，单一数据源 = 图谱 mastery）。
+    """学科分量聚合（学科侧栏 + 跨学科汇总行的数据源，单一数据源 = 图谱 mastery）。
+
+    2026-11-15 撤「学习进度」仪表盘整页后，这里只保留聚合统计本身：薄弱点 Top3 /
+    下一步推荐是仪表盘专属数据，与学科聚合无关，不再返回（顺带消掉 <30 / 50 分
+    两套与四档分档不一致的口径）。「下一步」的唯一真值改到学习路径 tab 的
+    `recommended` 首项；模型侧 / DSH 面板仍各自走 `kg.get_next_to_learn()`。
 
     参数:
         kg: KnowledgeGraph 实例（已绑定当前用户）
@@ -654,8 +667,6 @@ def compute_stats(kg, subject: str | None = None) -> dict:
             "subject": str | None,          # 指定学科时返回学科名
             "overall": {...},               # 全局（或指定学科）聚合
             "by_subject": [ {...}, ... ],   # 按学科分组（仅 subject=None 时返回）
-            "weak_points": [ {id, name, subject, mastery}, ... ],  # 薄弱点 Top3
-            "next_to_learn": {...} | None,  # 复用 get_next_to_learn
         }
     """
     if subject:
@@ -673,30 +684,9 @@ def compute_stats(kg, subject: str | None = None) -> dict:
         if orphan:
             by_subject.append(_subject_stats(kg, orphan, SUBJECT_UNCLASSIFIED))
 
-    # 薄弱点 Top3：未开始(0) + 薄弱(1~29)，按掌握度升序，取前 3
-    weak_candidates = [n for n in nodes if int(n.get("mastery", 0) or 0) < MASTERY_WEAK]
-    weak_candidates.sort(key=lambda n: int(n.get("mastery", 0) or 0))
-    weak_points = [
-        {
-            "id": n["id"],
-            "name": n.get("name", ""),
-            "subject": kg.node_subject(n) or SUBJECT_UNCLASSIFIED,
-            "mastery": int(n.get("mastery", 0) or 0),
-        }
-        for n in weak_candidates[:3]
-    ]
-
-    # 下一步推荐：复用已有推荐逻辑（只算一次，主调方拿 next_to_learn 即可）
-    next_to_learn = kg.get_next_to_learn() if nodes else None
-    # 与 weak_points 对齐：无学科归属的推荐节点也标成「未分类」，便于前端切到该分组
-    if next_to_learn and not next_to_learn.get("subject"):
-        next_to_learn["subject"] = SUBJECT_UNCLASSIFIED
-
     return {
         "total_nodes": len(nodes),
         "subject": subject or None,
         "overall": overall,
         "by_subject": by_subject,
-        "weak_points": weak_points,
-        "next_to_learn": next_to_learn,
     }

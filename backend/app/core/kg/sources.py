@@ -13,8 +13,9 @@ class _SourcesMixin:
         参数:
             node_id: 节点 ID（仅当前用户）
         返回:
-            `[{doc_id, doc_name, section, chunk_id, extracted_at}, ...]`；
+            `[{doc_id, doc_name, section, chunk_id, extracted_at, locator?}, ...]`；
             **节点不存在或不属于当前用户 → `[]`**（他人节点视同不存在）。
+            `locator`（时间定位，如 `"t=754"`）只在写入时给过才有这个键。
         """
         row = self._conn.execute(
             "SELECT sources FROM nodes WHERE id = ? AND user_id = ?",
@@ -32,8 +33,9 @@ class _SourcesMixin:
 
         参数:
             node_id: 节点 ID（仅当前用户；不存在/不属于当前用户 → 不写、返回 False）
-            entries: `[{doc_id, doc_name, section, chunk_id?, extracted_at?}, ...]`
-                     —— 逐条经 `normalize_source_entry` 规范化，非法条目静默跳过
+            entries: `[{doc_id, doc_name, section, chunk_id?, extracted_at?, locator?}, ...]`
+                     —— 逐条经 `normalize_source_entry` 规范化，非法条目静默跳过。
+                     `locator` 是可选的时间定位（`"t=754"`），**不参与去重键**。
         返回:
             是否发生写入（无新增来源 → False，即幂等信号）
         副作用:

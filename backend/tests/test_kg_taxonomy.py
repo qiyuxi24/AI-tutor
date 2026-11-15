@@ -91,3 +91,19 @@ def test_explicit_subject_board_skips_llm(kg, monkeypatch):
     node = kg.get_node("queue")
     assert KnowledgeGraph.node_subject(node) == "数据结构"  # 自报学科盖过难度标签
     assert node["board"] == "线性表"
+
+
+def test_llm_call_disables_thinking(kg, monkeypatch):
+    """归类只输出 {"subject","board"} 两个短字段 → 关思考（省时省钱）"""
+    seen = {}
+
+    async def fake(system_prompt, messages, **kw):
+        seen.update(kw)
+        return '{"subject":"数据结构","board":"线性表"}'
+
+    monkeypatch.setattr(tax, "call_llm", fake)
+    node = {"name": "队列", "summary": "先进先出", "tags": ["二级"]}
+
+    asyncio.run(tax.assign_taxonomy(kg, node))
+
+    assert seen.get("thinking") is False

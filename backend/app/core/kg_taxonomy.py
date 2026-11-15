@@ -123,7 +123,10 @@ async def _ask_llm(kg: KnowledgeGraph, node_data: dict, subject: str,
             '只输出 JSON：{"subject": "...", "board": "..."}'
         )
         raw = await call_llm(_SYSTEM_PROMPT, [{"role": "user", "content": prompt}],
-                             kind="taxonomy")
+                             kind="taxonomy",
+                             # 只输出 {"subject","board"} 两个短字段：思考纯浪费，
+                             # 且它在建节点路径上同步阻塞（见模块 docstring 失败语义）。
+                             thinking=False)
         matched = re.search(r"\{.*\}", raw, re.S)
         data = json.loads(matched.group(0)) if matched else {}
         return {

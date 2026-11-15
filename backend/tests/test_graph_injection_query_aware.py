@@ -18,17 +18,32 @@ from app.core.token_counter import count_tokens
 class FakeKg:
     """build_graph_context 用到的成员（鸭子类型）：nodes / edges / 内容预览 / 学科。"""
 
-    def __init__(self, n_nodes: int = 50, preview_chars: int = 200):
+    def __init__(self, n_nodes: int = 50, preview_chars: int = 200,
+                 edges_per_node: int = 1):
         self.nodes = [
             {"id": f"n{i}", "name": f"知识点{i}", "mastery": i % 100,
              "tags": ["数学"], "subject": "数学", "board": "基础" if i < 25 else "进阶"}
             for i in range(n_nodes)
         ]
-        self.edges = [
-            {"from_node": f"n{i}", "to_node": f"n{i + 1}",
-             "relation": "prerequisite", "label": "前置"}
-            for i in range(max(0, n_nodes - 1))
-        ]
+        if edges_per_node <= 1:
+            self.edges = [
+                {"from_node": f"n{i}", "to_node": f"n{i + 1}",
+                 "relation": "prerequisite", "label": "前置"}
+                for i in range(max(0, n_nodes - 1))
+            ]
+        else:
+            # 真实库的形状：每节点 ~2 条边（含 4 类 relation），用来复现
+            # 「边块恒为全量 → 阶梯 ①②③④ 全部超限 → 焦点段永不输出」。
+            rels = ("prerequisite", "related", "extension", "confusion")
+            self.edges = []
+            for i in range(n_nodes):
+                for k in range(1, edges_per_node + 1):
+                    j = (i + k) % n_nodes
+                    if i == j:
+                        continue
+                    self.edges.append({
+                        "from_node": f"n{i}", "to_node": f"n{j}",
+                        "relation": rels[k % len(rels)], "label": "前置知识"})
         self._preview = "内容" * (preview_chars // 2)
 
     def get_node_content_preview(self, node_id: str) -> str:
@@ -123,3 +138,44 @@ def test_focus_neighborhood_has_summary():
     # ±2 跳：n8..n12 都应在焦点段里
     for nid in ("n8", "n12"):
         assert f"[{nid}]" in segment
+
+
+# ── 真实规模（2026-11-15）：边块恒为全量 → 焦点段从未输出过 ──────────
+#
+# 线上实测（user 5：123 节点 / 233 边）：注入 11910 字，但 `摘要:` 出现 **0 次**
+# —— 阶梯 ①②③④ 的边块都是全量（17492 字），逐档恒超 12000 上限，
+# 于是永远落到 ⑤「骨架截断 + 子图边」，焦点邻域被静默丢弃。
+# 上面的 FakeKg(50) 边太少（49 条），这个 bug 不可能复现。
+
+def test_focus_survives_at_realistic_scale():
+    """真实规模下焦点邻域必须仍在（否则"按 query 选片"等于没实现）。"""
+    kg = FakeKg(120, edges_per_node=3)
+
+    out = build_graph_context(kg, detailed=True, max_chars=12000, focus_ids=["n60"])
+
+    assert len(out) <= 12000, f"超上限：{len(out)}"
+    assert "本次焦点邻域" in out, "真实规模下焦点段被整段丢弃（阶梯①②③④ 恒超限）"
+    assert "摘要:" in out, "焦点摘要（选片唯一的收益）没有进注入"
+    assert "[n60]" in out.split("### 本次焦点邻域")[1]
+
+
+def test_skeleton_never_loses_nodes_at_realistic_scale():
+    """I1-1/I1-3：可行域骨架不得因体量而丢节点（截断必须发生在细节层，不在骨架层）。"""
+    kg = FakeKg(120, edges_per_node=3)
+
+    out = build_graph_context(kg, detailed=True, max_chars=12000, focus_ids=["n60"])
+
+    assert {n["id"] for n in kg.nodes} - _ids(out) == set(), "骨架段不得少给任何节点"
+
+
+def test_legacy_fallback_keeps_all_nodes_at_realistic_scale():
+    """判不出焦点（focus_ids 为空）时同样不得丢节点 —— 这才是线上最常见的形状。
+
+    线上实测：这一步丢 54/123 个节点（整个「高中物理」消失），根因与焦点路径同一个：
+    全量表 17549 字单独就顶穿 12000 上限，于是只能靠删节点往下压。
+    """
+    kg = FakeKg(120, edges_per_node=3)
+
+    out = build_graph_context(kg, detailed=True, max_chars=12000)
+
+    assert {n["id"] for n in kg.nodes} - _ids(out) == set(), "退化为全量时骨架不得丢节点"

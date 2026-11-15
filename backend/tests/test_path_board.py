@@ -1,13 +1,15 @@
 """`graph_middleware.path_board` / `GET /knowledge/path-board` 的契约。
 
-「学习任务栏」= 分层看板：无前置的并排在第 1 层，下层等前置掌握后解锁；
-某个知识点没掌握时，沿前置反向追溯到**最根源的未掌握知识点**。
+「学习路径」= 一条按先修关系排好的**建议顺序** + 每个知识点自己的前置 / 追溯结果。
+前置**不是硬门槛**：用户可以直接跳级，前置未掌握只影响"建议先补谁"与排序（排后），
+不把节点从路径里剔除（`recommended` 是全部未掌握节点的完整全序，不截断）。
 
-这里锁四件事：
+这里锁五件事：
   1. 分层取**最长**前置链（`a→c` 与 `a→b→c` 并存时 c 必须在 b 之后，不能按最短提到 b 层）；
-  2. 解锁判定只看**直接前置**是否全部掌握（≥70）；
+  2. `blocked_by` 只记**直接**未掌握前置（≥70 算掌握），且只是软提示；
   3. 追溯沿**全部祖先**走 —— "直接前置已掌握、但它自己的前置没掌握"必须能追到根源；
-  4. 退化输入：无前置边、成环、空图 —— 一律不抛异常。
+  4. 建议路径同层内**前置待补的排后**（`order_key` 的 `prereq_unmastered` 生效），且不截断到 5 个；
+  5. 退化输入：无前置边、成环、空图 —— 一律不抛异常。
 
 全离线：KnowledgeGraph 换成 FakeKG，不碰 data/。
 """
@@ -209,7 +211,7 @@ def test_isolated_node_keeps_first_level():
     assert items["z"]["related"] == []
 
 
-# ── 前置与解锁 ──────────────────────────────────────────
+# ── 前置与软提示 ────────────────────────────────────────
 
 def test_prerequisites_and_unlocks_are_symmetric():
     kg = FakeKG(
@@ -224,7 +226,7 @@ def test_prerequisites_and_unlocks_are_symmetric():
 
 
 def test_blocked_by_only_counts_direct_prereq_below_mastered():
-    """解锁只看**直接**前置是否全部掌握（≥70）；已掌握的前置不算阻碍。"""
+    """`blocked_by` 只记**直接**未掌握前置（≥70 算掌握），且只是软提示、不挡路。"""
     kg = FakeKG(
         nodes=[_node("a", mastery=MASTERY_MASTERED), _node("b", mastery=69),
                _node("c", mastery=0)],
@@ -233,8 +235,9 @@ def test_blocked_by_only_counts_direct_prereq_below_mastered():
     got = path_board(kg, subject="数据结构")
     items = _by_id(got)
 
-    assert items["c"]["blocked_by"] == ["b"]          # a 已掌握，不挡路
-    assert "先学完" in items["c"]["hint"]
+    assert items["c"]["blocked_by"] == ["b"]          # a 已掌握，不算待补
+    assert "建议先补" in items["c"]["hint"]
+    assert "先学完" not in items["c"]["hint"]           # 不是硬门槛
     assert "节点b" in items["c"]["hint"]
     # b 自己就是未掌握的那个 → 追溯焦点落在 b（没有更深层缺口）
     assert items["c"]["trace"]["focus_id"] == "b"
@@ -355,30 +358,64 @@ def test_node_without_prereq_says_can_start():
     assert _by_id(got)["a"]["trace"] is None
 
 
-# ── 推荐顺序 ────────────────────────────────────────────
+# ── 建议路径（recommended = 全部未掌握节点的完整全序）──────
 
-def test_recommended_only_unlocked_and_unmastered():
+def test_recommended_includes_unmastered_even_when_blocked():
+    """前置是软提示：被 `blocked_by` 的节点**仍在**路径里，只排在同层更后。
+
+    a 已掌握 → 不进推荐；b、c 都未掌握 → 都在路径里（c 虽被 b 挡，但不剔除）。
+    """
     kg = FakeKG(
         nodes=[_node("a", 90), _node("b", 0), _node("c", 40)],
         edges=[_prereq("a", "b"), _prereq("b", "c")],
     )
     got = path_board(kg, subject="数据结构")
 
-    # a 已掌握 → 不进推荐；c 被未掌握的 b 挡住 → 不进推荐
-    assert [it["id"] for it in got["recommended"]] == ["b"]
+    assert [it["id"] for it in got["recommended"]] == ["b", "c"]
 
 
-def test_recommended_order_is_by_level_then_weakest():
+def test_recommended_order_is_by_level_then_weakest_and_keeps_blocked():
     kg = FakeKG(
         nodes=[_node("a", 30), _node("b", 10), _node("c", 0)],
         edges=[_prereq("a", "c"), _prereq("b", "c")],
     )
     got = path_board(kg, subject="数据结构")
 
-    # a / b 都在第 1 层且没被挡 → 可推；层内取最弱的先补
-    # c 被 a、b 两个未掌握的前置挡住 → 不进推荐
-    assert [it["id"] for it in got["recommended"]] == ["b", "a"]
+    # a / b 第 1 层、层内取最弱；c 第 2 层、被 a、b 挡住但**仍排进队尾**（软提示）
+    assert [it["id"] for it in got["recommended"]] == ["b", "a", "c"]
     assert _by_id(got)["c"]["blocked_by"] == ["a", "b"]
+
+
+def test_recommended_within_level_puts_prereq_pending_last():
+    """`order_key(prereq_unmastered=True)` 真正生效：同层里前置待补的节点排后。
+
+    m(80 已掌握) / n(10 未掌握) 是第 1 层；x、y 都第 2 层：
+      x 前置 m（已掌握 → blocked=[]，掌握度 60）
+      y 前置 n（未掌握 → blocked=['n']，掌握度 5 更低）
+    若只看掌握度 y(5) 会抢在 x(60) 前；但前置待补应排后 → x 先、y 后。
+    这条同时证明 blocked 节点没被 filter 掉。
+    """
+    kg = FakeKG(
+        nodes=[_node("m", 80), _node("n", 10), _node("x", 60), _node("y", 5)],
+        edges=[_prereq("m", "x"), _prereq("n", "y")],
+    )
+    got = path_board(kg, subject="数据结构")
+    ids = [it["id"] for it in got["recommended"]]
+
+    assert ids == ["n", "x", "y"]
+    assert ids.index("x") < ids.index("y")
+
+
+def test_recommended_is_not_truncated_to_five():
+    """路径是完整全序，不再 `[:5]` 截断（7 个孤立未掌握节点应全部返回）。"""
+    kg = FakeKG(
+        nodes=[_node(c) for c in "abcdefg"],
+        edges=[],
+    )
+    got = path_board(kg, subject="数据结构")
+
+    assert len(got["recommended"]) == 7
+    assert [it["id"] for it in got["recommended"]] == list("abcdefg")
 
 
 # ── 切片与退化输入 ──────────────────────────────────────

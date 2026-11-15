@@ -217,6 +217,73 @@ def test_normalize_source_entry_defaults_and_chunk_none():
     assert normalize_source_entry({"doc_id": "x"}) is None
 
 
+def test_normalize_source_entry_without_locator_keeps_five_keys():
+    """**向后兼容硬约束**：没有 `locator` 时结果仍是原来那五个键（逐字节不变）。
+
+    2026-11-15 视频导入二期给来源加了可选的时间定位，让"同一知识点被 3 集讲过"
+    能长出 3 条各带时间点的出处。它必须是**可选**的：老数据（教材/网页等）没有
+    时间概念，多出一个 `locator: ""` 会让所有既有来源 JSON 变样、去重键也得跟着改。
+    """
+    e = normalize_source_entry({"doc_id": 1, "doc_name": "教材A", "section": "第一章"})
+
+    assert set(e) == {"doc_id", "doc_name", "section", "chunk_id", "extracted_at"}
+    assert "locator" not in e, "缺省不出现该键（不是空串）"
+
+
+def test_normalize_source_entry_with_locator_sixth_key():
+    """带时间定位时才多出第 6 键（形如 `t=754`）。"""
+    e = normalize_source_entry({"doc_id": 1, "locator": "t=754"})
+    assert e["locator"] == "t=754"
+
+    blank = normalize_source_entry({"doc_id": 1, "locator": ""})
+    assert "locator" not in blank, "空串等同缺失"
+
+
+def test_locator_does_not_change_dedupe_key(kg):
+    """去重键仍是 `(doc_id, chunk_id, section)` —— `locator` **不参与**。
+
+    这条是"别的表都不用建"的前提：同一资料同一段落无论带几个时间点都是**一条**来源；
+    反过来，同一集视频的两个知识点（section 不同）是两条。若把 locator 塞进去重键，
+    每次重跑结构化都会给节点追加一批"新"来源，sources 会无限膨胀。
+    """
+    kg.add_node({"id": "a", "name": "拉普拉斯变换"})
+
+    assert kg.add_sources("a", [_src(section="t=754", chunk_id="c1")]) is True
+    # 同键、只多一个 locator → 仍算同一条，不新增
+    assert kg.add_sources("a", [dict(_src(section="t=754", chunk_id="c1"),
+                                     locator="t=754")]) is False
+    assert len(kg.get_sources("a")) == 1
+
+    # 不同段落（= 同一集的两个知识点）才是两条
+    assert kg.add_sources("a", [_src(section="t=1020", chunk_id="c2")]) is True
+    assert len(kg.get_sources("a")) == 2
+
+
+def test_add_sources_keeps_locator_when_present(kg):
+    """带 locator 的条目原样存进 `nodes.sources`（前端"跳到那一秒"靠它）。"""
+    kg.add_node({"id": "a", "name": "拉普拉斯变换"})
+    kg.add_sources("a", [dict(_src(doc_id=40, section="t=754"), locator="t=754")])
+
+    got = kg.get_sources("a")[0]
+    assert got["locator"] == "t=754"
+    assert got["doc_id"] == 40
+
+
+def test_add_sources_does_not_backfill_locator(kg):
+    """已有来源（无 locator）再并入带 locator 的同一来源 → **不覆盖**（幂等语义不变）。
+
+    这是 `add_sources` 的核心承诺"绝不覆盖"：老数据没有时间点就让它没有，
+    第二次带时间点进来也不该改写首次记录。
+    """
+    kg.add_node({"id": "a", "name": "拉普拉斯变换"})
+    kg.add_sources("a", [_src(section="第一章", chunk_id="c1")])
+    kg.add_sources("a", [dict(_src(section="第一章", chunk_id="c1"), locator="t=754")])
+
+    got = kg.get_sources("a")
+    assert len(got) == 1
+    assert "locator" not in got[0]
+
+
 # ── mark_doc_nodes / list_doc_marks / set_mark_status（GQ-19 ③）──
 
 def test_mark_doc_nodes_inserts_pending(kg):

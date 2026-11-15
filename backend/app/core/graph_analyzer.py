@@ -135,7 +135,14 @@ def _render_graph_block(kg, nodes: list, edges: list, mode: str) -> str:
 
     mode: preview（含摘要）/ compact（省摘要）/ overview（仅名称+标签）；
     表头用图谱真实规模（不用展示数），便于配合展示范围说明。
+
+    边同样走**邻接式**（前置挂节点行尾、只写名称）：早先每行打印
+    `from → to (relation): label` 两个英文 id，线上 233 条边独占 17549 字，
+    把 123 个节点挤掉 54 个（整科消失）—— 同一份信息换种排法就不必删节点。
     """
+    name_of = {n["id"]: n["name"] for n in nodes}
+    prereq = _prereq_map(edges, set(name_of), name_of) if nodes else {}
+
     node_lines = []
     for n in nodes:
         if mode == "overview":
@@ -143,6 +150,9 @@ def _render_graph_block(kg, nodes: list, edges: list, mode: str) -> str:
             node_lines.append(f"  [{n['id']}] {n['name']} (标签: {', '.join(n.get('tags', []))})")
             continue
         line = f"  [{n['id']}] {n['name']} (掌握度:{n.get('mastery', 0)})"
+        pre = prereq.get(n["id"]) or []
+        if pre:
+            line += f" ← {'、'.join(pre)}"
         if mode == "preview":
             # 详细模式：附 MD 摘要（走 KnowledgeGraph 的内容缓存，减少文件 I/O）
             content = kg.get_node_content_preview(n["id"])
@@ -150,10 +160,11 @@ def _render_graph_block(kg, nodes: list, edges: list, mode: str) -> str:
         node_lines.append(line)
     node_list = "\n".join(node_lines) if node_lines else "  (暂无节点)"
 
-    edge_list = "\n".join(
-        f"  {e['from_node']} → {e['to_node']} ({e['relation']}): {e.get('label', '')}"
-        for e in edges
-    ) or "  (暂无关系)"
+    rel_lines = _relation_lines(edges, set(name_of), name_of) if nodes else []
+    if rel_lines:
+        edge_list = "\n".join(rel_lines)
+    else:
+        edge_list = "(前置关系已标在上方节点行尾)" if prereq else "  (暂无关系)"
 
     return f"""## 当前知识图谱
 
@@ -286,6 +297,12 @@ GRAPH_FOCUS_MAX_NODES = 12      # 焦点邻域最多给多少个节点的摘要�
 _DROP_SUMMARY_NOTE = ("为控制体量，本次只给了**焦点邻域**的节点摘要（不等于其他节点没有内容）；"
                       "需要其他知识点的详细讲解时调用 rag_search 检索。")
 
+_RELATION_CN = {"prerequisite": "前置", "related": "相关",
+                "confusion": "易混淆", "extension": "延伸"}
+# label 退化成 relation 中文直译 → 不输出（线上 124/233 条边如此，等于把关系写两遍）
+_REDUNDANT_LABELS = {"前置知识", "前置依赖", "相关概念", "相关主题", "相关应用",
+                     "易混淆", "扩展延伸", "前置", "相关", "延伸"}
+
 
 def _neighborhood_ids(edges: list, seeds: list[str], radius: int) -> set[str]:
     """从 seeds 出发沿任意关系的边**双向**扩跳 radius 跳，返回节点 id 集合（含 seeds）。"""
@@ -307,8 +324,19 @@ def _neighborhood_ids(edges: list, seeds: list[str], radius: int) -> set[str]:
     return near
 
 
-def _render_skeleton(kg, nodes: list) -> str:
-    """可行域骨架：学科 → 板块 → `[id] 名称 (掌握度)`（**不含摘要**，随规模只涨名称）。"""
+def _render_skeleton(kg, nodes: list,
+                     prereq_of: dict[str, list[str]] | None = None,
+                     compact: bool = False) -> str:
+    """可行域骨架：学科 → 板块 → `[id] 名称 (掌握度)` ← 前置名称。
+
+    前置关系走**邻接式**（挂在节点行尾、只写名称），不再单列 `from → to (label)` 表：
+    同一份信息省掉每行两个 id 与重复 label —— 实测同一张真图谱 17492 字 → 千字级，
+    这才腾得出空间给焦点邻域（选片的唯一收益）。
+
+    compact=True 只去掉前置标注（`← 名称`），**不删节点、不删掌握度** ——
+    掌握度是参照系 L2「现在在哪」的唯一真值，比前置标注更不能丢。
+    """
+    prereq_of = {} if compact else (prereq_of or {})
     groups: dict[tuple[str, str], list] = {}
     for n in nodes:
         try:
@@ -324,19 +352,53 @@ def _render_skeleton(kg, nodes: list) -> str:
         if board:
             label = f"{label} / {board}"
         lines.append(f"【{label}】")
-        lines.extend(f"  [{n['id']}] {n['name']} (掌握度:{n.get('mastery', 0)})"
-                     for n in group)
+        for n in group:
+            pre = prereq_of.get(n["id"]) or []
+            lines.append(f"  [{n['id']}] {n['name']} (掌握度:{n.get('mastery', 0)})"
+                         + (f" ← {'、'.join(pre)}" if pre else ""))
     return "\n".join(lines) if lines else "  (暂无节点)"
 
 
-def _focus_lines(kg, focus_nodes: list, with_summary: bool) -> list[str]:
-    """焦点邻域渲染：`[id] 名称 (掌握度:x)` + 200 字摘要（with_summary=False 则省摘要）。"""
+def _prereq_map(edges: list, ids: set[str], name_of: dict[str, str]) -> dict[str, list[str]]:
+    """to_node → 前置节点**名称**（只收两端都在展示集内的 prerequisite 边）。"""
+    out: dict[str, list[str]] = {}
+    for e in edges:
+        if e.get("relation") != "prerequisite":
+            continue
+        f, t = e.get("from_node"), e.get("to_node")
+        if f in ids and t in ids:
+            out.setdefault(t, []).append(name_of.get(f, f))
+    return out
+
+
+def _relation_lines(edges: list, scope: set[str], name_of: dict[str, str]) -> list[str]:
+    """`scope` 内节点的**非前置**关系（前置已挂在骨架行尾，不重复）。
+
+    label 只在它没有退化成 relation 的中文直译时才输出 —— 线上 53% 的边
+    label 就是 `前置知识/相关概念/扩展延伸` 这类，等于把关系写了两遍。
+    """
+    lines: list[str] = []
+    for e in edges:
+        rel = e.get("relation")
+        if rel == "prerequisite":
+            continue
+        f, t = e.get("from_node"), e.get("to_node")
+        if f not in scope and t not in scope:
+            continue
+        label = str(e.get("label") or "").strip()
+        desc = label if label and label not in _REDUNDANT_LABELS else _RELATION_CN.get(rel, rel)
+        lines.append(f"    {name_of.get(f, f)} —{desc}→ {name_of.get(t, t)}")
+    return lines
+
+
+def _focus_lines(kg, focus_nodes: list, summary_chars: int) -> list[str]:
+    """焦点邻域渲染：`[id] 名称 (掌握度:x)` + `summary_chars` 字摘要（0=省摘要）。"""
     lines: list[str] = []
     for n in focus_nodes:
         lines.append(f"  [{n['id']}] {n['name']} (掌握度:{n.get('mastery', 0)})")
-        if with_summary:
+        if summary_chars:
             content = kg.get_node_content_preview(n["id"])
-            lines.append(f"    摘要: {content[:200].replace(chr(10), ' ')}")
+            lines.append(f"    摘要: {content[:summary_chars].replace(chr(10), ' ')}")
     return lines
 
 
@@ -347,14 +409,11 @@ def _render_focus_blocks(kg, nodes: list, edges: list, focus_ids: list[str],
     降级顺序（P1-2）：砍摘要 → 砍邻域规模 → 骨架段最后缩（缩时显式标注展示范围）。
     骨架段是「教学的唯一边界」（契约 I1-1），能不动就不动。
     """
-    def _edges_block(visible: list) -> str:
-        lines = "\n".join(
-            f"  {e['from_node']} → {e['to_node']} ({e['relation']}): {e.get('label', '')}"
-            for e in visible) or "  (暂无关系)"
-        return f"### 现有关系（共 {len(visible)} 条）\n{lines}"
-
     total = len(nodes)
-    skeleton = _render_skeleton(kg, nodes)
+    name_of = {n["id"]: n["name"] for n in nodes}
+    all_ids = set(name_of)
+    prereq = _prereq_map(edges, all_ids, name_of)
+    skeleton = _render_skeleton(kg, nodes, prereq)
 
     near = _neighborhood_ids(edges, focus_ids, GRAPH_FOCUS_HOPS)
     focus_set = set(focus_ids)
@@ -366,19 +425,22 @@ def _render_focus_blocks(kg, nodes: list, edges: list, focus_ids: list[str],
     head = (f"## 当前知识图谱\n\n"
             f"### 知识可行域（本次参照系：全部知识点骨架，共 {total} 个）")
 
-    def compose(skel_text: str, edge_text: str, focus_nodes: list, with_summary: bool,
+    def compose(skel_text: str, focus_nodes: list, summary_chars: int,
                 notes: list[str]) -> str:
-        parts = [head, skel_text, edge_text]
+        parts = [head, skel_text]
         if focus_nodes:
             parts.append("### 本次焦点邻域（与当前问题最相关，含摘要）")
-            parts.extend(_focus_lines(kg, focus_nodes, with_summary))
+            parts.extend(_focus_lines(kg, focus_nodes, summary_chars))
+            rel = _relation_lines(edges, {n["id"] for n in focus_nodes}, name_of)
+            if rel:
+                parts.extend(["### 邻域内的其他关系"] + rel)
         if notes:
             parts.append("> 说明：" + " ".join(notes))
         return "\n\n".join(parts)
 
-    def notes_for(shown: int, total_focus: int, with_summary: bool) -> list[str]:
+    def notes_for(shown: int, total_focus: int, summary_chars: int) -> list[str]:
         notes: list[str] = []
-        if not with_summary and shown:
+        if shown and not summary_chars:
             notes.append(_DROP_SUMMARY_NOTE)
         if not shown:
             notes.append("本次未给出焦点邻域的细节（体量受限）；需要某个知识点的详细讲解时"
@@ -388,31 +450,43 @@ def _render_focus_blocks(kg, nodes: list, edges: list, focus_ids: list[str],
                          "未列出的部分并非不存在，需要时可用 rag_search 检索。")
         return notes
 
-    all_edges_block = _edges_block(edges)
-
-    # 阶梯 ① 全量骨架 + 焦点邻域（含摘要）→ ② 省摘要 → ③ 缩邻域 → ④ 只留焦点本体
-    ladder: list[tuple[list, bool]] = [
-        (ordered_focus, True),
-        (ordered_focus, False),
-        (ordered_focus[:max(1, len(focus_ids))], False),
-        ([], False),
+    # 阶梯：先缩短摘要 → 再省摘要 → 再缩邻域 → 只留焦点本体 → 骨架不给细节
+    # ⚠ 边/关系块随阶梯一起收缩：早先它在每一档都是全量（线上 17492 字），
+    # ①②③④ 因此档档超限、永远落到骨架截断，焦点邻域从未真正进过提示词。
+    near_n = max(1, len(focus_ids))
+    ladder: list[tuple[list, int]] = [
+        (ordered_focus, 200),
+        (ordered_focus, 60),            # 只差一点时缩短摘要，不整段丢弃
+        (ordered_focus, 0),
+        (ordered_focus[:near_n], 0),
+        (ordered_focus[:1], 0),
     ]
-    for focus_nodes, with_summary in ladder:
-        text = compose(skeleton, all_edges_block, focus_nodes, with_summary,
-                       notes_for(len(focus_nodes), len(ordered_focus), with_summary))
+    for focus_nodes, summary_chars in ladder:
+        text = compose(skeleton, focus_nodes, summary_chars,
+                       notes_for(len(focus_nodes), len(ordered_focus), summary_chars))
         if cap <= 0 or len(text) <= cap:
             return text
 
-    # 阶梯 ⑤ 骨架段最后缩（必须显式标注展示范围，否则模型会误判图谱只有这么大）；
-    # 边只保留两端都在展示集内的（与旧路径同一口径）。
+    # 阶梯 ⑥ 先放弃细节、保住的仍是**全部节点**（I1-1：骨架是教学的唯一边界）
+    no_detail = notes_for(0, len(ordered_focus), 0)
+    text = compose(skeleton, [], 0, no_detail)
+    if cap <= 0 or len(text) <= cap:
+        return text
+
+    # 阶梯 ⑦ 骨架只压缩冗余标注（前置名称），节点与掌握度仍一个不丢
+    bare = _render_skeleton(kg, nodes, prereq, compact=True)
+    text = compose(bare, [], 0, no_detail)
+    if cap <= 0 or len(text) <= cap:
+        return text
+
+    # 阶梯 ⑧ 最后才裁节点（必须显式标注展示范围，否则模型会误判图谱只有这么大）
     scope = ("当前展示范围：知识点 {k}/{total} 个（已按学科分组优先保留），"
              "未列出的部分并非不存在，需要时可用 rag_search 检索；"
              "本次未给出焦点邻域细节。")
 
     def shrink_trial(k: int) -> str:
         shown = nodes[:k]
-        return compose(_render_skeleton(kg, shown),
-                       _edges_block(_visible_edges(shown, edges)), [], False,
+        return compose(_render_skeleton(kg, shown, prereq, compact=True), [], 0,
                        [scope.format(k=k, total=total)])
 
     lo, hi, best = 1, total, 1
