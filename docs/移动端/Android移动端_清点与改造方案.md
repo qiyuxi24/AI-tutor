@@ -57,7 +57,7 @@
 |---|---|
 | `frontend/src` | 73 文件 / **19,912 行** |
 | `.vue` | **41 个 / 14,366 行**（views 7、components 33） |
-| views 逐个 | LectureImportView 997（已挂载）、QuizView 825、HomeView 810、CollectorView 615（**未挂载**）、DashboardView 370、SettingsView 124、KbView 54 |
+| views 逐个 | LectureImportView 997（已挂载）、QuizView 825、HomeView 810、CollectorView 615（**未挂载**）、DashboardView 370（**Web 端 2026-11-15 撤页后仅余归档参考**）、SettingsView 124、KbView 54 |
 | 最大组件 | UserProfile 836、NodeDetail 829、KbPanel 703、PathBoard 707、ForceGraph 567、MessageBubble 481、FloatingBall 591 |
 | 构建产物 | `frontend/dist` 73 文件 / **4.61MB** |
 | 前端测试 | 仅 2 文件 442 行（`chatStore.lifecycle.test.js`、`graphTree.test.js`），无组件/E2E |
@@ -152,7 +152,7 @@ const isMobile = () => matchMedia('(max-width: 768px)').matches || location.hash
 | **ima（对话）** | 对话 | `viewMode='chat'` | 主 tab；侧栏会话列表 → 抽屉 |
 | **知识库** | 知识库 + 视频导入 | `kb` + `lecture` | 主 tab；视频导入降级为"+"里的一个入口 |
 | **笔记** | **无对应** → 用「学习」替代 | — | 主 tab = 图谱 + 学习路径 + 进度（**我们的差异化就在这里，不假装做笔记**） |
-| **我** | 设置 + 学习进度（dashboard） | `settings` + `dashboard` | 主 tab；出题/错题/模型/主题都收进来 |
+| **我** | 设置 + 学习进度（Web 端已撤整页，进度并入图谱页学科侧栏；Android 是否跟进另议） | `settings` + ~~`dashboard`~~ | 主 tab；出题/错题/模型/主题都收进来 |
 
 > 关键取舍：**不做"笔记"**。ima 的笔记是纯文本富媒体，我们从零做只能做成半成品；把「学习」放第 3 个 tab，答辩时正好用它讲"ima 只能存，我们能算"。
 
