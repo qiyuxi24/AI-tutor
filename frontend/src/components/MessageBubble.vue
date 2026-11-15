@@ -5,6 +5,7 @@ import { avatarState } from '../utils/avatar.js'
 import QuizCard from './QuizCard.vue'
 import { BRAND_ICON } from '../utils/brandAssets.js'
 import { formatMsgTime } from '../utils/time.js'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
   message: { type: Object, required: true },
@@ -251,10 +252,7 @@ watch(renderedContent, () => {
     <div class="avatar" :class="{ 'user-avatar': isUser, 'ai-avatar': !isUser }">
       <img v-if="!isUser" class="avatar-img" :src="BRAND_ICON" alt="AI" />
       <img v-else-if="avatarState.url" class="avatar-photo" :src="avatarState.url" alt="我的头像" />
-      <svg v-else class="avatar-person" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-        <circle cx="12" cy="7" r="4" />
-      </svg>
+      <AppIcon v-else class="avatar-person" name="user" :size="18" />
     </div>
     <div class="bubble" :class="{ 'user-bubble': isUser, 'ai-bubble': !isUser }" ref="bubbleRef">
       <div v-if="isUser" class="text">{{ message.content }}</div>
@@ -268,38 +266,13 @@ watch(renderedContent, () => {
           >
             <!-- 状态指示：执行中转圈 / 有失败标红 / 全部成功勾号 -->
             <span v-if="toolStats.running" class="tool-spinner" />
-            <svg
+            <AppIcon
               v-else-if="toolStats.errorCount > 0"
               class="tool-head-icon is-error"
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="8" x2="12" y2="12" />
-              <line x1="12" y1="16" x2="12.01" y2="16" />
-            </svg>
-            <svg
-              v-else
-              class="tool-head-icon is-done"
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
+              name="alertCircle"
+              :size="14"
+            />
+            <AppIcon v-else class="tool-head-icon is-done" name="check" :size="14" />
 
             <!-- 标题只说结论；工具名/参数/结果是点开后的证据，不常驻 -->
             <span class="tool-head-title">
@@ -407,19 +380,7 @@ watch(renderedContent, () => {
         <div v-if="message.failed" class="failed-actions">
           <button class="retry-btn" @click="emit('retry')">
             <!-- 旋转箭头（lucide rotate-ccw），替代 ↻ 字符 -->
-            <svg
-              class="retry-icon"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-              <path d="M3 3v5h5" />
-            </svg>
+            <AppIcon class="retry-icon" name="rotateCcw" :size="14" />
             <span>重试</span>
           </button>
         </div>
@@ -442,50 +403,11 @@ watch(renderedContent, () => {
           >
             <!-- 复制按钮：常态为双层方框，复制成功后短暂切换为对勾 -->
             <template v-if="act.key === 'copy'">
-              <svg
-                v-if="!copied"
-                width="15"
-                height="15"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.9"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-              </svg>
-              <svg
-                v-else
-                width="15"
-                height="15"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2.2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
+              <AppIcon v-if="!copied" name="copy" :size="15" />
+              <AppIcon v-else name="check" :size="15" />
             </template>
-            <!-- 外部扩展动作：支持传入内联 SVG 字符串（仅限受信常量） -->
-            <svg
-              v-else-if="act.icon"
-              width="15"
-              height="15"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.9"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-              v-html="act.icon"
-            />
+            <!-- 外部扩展动作：icon 传 utils/icons.js 的键名（不要传图形串） -->
+            <AppIcon v-else-if="act.icon" :name="act.icon" :size="15" />
           </button>
 
           <!-- 插槽：保留自定义组件级操作接入点 -->
@@ -562,7 +484,7 @@ watch(renderedContent, () => {
 
 .bubble {
   padding: 12px 16px;
-  border-radius: 18px;
+  border-radius: var(--radius-xl);
   line-height: 1.6;
   font-size: 14px;
   word-break: break-word;
@@ -598,7 +520,7 @@ watch(renderedContent, () => {
   gap: 7px;
   padding: 5px 10px;
   border: 1px solid var(--color-border-subtle, var(--color-border));
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--color-bg-secondary);
   color: var(--color-text-secondary);
   font-size: 12px;
@@ -662,7 +584,7 @@ watch(renderedContent, () => {
   gap: 7px;
   min-width: 0;
   padding: 2px 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   color: var(--color-text-secondary);
   transition: background 0.15s ease;
   /* 真 <button>：清掉浏览器按钮默认外观（原本是 <div @click>，键盘不可达） */
@@ -746,7 +668,7 @@ watch(renderedContent, () => {
 .tool-detail {
   margin-left: 18px;
   padding: 6px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border-subtle, var(--color-border));
   display: flex;
@@ -804,7 +726,7 @@ watch(renderedContent, () => {
   gap: 5px;
   padding: 4px 12px;
   border: 1px solid var(--color-accent-light);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-accent);
   font-size: 13px;
@@ -848,7 +770,7 @@ watch(renderedContent, () => {
   height: 26px;
   padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-tertiary);
   cursor: pointer;
@@ -935,7 +857,7 @@ watch(renderedContent, () => {
 .markdown-body :deep(code) {
   background: var(--color-bg-hover);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-family: 'Consolas', 'Courier New', monospace;
   font-size: 13px;
 }
@@ -944,7 +866,7 @@ watch(renderedContent, () => {
   background: var(--color-bg-tertiary);
   color: var(--color-text-primary);
   padding: 14px 16px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   overflow-x: auto;
   margin: 10px 0;
   font-size: 13px;
@@ -973,7 +895,7 @@ watch(renderedContent, () => {
   padding: 4px 12px;
   color: var(--color-text-secondary);
   background: var(--color-accent-light);
-  border-radius: 0 6px 6px 0;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
 }
 
 .markdown-body :deep(h3),
@@ -993,7 +915,7 @@ watch(renderedContent, () => {
   border-bottom: 1.5px dashed var(--color-accent-light);
   transition: color 0.15s, border-color 0.15s, background 0.15s;
   padding: 0 2px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
 }
 
 .markdown-body :deep(.kg-link:hover) {

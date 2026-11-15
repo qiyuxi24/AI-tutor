@@ -43,6 +43,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { renderMarkdown } from '../utils/markdown.js'
 import { previewKindOf } from '../utils/filePreview.js'
 import { apiClient } from '../api'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -277,12 +278,9 @@ function openInNewTab(event) {
               <button type="button" :class="{ active: viewMode === 'slides' }"
                       @click="viewMode = 'slides'">截图 {{ slideImages.length }}</button>
             </div>
+            <slot name="actions" />
             <button class="action-btn close-btn" title="关闭" @click="emit('update:visible', false)">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                   stroke-width="2.5" stroke-linecap="round">
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
+              <AppIcon name="x" :size="18" />
             </button>
           </div>
         </div>
@@ -347,7 +345,7 @@ function openInNewTab(event) {
   width: min(760px, 92vw);
   max-height: 85vh;
   background: var(--color-bg-primary);
-  border-radius: 14px;
+  border-radius: var(--radius-xl);
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-popup);
@@ -505,7 +503,7 @@ function openInNewTab(event) {
   background: transparent;
   color: var(--color-text-secondary);
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 4px;
 }
 
@@ -545,7 +543,7 @@ function openInNewTab(event) {
 .img-view img {
   max-width: 100%;
   height: auto;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .docx-view :deep(.docx-wrapper) {

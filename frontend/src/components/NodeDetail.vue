@@ -8,7 +8,7 @@
  * 也是全站唯一的 Markdown 编辑入口，编辑器为开源 Vditor）。本组件只负责：
  *   · 左侧栏（小节列表 + 试题分组）与「哪一节被选中」；
  *   · 把「当前这节的正文」包装成 DocWorkspace 要的 doc 对象 + 三个适配器；
- *   · 节点特有的东西：去学习 / 前置知识 / 相关节点 / 小节学习状态条。
+ *   · 节点特有的东西：去学习 / 小节学习状态条。
  *
  * 为什么小节也要能编辑：小节化（2026-09-27）之后正文在多个平行 MD 里，没有主文件，
  * 于是旧的「编辑」按钮对这类节点直接隐藏 —— 结果是**大部分节点根本没编辑入口**。
@@ -29,7 +29,6 @@
  *   close: ()                  — 关闭弹窗
  *   refresh: ()                — 请求父组件刷新数据
  *   save-content: ({ nodeId, content, onResult }) — 保存老节点单 MD（父组件调用 Store）
- *   navigate-to-node: (nodeId) — 跳到另一个知识点
  *   open-quiz: ({...})         — 去出题页
  *   go-learn: (nodeId)         — 带着这个节点去对话里学习
  *   open-lecture: ({ docId, at }) — 从「视频出处」跳到课时页（父组件负责切视图）
@@ -42,6 +41,7 @@ import { formatError } from '../utils/errorCodes.js'
 import { useDetailPrefs } from '../utils/detailPrefs.js'
 import DocWorkspace from './DocWorkspace.vue'
 import VideoSourceCard from './VideoSourceCard.vue'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
   nodeInfo: { type: Object, default: null },
@@ -51,7 +51,7 @@ const props = defineProps({
   sourceDocId: { type: [Number, String], default: null },
 })
 
-const emit = defineEmits(['close', 'refresh', 'save-content', 'navigate-to-node', 'open-quiz', 'go-learn', 'open-lecture'])
+const emit = defineEmits(['close', 'refresh', 'save-content', 'open-quiz', 'go-learn', 'open-lecture'])
 
 /** 全屏：把模态撑满视口（阅读长讲义/写长文时的唯一诉求，不换路由也不换组件） */
 const fullscreen = ref(false)
@@ -302,14 +302,14 @@ function openQuizCreator() {
 }
 
 /* kind 是后端软标签（definition/formula/method/example/mistake/custom…），
-   只用于挑图标，未知 kind 落到默认。用内联 lucide 路径（项目禁 emoji，且不引图标库）。 */
+   只用于挑图标名，未知 kind 落到默认。图形定义在 utils/icons.js。 */
 const KIND_ICONS = {
-  definition: '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
-  formula: '<path d="M18 7V4H6l6 8-6 8h12v-3"/>',
-  method: '<rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/>',
-  example: '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/>',
-  mistake: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
-  _default: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+  definition: 'kindDefinition',
+  formula: 'kindFormula',
+  method: 'kindMethod',
+  example: 'kindExample',
+  mistake: 'kindMistake',
+  _default: 'fileText',
 }
 
 /** 侧边栏点击：有 manifest → 切到该小节；老节点 → 只有「正文」一项（正文已在详情里） */
@@ -321,10 +321,9 @@ function selectDoc(s) {
   activeSectionId.value = nextId
 }
 
-/** 按 kind 返回内联 SVG 字符串（硬编码常量，无用户输入） */
-function kindIconSvg(kind) {
-  const inner = KIND_ICONS[kind] || KIND_ICONS._default
-  return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`
+/** 按 kind 取图标名（交给 <AppIcon> 渲染） */
+function kindIcon(kind) {
+  return KIND_ICONS[kind] || KIND_ICONS._default
 }
 
 /* 面板尺寸 / 正文字号来自设置页（模块级单例，改设置即时生效）。
@@ -407,11 +406,6 @@ function handleKeydown(e) {
 onMounted(() => window.addEventListener('keydown', handleKeydown))
 onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
 
-function displayName(id) {
-  if (!id) return ''
-  return id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-}
-
 /* 掌握程度不再由节点详情手动调整：主信号是出题判分（grade_answer） */
 </script>
 
@@ -429,11 +423,7 @@ function displayName(id) {
               title="按小节带你过一遍这个知识点"
               @click="emit('go-learn', nodeInfo.id)"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                   stroke-linecap="round" stroke-linejoin="round">
-                <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/>
-                <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
-              </svg>
+              <AppIcon name="bookOpen" :size="16" />
               去学习
             </button>
             <!-- 全屏：读长讲义/写长文的唯一诉求。只改面板尺寸，不换路由也不换组件 -->
@@ -442,25 +432,11 @@ function displayName(id) {
               :title="fullscreen ? '退出全屏（Esc）' : '全屏阅读'"
               @click="fullscreen = !fullscreen"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                   stroke-linecap="round" stroke-linejoin="round">
-                <template v-if="fullscreen">
-                  <polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/>
-                  <line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>
-                </template>
-                <template v-else>
-                  <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
-                  <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
-                </template>
-              </svg>
+              <AppIcon :name="fullscreen ? 'minimize' : 'maximize'" :size="16" />
               {{ fullscreen ? '退出全屏' : '全屏' }}
             </button>
             <button class="action-btn close-btn" @click="emit('close')" title="关闭">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-                   stroke-linecap="round">
-                <line x1="18" y1="6" x2="6" y2="18"/>
-                <line x1="6" y1="6" x2="18" y2="18"/>
-              </svg>
+              <AppIcon name="x" :size="18" />
             </button>
           </div>
         </div>
@@ -477,11 +453,7 @@ function displayName(id) {
               :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'"
               @click="sidebarCollapsed = !sidebarCollapsed"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline v-if="sidebarCollapsed" points="9 18 15 12 9 6"/>
-                <polyline v-else points="15 18 9 12 15 6"/>
-              </svg>
+              <AppIcon :name="sidebarCollapsed ? 'chevronRight' : 'chevronLeft'" :size="14" />
             </button>
             <div class="sidebar-body section-sidebar-body">
               <ul class="sidebar-nav section-list">
@@ -494,7 +466,7 @@ function displayName(id) {
                     :title="s.title"
                     @click="selectDoc(s)"
                   >
-                    <span class="section-kind-icon" v-html="kindIconSvg(s.kind)"></span>
+                    <AppIcon class="section-kind-icon" :name="kindIcon(s.kind)" :size="16" />
                     <span class="section-title">{{ s.title }}</span>
                     <!-- 学习状态：通过 > 已懂 > 不懂 > 已读（未标记不占位） -->
                     <span
@@ -513,11 +485,7 @@ function displayName(id) {
                     :title="sectionQuiz === s.id ? '出题中，约 40 秒' : '针对本节出一道题'"
                     @click.stop="quizFromSection(s)"
                   >
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <circle cx="12" cy="12" r="10"/>
-                      <path d="M12 8v8"/><path d="M8 12h8"/>
-                    </svg>
+                    <AppIcon name="plusCircle" :size="13" />
                   </button>
                 </li>
               </ul>
@@ -627,38 +595,6 @@ function displayName(id) {
             />
           </div>
         </div>
-
-        <!-- 前置知识 -->
-        <div v-if="nodeInfo.prerequisites?.length" class="relations-section">
-          <h3>前置知识</h3>
-          <div class="relation-list">
-            <button
-              v-for="pid in nodeInfo.prerequisites"
-              :key="pid"
-              class="relation-tag link-btn"
-              :title="`跳转到「${displayName(pid)}」`"
-              @click="emit('navigate-to-node', pid)"
-            >
-              ← {{ displayName(pid) }}
-            </button>
-          </div>
-        </div>
-
-        <!-- 相关知识点 -->
-        <div v-if="nodeInfo.related_nodes?.length" class="relations-section">
-          <h3>相关知识点</h3>
-          <div class="relation-list">
-            <button
-              v-for="rid in nodeInfo.related_nodes"
-              :key="rid"
-              class="relation-tag related link-btn"
-              :title="`跳转到「${displayName(rid)}」`"
-              @click="emit('navigate-to-node', rid)"
-            >
-              ↔ {{ displayName(rid) }}
-            </button>
-          </div>
-        </div>
       </div>
     </div>
   </Transition>
@@ -673,7 +609,7 @@ function displayName(id) {
 
 .modal-panel {
   width: min(680px, 95vw); max-height: 85vh;
-  background: var(--color-bg-primary); border-radius: 14px;
+  background: var(--color-bg-primary); border-radius: var(--radius-xl);
   display: flex; flex-direction: column;
   box-shadow: var(--shadow-popup);
   overflow: hidden;
@@ -693,7 +629,7 @@ function displayName(id) {
 .action-btn {
   display: flex; align-items: center; gap: 5px;
   padding: 6px 14px; border: 1px solid var(--color-border);
-  border-radius: 8px; background: var(--color-bg-secondary); color: var(--color-text-secondary);
+  border-radius: var(--radius-md); background: var(--color-bg-secondary); color: var(--color-text-secondary);
   font-size: 13px; cursor: pointer; transition: all 0.15s;
   white-space: nowrap;
 }
@@ -739,7 +675,7 @@ function displayName(id) {
 .section-row .section-item { flex: 1; min-width: 0; }
 .section-quiz-btn {
   flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
-  width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px;
+  width: 24px; height: 24px; padding: 0; border: none; border-radius: var(--radius-md);
   background: transparent; color: var(--color-text-muted); cursor: pointer;
   opacity: 0.55; transition: all 0.15s;
 }
@@ -768,7 +704,7 @@ function displayName(id) {
 .quiz-item.is-source-hit { background: var(--color-green-light); }
 .quiz-item-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .quiz-type-badge {
-  flex-shrink: 0; padding: 1px 6px; border-radius: 8px; font-size: 11px; font-weight: 600;
+  flex-shrink: 0; padding: 1px 6px; border-radius: var(--radius-md); font-size: 11px; font-weight: 600;
   background: var(--color-accent-light); color: var(--color-accent);
 }
 .quiz-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -777,7 +713,7 @@ function displayName(id) {
 .quiz-empty { display: flex; flex-direction: column; gap: 6px; padding: 4px 2px; font-size: 12px; color: var(--color-text-muted); }
 .quiz-goto-btn {
   align-self: flex-start; padding: 4px 10px; border: 1px solid var(--color-border);
-  border-radius: 8px; background: var(--color-bg-secondary); color: var(--color-text-secondary);
+  border-radius: var(--radius-md); background: var(--color-bg-secondary); color: var(--color-text-secondary);
   font-size: 12px; cursor: pointer; transition: all 0.15s;
 }
 .quiz-goto-btn:hover { background: var(--color-bg-hover); border-color: var(--color-border-light); color: var(--color-text-primary); }
@@ -792,22 +728,6 @@ function displayName(id) {
 .section-hint { padding: 16px 24px; margin: 0; font-size: 13px; color: var(--color-text-muted); }
 @media (max-width: 560px) { .section-sidebar { width: 140px; min-width: 140px; } }
 
-/* 关系 */
-.relations-section { padding: 14px 24px 18px; border-top: 1px solid var(--color-border); flex-shrink: 0; }
-.relations-section h3 { font-size: 13px; font-weight: 600; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 8px; }
-.relation-list { display: flex; flex-wrap: wrap; gap: 6px; }
-.relation-tag { padding: 3px 10px; border-radius: 6px; font-size: 12px; background: var(--color-blue-light); color: var(--color-blue); border: 1px solid var(--color-border-light); }
-.relation-tag.related { background: var(--color-accent-light); color: var(--color-purple); border-color: var(--color-accent-light); }
-.relation-tag.link-btn {
-  cursor: pointer;
-  transition: all 0.15s;
-  font-family: inherit;
-}
-.relation-tag.link-btn:hover {
-  filter: brightness(0.95);
-  transform: translateY(-1px);
-}
-
 /* 弹窗动画 */
 .modal-enter-active, .modal-leave-active { transition: opacity 0.2s ease; }
 .modal-enter-from, .modal-leave-to { opacity: 0; }
@@ -821,7 +741,7 @@ function displayName(id) {
   padding: 6px 9px;
   margin-bottom: 8px;
   border: 1px solid var(--color-border-default, #ddd);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--color-bg-tertiary, rgba(127, 127, 127, 0.06));
   font-size: 12px;
 }
@@ -830,7 +750,7 @@ function displayName(id) {
   font-family: inherit;
   font-size: 12px;
   padding: 2px 10px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   border: 1px solid var(--color-border-default, #ddd);
   background: transparent;
   color: var(--color-text-secondary);
@@ -839,7 +759,7 @@ function displayName(id) {
 .slb-btn:hover:not(:disabled) { border-color: var(--color-accent); color: var(--color-text-primary); }
 .slb-btn.on {
   border-color: var(--color-accent);
-  background: var(--color-accent-light, rgba(99, 102, 241, 0.12));
+  background: var(--color-accent-light);
   color: var(--color-text-primary);
 }
 .slb-btn:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -863,12 +783,12 @@ function displayName(id) {
   flex-shrink: 0;
   margin-left: 4px;
   padding: 0 5px;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   font-size: 11px;
   line-height: 15px;
 }
 .lp-passed { background: var(--color-green-light, rgba(34, 160, 107, 0.15)); color: var(--color-green, #22a06b); }
-.lp-understood { background: var(--color-accent-light, rgba(99, 102, 241, 0.12)); color: var(--color-text-secondary); }
+.lp-understood { background: var(--color-accent-light); color: var(--color-text-secondary); }
 .lp-confused { background: var(--color-red-light, rgba(224, 86, 86, 0.15)); color: var(--color-red, #e05656); }
 .lp-read { background: var(--color-bg-hover, rgba(127, 127, 127, 0.12)); color: var(--color-text-tertiary); }
 /* AI 讲完自动记的「已懂 / 不懂」：同色系加一圈细描边，与“学生自己标的”区分开
@@ -878,7 +798,7 @@ function displayName(id) {
 /* 顶部栏「去学习」：用主色，与工具类按钮（编辑/关闭）区分开 */
 .learn-btn {
   border-color: var(--color-accent);
-  background: var(--color-accent-light, rgba(99, 102, 241, 0.1));
+  background: var(--color-accent-light);
   color: var(--color-text-primary);
 }
 </style>

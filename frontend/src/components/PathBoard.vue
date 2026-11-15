@@ -147,11 +147,11 @@ watch(() => props.items, () => {
         <!-- ── 空态（带动作）── -->
         <div v-if="!subject" class="pb-empty">
           <p>先在「学科分类」里选一个学科</p>
-          <button class="pb-empty-act" @click="emit('switch-tab')">去选学科 →</button>
+          <button class="pb-empty-act" @click="emit('switch-tab')">去选学科</button>
         </div>
         <div v-else-if="!items.length" class="pb-empty">
           <p>「{{ subject }}」还没有知识点</p>
-          <button class="pb-empty-act" @click="emit('switch-tab')">换个学科 →</button>
+          <button class="pb-empty-act" @click="emit('switch-tab')">换个学科</button>
         </div>
 
         <template v-else>
@@ -179,7 +179,7 @@ watch(() => props.items, () => {
           </div>
 
           <!-- ── 全掌握 ── -->
-          <div v-if="!path.length" class="pb-empty pb-all-done">🎉 这个学科的知识点都掌握了</div>
+          <div v-if="!path.length" class="pb-empty pb-all-done">这个学科的知识点都掌握了</div>
 
           <!-- ── 建议路径：依赖脊 ── -->
           <template v-else>
@@ -239,7 +239,7 @@ watch(() => props.items, () => {
                   <span class="pb-lv">L{{ n.level + 1 }}</span>
                 </div>
                 <div v-if="i === 0" class="pb-row-hint">
-                  <button class="pb-go" @click.stop="emit('learn-node', n.id)">去学习 →</button>
+                  <button class="pb-go" @click.stop="emit('learn-node', n.id)">去学习</button>
                 </div>
                 <div v-else-if="softHint(n)" class="pb-row-hint">
                   <button class="pb-hint-btn" @click.stop="jumpTo(focusTarget(n))">↳ {{ softHint(n) }}</button>
@@ -273,7 +273,7 @@ watch(() => props.items, () => {
   padding: 10px 12px 16px;
 }
 .pb-body::-webkit-scrollbar { width: 5px; }
-.pb-body::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
+.pb-body::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: var(--radius-sm); }
 
 /* ── 范围 / 进度 ── */
 .pb-scope {
@@ -288,14 +288,14 @@ watch(() => props.items, () => {
 .pb-prog-track {
   flex: 1;
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--radius-xl);
   background: var(--color-bg-tertiary);
   overflow: hidden;
 }
 .pb-prog-fill {
   display: block;
   height: 100%;
-  border-radius: 999px;
+  border-radius: var(--radius-xl);
   background: var(--color-accent);
   transition: width 0.35s ease;
 }
@@ -310,7 +310,7 @@ watch(() => props.items, () => {
   width: 100%;
   padding: 7px 9px;
   border: 1px dashed var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--color-green-light);
   color: var(--color-text-secondary);
   font-family: inherit;
@@ -324,7 +324,7 @@ watch(() => props.items, () => {
 .pb-done-chip {
   font-size: var(--font-size-xs);
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-xl);
   border: 1px solid var(--color-border-subtle);
   background: var(--color-bg-tertiary);
   color: var(--color-text-tertiary);
@@ -347,7 +347,7 @@ watch(() => props.items, () => {
 /* ── 选中 inspector ── */
 .pb-inspector {
   border: 1px solid var(--color-accent);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--color-accent-light);
   padding: 8px 10px;
   margin-bottom: 10px;
@@ -372,7 +372,7 @@ watch(() => props.items, () => {
   font-family: inherit;
   font-size: var(--font-size-xs);
   padding: 4px 9px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
   background: var(--color-bg-card);
   color: var(--color-text-secondary);
@@ -402,7 +402,7 @@ watch(() => props.items, () => {
   padding: 4px 0 4px 50px;
   border-bottom: 1px solid var(--color-border-subtle);
   cursor: pointer;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   opacity: 0;
   animation: pb-in 0.28s ease forwards;
 }
@@ -429,12 +429,12 @@ watch(() => props.items, () => {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .pb-row.start .pb-row-name { color: var(--color-accent-hover); }
-.pb-badge { flex-shrink: 0; font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap; font-weight: 500; }
+.pb-badge { flex-shrink: 0; font-size: 10px; padding: 1px 6px; border-radius: var(--radius-xl); white-space: nowrap; font-weight: 500; }
 .st-mastered { background: var(--color-green); color: var(--color-text-inverse); }
 .st-learning { background: var(--color-yellow); color: var(--color-text-inverse); }
 .st-weak { background: var(--color-red); color: var(--color-text-inverse); }
 .st-unstarted { background: var(--color-bg-surface); color: var(--color-text-secondary); }
-.pb-pill { flex-shrink: 0; font-size: 9.5px; padding: 1px 6px; border-radius: 999px; background: var(--color-accent); color: var(--color-text-inverse); font-weight: 600; white-space: nowrap; }
+.pb-pill { flex-shrink: 0; font-size: 9.5px; padding: 1px 6px; border-radius: var(--radius-xl); background: var(--color-accent); color: var(--color-text-inverse); font-weight: 600; white-space: nowrap; }
 .pb-lv { flex-shrink: 0; font-size: 10px; color: var(--color-text-muted); white-space: nowrap; }
 .pb-row-hint { font-size: 10.5px; line-height: 1.4; color: var(--color-accent-hover); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pb-go, .pb-hint-btn {
@@ -452,16 +452,16 @@ watch(() => props.items, () => {
 .pb-empty p { margin: 0 0 10px; }
 .pb-empty-act {
   font-family: inherit; font-size: var(--font-size-xs); font-weight: 600;
-  padding: 5px 12px; border-radius: 7px;
+  padding: 5px 12px; border-radius: var(--radius-md);
   border: 1px solid var(--color-accent); background: var(--color-accent-light);
   color: var(--color-accent-hover); cursor: pointer;
 }
 .pb-all-done { color: var(--color-green); font-weight: 600; }
 .pb-skeleton { padding: 4px 2px; }
-.sk-bar { height: 6px; border-radius: 999px; background: var(--color-bg-tertiary); margin-bottom: 14px; }
+.sk-bar { height: 6px; border-radius: var(--radius-xl); background: var(--color-bg-tertiary); margin-bottom: 14px; }
 .sk-row { display: flex; align-items: center; gap: 10px; height: 48px; border-bottom: 1px solid var(--color-border-subtle); }
 .sk-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--color-bg-tertiary); flex-shrink: 0; }
-.sk-line { height: 9px; border-radius: 5px; background: var(--color-bg-tertiary); animation: sk-pulse 1.2s ease-in-out infinite; }
+.sk-line { height: 9px; border-radius: var(--radius-sm); background: var(--color-bg-tertiary); animation: sk-pulse 1.2s ease-in-out infinite; }
 @keyframes sk-pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
 
 /* ── 过渡 ── */

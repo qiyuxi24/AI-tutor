@@ -6,7 +6,7 @@
  * 本组件只负责：
  *   1. 把 store 的可见图与高亮态喂给内核；
  *   2. 右键菜单 → 编辑弹窗 / 展开合并 / 建边删边 的交互编排；
- *   3. 覆盖层：加载 / 错误 / 空态、缩放控件、更新提示（掌握度图例在左侧栏底部）。
+ *   3. 覆盖层：加载 / 错误 / 空态、缩放控件、更新提示（掌握度图例在左侧栏底部、「下一步」在学习路径 tab）。
  *
  * 设计风格：Obsidian 极简 —— 纯色节点、细线边、无光晕/渐变/装饰。
  *
@@ -22,6 +22,7 @@ import { useGraphForces } from '../utils/graphForces'
 import { useContextMenu } from '../utils/contextMenu'
 import { createForceGraphEngine } from '../utils/forceGraphEngine'
 import { normalizeEdge } from '../utils/graphNormalize'
+import AppIcon from './AppIcon.vue'
 
 /* ================================================================
    组件 Props
@@ -33,9 +34,6 @@ const props = defineProps({
   error: { type: String, default: '' },
   autoRefresh: { type: Boolean, default: false },
   refreshInterval: { type: Number, default: 30000 },
-  // ── 科技树联动（学习进度） ──
-  // 下一步推荐节点 id（薄弱点脉冲标记）
-  nextNodeId: { type: String, default: '' },
   // 来源高亮：命中的节点 id 数组（知识库右键「在图谱中显示」用），非空即加醒目描边
   sourceNodes: { type: Array, default: () => [] },
 })
@@ -82,10 +80,9 @@ const { forces } = useGraphForces()
    ================================================================ */
 let engine = null
 
-/** 喂给内核的高亮态（推荐节点脉冲环 / 来源命中节点描边） */
+/** 喂给内核的高亮态（来源命中节点描边） */
 function highlightState() {
   return {
-    nextNodeId: props.nextNodeId,
     sourceNodes: props.sourceNodes,
   }
 }
@@ -126,8 +123,7 @@ watch(() => [props.nodes, props.edges], () => {
   engine?.update(props.nodes, props.edges)
 }, { deep: true })
 
-// ── 科技树联动：推荐节点变化时增量刷新样式（不重建布局） ──
-watch(() => props.nextNodeId, syncHighlight)
+// ── 来源命中变化时增量刷新高亮态（不重建布局） ──
 watch(() => props.sourceNodes, syncHighlight)
 function syncHighlight() {
   engine?.setHighlight(highlightState())
@@ -326,11 +322,7 @@ defineExpose({ focusNode })
     <!-- 空状态 -->
     <div v-else-if="!loading && props.nodes.length === 0 && !error" class="empty-overlay">
       <div class="empty-icon">
-        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="9" />
-          <circle cx="12" cy="12" r="3.5" />
-        </svg>
+        <AppIcon name="target" :size="32" />
       </div>
       <p>该学科还没有知识点</p>
       <p class="empty-hint">右键空白处新建，或让 AI 从资料建图</p>
@@ -339,25 +331,14 @@ defineExpose({ focusNode })
     <!-- 缩放控制 -->
     <div v-if="props.nodes.length > 0" class="zoom-controls">
       <button class="zoom-btn" title="放大" @click="zoomIn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" aria-hidden="true">
-          <line x1="12" y1="5" x2="12" y2="19" />
-          <line x1="5" y1="12" x2="19" y2="12" />
-        </svg>
+        <AppIcon name="plus" :size="14" />
       </button>
       <span class="zoom-level">{{ currentZoom }}x</span>
       <button class="zoom-btn" title="缩小" @click="zoomOut">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" aria-hidden="true">
-          <line x1="5" y1="12" x2="19" y2="12" />
-        </svg>
+        <AppIcon name="minus" :size="14" />
       </button>
       <button class="zoom-btn zoom-reset" title="重置视图" @click="zoomReset">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M3 12a9 9 0 1 0 3-6.7" />
-          <polyline points="3 4 3 9 8 9" />
-        </svg>
+        <AppIcon name="rotateCcw" :size="14" />
       </button>
     </div>
 
@@ -378,10 +359,7 @@ defineExpose({ focusNode })
         <template v-if="menuTargetType === 'canvas'">
           <div class="menu-item" @click="handleCreateNode(); close()">
             <span class="menu-icon">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
+              <AppIcon name="plus" :size="14" />
             </span>
             创建新节点
           </div>
@@ -392,31 +370,20 @@ defineExpose({ focusNode })
           <!-- 普通知识点 -->
           <div class="menu-item" @click="handleEditNode(menuTargetData); close()">
               <span class="menu-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                </svg>
+                <AppIcon name="pencil" :size="14" />
               </span>
               编辑节点
             </div>
             <div class="menu-item" @click="handleAddEdgeFromNode(menuTargetData?.id); close()">
               <span class="menu-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-                </svg>
+                <AppIcon name="link" :size="14" />
               </span>
               添加关联边
             </div>
             <div class="menu-divider"></div>
             <div class="menu-item menu-item-danger" @click="handleDeleteNode(menuTargetData?.id); close()">
               <span class="menu-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M3 6h18" />
-                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-                  <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                  <line x1="10" y1="11" x2="10" y2="17" />
-                  <line x1="14" y1="11" x2="14" y2="17" />
-                </svg>
+                <AppIcon name="trash" :size="14" />
               </span>
               删除节点
             </div>
@@ -426,22 +393,14 @@ defineExpose({ focusNode })
         <template v-else-if="menuTargetType === 'edge'">
           <div class="menu-item" @click="handleEditEdge(menuTargetData); close()">
             <span class="menu-icon">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-              </svg>
+              <AppIcon name="pencil" :size="14" />
             </span>
             编辑边标签
           </div>
           <div class="menu-divider"></div>
           <div class="menu-item menu-item-danger" @click="handleDeleteEdge(menuTargetData); close()">
             <span class="menu-icon">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 6h18" />
-                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                <line x1="10" y1="11" x2="10" y2="17" />
-                <line x1="14" y1="11" x2="14" y2="17" />
-              </svg>
+              <AppIcon name="trash" :size="14" />
             </span>
             删除边
           </div>
@@ -468,7 +427,7 @@ defineExpose({ focusNode })
   width: 100%;
   height: 100%;
   background: var(--color-bg-primary);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   position: relative;
 }
@@ -545,7 +504,7 @@ defineExpose({ focusNode })
 .zoom-btn {
   width: 28px; height: 28px;
   border: 1px solid var(--color-border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--color-bg-primary);
   color: var(--color-text-secondary);
   padding: 0;
@@ -557,14 +516,6 @@ defineExpose({ focusNode })
 .zoom-reset { margin-top: 4px; border-top: 1px solid var(--color-border-subtle); padding-top: 8px; }
 .zoom-level { font-size: 11px; color: var(--color-text-muted); user-select: none; padding: 2px 0; }
 
-/* 薄弱点脉冲环：推荐节点扩散动画 */
-.node-pulse { transform-origin: center; transform-box: fill-box; animation: nodePulse 2.2s ease-out infinite; }
-@keyframes nodePulse {
-  0%   { transform: scale(1);    opacity: 0.85; }
-  65%  { transform: scale(1.9);  opacity: 0; }
-  100% { transform: scale(1.9);  opacity: 0; }
-}
-
 /* ================================================================
    更新提示
    ================================================================ */
@@ -573,7 +524,7 @@ defineExpose({ focusNode })
   transform: translateX(-50%);
   background: var(--color-bg-surface);
   color: var(--color-text-primary);
-  padding: 8px 18px; border-radius: 6px;
+  padding: 8px 18px; border-radius: var(--radius-md);
   font-size: 12px; font-weight: 500;
   border: 1px solid var(--color-border-subtle);
   box-shadow: 0 2px 12px rgba(0,0,0,0.15);

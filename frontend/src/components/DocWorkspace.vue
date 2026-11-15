@@ -43,6 +43,7 @@ import { renderMarkdown } from '../utils/markdown.js'
 import { previewKindOf } from '../utils/filePreview.js'
 import { apiClient } from '../api'
 import DocEditor from './DocEditor.vue'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
   doc: { type: Object, default: null },
@@ -386,12 +387,7 @@ defineExpose({ canLeave, startEdit })
   <div class="doc-ws" :class="{ 'doc-ws--bare': bare }">
     <!-- 空态 -->
     <div v-if="!doc" class="doc-empty">
-      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-        <polyline points="14 2 14 8 20 8" /><line x1="8" y1="13" x2="16" y2="13" />
-        <line x1="8" y1="17" x2="13" y2="17" />
-      </svg>
+      <AppIcon name="fileText" :size="40" />
       <p class="doc-empty-title">{{ emptyTitle }}</p>
       <p class="doc-empty-sub">{{ emptyHint }}</p>
     </div>
@@ -641,7 +637,7 @@ defineExpose({ canLeave, startEdit })
 .doc-mode-switch button {
   padding: 3px 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-tertiary);
   font-family: inherit;
@@ -705,7 +701,7 @@ defineExpose({ canLeave, startEdit })
 .doc-img img {
   max-width: 100%;
   height: auto;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 .doc-docx,
 .doc-sheet {
@@ -778,7 +774,7 @@ defineExpose({ canLeave, startEdit })
 .markdown-body :deep(code) {
   background: var(--color-bg-surface);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-family: 'Consolas', monospace;
   font-size: 0.92em;
 }
@@ -786,7 +782,7 @@ defineExpose({ canLeave, startEdit })
   background: var(--color-bg-tertiary);
   color: var(--color-text-primary);
   padding: 14px 16px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   overflow-x: auto;
   margin: 12px 0;
   font-size: 0.92em;
@@ -837,7 +833,7 @@ defineExpose({ canLeave, startEdit })
 .markdown-body :deep(img) {
   max-width: 100%;
   height: auto;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: zoom-in;
 }
 </style>

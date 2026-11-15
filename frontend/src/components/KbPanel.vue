@@ -5,10 +5,7 @@
     <div class="kb-toolbar">
       <template v-if="inlineFile">
         <button type="button" class="kb-back-btn" title="返回文件列表（Esc）" @click="closeInlineFile">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="15 18 9 12 15 6" />
-          </svg>
+          <AppIcon name="chevronLeft" :size="13" />
           返回
         </button>
         <span class="kb-file-name" :title="inlineFile.name">{{ inlineFile.name }}</span>
@@ -18,12 +15,12 @@
         <div class="kb-actions">
           <el-tooltip content="新建文件夹" placement="top">
             <button class="kb-icon-btn" @click="openCreateFolder">
-              <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+              <AppIcon name="folder" :size="16" />
             </button>
           </el-tooltip>
           <el-tooltip content="上传文件" placement="top">
             <label class="kb-icon-btn" :class="{ 'is-busy': uploading }">
-              <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
+              <AppIcon name="paperclip" :size="16" />
               <input ref="fileInputRef" type="file" hidden multiple :accept="acceptTypes" @change="handleUpload">
             </label>
           </el-tooltip>
@@ -107,8 +104,7 @@
             :class="{ selected: selectedNode?.id === data.id }"
           >
             <span class="kb-node-icon">
-              <svg v-if="data.type === 'folder'" viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
-              <svg v-else viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+              <AppIcon :name="data.type === 'folder' ? 'folder' : 'fileText'" :size="16" />
             </span>
             <span class="kb-node-name">{{ data.name }}</span>
             <ItemMoreButton title="更多操作" @click="openMenuAt($event, 'kb', data)" />
@@ -141,41 +137,26 @@
         <template v-if="menuNode">
           <div class="menu-item" @click="close(); setContext(menuNode)">
             <span class="menu-icon">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 5v14" /><path d="M5 12h14" />
-              </svg>
+              <AppIcon name="plus" :size="14" />
             </span>
             加入对话上下文
           </div>
           <template v-if="menuNode.type === 'file'">
             <div class="menu-item" @click="close(); emitShowInGraph(menuNode)">
               <span class="menu-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" />
-                  <path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" />
-                  <circle cx="12" cy="12" r="3" />
-                </svg>
+                <AppIcon name="focus" :size="14" />
               </span>
               在图谱中显示
             </div>
             <div class="menu-item" @click="close(); openFromMenu(menuNode)">
               <span class="menu-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" />
-                </svg>
+                <AppIcon name="eye" :size="14" />
               </span>
               预览
             </div>
             <div class="menu-item" @click="close(); openInBrowser(menuNode)">
               <span class="menu-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M15 3h6v6" /><path d="M10 14 21 3" />
-                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                </svg>
+                <AppIcon name="externalLink" :size="14" />
               </span>
               在浏览器中打开
             </div>
@@ -183,19 +164,13 @@
           <template v-else>
             <div class="menu-item" @click="close(); openCreateFolder(menuNode)">
               <span class="menu-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                </svg>
+                <AppIcon name="folderPlus" :size="14" />
               </span>
               新建子文件夹
             </div>
             <div class="menu-item" @click="close(); uploadInto(menuNode)">
               <span class="menu-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
-                </svg>
+                <AppIcon name="upload" :size="14" />
               </span>
               上传到此文件夹
             </div>
@@ -203,10 +178,7 @@
           <div class="menu-divider"></div>
           <div class="menu-item menu-item-danger" @click="close(); confirmDelete(menuNode)">
             <span class="menu-icon">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-              </svg>
+              <AppIcon name="trash" :size="14" />
             </span>
             删除{{ menuNode.type === 'folder' ? '文件夹（含内容）' : '文件' }}
           </div>
@@ -268,6 +240,7 @@ import ContextMenu from './ContextMenu.vue'
 import ItemMoreButton from './ItemMoreButton.vue'
 import { useContextMenu } from '../utils/contextMenu.js'
 import { useChatStore } from '../stores/chatStore.js'
+import AppIcon from './AppIcon.vue'
 
 const store = useChatStore()
 
@@ -651,7 +624,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
   width: 26px;
   height: 26px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
   cursor: pointer;
@@ -703,7 +676,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
   flex-shrink: 0;
   padding: 3px 8px 3px 5px;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
   font-family: inherit;
@@ -803,7 +776,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
 .kb-tree-wrap::-webkit-scrollbar { width: 4px; }
 .kb-tree-wrap::-webkit-scrollbar-thumb {
   background: var(--color-border-light);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
 }
 
 .kb-node {
@@ -811,7 +784,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
   align-items: center;
   gap: 6px;
   padding: 4px 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   /* ⚠️ 不能写 width:100%：el-tree 的 __content 里还有缩进 / 展开箭头 / 复选框，
      它按 content 的 100% 计算就会比可用宽度多出一截，长文件名时把右侧 ⋯ 按钮
@@ -876,7 +849,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
   justify-content: space-between;
   padding: 6px 10px;
   background: var(--color-green-light);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   color: var(--color-green);
 }

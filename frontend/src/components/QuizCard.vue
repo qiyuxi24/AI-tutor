@@ -169,7 +169,7 @@ function submit(q) {
 .qc {
   border: 1px solid var(--color-border-default, #ddd);
   border-left: 3px solid var(--color-accent);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-card, transparent);
   padding: 10px 12px;
 }
@@ -185,8 +185,8 @@ function submit(q) {
 .qc-idx { font-weight: 600; color: var(--color-text-secondary); }
 .qc-type {
   padding: 0 6px;
-  border-radius: 9px;
-  background: var(--color-accent-light, rgba(99, 102, 241, 0.12));
+  border-radius: var(--radius-md);
+  background: var(--color-accent-light);
   color: var(--color-text-secondary);
 }
 .qc-sent { margin-left: auto; color: var(--color-green, #22a06b); }
@@ -207,7 +207,7 @@ function submit(q) {
   gap: 7px;
   padding: 6px 9px;
   border: 1px solid var(--color-border-subtle, #eee);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   line-height: 1.6;
   color: var(--color-text-secondary);
@@ -217,7 +217,7 @@ function submit(q) {
 .qc-option:hover { border-color: var(--color-border-light, #ccc); }
 .qc-option.on {
   border-color: var(--color-accent);
-  background: var(--color-accent-light, rgba(99, 102, 241, 0.1));
+  background: var(--color-accent-light);
   color: var(--color-text-primary);
 }
 .qc-option input { margin: 2px 0 0; cursor: pointer; }
@@ -234,7 +234,7 @@ function submit(q) {
   box-sizing: border-box;
   padding: 6px 9px;
   border: 1px solid var(--color-border-subtle, #eee);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-primary);
   font-family: inherit;
@@ -253,7 +253,7 @@ function submit(q) {
   font-family: inherit;
   font-size: 12.5px;
   padding: 4px 16px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--color-accent);
   background: var(--color-accent);
   color: var(--color-text-inverse, #fff);

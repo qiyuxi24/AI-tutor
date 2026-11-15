@@ -136,7 +136,7 @@ function graphFingerprint(nodes, links) {
  * @param {Object}   p
  * @param {Element}  p.container 图谱容器（引擎只往它里面 append 一个 svg）
  * @param {Object}   p.forces    力场参数（缺省用 FORCE_DEFAULTS）
- * @param {Object}   p.highlight 初始高亮态 {nextNodeId, sourceNodes}
+ * @param {Object}   p.highlight 初始高亮态 {sourceNodes}
  *        - sourceNodes：来源命中的节点 id 数组（知识库右键「在图谱中显示」），非空即加醒目描边
  * @param {Object}   p.handlers  交互回调（全部可选）
  *        - onNodeClick(id)                  单击普通知识点
@@ -150,7 +150,7 @@ function graphFingerprint(nodes, links) {
 export function createForceGraphEngine({ container, forces, highlight, handlers = {} } = {}) {
   /* ── 实例状态（全部不进入 Vue 响应式）── */
   let forceParams = { ...FORCE_DEFAULTS, ...(forces || {}) }
-  let hl = { nextNodeId: '', ...(highlight || {}) }
+  let hl = { ...(highlight || {}) }
 
   let simulation = null
   let svgSelection = null
@@ -218,12 +218,6 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
 
   function nodeBodyStrokeOpacity(d) {
     return isSourceNode(d.id) ? 1 : 0.3
-  }
-  /** 推荐节点脉冲环 */
-  function applyPulse() {
-    if (!svgSelection) return
-    svgSelection.selectAll('.node-pulse')
-      .style('display', (d) => (d.id === hl.nextNodeId ? null : 'none'))
   }
 
   /* ---------- 画布骨架 ---------- */
@@ -525,15 +519,6 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
       .attr('fill', 'transparent')
       .style('pointer-events', 'all')
 
-    // ── 薄弱点脉冲环（下一步推荐节点，扩散动画提示"从这里学起"） ──
-    nodeEnter.append('circle')
-      .attr('class', 'node-pulse')
-      .attr('fill', 'none')
-      .attr('stroke', 'var(--color-accent)')
-      .attr('stroke-width', 2)
-      .style('pointer-events', 'none')
-      .style('display', 'none')
-
     // ── 节点名称（标签在节点右侧，Obsidian 风格；聚合节点带成员数） ──
     nodeEnter.append('text')
       .attr('class', 'node-label')
@@ -574,10 +559,6 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
     // 入场淡入
     nodeEnter.transition().duration(320).attr('opacity', 1)
     nodeEnter.select('.node-label').transition().duration(320).style('opacity', 1)
-
-    nodeSelection.select('.node-pulse')
-      .attr('r', (d) => nodeRadius(d))
-      .style('display', (d) => (d.id === hl.nextNodeId ? null : 'none'))
 
     nodeSelection.select('.node-label')
       .attr('dx', (d) => nodeRadius(d) + 8)
@@ -730,7 +711,7 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
 
   /**
    * 用最新数据刷新画布。
-   * 指纹未变 → 直接返回（学习路径/推荐节点变化走 setHighlight，不必重建布局）。
+   * 指纹未变 → 直接返回（来源命中变化走 setHighlight，不必重建布局）。
    */
   function update(rawNodes, rawEdges) {
     if (destroyed) return
@@ -752,10 +733,9 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
     }
   }
 
-  /** 合并高亮态（下一步推荐节点）并立即刷新样式 */
+  /** 合并高亮态（来源命中节点）：下一次画布更新或鼠标移出时描边生效 */
   function setHighlight(patch) {
     hl = { ...hl, ...patch }
-    applyPulse()
   }
 
   /** 力场参数变化：只改参数 + 重启仿真（不重建、不重置视野） */

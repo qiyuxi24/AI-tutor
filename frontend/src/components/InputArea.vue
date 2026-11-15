@@ -14,6 +14,7 @@
 import { ref, computed, nextTick } from 'vue'
 import { useChatStore } from '../stores/chatStore'
 import ContextPicker from './ContextPicker.vue'
+import AppIcon from './AppIcon.vue'
 
 const store = useChatStore()
 
@@ -100,15 +101,10 @@ function handleKeydown(e) {
           class="chip"
           :title="d.path || d.name"
         >
-          <svg class="chip-icon" width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-            <polyline points="14 2 14 8 20 8" />
-          </svg>
+          <AppIcon class="chip-icon" name="file" :size="12" />
           <span class="chip-text">{{ docLabel(d) }}</span>
           <button class="chip-x" :aria-label="`移除 ${d.name}`" @click="removeDoc(d)">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="3" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+            <AppIcon name="x" :size="10" />
           </button>
         </span>
         <span
@@ -116,14 +112,10 @@ function handleKeydown(e) {
           class="chip chip-node"
           :title="n.subject ? `${n.name} · ${n.subject}` : n.name"
         >
-          <svg class="chip-icon" width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r="9" opacity="0.45" />
-          </svg>
+          <AppIcon class="chip-icon" name="target" :size="12" />
           <span class="chip-text">{{ n.name }}</span>
           <button class="chip-x" :aria-label="`移除 ${n.name}`" @click="removeNode(n)">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="3" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+            <AppIcon name="x" :size="10" />
           </button>
         </span>
         <button class="chips-clear" @click="clearAll">全部清除</button>
@@ -154,11 +146,7 @@ function handleKeydown(e) {
             aria-label="引用资料"
             @click="togglePicker('docs')"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-            </svg>
+            <AppIcon name="file" :size="14" />
             <span>资料</span>
             <span v-if="selDocs.length" class="pill-count">{{ selDocs.length }}</span>
           </button>
@@ -170,10 +158,7 @@ function handleKeydown(e) {
             aria-label="引用知识点"
             @click="togglePicker('nodes')"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="3" />
-            </svg>
+            <AppIcon name="target" :size="14" />
             <span>知识点</span>
             <span v-if="selNodes.length" class="pill-count">{{ selNodes.length }}</span>
           </button>
@@ -195,9 +180,7 @@ function handleKeydown(e) {
             aria-label="停止生成"
             @click="store.stopGenerating()"
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <rect x="7" y="7" width="10" height="10" rx="2" />
-            </svg>
+            <AppIcon name="stop" :size="14" />
           </button>
           <button
             v-else
@@ -208,10 +191,7 @@ function handleKeydown(e) {
             title="发送"
             aria-label="发送消息"
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 19V5" /><polyline points="5 12 12 5 19 12" />
-            </svg>
+            <AppIcon name="arrowUp" :size="18" />
           </button>
         </div>
       </div>

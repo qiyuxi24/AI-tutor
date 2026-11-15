@@ -3,6 +3,7 @@ import { watch, nextTick, ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useChatStore } from '../stores/chatStore'
 import MessageBubble from './MessageBubble.vue'
 import InputArea from './InputArea.vue'
+import AppIcon from './AppIcon.vue'
 
 const emit = defineEmits(['navigate-to-node'])
 
@@ -458,21 +459,7 @@ const greetingMessages = [
             <span></span><span></span><span></span>
           </span>
           <!-- LLM 不在生成：显示向下箭头 -->
-          <svg
-            v-else
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <polyline points="19 12 12 19 5 12" />
-          </svg>
+          <AppIcon v-else name="arrowDown" :size="16" />
         </button>
       </Transition>
     </div>
@@ -516,7 +503,7 @@ const greetingMessages = [
 
 .message-list::-webkit-scrollbar-thumb {
   background: var(--color-border-light);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 
 /* ── 右侧对话轮次刻度进度条（中心对称 + 悬停波浪凸起 + 轮次预览浮窗） ── */
@@ -555,7 +542,7 @@ const greetingMessages = [
   border: 0;
   background: none;
   font: inherit;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .turn-tick-item:focus-visible {
@@ -567,7 +554,7 @@ const greetingMessages = [
   display: block;
   width: 6px;
   height: 2px;
-  border-radius: 999px;
+  border-radius: var(--radius-xl);
   background: var(--color-text-tertiary);
   opacity: 0.42;
   transition:
@@ -610,7 +597,7 @@ const greetingMessages = [
   width: 280px;
   max-width: min(280px, 55vw);
   padding: 10px 14px;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-card);
   border: 1px solid var(--color-border-strong, var(--color-border));
   box-shadow: var(--shadow-popup);
