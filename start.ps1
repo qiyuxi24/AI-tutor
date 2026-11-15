@@ -461,13 +461,24 @@ New-Item -ItemType Directory -Force -Path (Split-Path $backendLog -Parent) | Out
 # 另加 --reload-dir data/prompts：提示词模板不在 app/ 下，漏了它改 .j2 不会重载
 # （进程内模板缓存不失效 → 改了看不到效果，容易被误判成"模型没按提示词走"）。
 # 绝对路径：uvicorn 的监视目录相对 CWD 解析，写成相对路径会随启动方式漂移。
+# --timeout-graceful-shutdown 5：**必须加**。uvicorn 关停 worker 时先 `server.close()`，
+# 然后死等 `server_state.connections` 清空（server.py:303 `_wait_tasks_to_complete`），
+# 而这个等待默认**无超时**（config.py:218 `timeout_graceful_shutdown = None`）。
+# 前端 `chatStore` 常驻一条 `/api/v1/knowledge/events` 的 EventSource（后端是
+# `event_bus.subscribe()` 的 while True，永不主动结束），只要浏览器标签页开着，
+# 这条连接就一直在 connections 里 → reload 的 join() 无限等 → 8000 端口
+# 还 LISTEN 但没人 accept（reloader 卡在等子进程），前端表现为「发消息毫无反应」，
+# 而 agent_runs / tutor.log 里什么都没有（请求根本没到 handler）。
+# 实测（2026-11-15，.dsh_local\chatprobe\repro_shutdown.py）：默认 8s 内不退出；
+# 加 2s 超时后 2.33s 退出，日志报 "Cancel N running task(s), timeout graceful shutdown exceeded"。
+# 取 5s：远小于前端 apiClient 的 300s，又足够让普通请求收尾。
 # !! 路径含空格时**必须自带引号**：Start-Process 的 -ArgumentList 是「数组元素按空格拼成一条
 #    命令行」，它不会替我们加引号。本项目路径含空格（`AI-tutor_ - 副本`），不加引号就变成
 #    `--reload-dir C:\...\AI-tutor_ - 副本\...\data\prompts` → uvicorn 收到两个参数 →
 #    「Error: Got unexpected extra arguments (- 副本\...\data\prompts)」→ 进程秒退，
 #    而脚本只会报「后端启动超时」（真因在 logs\uvicorn-dev.log）。2026-09-28 踩过一次。
 $promptsDir = Join-Path $projectRoot "data\prompts"
-$backendProcess = Start-Process -FilePath $venvPython -ArgumentList "-m", "uvicorn", "app.main:app", "--host", $backendHost, "--port", "8000", "--reload", "--reload-dir", "app", "--reload-dir", "`"$promptsDir`"", "--no-use-colors" -PassThru -WindowStyle Hidden -WorkingDirectory $backendDir -RedirectStandardError $backendLog
+$backendProcess = Start-Process -FilePath $venvPython -ArgumentList "-m", "uvicorn", "app.main:app", "--host", $backendHost, "--port", "8000", "--reload", "--reload-dir", "app", "--reload-dir", "`"$promptsDir`"", "--timeout-graceful-shutdown", "5", "--no-use-colors" -PassThru -WindowStyle Hidden -WorkingDirectory $backendDir -RedirectStandardError $backendLog
 
 Write-Host "[后端] PID: $($backendProcess.Id)" -ForegroundColor Green
 
