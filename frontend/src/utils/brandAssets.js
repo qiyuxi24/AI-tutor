@@ -8,6 +8,11 @@
  *
  * 例外的引用点：index.html 的 <link rel="icon">（静态 HTML，先于 JS 存在，无法 import），
  * 换品牌图形时需手动同步 index.html。
+ *
+ * ⚠️ 与 `utils/icons.js` 的分工（2026-11-15）：本文件管 **public/ 下的独立图形文件**
+ * （品牌星、Logo），整张图整体 `<img src>`；icons.js 管 **界面里的小图标**，一律走
+ * `<AppIcon>`（内联渲染、currentColor 跟随文字色）。两者不要互相搬 —— 小图标别做成
+ * 独立 .svg 文件（那样改颜色就得改文件），品牌图形也别塞进图标注册表（它有多色）。
  */
 
 /** 品牌图形（像素星）：favicon、活动栏 logo、对话 AI 头像、悬浮球共用同一份 */

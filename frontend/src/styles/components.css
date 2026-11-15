@@ -21,27 +21,28 @@
      <span class="tag tag-success">已索引</span>
    ═══════════════════════════════════════ */
 
-/* ════════════ 卡片 ════════════ */
+/* ════════════ 卡片 ════════════
+   卡片用 **1px 描边**而不是投影：投影 + 圆角 + 统一尺寸是「SaaS 卡片套件」的
+   外形特征。阴影只留给真正浮在页面之上的东西（弹窗 / 下拉 / 悬浮球）。 */
 .card {
   background: var(--color-bg-card);
   border: 1px solid var(--color-border-default);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-md);
 }
 
-/* 无阴影版：用在已有边框/分隔的密集区域，避免层层叠影 */
-.card-flat {
-  box-shadow: none;
+/* 需要时显式加投影（少用） */
+.card-elevated {
+  box-shadow: var(--shadow-lg);
 }
 
-/* 可点击卡片：hover 抬升 */
+/* 可点击卡片：hover 时描边转为主色，不抬升 */
 .card-hover {
-  transition: box-shadow 0.2s, border-color 0.2s, transform 0.2s;
+  transition: border-color 0.15s, background 0.15s;
   cursor: pointer;
 }
 .card-hover:hover {
-  box-shadow: var(--shadow-lg);
   border-color: var(--color-primary-light);
+  background: var(--color-bg-hover);
 }
 
 /* 内衬：卡片内部再降一层背景（表头、配置区等） */
@@ -288,13 +289,13 @@
   border-top: 1px solid var(--color-border-soft);
 }
 
-/* 分组标题（小号、大写、弱化） */
+/* 分组标题（小号、弱化）——
+   不用 text-transform: uppercase + 字距：那套"全大写小标签"是模板化的典型外观，
+   而且中文本身就是全角方块字，大写变换对中文零效果、只把英文标签变成吵的一行。 */
 .sidebar-group-title {
   padding: var(--space-md) var(--space-sm) var(--space-xs);
   font-size: var(--font-size-xs);
   font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   color: var(--color-text-placeholder);
 }
 

@@ -59,7 +59,7 @@
   align-items: center;
   gap: 10px;
   padding: 9px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   color: var(--color-text-secondary);
   cursor: pointer;
@@ -89,7 +89,7 @@
 .settings-content::-webkit-scrollbar { width: 5px; }
 .settings-content::-webkit-scrollbar-thumb {
   background: var(--color-border-light);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 
 .sc-section {
@@ -112,7 +112,7 @@
   padding: 16px 18px;
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   margin-bottom: 10px;
 }
 
@@ -145,7 +145,7 @@
   gap: 6px;
   padding: 7px 14px;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
   font-size: 13px;
@@ -169,7 +169,7 @@
   flex-shrink: 0;
   padding: 7px 16px;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
   font-size: 13px;
@@ -211,7 +211,7 @@
   gap: 8px;
   padding: 7px 14px;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
   font-size: 13px;
@@ -257,7 +257,7 @@
   padding: 16px 18px;
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
 }
 
 .force-row-head {
