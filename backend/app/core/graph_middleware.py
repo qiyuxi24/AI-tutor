@@ -679,6 +679,18 @@ def compute_stats(kg, subject: str | None = None) -> dict:
         by_subject = []
         for subj in kg.get_subjects():
             by_subject.append(_subject_stats(kg, kg.get_nodes_by_subject(subj), subj))
+        # 排序：**有学习记录的学科在前**，同组内按内容量，最后按学科名兜底。
+        # 为什么不用「节点出现顺序」（SQLite 行序，取决于建图先后）：侧栏顺序会随
+        # 建图顺序漂移，而前端 `ensureSubjectSelected` 取 `subjects[0]` 作为"打开图谱
+        # 默认落在哪个学科"—— 实测演示账号因此首屏落在只有 1 个知识点的学科上，
+        # 画布一片空白，看起来像没数据。
+        # 为什么"有学习记录"优先而不是单纯比节点数：对学生而言，他最该先看到的是
+        # 自己**正在学**的那门；新账号全为 0 时自然退化成"内容最多的在前"。
+        by_subject.sort(key=lambda s: (
+            -(1 if (s["mastered_count"] + s["learning_count"] + s["weak_count"]) else 0),
+            -s["node_count"],
+            s["subject"] or "",
+        ))
         # 无学科归属的节点归入「未分类」
         orphan = _unclassified_nodes(kg)
         if orphan:
