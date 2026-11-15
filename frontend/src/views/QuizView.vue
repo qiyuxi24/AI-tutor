@@ -9,8 +9,12 @@
  *   - 判分：客观题规则判分、简答题 LLM 判分，展示解析
  */
 
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import AppIcon from '../components/AppIcon.vue'
+import SidePanel from '../components/SidePanel.vue'
+import QuizHistorySidebar from '../components/QuizHistorySidebar.vue'
+import KbTextPreviewDialog from '../components/KbTextPreviewDialog.vue'
 import {
   generateQuiz,
   gradeQuizQuestion,
@@ -18,7 +22,8 @@ import {
   getQuizQuestion,
   listQuizBatches,
   getBatchQuestions,
-  downloadQuiz,
+  fetchQuizBlob,
+  saveQuizBlob,
   readBlobError,
 } from '../api/quiz.js'
 
@@ -136,6 +141,7 @@ async function handleGenerate() {
       localIdx: i,
       dbId: ids[i] != null ? ids[i] : null,  // 数据库 id（用于判分）
     }))
+    activeBatchId.value = ''   // 新生成的一套 = 草稿，清掉历史选中态
     rejectedCount.value = d.rejected || 0
     materialsUsed.value = d.materials_used || 0
     requestedCount.value = d.requested || questions.value.length
@@ -220,43 +226,97 @@ const exportOptions = [
   { fmt: 'md', label: 'Markdown', tip: '纯文本，便于二次加工' },
   { fmt: 'tsv', label: 'Anki', tip: '导入 Anki 的卡片（正面题干/背面答案解析，始终含答案）' },
 ]
-const exportingFmt = ref('')        // 正在导出的格式，用于按钮 loading
+const exportingFmt = ref('')        // 正在请求/预览的格式，用于按钮 loading
 const withAnswer = ref(true)        // false = 学生卷（不含答案解析）
+const exportFmt = ref('pdf')        // 预览默认 PDF（浏览器原生阅读器，最忠实）
 
-/**
- * 导出当前这套题；若还没出题，则按主题导出题库。
- * 后端按 ids 优先，因此刚出的那套题顺序、内容与页面完全一致。
- */
-async function handleExport(fmt) {
+/** 导出参数：预览与下载共用同一份，保证「所见即所得」 */
+function exportParams(fmt) {
   const ids = questions.value
     .map((q) => q.dbId)
     .filter((id) => id != null)
     .join(',')
   const subj = subject.value.trim()
+  return {
+    params: {
+      format: fmt,
+      ids,                              // 有当前题目 → 只导出这套
+      subject: ids ? '' : subj,         // 否则按主题导出题库
+      limit: 200,
+      with_answer: withAnswer.value,
+    },
+    fallbackName: `${subj || 'AI试题'}${withAnswer.value ? '_试题' : '_学生卷'}`,
+  }
+}
 
-  if (!ids && !subj) {
+/**
+ * 预览：只请求一次并持有字节（后端每次导出都写「导出时间」，分两次请求会是两份）。
+ * docx/pdf 交原件渲染器，md/tsv 是纯文本、读到 markdown 字符串里再渲染。
+ */
+const previewVisible = ref(false)
+const previewName = ref('')
+const previewFileType = ref('')
+const previewRawBlob = ref(null)
+const previewMarkdown = ref('')
+const previewHeld = ref(null)       // { blob, filename, type }：预览的就是可下载的那一份
+
+const previewFileTypes = { docx: '.docx', pdf: '.pdf', md: '.md', tsv: '.tsv' }
+
+async function handlePreview(fmt) {
+  const { params, fallbackName } = exportParams(fmt)
+  if (!params.ids && !params.subject) {
     ElMessage.warning('请先「开始出题」，或填写主题以导出该主题的题库')
     return
   }
-
   exportingFmt.value = fmt
   try {
-    const name = await downloadQuiz(
-      {
-        format: fmt,
-        ids,                              // 有当前题目 → 只导出这套
-        subject: ids ? '' : subj,         // 否则按主题导出题库
-        limit: 200,
-        with_answer: withAnswer.value,
-      },
-      `${subj || 'AI试题'}${withAnswer.value ? '_试题' : '_学生卷'}`
-    )
+    const held = await fetchQuizBlob(params, fallbackName)
+    previewName.value = held.filename
+    previewFileType.value = previewFileTypes[fmt] || '.md'
+    previewMarkdown.value = ''
+    previewRawBlob.value = null
+    if (fmt === 'md' || fmt === 'tsv') {
+      previewMarkdown.value = await held.blob.text()
+    } else {
+      previewRawBlob.value = held.blob
+    }
+    previewHeld.value = held
+    previewVisible.value = true
+  } catch (e) {
+    ElMessage.error(await readBlobError(e))
+  } finally {
+    exportingFmt.value = ''
+  }
+}
+
+/** 下载当前预览的那一份字节；未预览时退化为一次请求即下载 */
+async function handleExport(fmt) {
+  if (previewHeld.value && previewVisible.value) {
+    const name = saveQuizBlob(previewHeld.value)
+    ElMessage.success(`已下载 ${name}`)
+    return
+  }
+  const { params, fallbackName } = exportParams(fmt)
+  if (!params.ids && !params.subject) {
+    ElMessage.warning('请先「开始出题」，或填写主题以导出该主题的题库')
+    return
+  }
+  exportingFmt.value = fmt
+  try {
+    const name = saveQuizBlob(await fetchQuizBlob(params, fallbackName))
     ElMessage.success(`已下载 ${name}`)
   } catch (e) {
     ElMessage.error(await readBlobError(e))
   } finally {
     exportingFmt.value = ''
   }
+}
+
+function closePreview() {
+  previewVisible.value = false
+  previewRawBlob.value = null
+  previewMarkdown.value = ''
+  previewHeld.value = null
 }
 
 /**
@@ -283,16 +343,16 @@ async function focusQuestion(id) {
   }
 }
 
-// ─── 出题历史（题集）───
-// 每次出题 = 一个题集；历史抽屉列出全部题集，点开可回看/判分/导出，
-// 避免生成的题散在题库里「找不到」。
-const historyVisible = ref(false)
+// ─── 出题历史（常驻左侧栏，统一走 SidePanel）───
+// 每次出题 = 一个题集；侧栏列出全部题集，点一条即载入主区（可回看/判分/导出），
+// 选中态高亮，避免生成的题散在题库里「找不到」。
 const batches = ref([])
 const batchesTotal = ref(0)
 const historyLoading = ref(false)
 const openingBatch = ref('')
-
-const difficultyLabels = { easy: '简单', medium: '中等', hard: '困难' }
+const activeBatchId = ref('')         // '' = 当前是新生成的草稿 / 聚焦单题（无历史选中）
+const historyCollapsed = ref(false)
+const historyWidth = ref(240)
 
 async function loadBatches() {
   historyLoading.value = true
@@ -305,11 +365,6 @@ async function loadBatches() {
   } finally {
     historyLoading.value = false
   }
-}
-
-function openHistory() {
-  historyVisible.value = true
-  loadBatches()
 }
 
 /** 载入某个历史题集：形状对齐 handleGenerate 的 questions 项，使其可判分/导出 */
@@ -329,7 +384,7 @@ async function openBatch(b) {
     materialsUsed.value = 0
     requestedCount.value = qs.length
     if (b.subject && !subject.value.trim()) subject.value = b.subject
-    historyVisible.value = false
+    activeBatchId.value = b.batch_id
     ElMessage.success(`已载入历史题目 ${qs.length} 道`)
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '加载历史题目失败')
@@ -338,18 +393,18 @@ async function openBatch(b) {
   }
 }
 
-/** 后端 created_at 是 UTC（SQLite datetime('now')）→ 转本地展示 */
-function formatTime(s) {
-  if (!s) return ''
-  const d = new Date(String(s).replace(' ', 'T') + 'Z')
-  if (Number.isNaN(d.getTime())) return s
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
+/** 导出提示：当前是新草稿 / 某个历史题集 / 主题题库 */
+const sourceLabel = computed(() => {
+  if (questions.value.length) {
+    const hit = batches.value.find((b) => b.batch_id === activeBatchId.value)
+    return hit ? `历史题集「${hit.subject || '未命名主题'}」` : '本次题目'
+  }
+  return `主题「${subject.value.trim()}」的题库`
+})
 
 onMounted(() => {
   loadStats()
-  loadBatches()   // 按钮角标显示历史题集数；打开抽屉时再刷新一次
+  loadBatches()   // 侧栏角标显示历史题集数
   // 从节点详情跳入时：预填主题（仅在原为空时覆盖）+ 聚焦指定题目
   if (props.initialSubject && !subject.value.trim()) {
     subject.value = props.initialSubject
@@ -361,22 +416,34 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="page-scroll">
-    <main class="quiz-content">
+  <div class="quiz-layout">
+    <!-- 出题历史：常驻左侧栏，与对话历史 / 图谱导航共用 SidePanel（拖宽 / 折叠 / 持久化） -->
+    <SidePanel
+      class="quiz-history-panel"
+      side="left"
+      label="出题历史"
+      :min="200"
+      :max="420"
+      storage-key="quizHistory"
+      v-model:width="historyWidth"
+      v-model:collapsed="historyCollapsed"
+    >
+      <QuizHistorySidebar
+        :batches="batches"
+        :total="batchesTotal"
+        :loading="historyLoading"
+        :active-id="activeBatchId"
+        :opening-id="openingBatch"
+        @select="openBatch"
+      />
+    </SidePanel>
+
+    <main class="quiz-content page-scroll">
       <div class="page-inner">
         <header class="page-head">
           <div class="qc-header-main">
             <h2 class="page-title">出题</h2>
           </div>
-          <el-button class="history-entry" @click="openHistory">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-              <path d="M3 3v5h5" />
-              <path d="M12 7v5l4 2" />
-            </svg>
-            历史出题
-            <span v-if="batchesTotal" class="history-count">{{ batchesTotal }}</span>
-          </el-button>
         </header>
 
         <!-- 出题配置 -->
@@ -434,36 +501,46 @@ onMounted(() => {
           >· 详情</span>
         </div>
 
-        <!-- 试卷导出：出过题导出这套题，否则按主题导出题库 -->
+        <!-- 试卷导出：选格式 → 项目内预览 / 下载同一份 -->
         <div v-if="questions.length || subject.trim()" class="quiz-export">
           <span class="export-title">导出试卷</span>
 
-          <el-radio-group v-model="withAnswer" size="small">
+          <el-select v-model="exportFmt" class="export-fmt" size="small">
+            <el-option
+              v-for="opt in exportOptions"
+              :key="opt.fmt"
+              :label="opt.label"
+              :value="opt.fmt"
+            />
+          </el-select>
+
+          <el-radio-group v-model="withAnswer" size="small" @change="closePreview">
             <el-radio-button :value="true">含答案</el-radio-button>
             <el-radio-button :value="false">仅题目</el-radio-button>
           </el-radio-group>
 
-          <el-tooltip
-            v-for="opt in exportOptions"
-            :key="opt.fmt"
-            :content="opt.tip"
-            placement="top"
-          >
+          <el-tooltip :content="exportOptions.find(o => o.fmt === exportFmt)?.tip" placement="top">
             <el-button
               size="small"
-              type="primary"
-              plain
-              :loading="exportingFmt === opt.fmt"
-              :disabled="!!exportingFmt && exportingFmt !== opt.fmt"
-              @click="handleExport(opt.fmt)"
+              :loading="exportingFmt === exportFmt"
+              :disabled="!!exportingFmt"
+              @click="handlePreview(exportFmt)"
             >
-              导出 {{ opt.label }}
+              <AppIcon name="eye" :size="14" /> 预览
             </el-button>
           </el-tooltip>
 
-          <span class="export-hint">
-            {{ questions.length ? '本次题目' : `主题「${subject.trim()}」的题库` }}
-          </span>
+          <el-button
+            size="small"
+            type="primary"
+            :loading="exportingFmt === exportFmt"
+            :disabled="!!exportingFmt"
+            @click="handleExport(exportFmt)"
+          >
+            <AppIcon name="download" :size="14" /> 下载
+          </el-button>
+
+          <span class="export-hint">{{ sourceLabel }}</span>
         </div>
 
         <!-- 题目列表 -->
@@ -556,25 +633,11 @@ onMounted(() => {
               <div v-if="results[q.localIdx]" class="q-result" :class="results[q.localIdx].correct ? 'ok' : 'wrong'">
                 <div class="q-result-score">
                   <!-- 对错图标：描边 SVG，颜色由 .q-result.ok/.wrong 的 color 决定 -->
-                  <svg
-                    v-if="results[q.localIdx].correct"
+                  <AppIcon
                     class="q-result-icon"
-                    width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M20 6 9 17l-5-5" />
-                  </svg>
-                  <svg
-                    v-else
-                    class="q-result-icon"
-                    width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M18 6 6 18" />
-                    <path d="m6 6 12 12" />
-                  </svg>{{ results[q.localIdx].score }} / {{ results[q.localIdx].max_score }} 分
+                    :name="results[q.localIdx].correct ? 'check' : 'x'"
+                    :size="14"
+                  />{{ results[q.localIdx].score }} / {{ results[q.localIdx].max_score }} 分
                   <span class="q-result-comment">{{ results[q.localIdx].comment }}</span>
                 </div>
                 <div v-if="results[q.localIdx].analysis" class="q-result-analysis">
@@ -594,40 +657,47 @@ onMounted(() => {
       </div>
     </main>
 
-    <!-- 出题历史：列出之前生成的每个题集，点开即可回看 / 判分 / 导出 -->
-    <el-drawer v-model="historyVisible" title="出题历史" size="420px">
-      <div v-loading="historyLoading" class="history-list">
-        <div v-if="!historyLoading && !batches.length" class="history-empty">
-          <p>还没有出题记录</p>
-        </div>
-        <div
-          v-for="b in batches"
-          :key="b.batch_id"
-          class="history-item"
-          :class="{ opening: openingBatch === b.batch_id }"
-          @click="openBatch(b)"
-        >
-          <div class="hi-top">
-            <span class="hi-subject">{{ b.subject || '未命名主题' }}</span>
-            <span class="hi-count">{{ b.question_count }} 题</span>
-          </div>
-          <div class="hi-meta">
-            <span v-if="b.source === 'chat'" class="hi-tag">对话内</span>
-            <span v-if="b.section_id" class="hi-tag">小节</span>
-            <span class="hi-diff">{{ difficultyLabels[b.difficulty] || b.difficulty }}</span>
-            <span class="hi-time">{{ formatTime(b.created_at) }}</span>
-          </div>
-        </div>
-      </div>
-    </el-drawer>
+    <!-- 项目内只读预览：复用知识库原件预览组件，下载的就是预览的这一份 -->
+    <KbTextPreviewDialog
+      :visible="previewVisible"
+      :name="previewName"
+      :file-type="previewFileType"
+      :raw-blob="previewRawBlob"
+      :markdown="previewMarkdown"
+      :chars="previewMarkdown.length"
+      :total-chars="previewMarkdown.length"
+      @update:visible="closePreview"
+    >
+      <template #actions>
+        <button class="quiz-preview-download" title="下载当前文件" @click="handleExport(exportFmt)">
+          <AppIcon name="download" :size="15" />
+          下载
+        </button>
+      </template>
+    </KbTextPreviewDialog>
   </div>
 </template>
 
 <style scoped>
-/* 页面骨架（滚动 / 限宽 / 页头 / 标题字号）全在 styles/page.css，本页只剩内容类 */
+/* 出题页是两栏：常驻历史侧栏（SidePanel）+ 右侧自己滚动的题目主区。
+   外层 absolute 铺满视图（同 chat/graph 画布），主区沿用 page-scroll/page-inner，两栏用 flex 并排。 */
+.quiz-layout {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
 
-/* 撑满，好让 .page-inner 的 min-height:100% 有百分比基准 */
+.quiz-history-panel {
+  flex-shrink: 0;
+}
+
+/* 右侧主区：吃掉剩余宽度、自己滚；.page-inner 的限宽/留白照旧 */
 .quiz-content {
+  flex: 1;
+  min-width: 0;
   height: 100%;
 }
 
@@ -636,26 +706,11 @@ onMounted(() => {
   min-width: 0;
 }
 
-.history-entry {
-  flex-shrink: 0;
-}
-
-.history-entry svg {
-  margin-right: 5px;
-  vertical-align: -2px;
-}
-
-.history-entry .history-count {
-  margin-left: 5px;
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-}
-
 /* 配置区 */
 .quiz-config {
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   padding: 16px;
   margin-bottom: 20px;
 }
@@ -729,16 +784,41 @@ onMounted(() => {
   padding: 10px 14px;
   margin-bottom: 16px;
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-subtle);
 }
 .quiz-export .export-title {
   font-size: 13px;
   font-weight: 600;
 }
+.quiz-export .export-fmt {
+  width: 128px;
+}
+.quiz-export .el-button svg {
+  margin-right: 4px;
+  vertical-align: -2px;
+}
 .quiz-export .export-hint {
   font-size: 12px;
   color: var(--color-text-secondary);
+  margin-left: auto;
+}
+.quiz-preview-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.quiz-preview-download:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
 }
 
 /* 题目卡片 */
@@ -751,7 +831,7 @@ onMounted(() => {
 .question-card {
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   padding: 16px;
   transition: border-color 0.15s;
 }
@@ -771,7 +851,7 @@ onMounted(() => {
   font-size: 11px;
   font-weight: 600;
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-hover);
   color: var(--color-text-secondary);
 }
@@ -845,7 +925,7 @@ onMounted(() => {
   margin-top: 4px;
   color: var(--color-text-secondary);
   background: var(--color-bg-hover);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 8px 12px;
 }
 
@@ -856,81 +936,4 @@ onMounted(() => {
   color: var(--color-text-secondary);
 }
 
-/* 出题历史抽屉 */
-.history-list {
-  min-height: 120px;
-}
-
-.history-empty {
-  text-align: center;
-  color: var(--color-text-tertiary);
-  padding: 48px 16px;
-  font-size: 14px;
-}
-
-.history-empty p {
-  margin: 4px 0;
-}
-
-.history-item {
-  padding: 12px 14px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-  margin-bottom: 10px;
-}
-
-.history-item:hover {
-  border-color: var(--color-accent);
-  background: var(--color-bg-hover);
-}
-
-.history-item.opening {
-  opacity: 0.6;
-  pointer-events: none;
-}
-
-.hi-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.hi-subject {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.hi-count {
-  flex-shrink: 0;
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-}
-
-.hi-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-}
-
-.hi-tag {
-  padding: 1px 6px;
-  border-radius: 6px;
-  background: var(--color-bg-hover);
-  font-size: 11px;
-  color: var(--color-text-secondary);
-}
-
-.hi-time {
-  margin-left: auto;
-}
 </style>

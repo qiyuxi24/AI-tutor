@@ -91,15 +91,30 @@ function saveBlob(blob, filename) {
 }
 
 /**
- * 导出并直接下载试卷。
- * @returns {Promise<string>} 实际下载的文件名
+ * 请求导出接口，返回一次请求的全部产物（字节 + 文件名 + MIME）。
+ * 预览与下载共用这同一份字节 —— 后端每次导出都把「导出时间」写进卷面，
+ * 分两次请求会得到两份不同的文件，所以只请求一次、交给调用方持有。
+ * @returns {Promise<{blob: Blob, filename: string, type: string}>}
  */
-export async function downloadQuiz(params, fallbackName = 'AI试题') {
+export async function fetchQuizBlob(params, fallbackName = 'AI试题') {
   const res = await exportQuiz(params)
   const disposition = res.headers?.['content-disposition'] || res.headers?.['Content-Disposition']
   const ext = params.format || 'docx'
   const filename = parseDispositionFilename(disposition) || `${fallbackName}.${ext}`
   const type = res.headers?.['content-type'] || 'application/octet-stream'
-  saveBlob(new Blob([res.data], { type }), filename)
+  return { blob: res.data, filename, type }
+}
+
+/** 把已持有的那一份字节触发下载（预览完直接下载，保证所见即所得） */
+export function saveQuizBlob({ blob, filename, type }) {
+  saveBlob(new Blob([blob], { type }), filename)
   return filename
+}
+
+/**
+ * 导出并直接下载试卷（兼容旧调用方：一次请求 → 直接下载）。
+ * @returns {Promise<string>} 实际下载的文件名
+ */
+export async function downloadQuiz(params, fallbackName = 'AI试题') {
+  return saveQuizBlob(await fetchQuizBlob(params, fallbackName))
 }
