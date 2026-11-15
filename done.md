@@ -318,3 +318,22 @@
 - `get_current_user` 不校验 `users.status`（禁用账号旧 token 仍可用至过期）—— 每请求加一次 DB 读、且会波及大量用 `get_current_user_from_token` 的测试；更优解是 token 版本号（新列 + 迁移），另立需求。
 - `index_user_graph` 全量重建「先清空后重建、中途失败无回滚」（可重跑修复，非静默损坏）。
 - 删 KB 文件不回收图谱侧 `doc_node_marks` / `nodes.sources` 引用（ghost 引用，影响较轻）。
+
+## 12. 2026-11-12 全量复核后确认已完成（从 TODO 搬入）
+
+本节由「对 TODO §1~§10 每一条未勾选项做代码级取证」得出，**只搬经实测确认已完成的**，
+不是文档转述。当日基线：后端 **1968 passed / 1 skipped / 7 deselected**、前端 **42 passed (3 files)**、
+`backend-admin` **43 passed**。
+
+- **GQ-11 aggregate 暴露合并数 / 跳过数 / 失败块数**：`aggregate` 含 `merged_nodes` / `skipped_docs` / `failed_docs` / `failed_chunks`（`core/kb/graph_generator.py:1553-1564`），并进 `graph_updated` 通知体（`api/v1/kb.py:482-484`），前端 `chatStore.js:940-943` 消费。
+- **GQ-18 溯源贯通（L0）**：体检口径第三处同步已落实 —— `scripts/inspect_graph_quality.py:113` `support_counts`、`:450-454` 支撑度、`:151` `_align_metrics` 对齐率、`:535-550` 打印（未就绪显式跳过）。`edges.sources` 仍按计划暂缓（无消费者）。
+- **GQ-19 新资料演进流程（L3，按资料增量）**：五步全落地 —— `_process_book`（`graph_generator.py:1608-1675`）→ 幂等检查 `:1619`、续填 `:1635-1640`、标记落表 `:1668-1672`（`evidence.kind=new/hit`）、只填被标记 `:1674`。回归 `test_graph_topdown.py:415`（只动 hit 节点）/`:448`（同资料二次调用跳过）/`:471`（`skipped_docs`）。
+- **「没有学习会话这一等对象」（架构债务 §3 的第二条根因）**：`core/learning/session.py:53-90` `LearnTurn` 一等对象 + `kg/schema.py:133` `learning_sessions` 表 + `upsert/get`（`sections.py:230-261`）。旧临时属性（`kg.student_input` / `kg.quiz_consent` / `kg.learn_target`）已删，并有静态守卫 `tests/test_learning_session.py:185 test_retired_temp_attrs_are_gone_from_app`。
+  - ⚠️ 残留转 TODO §10 P1：表里缺「待办队列 / 最近一题状态」两列，无 API 暴露，前端零消费，`reconcile()` 零调用方。
+- **教学策略「抽出判定出口」（架构债务 §3 第一条的前半）**：`core/teaching/policy.py:123 decide()` 是唯一策略出口，`chat_service.py:471/590` 调用；`tests/test_learn_block_golden.py` 用 golden 逐字符比对锁等价重构。
+  - ⚠️ 后半（消除 `_build_learn_block` 的 9 处 ⛔ 规则）未做，仍在 TODO。
+- **掌握度「进入路径排序」（架构债务 §3 第三条的前半）**：`core/kg/paths.py:97` 改走 `core/graph_order.order_key`，键 = `(前置未达标, mastery 升序, id)`（`core/graph_order.py:48-57`）。原记录"排序只看 prerequisite、不读 mastery"已过时。
+- **事件数观测（观测性缺口的三分之一）**：`core/agent/store.py:54` `events_written` 列 + `loop.py:826` 写入 + `core/agent/events.py:118` 单一计数口径。首字节延迟仍缺。
+- **对话删除的跨端传播（双写持久化的前半）**：`core/conversation_store.py:419` `soft_delete` / `:429` tombstones / `:437-465` `sync` 返回 tombstones；前端 `chatStore.js:223-237` `adoptRemote` 按墓碑删本地。原记录"删除不传播 + 每次 persist 全量重传"已过时（`persist` 现只写 localStorage `:1084-1097`，`sync` 只在 `init` 调一次 `:696`）。仅剩"真合并"未做。
+- **SSE 通道分层（原 [P0]）**：`event_bus.subscribe(user_id=…)` 是 per-connection fan-out（`event_bus.py:156-163`），`broadcast(:175)` / `notify(:196)` 各投每队列一份 → "多标签页互相抢事件"这个前提彻底作废。剩余物已收窄为"对话列表跨端无通知"与"事件类型过窄"两条子项。
+- **建图完成走通知（长同步端点收口的第一处）**：`api/v1/kb.py:549-567` `finally` 内 `notify(GRAPH_UPDATED, ...)`，成功/失败/取消都发。回归 `tests/test_kb_graph_generate_notify.py`（7 例）。`sections/generate` 仍是同步等待，未做。

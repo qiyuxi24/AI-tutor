@@ -8,27 +8,98 @@
 
 ---
 
+## 0. 开发进度快照（2026-11-12 全量复核）
+
+> 本节是**唯一**的"现在到哪了"入口。下列数字全部为当日实测（不是文档转述），复跑命令见每项括号。
+> 复核方式：对 §1~§10 的**每一条**未勾选项做了代码级取证（grep/read），判定为
+> `已完成 / 部分完成 / 仍未做 / 前提过时` 四档 —— 只记"部分完成"里的**差什么**。
+
+### 0.1 数字基线（可复跑）
+
+| 项 | 实测 | 复跑方式 |
+|---|---|---|
+| 后端测试 | **1968 passed / 1 skipped / 7 deselected**（133.8s） | `backend/venv/Scripts/python.exe -m pytest backend/tests -q -m "not llm_api"` |
+| 前端测试 | **42 passed / 3 files**（5.5s） | `cd frontend && npm test` |
+| 运维后台测试 | **43 passed**（29.7s） | 单独一次 pytest 调用（两边包名都叫 `app`，合跑必 `ModuleNotFoundError`） |
+| 后端代码量 | `backend/app` **31,686 行 / 174 个测试文件** | — |
+| 前端代码量 | `frontend/src` **19,567 行**（不含 `.test.`） | — |
+| 后端分层 | `core/` 13 个模块 + `api/v1` 11 个路由文件 | — |
+| 线上部署 | `47.98.160.194` 跑 `6316d36`（2026-10-22），**落后 origin/main 66 个提交** | 见 §12 |
+
+### 0.2 十条主线的一句话状态
+
+| 主线 | 状态 | 关键证据 |
+|---|---|---|
+| 数据层 / 存储 | ✅ 收口 | 单一 `DATA_ROOT`；`records.py` 统一记录型库；三处 SQLite 口径统一 |
+| Agent 内核 | ✅ 稳定 | loop + TurnPlan + 工具注册表 + 双记录；本轮 1968 例全绿 |
+| 知识图谱 | ✅ 骨架完成，**质量项待真跑** | GQ-11/18/19 已落地；GQ-4 工具就绪但**从未执行**；GQ-12/13/14 待跑 |
+| 对话 / SSE | ✅ 事件链路已收口 | 请求内事件走私有队列；建图完成走 `graph_updated` 通知；回前台补偿已做 |
+| 知识库 / RAG | ✅ 可用 | 小节化 + 索引收口 + 空范围修复 + 视频导入队列 |
+| 主体性（架构债务 §3） | 🚧 **一半** | `learning_sessions` 表 + `teaching/policy.decide()` 已落地；**提示词里 9 处 ⛔ 规则未消**，验收判据 0/4 |
+| 一站式学习（§10） | 🚧 缺一条线 | 部件齐、`/learn/start` 与 `learn_progress` 全空 |
+| 评价体系（§7） | ⬜ 未启动 | `core/assessment/` 目录都不存在（自述"非本人职责"） |
+| 教育采集 | 🚧 适配器齐、**入口缺** | `dataset_quiz`/`web_page` adapter 已实现且测试全绿，但**零生产调用方** |
+| Android 客户端 | 🚧 **在跑，但 TODO 里没有它** | 分支 `feat/android-chat`：49 文件 / **+6343 行**，已到"对话页流式渲染 + Markdown + 引用" |
+
+### 0.3 ⚠️ 三件必须先知道的事
+
+1. **§11.2 的"已写好但未提交的前端一档（分支 `feat/kb-task-progress`）"已经丢失。**
+   2026-11-12 实测：`git stash list` 只有一条 2026-09-28 的 `wip-before-pull-...`，其
+   untracked 部分与 `kbTaskProgress.js` 无关；`main` / `origin/main` / 所有 remote 分支 /
+   全部 dangling commit 里都**没有** `kbTaskProgress.js` / `KbPanel.tasks.test.js`。
+   → 那 8 个文件（+22 例测试）需按 §11.2 的表格**重写**，不要再去 `git stash pop`。
+2. **服务器停在 2026-10-22 的代码上，落后 66 个提交。** 它不会自动 `git pull` ——
+   reflog 显示只手工 merge 过 4 次。本地已做的建图通知收口、boot_id、视频导入队列、
+   前端交互全部**没上线**。更新步骤见 §12。
+3. **Android 客户端不在本表里。** 它在分支 `feat/android-chat`（`5a17167`），
+   已完成：SSE 流解析 / Markdown（表格·公式·HTML 转义）/ 对话页流式渲染 + 引用 + 消息工具栏 /
+   LaTeX 渲染。本表 §5（AGENTS.md）仍写"除 Hello World 外零业务代码"，**已过时**。
+
+---
+
 ## 1. 工程化收尾（P0/P1/P2）
 
 ### P0 — 收尾就绪（演示不翻车 + 材料可信）
 
-- [ ] **quiz 简答 LLM 判分端到端联调**（走 `call_llm` 纯文本，MiniMax key 可用即可验，不依赖 embedding）
+- [x] **quiz 简答 LLM 判分端到端联调**（走 `call_llm` 纯文本，MiniMax key 可用即可验，不依赖 embedding）—— ✅ 2026-11-15 真 key 跑通
+  - 2026-11-12 取证：**代码已完整、只差一次真 key 跑**。`core/quiz/grader.py:116-157` 简答判分齐（`call_llm` + JSON 正则提取 + 失败降级半分），`tests/test_quiz_grader.py:189-251` 六例**全 mock**；全库 `llm_api` 标记只有 `test_agent_loop_real_api.py:30` 一处。
+  - ⚠️ 附带事实：`core/quiz/chat_quiz.py:51` 对话内出题**不含 short_answer**，简答只在独立 QuizView 路径 —— 联调要按那条路径验。
+  - ✅ 2026-11-15 联调结果（`POST /quiz/generate` 要 `question_types=["short_answer"]` → `POST /quiz/{id}/grade?user_answer=…`，脚本 `.dsh_local/aic_defense/probe_short_answer_e2e.py`）：出题 **5.56s / 3 道**，`question_ids=[43,44,45]`；同一道题（id=43）两例作答判分 —— 「答得较全」**1.1s / score=4/10**、「空泛回答」**1.01s / score=0/10**，评语各自具体（点名"未写出前序与中序遍历结点序列"），**不是降级固定文案**「已作答，请参考参考答案要点。」→ LLM 判分真的跑通、按内容给分。
+  - 📌 口径记录（不是 bug，但容易踩）：`POST /quiz/generate` 返回的 `questions[].id` 是**生成器本地标签** `q1/q2/q3`（`core/quiz/generator.py:411-413` 重排），库内整数 id 在 **`question_ids[]`** 里，一一对应。前端 `QuizView.vue:123-127` 用 `ids[i]` 填 `dbId` 再判分；探针一开始拿 `questions[].id` 判分，报"不是整数"。`Question.id` 的 docstring（`core/quiz/schema.py:28`）已写明是"题目内部 id，如 q1/q2"。
+  - ⚠️ 判分端点是 **POST 但参数在 query**（body 为空），裸 `urllib` 不显式传 `method="POST"` 会发成 GET → `405 Method Not Allowed`。
+- [x] **独立出题页判分不回写掌握度**（反馈闭环断裂，**直接砸答辩演示**）—— ✅ 2026-11-15 修
+  - 现象：对话内出题答对会 `add_mastery(+20)`，但**独立出题页**（`QuizView` → `POST /quiz/{id}/grade`）只写 `attempts`、完全不碰图谱 → 判完分回图谱节点颜色一点不变。录制脚本「判分结论单独成行，掌握度当场回写 → Ctrl+1 回图谱看颜色变化」原本演不出来；PPT P13「判分后掌握度与路径同步变化」也只在对话内路径成立。仓库早有记录：`docs/教学模块/学习进度仪表盘设计.md:53`。
+  - 修法（节点 id 走 `knowledge_point` 字符串字段 —— `questions.node_id` 是 INTEGER 知识库文件 id，装不下图谱节点 id；照抄 `core/quiz/chat_quiz.py:242-243` 既有做法）：
+    - `core/quiz/schema.py::QuizGenerateRequest` 加 `graph_node_id: str = ""`；`api/v1/quiz.py::create_quiz` 入库前 `if req.graph_node_id: q["knowledge_point"] = req.graph_node_id`
+    - `api/v1/quiz.py` 新增 `_write_back_to_graph()`：题带 `section_id` → `apply_section_after_answer`（小节口径），否则 → `apply_mastery_after_answer`（答对 +20、答错不变）；图谱写失败只 warning，**绝不影响分数**；响应补 `node_id`/`mastery`/`mastery_note`（或 `section_id`/`next_action`/`section_note`）
+    - 前端：`HomeView.vue::handleOpenQuiz` 补解构 `nodeId`（`NodeDetail.vue` 的 emit 本来就带，是这里丢的）→ 透传 `:graph-node-id`；`QuizView.vue` 出题 body 带 `graph_node_id`、判分结果展示掌握度变化、`emit('mastery-changed')` → 父级 `refreshGraph()`
+  - 回归：`backend/tests/test_quiz_grade_mastery.py`（7 例：答对 +20 / 答错不动 / 无 knowledge_point 不碰图谱 / 小节口径只置本节 passed / 出题改写 knowledge_point / 未传保留 LLM 值 / 出题→判分闭环）。全量后端 **1991 passed, 1 skipped, 7 deselected**（1984 + 7）。
+  - ⚠️ 写测试时的坑：fixture 只建**一节**时，答对即 `all_passed` → 掌握度直接置 100，`assert mastery == 0` 会红 —— **是被测代码对、断言错**（补第二节才测得出"小节口径不 +20"）。
 - [ ] **OI-wiki 真网联调**：`search("数据结构与算法")` 应返回 ds/算法基础板块候选、fetch 首页正文入库无 MkDocs 残留语法（普通联网即可验，无需 DASHSCOPE）——`[待议]`（2026-09-05 暂缓，待用户定时间）
+  - 2026-11-12 取证：适配器已实现（`core/collector/adapters/oiwiki.py:91`：mkdocs.yml nav 发现 + raw md 抓取 + 清理），`tests/test_oiwiki_adapter.py` 17 例**全 mock 离线**（文件头自述）→ 真网仍未跑。
 - [ ] **演示数据 + 脚本**：填充 1 个完整学科图谱（15-20 节点 + prerequisite 边）；写 2-3 条预演对话路径
+  - 2026-11-12 取证：`backend/scripts` 30 个脚本**无一个**建演示图谱/预演对话；`data/knowledge/knowledge.db` 里 user 1 已有 **25 节点 / 11 条 prerequisite 边**（数量够，但**不可重现**、不是脚本产物）。这是 P0 里唯一"没有代码可复用"的活。
 
 ### P1 — 工程化补强（评委可问项）
 
 - [ ] **Prompt 笔记优化**：教学后主动 `update_node_content` / `add_knowledge_node` 记笔记（提示词层，未动）
+  - 2026-11-12 取证：0 进度。`data/prompts/` 只有 `system_prompt_common.j2`（64 行），"笔记 / update_node_content / 记下" 零命中；反而 `agent_tools/tools/update_node_content.py:25-26` 的 GUIDANCE 写着"属于须先问操作，不要直接改" → **先定调性再动提示词**，否则两处互相打脸。
 - [x] **空图谱时的行动顺序 · 工具层引导**：节点不存在时把 `E-LLM-007` 变成"请先用 `add_knowledge_node` 创建它"的可自纠正提示（P1 对照实验发现模型会拿节点名当 `node_id`）
   - 修法（2026-11-10）：`core/kg/edges.py::add_edge` 的两条 `ValueError` 改成"下一步动作"（点名 `add_knowledge_node` + "要传**节点 ID** 不是知识点名字"）。只改文案，不动判据 —— 原来只说"节点不存在"，模型解读成"参数没传对"→ 用同样参数重试 → 撞 `loop._LoopGuard` 同参数 ≤2 熔断 → 用户看到"AI 说在整理图谱然后什么都没发生"。
   - 回归：`tests/test_kg_edge_error_hint.py`（3 例，断言的是"文案里有可执行动作"而非具体措辞）。
 - [x] **对话内出题（P0）遗留**（主链路已落地，见 `done.md` §6.2）：
   - [x] 题目渲染成可点选项卡片（前端 `quiz_ready` 已带 `questions` 字段，`MessageBubble` 加 `QuizCard.vue`）—— **核实已完成**：`frontend/src/components/QuizCard.vue` 存在，挂在 `MessageBubble.vue:401-404`（`v-if="message.quiz?.length"`，`@submit` 走 `submit-quiz`）。
   - [x] 已知瑕疵：KB 检索片段混入依据会导致题目轻微漂移（节点是"二叉树性质1"，却出了"每层都达最大结点数 → 满二叉树"的题）—— 可考虑降 `CHAT_QUIZ_TOP_K` 或只用节点正文 —— **已解决**：`core/quiz/chat_quiz.py:48` 定 `CHAT_QUIZ_TOP_K = 0`，注释写明"必须是 0：出题依据只允许用当前节点的正文"（原文记录的正是这次实测结论）。
-- [ ] **出题稳定性遗留**（分批 + 补题 + 批次隔离已落地，见 `done.md` §6.1）：
-  - [ ] 可选优化：出题改用非思考模型（结构化任务未必需要深度推理），需 A/B 质量验证
+- [x] **出题稳定性遗留**（分批 + 补题 + 批次隔离已落地，见 `done.md` §6.1）：
+  - [x] 可选优化：出题改用非思考模型（结构化任务未必需要深度推理），需 A/B 质量验证
+    - 2026-11-12 取证：`core/quiz/` 全目录 `thinking` **零命中**；`core/quiz/generator.py:262` 调 `call_llm` 未传 `thinking=False`，靠 `QUIZ_BATCH_MAX_TOKENS=8000` 硬扛。对比 `kb/graph_generator.py:623/895` 已显式 `thinking=False` → 这里**是一个真实的遗漏**，不只是"可选优化"。
+    - ✅ 2026-11-15 已修：`_generate_batch` 的 `call_llm(...)` 加 `thinking=False`（理由同 `graph_generator`：思考与正文共享 `max_tokens`，思考吃满会返空 → `E-LLM-006` → 整批作废）。回归 `tests/test_quiz_generator.py::test_generate_batch_turns_thinking_off`。
+    - ✅ 2026-11-15 实测提速：同一请求（`subject=二叉树遍历`、5 题）**35.13s / 38.97s → 7.91s / 8.08s / 6.69s**（约 4~5 倍）。取证脚本 `.dsh_local/aic_defense/probe_thinking_ab.py`（单次调用 A/B：`thinking=True` 7.49s/completion=437 vs `False` 2.66s/completion=203 → 网关确实透传 `thinking.type=disabled`）+ `probe_quiz_profile.py`（批内 6~9s、两批真并发）。
+    - ⚠️ **踩坑记录**：首轮量到"38.97s 比改前更慢"是**测错了对象** —— 8000 端口的 uvicorn 是 16:36 启动的，而改动文件 mtime 是 17:05~17:31，进程从未重载，量到的是旧代码。**改完后端代码必须重启再测**（`GET /api/health` 的 `boot_id` 变了才算）。
+    - ⚠️ **仍只关了思考，没做 A/B 质量验证** —— 质量是否受影响仍需真实 key 抽样对比（本条的后半句仍未验）。
 - [ ] **建节点收口 · 收尾项**（写路径部分 2026-09-15 已闭环）：
   - [ ] **嵌入语义去重**（栈/堆栈 这类同名不同字）：Agent 热路径上要多付一次嵌入 + LLM 二次确认（嵌入已恢复，可量化收益后再定）；实现路径 = 复用 `graph_generator._find_dedup_candidates` + `_confirm_synonyms`
+    - 2026-11-12 取证：`knowledge_writer.py:59-61` 的 ponytail 注释明写"只做字符串层同名，不做嵌入语义去重"。⚠️ 该注释仍称"当前嵌入 API 欠费"，与本条"嵌入已恢复"**已经矛盾** —— 动这条时顺手校准注释。
   - [ ] 权限守卫：**新建路径本就不触发** `_guard_human_content`，仅当将来新增"AI 覆盖已有节点"入口时才需要 —— 那时走 `update_node_content(caller="ai")` 即可
 
 ### P2 — 功能路线图（比赛可选项 / 有真实 key 后）
@@ -60,38 +131,49 @@
 > 已修：对话事件改走本请求私有队列（`core/agent/events.py` + `chat_service._consume_agent_events`），
 > 回归 `tests/test_event_bus.py::test_chat_stream_not_starved_by_long_lived_subscriber`。下列是**同源或同症状**的剩余项。
 
-- [ ] **[P0] SSE 通道分层**（本次只修掉"对话流"这一处冲突）
+- [ ] **[P0] SSE 通道分层** —— **2026-11-12 复核：本条主体已完成，下列两条子项才是剩余物**
   - 不变量已钉进 `event_bus.publish` docstring：通知类（`graph_updated`/`quiz_ready`/`error`）走 per-user 队列；请求内 6 事件必须走 `AgentEventEmitter(queue=...)` 私有队列
   - ~~剩余缺口：同一 user 开两个标签页 = 两条 `subscribe(user_id)`，`quiz_ready` 仍随机进其一~~
     **（2026-11-10 核实：前提已过时，多标签页问题已不存在）** `event_bus.subscribe(user_id=...)` 现在是 **per-connection fan-out** —— 每次调用都新建队列并登记进 `_user_queues[user_id]` 这个 **set**（`event_bus.py:156-163` 注释明确"旧语义'同用户返回同一实例'已随多端 fan-out 废弃"）；`broadcast()` 给每条订阅队列各一份、`notify()` 同理。两个标签页各收一份，不抢。回归 `tests/test_event_bus.py:214`（多连接订阅）与 `:228`。
+  - 2026-11-12 复核：`event_bus.py:156-163` 与上述一致，`broadcast(:175)` / `notify(:196)` 各投每队列一份 → **本条作为"分层"任务可关**，真正剩余的是下面两个"前端不主动问"的子项。
   - **本条的真正剩余物 = 三个「前端不主动问」的缺口**（2026-11-10 核实，此前 TODO 未记录）：
     - [x] ~~**[P1] 前端没有回前台 / 多标签补偿**~~（2026-11-10 已修）：全前端原本无 `BroadcastChannel`、无 `storage` 事件监听、无 `visibilitychange`/`focus` 处理。长连接在半睡/切回后可能"看起来连着但收不到"，界面只能等下一次事件或手动刷新。**修法**：`chatStore` 新增回前台补偿 —— `visibilitychange`/`focus` → `fetchPendingNotices()` + `refreshGraph()`；2s 去重窗口 + 页面 `hidden` 时不拉。全局**只挂一份**监听器、转发给"当前活跃 store 实例"（每实例各挂一份会让 N 个实例同时拉，去重窗口挡不住）；`dispose()` 只摘自己那份。**不重连**（重连由 boot_id 那套负责，重复触发只会打架）。回归 `chatStore.lifecycle.test.js`「回前台补偿」6 例（含"重建实例不叠加监听器"）。
     - [ ] **[P1] 对话列表的跨端变更完全无通知**：`api/v1/conversations.py` 全文 `notify`/`broadcast` **零命中** —— 另一台设备改名 / 删除 / 新建对话不产生任何事件。症状与建图那条同族（"后台改了、这边不刷新"），但**根因相反**：不是"推丢了"，而是**压根没推**。
       - 修法方向：会话增删改补 `notify(user_id, ...)` 并发新事件类型；⚠️ 注意 `chatStore` 的 SSE 分发是**白名单**，加新类型必须同步改前端，否则静默丢弃。
+      - 2026-11-12 复核：仍 0 进度 —— `conversations.py` 6 个端点（`:29/:63/:88/:134/:159/:180`）全无事件；前端白名单 `chatStore.js:804-820` 也未含会话类事件。
     - [ ] **[P2] 事件类型过窄**：同上 —— 前端只认 5 类（`graph_updated`/`quiz_ready`/`kb_updated`/`import_progress`/`error`），后端新增类型不改前端就静默丢弃。这是上面那条的实施约束，不是独立 bug。
+      - 2026-11-12 复核：`event_bus.py:45-55` 仍是这 5 类；`chatStore.js:804-820` 是 `if/elif` 白名单**无 else**。
   - **待决策**：~~a) 按通道分队列／b) per-connection 队列 + 路由表／c) 维持现状~~ → 多标签页那半已被现状实现（`c`），本条只剩"a) 按通道分队列"作为**演化方向**（若将来要做"某类通知只给某个页面"）。
   - 验收：加"同一 user 多连接订阅"测试，断言通知类事件按预期投递（**已存在**，见上方回归）；回前台补偿已能观测到"切回来就补拉了一次"。
 - [ ] **[P0] 长同步端点的结果必须走通知，不能只靠 HTTP 响应**（2026-11-10 发现并修掉建图这一处，另外几处待查）
   - 已修：`POST /kb/graph/generate`（实测 15 分钟量级，axios/Vite 代理都是 300s 超时，用户切页面/断线则永远收不到）→ 完成即 `notify(user_id, GRAPH_UPDATED, payload)`，成功/失败/取消都发。回归 `tests/test_kb_graph_generate_notify.py`。
   - 排查口径：任何**墙钟可能超过 1 分钟**的同步 HTTP 端点都属此列。已知嫌疑：`POST /kb/graph/generate`（已修）、`POST /knowledge/sections/generate`（已在完成时 `broadcast(GRAPH_UPDATED)`，但仍是同步等待）。
+  - 2026-11-12 复核：建图那条确已闭环（`kb.py:549-567` `finally` 内 `notify(GRAPH_UPDATED, ...)`，成败/取消都发）。`sections/generate`（`knowledge.py:455-482`）**仍是** `await SectionGenerator.generate` 后只 `broadcast(:479)` —— 无 `notify`、无 `task_id`、断连即取消。**这条是本项唯一剩余物。**
   - 更彻底的方向（未做，属结构性改造）：改成 `POST` 立即返 `task_id` + 前端轮询/订阅进度，见 `docs/上下文工程/上下文工程_调研与差距审计.md:466`。
 - [ ] **[P1] 对话调用链（M3）三处收尾**（「真流式」已完成，见 `done.md` §4.5）
   - **思考吃光 `max_tokens` → 长回答可能整段空正文**（优先）：`AGENT_MAX_TOKENS=2000` + 允许思考时二者共享预算 —— 真机探针一次 52.8s 全烧在思考上、`content=0`、`finish=length`
   - `strip_think_tags` 仍是**整段正则**（未做流式状态机）：靠 `reasoning_split=True` 让 content 保持纯净；若某网关忽略该参数，流式正文可能短暂含思考标签（存量兜底仍会清库里的文本）
   - **中间轮文本会实时显示**（有意）：工具轮的过渡语在内容 delta 里，位置先于 tool_calls delta；要隐藏需前端"撤帧"机制
+  - 2026-11-12 复核：三条**均未动**。`agent/loop.py:96` 仍是 `AGENT_MAX_TOKENS = 2000` 硬编码、无思考/正文预算拆分；`llm/thinking.py:38` `strip_think_tags` 仍是整段正则；`loop.py:561` 每轮建 `_DeltaPump` 实时推 `TEXT_DELTA`。**建议拆成三条独立小改**（各有独立修法、互不阻塞）。
 - [ ] **[P1] 观测性缺口：无法回答"回复到底送到前端没有"**
   - 后端证据齐（`agent_runs` / `debug_log`），**前端零**
   - 落点：一次 run 的**首字节延迟 / 写出事件数 / 写出字节数**（`chat_service` 消费侧计数 → `agent_runs` 或日志）
   - 附带：uvicorn access log 没进 `logs/tutor.log` → "请求到没到后端"只能翻库反推
   - 验收：给定 run_id 能直接看出"发了几条事件、前端有没有拿到"
+  - 2026-11-12 复核：**三分之一已做** —— 事件数已闭环（`agent/store.py:54` `events_written` 列 + `loop.py:826` 写入 + `events.py:118` 单一计数口径）；**首字节延迟仍缺**（全库 `first_token`/`ttft`/`first_delta` 零命中）；uvicorn access log 仍只走 root `basicConfig`（未接 `logging_setup.py`）。建议与上面「对话列表跨端通知」同批做（都改事件链路）。
 - [ ] **[P2] 双写持久化：两条真相来源没有裁决规则**
   - `syncToBackend` 每次 persist **全量重传所有对话**（O(全部历史) payload）；删除不传播；缺版本向量 → 多设备仍可能漂移（当前是"更新的赢"降级处理，不是真合并）
   - 已修①（2026-09-26）`updated_at` 语义；已修②（2026-10-07）**防覆盖**（`BEGIN IMMEDIATE` 内比较 + 旧快照拒绝写入），回归 `tests/test_conversation_store.py`
   - **仍未做**：删除的跨端传播；真合并（两端同时各加一条消息 → 仍是"新的赢"，另一条丢）
+  - 2026-11-12 复核：**前半句前提已过时、后半句仍成立** ——
+    删除传播**已做**（`conversation_store.py:419` `soft_delete` / `:429` tombstones / `:437-465` sync 返回 tombstones；前端 `chatStore.js:223-237` `adoptRemote` 按墓碑删本地）；
+    "每次 persist 全量重传"也已过时（`persist` 只写 localStorage `chatStore.js:1084-1097`，`sync` 仅 `init` 调一次 `:696`）。
+    **真正剩下的只有"真合并"**（两端并发各加一条 → 新的赢，另一条丢）。
 - [ ] **[P2] 前端 store 耦合：图谱长连接决定对话可用性**
   - `stores/chatStore.js` 同管对话 + 图谱 + SSE + 同步 + 出题回流；长连接生命周期由 `HomeView.onMounted → store.init()` 决定
   - 本次故障能潜伏很久正因为这个耦合（图谱通道能吞掉对话正文）
   - **待决策**：是否按关注点拆 store；不拆则至少把「**通道只管送到、渲染只有一份**」写成约定
+  - 2026-11-12 复核：仍 0 进度，且**文件已长到 1467 行**（`stores/` 下只有 `authStore.js` / `chatStore.js` 两个业务 store）。这条会随每条新增能力继续恶化，建议在 §10 一站式学习开工**之前**定调。
 - [x] **[P1] 开发态 SSE 断线重连误报「后端已重载」（2026-11-03 实测，2026-11-09 已修）** `[改]`
   - **现象**：LLM 对话流式生成及后台图谱分析（`_analyze_and_apply`）结束约 5s 后，常在后端进程**并未重启**的情况下弹出 `ⓘ 后端已重载，页面数据已同步`，并触发 `viewEpoch += 1` 重挂子视图
   - **根因**：前端 `chatStore.js::connectSSE` 把任意一次 `onerror → onopen` 重连成功直接等价判为「后端进程重载」并发射 `BACKEND_RELOADED_EVENT`（`HomeView.vue:80-86`）—— 而重连有三种成因（真重启 / 网络抖动 / 反代 300s 读超时），只有第一种该刷新
@@ -114,31 +196,39 @@
   - 症状（每加一个"AI 主动"能力，必配一个"AI 不做系统替它做"的兜底）：开场轮协议层硬禁工具（`agent/loop.py:431/468`）、越级记账硬拒（`tools/mark_section_understood.py:95`）、模型没出题后端补一道（`chat_service.py:539-579`）
   - 测试口径失真：`test_learn_mode.py` 47 例里 **10 条**是 `test_block_*`（锁的是"文档里有没有这句话"，不是行为对不对）
   - **待决策**：把教学策略提升为一等对象（会话状态 + 动作集合），还是继续堆规则文案？
-- [ ] **[根因·P0] 没有「学习会话」这一等对象 → 状态碎片化 + 每轮重算**
-  - 状态散在 4 处：`nodes.mastery`（SQLite）/ `manifest.sections[].learn`（文件）/ `questions.section_id`（题库）/ **每请求新建 kg 实例上的临时属性** `kg.student_input | quiz_consent | learn_target`（`chat_service.py:494-536`）
-  - 后果：模型没有跨轮记忆主体，只能靠一条提示词去对冲它自己上一轮的承诺
-  - 关联：一次 run 不是一等对象（`agent_runs.conv_id` 已于 2026-10-31 补齐，缺的是**会话对象本身**）
+  - 2026-11-12 复核：**"抽出判定出口"这一半已做**（`core/teaching/policy.py:123` `decide()` 是唯一策略出口，B2 落地）；**"消除提示词散文"那一半没做** —— `chat_service.py:415-574` 仍 **160 行 / 9 处 ⛔**（原记行号已漂移）。所以本条应改写为"消除 `_build_learn_block` 的规则堆叠"，而不是"要不要抽出策略"。
+
+- [x] **[根因·P0] 没有「学习会话」这一等对象 → 状态碎片化 + 每轮重算** —— **2026-11-12 核实：已完成（B1 落地）**
+  - 证据：`core/learning/session.py:53-90` `LearnTurn` 一等对象 + `kg/schema.py:133` `learning_sessions` 表 + `upsert_learning_session`/`get_learning_session`（`sections.py:230-261`）
+  - 旧临时属性（`kg.student_input` / `kg.quiz_consent` / `kg.learn_target`）已删除，并有静态守卫 `tests/test_learning_session.py:185 test_retired_temp_attrs_are_gone_from_app`
+  - ⚠️ **残留（转 §10 P1）**：表里没有"待办队列 / 最近一题状态"，无 API 暴露，前端零消费，`reconcile()` 全库零调用方 → 真正兑现"跨轮记忆主体"还差这一步
+
 - [ ] **[P1] 掌握度没有"力"：闭环缺最后一环**
   - 排序只看 prerequisite，**不读 mastery**（`knowledge_graph.py:780`、`:799-813`）；mastery 只在 `:888-894` 决定"推荐指针"
   - 出题 handler 不校验 mastery（`tools/quiz_generate.py:180-287`），只有提示词层一句否决
   - 无复习调度 / 错题队列：全后端唯一常驻循环是每日 GC（`main.py:108-114`）
+  - 2026-11-12 复核：**第一条已不成立** —— `kg/paths.py:97` 已改走 `graph_order.order_key`，键 = `(前置未达标, mastery 升序, id)`（`core/graph_order.py:48-57`）→ 排序**已经读 mastery**。
+    后两条仍成立：`tools/quiz_generate.py` 全文件 `mastery` **零命中**；`main.py:103` `_JOBS` 仍只有 5 个 GC 任务，`learning/session.py:43` 自述 `review` 未实现。**本条应缩为「出题不校验掌握度 + 无复习调度」。**
   - 结论：**"自适应"目前是单轮启发式，不是跨会话调度**
 - [ ] **[P1] 学生的主体性被压缩成"≤12 字同意词"**
   - `core/quiz/consent.py:28` `_QUIZ_CONSENT_MAX_CHARS = 12`，长句一律判"不确定 → 不放行"
   - 顺序被**显式**排除重排（`chat_service.py:270-274`）；画像 `goals` 只当语气参数（`chat_service.py:606-607`），不参与路径 / 选题
   - **待决策**：是否开放「顺序 / 范围 / 目标」三个真正的决策通道？
+  - 2026-11-12 复核：仍 0 进度。`consent.py:28` 仍是 `12`；`teaching/policy.py:115` `pick_start` 仍"刻意不按不懂优先重排"；画像 `goals` 仅经 `chat_service.py:792` 注入提示词。
 - [ ] **[P1] 系统没有"发起"通道 → 主动必须伪装成学生发言**
   - 前端为开一场学习**伪造一条用户消息**：`send('开始学习「X」')`（`frontend/src/stores/chatStore.js:801`）
   - 通道其实已存在却没被用来推进学习：`quiz_ready` 只往对话塞一张题卡，**不发请求、不推进小节**
   - **待决策**：复用通知通道做"薄弱点题自动送达"，还是引入调度器（间隔复习）？
+  - 2026-11-12 复核：仍 0 进度。伪造消息在 `chatStore.js:1040`（行号已漂移）；`quiz_ready` 处理仍只渲题卡（`chatStore.js:849-871`）。
 - [ ] **[P2] 叙述与实现缺 SSOT 守卫**
   - "学习模式"这个行为最密集的层**没有设计文档**（`docs/` 全库无"学习模式"，只有 `done.md` §4.4 + `chat_service` 注释）
   - 参照系契约自认"不宜直接宣称图谱是每次调用的参照系"
-- [ ] **本节验收（"改完了"的判据）**
+- [ ] **本节验收（"改完了"的判据）** —— **2026-11-12 复核：0/4 达成**
   - 一次学习推进不再依赖提示词里的 ⛔ 条目：`_build_learn_block` 规则数大幅下降，且 `test_block_forbids_*` 系列是**被删除**而不是被改写
   - "下一步做什么"有单一归属对象，且从它能直接读出：当前节 / 待办动作 / 是否已获学生同意
   - 至少一条"非学生触发"的学习推进在真实链路上可用
   - mastery 进入路径或选题，且有一处调度（错题优先或间隔复习）
+  - 实测：规则数未降（`chat_service.py:415-574` 仍 160 行 / 9 处 ⛔）；`test_learn_mode.py` 仍有 **9 条** `test_block_*`（从 10 减到 9，**未删除**）；无"非学生触发"推进；mastery **已进排序**但**未进选题**、无任何调度。第 2 条半达成（`LearnTurn` 可读出"当前节 + 待办动作"，但"是否已获同意"仍靠 `consent.py` 的 12 字判定）。
 
 ---
 
@@ -157,20 +247,35 @@
   - dry-run 实测（2026-09-20）：全库 25 组 / 55 个待删节点
   - ⚠ 会**删节点与 MD 文件**（不可回滚）→ 执行前先备份 `data/knowledge/{knowledge.db,nodes/}`；也可与"全量重建 vs 增量修复"一并决策
   - 验收：重跑体检脚本后同名组 = 0，uid5 节点数 311 → **283**
-- [ ] **GQ-7 禁止碎片类节点**：prompt 明确不输出"章节摘要/回顾/复习/小结"；入库侧对这类 name 做拦截或降级为 relation
+  - 2026-11-12 复核：工具齐（`inspect_graph_quality.py:894` `--fix-dupes`、`:901` `--apply`、`:26` 默认只读）。**当前库仍有 2 组成对同名**（u1「测试节点」`new_003/new_004`；「鸿蒙开发入门」`harmony_dev_intro/harmonyos_intro`），备份库 `_backup_20260926` 有 18 组 → **改造后从未跑过合并**。这是全表里投入产出比最高的一条（工具已就绪，只差备份 + 执行）。
+- [x] **GQ-7 禁止碎片类节点**：prompt 明确不输出"章节摘要/回顾/复习/小结"；入库侧对这类 name 做拦截或降级为 relation —— **2026-11-15 两侧都已落地**
+  - 提示词侧：`kb/graph_generator.py:167`「禁止把本章小结/复习回顾/章节导读当概念」
+  - 入库侧（2026-11-15）：`kg/_common.py::is_meta_concept_name` 判**结尾**元概念词（概览/综述/概述/总览/导论/导读/分类/分支/总结/小结/回顾/摘要/历史），`_write_concept_tree` 落库前拦截 → `aggregate["dropped_meta"]` 点名。依据 W3C SKOS：Collection 与 Concept 互斥。命中面实测全库 151 节点命中 7 个，反例（「加权最近邻分类器」「算法的分类方法与设计范式」）正确放过
+  - ⚠ **存量 7 个元概念节点未处理**：实测"把 18 条触及它们的 prerequisite 降级为 related"会让注入**变长**（9974→11991 字、焦点摘要归零，因为非前置关系每条边独占一行而前置关系压进节点行尾）→ 该方案已推翻。存量留给单独决策（可选方向：只反向"元概念作源"的 7 条语义颠倒边，需先量注入影响）
 - [ ] **GQ-8 建图写 `confidence`**：给每个节点打 0–1 置信度，低分节点不参与注入/出题（当前 1.6% 有值）
+  - 2026-11-12 复核：列存在（`kg/schema.py:43`），手写/建议入口会写（`knowledge.py:695`、`knowledge_writer.py:137-184`）；**建图路径完全不写** —— `_write_concept_tree` 的 `node_data`（`graph_generator.py:1066-1077`）无 `confidence` 键，全文 0 处 `confidence`。当前库 11/162 ≈ 6.8%。注入/出题也无按置信度过滤。
 - [ ] **GQ-9 主题隔离**：启用 `board`（当前几乎为空）区分书籍来源；跨学科节点标记待审，杜绝 KMP/最小生成树混入强化学习图
+  - 2026-11-12 复核：列 + 迁移有（`schema.py:37`/`:158`），建图从文件夹名取 board 并写入（`graph_generator.py:588-601`/`:1072`）；但库内仅 **10/162** 有 board（u5 的 116 个节点全空），且**无跨学科标记待审机制**。
 - [ ] **GQ-10 建图 token 消耗落盘**（复用 `token_counter.extract_usage`，写 aggregate + 报告文件）
-- [ ] **GQ-11 aggregate 暴露合并数 / 跳过数 / 失败块数**给前端
+  - 2026-11-12 复核：仍未做。只有间接归因（`llm/call.py:110` `call_llm(kind=...)` 记账，库里 kind=`kb_graph_extract/kb_graph_fill/kb_section_write/kb_graph_dedupe`）；`aggregate`（`graph_generator.py:1547-1565`）无 token 字段，`_graph_generated_payload` 无 token，`reports/` 无建图成本报告。
+- [x] **GQ-11 aggregate 暴露合并数 / 跳过数 / 失败块数**给前端 —— **2026-11-12 核实：已完成**
+  - `aggregate` 含 `merged_nodes`/`skipped_docs`/`failed_docs`/`failed_chunks`（`graph_generator.py:1553-1564`），并进通知体 `kb.py:482-484`，前端 `chatStore.js:940-943` 消费。
 - [ ] **GQ-12 清理历史噪声**：`123`（29 字手工占位）、`未识别内容片段`、u1 的 `test_*` 测试节点（7 个）
+  - 2026-11-12 复核：**部分已清** —— `123`、`未识别内容片段`、`%_review`、`%（复习）` 在库中已查无；但 u1 仍有 **5 个 `test_*`**（`test_ai_create/test_frontend/test_full_flow/test_node_ai/test_suggest_node`）+ 2 个「测试节点」+ GQ-4 那 2 组同名未合并。
 - [ ] **GQ-13 深度 A/B 对照**：同一本书跑"浅（现状）"vs"深"，用 `docs/知识图谱/知识图谱_检索与注入_方法与现状.md` §3 的口径比较出题质量与检索命中率
+  - 2026-11-12 复核：仍未做。`backend/scripts/smoke_graph_depth.py` 只是**单节点深度小样预览**（`:16` 自述"不代表落库形态"），不做 A/B。
 - [ ] **GQ-14 图谱开/关 A/B 重复运行取均值**：2026-09-12 首跑（5 例）与 2026-09-23 重跑（14 例）**结论相反**（+37.5pp vs -2.4pp）→ 该指标不稳定。需锁定模型版本、每组重复 ≥3 次，给出均值与区间才能对外引用
+  - 2026-11-12 复核：**脚本已就绪、缺"重复取均值"** —— `backend/scripts/eval_graph_injection.py` 有 off/on/slice 三组 + 规则指标（`:493-505` 参数表），报告在 `backend/eval_data/graph_injection_report_20260912.json` / `graph_injection_report.json`；但参数表**无 `--repeat`**、无均值与区间字段。→ 只剩"加重复次数 + 出均值/区间"这一小改。
 - [ ] **GQ-15 增强项（幂等键）**：`(user_id, subject, 文件指纹 hash)` → 命中则提示"这批资料已建过，是否只补增量"（per-user 建图互斥已落地 2026-09-26）
-- [ ] **GQ-18 溯源贯通（L0，多源维护前置）** 🔴 P0
+  - 2026-11-12 复核：**换了一种实现、效果等价** —— 无 `file_hash` 登记表，但建图 409 互斥（`kb.py:530`）+ 资料级 `doc_node_marks` 幂等（`graph_generator.py:1619-1625`，已建完即跳过）。缺的只是"提示用户"那一步（现在静默跳过）。
+- [ ] **GQ-18 溯源贯通（L0，多源维护前置）** 🔴 P0 —— **2026-11-12 核实：已完成**
   - ✅ 存储层（`nodes.sources`）、写入路径（`_record_sources`）、反查消费者（`GET /knowledge/source/{doc_id}/nodes`）均已落地
-  - ⏳ 第三处同步：`scripts/inspect_graph_quality.py` 的体检口径待落实
-  - ⏳ 刻意暂缓：`edges.sources`（边级溯源，现无消费者，待 L2 冲突层启动时再补）
-- [ ] **GQ-19 新资料演进流程（L3，"按资料增量"）** 🔴 P0 —— 5 步（首次建图 = 概念树为空时的特例，走同一路径）：
+  - ✅ 第三处同步**已落实**：体检口径 `inspect_graph_quality.py:113` `support_counts`、`:450-454` 支撑度、`:151` `_align_metrics` 对齐率、`:535-550` 打印（未就绪则显式跳过）
+  - ⏳ 刻意暂缓：`edges.sources`（边级溯源，现无消费者，待 L2 冲突层启动时再补）—— 仍然暂缓，与记录一致
+- [ ] **GQ-19 新资料演进流程（L3，"按资料增量"）** 🔴 P0 —— **2026-11-12 核实：五步全落地**
+  - 实测：`_process_book`（`graph_generator.py:1608-1675`）→ 幂等检查 `:1619`、续填 `:1635-1640`、标记落表 `:1668-1672`（`evidence.kind=new/hit`）、只填被标记 `:1674`
+  - 回归：`test_graph_topdown.py:415`（只动 hit 节点）/`:448`（同资料二次调用跳过）/`:471`（`skipped_docs`）
+  - → **可移 `done.md`**，剩"加第二本教材做端到端验收"一次人工验证
   1. **出目录**：新资料先抽自己的目录/概念清单（与阶段① 同一动作、同一粒度）
   2. **对账（三分类）**：`新增`（建节点）/ `命中`（覆盖了图谱已有节点 → 打标记，= 增补工作集）/ `无关`（不动）；实现上是**双向匹配**
   3. **标记落表**：`(user_id, doc_id, node_id, status: pending|filled, evidence, created_at)` —— 与 `sources`（GQ-18）分工：`sources` = 「节点 ← 多份资料」长期事实，本表 = 「资料 → 待补节点」过程状态
@@ -179,6 +284,7 @@
   - 幂等键 `(user_id, subject, doc_id)`；与 GQ-15 **合并**（同一把锁 + 同一张"资料已建"登记表），不要做成两套
   - 验收：加第二本教材后 —— ① 能列出「本次被标记的节点清单」② 新概念挂进正确板块、被标记节点正文被补充、`sources` 正确累积 ③ **未被标记的节点零改动**（`updated_at` 对比验证）
 - [ ] **GQ-20 合并决策落表 `merge_decisions`** 🟠 P1：`(kept_id, merged_id, score, evidence, decided_by, ts)` → 支持**回滚**与人工复核
+  - 2026-11-12 复核：仍未做 —— `sqlite_master` 无此表，全库仅设计文档（`docs/知识图谱/知识图谱_外部调研_论文开源与多源融合.md:151/161/163`）提到。
 - [x] **GQ-25 建图失败/跳过对用户可见** 🟠 P1：后端已带 `aggregate.failed_docs`/`skipped_docs`；**前端未做** —— `KnowledgeView.vue` 的 `genResult` 仍只显示 created/skipped nodes。验收：部分资料失败时结果区明确列出"未处理的资料"
   - 修法（2026-11-10）：`kb.py::_graph_generated_payload` 把 `failed_docs`/`skipped_docs`/`merged_nodes` 一并放进 `graph_updated` 通知，`chatStore.handleGraphUpdated` 收到后弹 `ElMessage.warning("N 份资料未入图：…")`（超过 5 个截断为"等"）。**顺带解决更根本的一条**：建图结果不再依赖 HTTP 响应（分钟级同步端点 + axios 300s 超时 + 用户切页面 → 永远收不到），改为完成即通知。
   - 回归：`tests/test_kb_graph_generate_notify.py`（7 例，含取消路径）、`frontend/src/stores/chatStore.lifecycle.test.js`「建图结果由 graph_updated 通知收口」6 例。
@@ -186,8 +292,10 @@
 
 ### 数据结构与检索通路（KG-D）
 
-- [ ] **KG-D7~D11（P1 剩余）**：~~`parent_id/path` 层级~~（主题层 2026-09-27 整体下线，**不做层级**）；`sources` 溯源 → **GQ-18**；按 relation 分策略扩跳；跨源 RRF 融合。**KG-D11 结构化选片 ✅ 2026-10-11 落地**（改用「全量骨架常驻 + 焦点 ±2 跳邻域带摘要」，见 `done.md` / 参照系契约 §4.2）
+- [ ] **KG-D7~D11（P1 剩余）**：~~`parent_id/path` 层级~~（主题层 2026-09-27 整体下线，**不做层级**）；`sources` 溯源 → **GQ-18 ✅**；按 relation 分策略扩跳；跨源 RRF 融合。**KG-D11 结构化选片 ✅ 2026-10-11 落地**（改用「全量骨架常驻 + 焦点 ±2 跳邻域带摘要」，见 `done.md` / 参照系契约 §4.2）
+  - 2026-11-12 复核：剩两项 —— 按 relation 分策略扩跳（`graph_middleware.py:116` `_prereq_pairs` 只认 `prerequisite`）、跨源 RRF 融合（`rrf_fuse` 只用于 `rag_pipeline` 的多 query 融合，非跨源/跨图谱）。
 - [ ] **KG-D12~D15（P2）**：FTS5、`confidence` 赋能或删列、向量改 BLOB、`quiz.questions.node_id` 改名
+  - 2026-11-12 复核：**四项全部未动** —— D12 无 FTS5（`core/kg` 无 `MATCH`/virtual table，只有 LIKE + whoosh 覆盖 kb/rag）；D13 `confidence` 既未赋能也未删列；D14 向量仍 JSON TEXT（`rag/vector_store.py:50`、`kb/doc_vector_store.py:48`），无嵌入模型/维度记录；D15 `questions.node_id` 仍叫 `node_id` 且是 `INTEGER`（`quiz/quiz_store.py:47`）。
 
 ---
 
@@ -204,9 +312,11 @@
   - 现状只有静态探针；框架不变量 B-1~B-7 需要运行时可见
   - 落点：`agent/store.py` 的 `agent_runs` 表（**扩展字段，不新建表；加列必须写进 `store._COLUMN_MIGRATIONS`**）+ `agent/loop.py` 落库处；`chat_service` 把分段体量传进去
   - 验收：`GET /agent/runs/{run_id}` 能看到该次 run 的各段 token；跑 20 轮对话可取 P95
+  - 2026-11-12 复核：仍未做。`agent_runs` 只有总量（`agent/store.py:68` `_SCHEMA`、`:51-58` `_COLUMN_MIGRATIONS` 仅 `token_estimate`/`events_written`/`conv_id`）；`loop._persist_run:698-720` 不传任何分段；`core/agent/*` 全文无 `segment`/`seg_tokens`/`breakdown`。
 - [ ] **P2-② 用实测拐点替换文献值** `[需API]`
   - 框架 §1.2 的 S6/S7 = 2K、S8 = 21K 目前是"文献曲线 + 体量估算"，**不是本项目实测**
   - 做法：固定的 20 轮教学对话，扫 S6/S7 的 top_k 与 S8 的轮数，按正确性/成本画曲线取拐点
+  - 2026-11-12 复核：仍未做。`docs/上下文工程/上下文工程_预算框架.md` §1.2 仍全部标【论文】/【判断】，无实测回填。
   - 验收：出"段配额 vs 指标"对照表，回填框架 §1.2 并升 v3
 
 ### 待决策（需用户先定）
@@ -236,8 +346,10 @@
 ### 待 API / 真网验证（B1/B2 收尾）
 
 - [ ] **B1.6 真实嵌入灌库**：`venv/Scripts/python.exe scripts/seed_collector.py --user <演示账号> --embed api`，40 词条入库后 `stats` 正常，替换 mock 哈希向量
+  - 2026-11-12 复核：**脚本就绪、从未在演示账号上跑过** —— `scripts/seed_collector.py:120-124` 有 `--user/--subject/--embed mock|api`，40 篇种子齐备（`data/collector/seed/dsa/*.md`）；但 `data/kb/5` 的 33 个文件与种子 **0 命中**（唯一命中是 `data/kb/1` 的「二分查找.md」）。`data/kb/5/rag.db` 2890 chunks 已是 1024 维真嵌入 → **"替换 mock 向量"的验收口径从未正式执行过**。
 - [ ] **Batch 1 端到端对话引用**：灌库后对话中挂载「自动采集」目录提问 DSA 概念 → 回答带 KB 引用（先完成上一条）
-- [ ] **B2.1 OI-wiki 真网联调**（同 §1 P0 待议项）
+  - 2026-11-12 复核：未做（依赖上条）。
+- [ ] **B2.1 OI-wiki 真网联调**（同 §1 P0 待议项）—— 同 §1 取证，mock 全绿、真网未跑。
 
 ### Batch 3 — 题库导入 + web_page 漏斗 + 来源统计
 
@@ -245,15 +357,21 @@
   - 读取开放数据集 JSON（如 CMMLU）→ 映射 `Question` schema → `quiz_store.save_questions`
   - subject/knowledge_point 来自数据集字段；测试 `test_dataset_quiz_adapter.py`
   - **预研项：存储配额/TTL**（入库批量导入**之前**必须完成，防百万题撑爆磁盘）：`storage_quota` 配置 + 超限告警
+  - 2026-11-12 复核：**代码已完成、缺入口** —— `adapters/dataset_quiz.py:96` `import_from_json` + 配额（`quiz/quota.py`，`settings.quiz_storage_quota=50_000`），`test_dataset_quiz_adapter.py` 7 例。但**零生产调用方**（只有测试调用），无 API/脚本入口 → 用户点不到。
 - [ ] **B3.2 通用网页正文抓取** `[新文件]` `adapters/web_page.py`
   - 站点白名单（个人模式）+ `trafilatura` 主用 / `readability-lxml` 后备；`httpx` 下载 → 正文抽取 → 转 MD 入库（license 由站点映射表给定，默认 L2）；测试 `test_web_page_adapter.py`
+  - 2026-11-12 复核：**代码已完成、缺入口** —— `adapters/web_page.py` 已实现+注册，`requirements.txt:37-38` 已有 `trafilatura`/`readability-lxml`，`test_web_page_adapter.py` **21 例**。但 `candidate_from_url:167` **无任何调用方**。
 - [ ] **B3.4 未做部分**：采集页资源列表条目入口 + 采集前 URL 预览（P0）—— 方案见 `docs/教育资料采集/采集_网页正文与开放来源_实施方案.md` §2.5
+  - 2026-11-12 复核：仍未做。`CollectorView.vue` 只有「搜索→勾选→任务」三步（模板 300-390 行），无 URL 输入、无 preview dialog（全文无 `preview`）；`api/v1/collector.py` 仅 6 个端点，无 preview/inspect。
 
 ### Batch 4 — 登录站 + CollectorRagSource + 本地模型（v1.5+）
 
 - [ ] **B4.1 Cookie 会话复用** `[新文件]` `collector/session.py`：浏览器辅助登录（复用 agent-browser/playwright）→ Cookie 存用户级目录（隔离/不进日志）；httpx 携带 Cookie 抓取；合法需登录站标注 L2
+  - 2026-11-12 复核：仍未做 —— 文件不存在（`core/collector/` 下只有 manager/http/store/subjects/types/adapters + chapterizer/pipeline_ingest/quiz_splitter）。⚠️ 别和 `core/learning/session.py`（学习会话）搞混。
 - [ ] **B4.2 CollectorRagSource 评估** `[改]` `rag_pipeline/sources.py` 新增 `CollectorRagSource`（name="collector"）+ `pipeline.register()` 一行；评估是否入对话引用（默认仅在采集页使用）
+  - 2026-11-12 复核：仍未做 —— `rag_pipeline/sources.py:174-176` 只注册 Graph / Kb / GraphStructure 三个源。
 - [ ] **B4.3 本地 embedding 正式启用** `[改]`：装 sentence-transformers（可选依赖）；`app/core/llm/embed.py` 加 `EMBED_MODE=local|api|auto`，auto 降级链 API→本地→hash；补 `test_embed_mode_config.py`
+  - 2026-11-12 复核：仍未做 —— `llm/embed.py` 无任何 `EMBED_MODE`（只有 `EMBEDDING_MODEL`/`MAX_EMBED_CHARS`/`EMBED_BATCH_SIZE`），`requirements.txt:31` 的 `sentence-transformers` 仍是注释。
 
 ### v2 — 高级（暂不排期）
 
@@ -269,6 +387,7 @@
 > 定位：**调研交付物**，建设期属于其他同学（**非本人职责**）；调研已完成、**建设未启动**。
 > 方案已拍板 **A. 独立 `core/assessment/`**（见下）；设计依据 `docs/教学模块/QUIZ_出题逻辑调研.md`、`docs/教学模块/学习进度仪表盘设计.md`。
 > **不做什么**：不动 `core/quiz/` 的出题 + schema；不动 `agent_tools/tools/grade_answer.py` 对外接口；**不建独立进度表**（沿用 `nodes.mastery` 单一数据源）。
+> **2026-11-12 复核：整节 0 进度** —— `backend/app/core/assessment/` 目录**不存在**，`api/v1/` 无 `assessment.py`（`main.py:168-178` 的 12 个 router 里没有），无任何 `test_assessment_*`。本节 9 条建设项 + 3 条迁移项全部从零。
 
 ### P0 — 骨架 + 难度评估（建议先做）
 
@@ -313,9 +432,12 @@
 - [x] **`scripts/backup.sh` 文档要求但文件不存在**（**2026-11-04 已补**）：`docs/运维部署/运维_生产上线与日常运营指南.md` 在 §5.3（备份）、§7.2（发布前手备）、§9（补齐清单第 3 步）三处 + cron 示例里都写 `bash scripts/backup.sh`，仓库里从来没有这个文件——**只有真出事那天才会发现**。新脚本要点：停容器 → `tar czf` → 启动，`trap ... EXIT` + `STOPPED` 幂等 flag 保证**打包失败也一定拉起服务**（否则一次备份变成一次停服事故）；保留「日备 7 天 / 周备 4 周」按文件名日期判断。⚠️ 两个 bash 坑：`[ x ] && continue` 在判 false 时返回 1，`set -e` 会当场退出（备份成功却报失败）→ 必须写 `if`；`set -o pipefail` 下 `grep` 无匹配也会让赋值语句触发 `set -e` → 需 `|| true`。⚠️ 不能排除 whoosh 段 / `*.db` / `-wal`：排除了会得到一个"能起但检索全空"的库。回归 `tests/test_backup_script.py`（10 例 + `bash -n`，本地无 bash 时跳过而非失败）。
 - [x] **CI 只跑后端套件**（**2026-11-04 已补**）：原本只有 `backend-tests.yml` 一个 workflow，`backend-admin` 41 例与前端 2 个 vitest 文件（锁的恰是 SSE 生命周期与图谱树构建）都不在 CI 里。新增 `backend-admin-tests.yml`（**必须独立 job、独立一次 pytest 调用**——两边包名都叫 `app`，合跑必 `ModuleNotFoundError`）与 `frontend-tests.yml`（`npm test` + `npm run build`，另加 `frontend-admin` 构建，那是它唯一的结构性回归）。
 - [ ] **试卷拆分器 `quiz_splitter.py` 已实现但零引用**（未接入上传链路）：`collector/quiz_splitter.py` 已有 `tests/test_quiz_splitter.py` 9 例覆盖但全库零调用。**待决策（入口三选一）**：① `/kb/upload` 命中试卷形态后自动拆分；② 独立 `POST /quiz/import`；③ 与 B3.1 `dataset_quiz` 合并做。**接入注意**：`quiz_store.save_questions` 收 `Question` 对象（须 `Question(**q.to_question_dict())`）。
+  - 2026-11-12 复核：仍零引用（只有 `quiz_splitter.py:398` 自身 `__main__` 自检 + 测试 9 例）；`api/v1/kb.py` 无 `/quiz/import` 类端点。
 - [ ] **`collector/pipeline_ingest.py` + `chapterizer.py` 零引用**：整书切章入库链路（`ingest_book_chapters`）已实现且 6 例测试通过，但采集链路 `manager.run_task` 直接调 `kb_manager.upload_and_index`，**未接此管线**。需定入口：采集任务整书入库 / 手动导入 / 判定不用后删除。
+  - 2026-11-12 复核：仍零引用（`pipeline_ingest` 只被自己 docstring 举例、`chapterizer` 只被 `pipeline_ingest:27` 引用）；`collector/manager.py:161-197` `run_task` 直调 `_ingest`。
 - [x] **`conversations` 内嵌 tools/thinking 去留 + run 与会话无关联键**（**2026-10-31 已定**）：`agent_runs.conv_id` 已加（可空，老库自动补列）；assistant 的 `tools` 摘要由服务端从 run 的 `rounds` 派生后落库（与 `tool_start`/`tool_result` 事件同形，前端零改动），`thinking` **不落**（体积大、刷新后本就不该重放）。见 `AGENTS.md §1`「对话历史的真相在服务端」。**遗留：墓碑无 GC** → **2026-11-04 已修**，见上方「`conversations` 表零索引 + 墓碑永不回收」条。
 - [ ] **采集库引用计数 UPDATE 跑在事件循环线程**（**口径已统一，根因未解**，2026-11-04 复核）：原记录说"`collector/store.py` 用默认 5s，调小会把锁等待变成 `database is locked`，正确修法是给引用计数另开只写连接"——**前半句已过时**（本次已把 `busy_timeout` 从默认 5s 提到 10000ms，与其它长驻库一致，见上一条），**后半句仍成立**：`manager.start_task` / `run_task` 都是 `async def`，里面的 `store.create_task` / `add_resource` / `update_task` / `update_resource_status` 是**同步 sqlite 写**，直接跑在事件循环线程上 → 写锁等待期间整个 loop 停摆（现在最长 10s，比原来的 5s 更久）。单用户单任务下几乎不会撞，**多端同时采集时才是真问题**。正确修法仍是「引用计数/状态回写另开只写连接 + `run_in_executor` 或独立队列」，属结构性改动，不在"顺手修债"范围。
+  - 2026-11-12 复核：仍未做。`manager.py` 的 `start_task`/`run_task`/`_ingest` 全是 `async def`，内部直接同步 sqlite 写（`:116/122/132/176/189/270/286`），全文**无** `run_in_executor` / `asyncio.to_thread`。
 
 ---
 
@@ -337,25 +459,34 @@
 ### P0 — 一条串联起来的任务链
 
 - [ ] **统一任务模型**：把「导入 → 建图 → 首轮路径规划」做成一条可暂停/续跑的任务链，复用 `core/kb/import_queue.py` 的任务表 + 每用户单 worker 模式（加 step 字段或 step 表，**不另造第二套调度**）。
+  - 2026-11-12 复核：仍未做。`import_tasks` 列（`kb/kb_store.py:81-97`）只有 status/total/done/failed/error，**无 step**；`import_queue.py` 全文无 graph/learn/chain 关联，仍只做视频导入。
 - [ ] **一个入口**：`POST /learn/start` 接收 主题名 / 教材文件 / 视频链接 三类输入，自动判定后续动作（无资料 → 先采集；有资料 → 建图；有图 → 生成路径），返回 `learn_session_id` + 首条进度事件。
+  - 2026-11-12 复核：仍未做 —— `api/v1/` 无 learn 模块，`main.py:168-178` 全部 router 里没有 learn。
 - [ ] **进度归一**：任务链每一步投递到同一个 `learn_progress` 事件（复用现有 SSE 通道），前端只画一条进度，不再分别监听 `import_progress` / `graph_updated` / `quiz_ready`。
+  - 2026-11-12 复核：仍未做 —— `event_bus.py:6-17` 事件注册表只有 text_delta/…/import_progress/error，**无 `learn_progress`**。
 
 ### P1 — 学习会话成为一等对象
 
 - [ ] **`learn_sessions` 表**（用户 / 主题 / 当前节点 / 待办队列 / 最近一题状态），**取代**现在散在前端 store 与提示词里的"当前学到哪"（与 §3「提示词当程序」同根因：状态写在提示词里，程序看不见）。
+  - 2026-11-12 复核：**表已存在、语义更窄**（比本行描述领先半步）—— `kg/schema.py:133-144` `learning_sessions(user_id, node_id, section_id, intended_action, consent, reason, updated_at)` + `upsert/get`（`sections.py:230-261`）。**缺**：「待办队列 / 最近一题状态」两列、无 API 暴露、前端零消费（`learning_session` 只在后端出现）、库里仅 1 行。→ 本条应缩为"补两列 + 开 API + 前端消费"。
 - [ ] **自动推进**：答完一题 → 判分写掌握度 → 按薄弱点选下一节 → 直接进下一轮讲解，**不需要用户再打"继续"**（`quiz_ready` 通道已具备触发能力，缺的是"推进策略"的收口处）。
+  - 2026-11-12 复核：仍未做。策略出口已有（`teaching/policy.py:123 decide()`，`chat_service.py:471/590` 调用），但判分后**无任何自动触发链路**（无调度、无 `quiz_ready` → 讲解的接线）。
 - [ ] **中断可续**：关掉应用再回来落在同一节、同一题；`learn_sessions` 是唯一真源，前端不再拼状态。
+  - 2026-11-12 复核：**后端能读回、前端不消费** —— `learning/session.py:199 load` / `:204 reconcile` 存在，但 `reconcile()` 全库**零调用方**、无端点、前端零消费。
 
 ### P2 — 复习与长期闭环
 
 - [ ] **错题队列 + 间隔复习**：判分失败进错题池，按 SM-2 简化版排期（在 `main.py::_prune_once` 的 `_JOBS` 旁加常驻调度），每日推一条 `notify` 摘要。
+  - 2026-11-12 复核：仍未做。`quiz/quiz_store.py:66-76` `attempts` 只有记录，无错题池/SM-2/调度；`main.py:103` `_JOBS` 仍是 5 个清理任务。
 - [ ] **学习报告**：按会话出「学了哪些节点 / 掌握度变化 / 薄弱点 / 建议下一步」，可导出 Markdown。
+  - 2026-11-12 复核：仍未做（无 report 模块/端点）。
 
 ### 验收（先写测试再实现）
 
 - [ ] 新用户 3 步内进入可交互课堂：选主题/给资料 → 等任务链跑完 → 直接开始第一节。
 - [ ] 中途关闭页面 5 分钟回来，能回到原节点继续，且不重复出同一题（`avoid_questions` 已具备）。
 - [ ] 一条 20 集的 B 站合集从导入到第一节开讲全自动，中间 0 次手动点击。
+  - 2026-11-12 复核：三条前提均未达成（§10 P0 三条全空）。
 
 ---
 
@@ -399,9 +530,13 @@ GET /api/v1/knowledge/graph?subject=线性代数  →  total=17 filled=17 → 10
 
 ### 11.2 已写好但**未提交**的前端一档（分支 `feat/kb-task-progress`）
 
-> 代码在 `git stash`（**8 个文件**：5 个改动 + 3 个新增，后者在 stash 的 untracked 部分，
-> 用 `git stash show --include-untracked --stat 'stash@{0}'` 才看得全）。
-> 要捡起来：`git stash pop`。
+> 🔴 **2026-11-12 核实：这批代码已经丢失，不要再去 `git stash pop`。**
+> 实测：`git stash list` 只有一条 `stash@{0}: On main: wip-before-pull-20260928-215150`（2026-09-28，
+> untracked 部分不含它）；`main` / `origin/main` / 所有 remote 分支 / 全部 dangling commit
+> 里都**没有** `kbTaskProgress.js` 或 `KbPanel.tasks.test.js`。→ **按下表重写**。
+>
+> 原记录（保留作施工规格）：代码在 `git stash`（**8 个文件**：5 个改动 + 3 个新增，后者在 stash 的
+> untracked 部分）。要捡起来：`git stash pop`。
 
 改动面（**全部前端，后端零改动**）：
 
@@ -452,29 +587,47 @@ GET /api/v1/knowledge/graph?subject=线性代数  →  total=17 filled=17 → 10
 所以刷新后图谱里**看得到骨架**，只是阶段②的正文没写完。这正是 11.1 的 `filled/total`
 能把"还剩多少"说清楚的原因。
 
-**还缺的**：
+**还缺的**（2026-11-15 已修前两条，见 §11.4-B）：
 
 | 缺口 | 位置 | 说明 |
 |---|---|---|
-| 没有 GET 暴露"正在建图" | `core/kb/graph_generator.py::is_graph_building` | 目前只在 6 处用于判 409（`api/v1/knowledge.py`），**没有任何端点能查** |
-| 断连即取消 | `api/v1/kb.py::generate_graph` | 需 `shield` 或 `runtime.spawn` 后台化 |
+| ~~没有 GET 暴露"正在建图"~~ | ~~`core/kb/graph_generator.py::is_graph_building`~~ | ✅ 已加 `GET /kb/graph/status`（`api/v1/kb.py`）：`building` / `subject` / `progress{filled,total,percent}` |
+| ~~断连即取消~~ | ~~`api/v1/kb.py::generate_graph`~~ | ✅ 已改 `runtime.spawn` 后台化：入队即返回 `{"status":"accepted"}`，断连不再取消；互斥表同时记学科名（`_GRAPH_INFLIGHT: dict[int, str]`） |
 | 无暂停/续跑/重试 | —— | 对比视频导入有完整队列（`import_queue`），建图没有 |
 
 ### 11.4 施工清单（按成本递增，A/B 可一起做）
 
-- [ ] **A · 只修显示**（纯前端，~30 分钟）
+- [ ] **A · 只修显示**（纯前端，~30 分钟）——**已被 B 取代，不必再做**
   `kbTasks` 写 localStorage（按 user_id 隔离，key 风格对齐 `chatStore` 的 `STORAGE_KEY_*`），
   刷新后能重放"上次未完成的任务"。
   ⚠️ **单独做 A 是不够的**：任务其实已经被取消了，这会显示一条**过时**的进度 —— 诚实但无用。
   所以 A 必须和 B 或 C 一起上，否则别做。
+  ✅ 2026-11-15：B 已落地且选的是"状态查询"路线（更准），localStorage 重放这条不用做了。
 
-- [ ] **B · 显示 + 断连保活 + 状态可查**（含小改后端，~半天）**← 推荐**
+- [x] **B · 显示 + 断连保活 + 状态可查**（含小改后端，~半天）**← 推荐** ✅ 2026-11-15 完成
   1. `generate_graph` 改后台化：`runtime.spawn`（项目已有该工具，见 `core/runtime.py`；
      裸 `asyncio.create_task` 不持有返回值会被 GC，`runtime.spawn` 就是为这个存在的）；
   2. 新增 `GET /kb/graph/status`（或并入 `/kb/stats`）暴露 `is_graph_building` + 进度，
-     前端刷新后据此恢复任务卡；轮询间隔参考 `KbPanel` 里的 `GRAPH_POLL_MS=3000`；
+     前端刷新后据此恢复任务卡；轮询间隔 3000ms（实际落在 `chatStore.js` 的
+     `GRAPH_STATUS_POLL_MS`，**KbPanel 里没有这个常量**）；
   3. 前端 A 的 localStorage 重放 + B 的状态查询二选一或叠加（状态查询更准，localStorage 更快）。
   **验收**：建图跑到一半刷新页面 → 任务卡还在、进度继续往前走、最终落成完整图谱。
+
+  **实际落地（2026-11-15）**：第 3 条选了**状态查询**（不做 localStorage 重放 —— 它只会
+  重放一条过时进度）。`chatStore.init()` 末尾 `restoreGraphBuildStatus()` 问一次
+  `GET /kb/graph/status`，`building=true` 就把 `graphGenerating` 接回学科名（缺失时用
+  「上次任务」，因为按钮文案是 `生成中（${graphGenerating}）`）；查询失败静默降级，
+  绝不把 init 搞挂。回归 `test_kb_graph_guard.py`(9) + `test_kb_graph_status.py`(6) +
+  `test_kb_graph_generate_notify.py`(7) + 前端「刷新后恢复生成中」4 例。
+  **进度条（2026-11-15 补完）**：`restoreGraphBuildStatus()` 拿到 `building=true` 后开
+  `startGraphStatusPoll()`（`GRAPH_STATUS_POLL_MS=3000`，常量在 `chatStore.js`，不在
+  KbPanel）；`generateSubjectGraph()` 一提交也开轮询（不等刷新）；轮询只喂
+  `graphBuildProgress`，**完成判定仍由 `graph_updated` 通知收口**，`handleGraphUpdated`
+  里 `stopGraphStatusPoll()` + 清进度；`dispose()` 里也停表（A3-3 定时器断言）。
+  UI = `KbPanel.vue` 的 `.kb-gen-progress`（`el-progress` + 「已补全 N / M 个知识点」），
+  **必须给绝对数**：`progress` 是增量补全口径，百分比不从 0 开始。回归 3 例
+  （首次快照 / 轮询推进 / building 翻 false 停表且不抢 `graphGenerating`）。
+  **仍未做**：暂停/续跑/重试（= §11.4-C）。
 
 - [ ] **C · 完全对齐视频导入**（持久化队列，1–2 天）
   建图也做成 `import_queue` 式任务（暂停/续跑/重试/重排），需要新增表。
@@ -493,5 +646,100 @@ GET /api/v1/knowledge/graph?subject=线性代数  →  total=17 filled=17 → 10
 - **建图互斥 GQ-15**：任何后台化改造都必须保住 `try_begin_graph_build` / `end_graph_build` 的
   成对释放（放 `finally`），否则该用户会被永久锁死，此后每次建图都 409。
 - **`content_status` 是进度真源**：别为进度另建一张表或新字段。
+
+---
+
+## 12. 线上实例运维（2026-11-12 全量体检 + 清理）
+
+> 实例手册（拓扑 / 凭据位置 / 日常命令）= `docs/运维部署/运维_线上实例手册.md`。
+> 本节只记**这次实测的结论**与**必须跟进的两件事**。
+
+### 12.1 体检结论（全绿，服务器没坏）
+
+| 项 | 实测 |
+|---|---|
+| 机器 | `47.98.160.194`，`up 37 days`，load `0.13/0.11/0.09`，无 failed systemd 单元 |
+| 内存 | 3623 MiB（用 1105），`pressure/memory avg10=0.00` |
+| 磁盘 | 清理后 `/dev/vda3 40G 用 8.4G（23%）`（清理前 11G / 30%） |
+| 容器 | `ai-tutor` / `edututor-api` / `edututor-web` 全 `Up 3 weeks (healthy)`，`restarts=0` |
+| 应用 | uvicorn 层 **5xx = 0**；容器 access log `5843×200 / 83×405 / 74×404 / 3×401`，无 5xx |
+| 站点 | `/` 200、`/api/health` 200、`/gate` 401（正常）、`/admin/`（带 Cookie）200 |
+| 出网 | MiniMax 200、DashScope 200、npmmirror 200、PyPI 清华源 200 |
+
+**本次清理动作**（全部为"只删可再生缓存"，未动业务数据）：
+`docker builder prune -af`（回收 **5.13 GB** build cache）→ `docker image prune -f`（0B）→
+`apt-get clean`（137 MB）→ `journalctl --vacuum-size=32M`（回收 48 MB）→
+**新增 2 GB swapfile**（`/swapfile`，已写 `/etc/fstab`，`vm.swappiness=10`）——
+这台机器原本**无 swap**，2 核 3.5G 跑三个容器，一次 LLM 批量任务就可能触发 OOM killer。
+
+### 12.2 必须跟进：部署落后 66 个提交
+
+线上跑的是 `6316d36`（2026-10-22 20:26，**且这个提交从未 push**；内容与 origin 的
+`df647bb` 逐行等价，`git diff --ignore-cr-at-eol` 为空）。`origin/main` 已是 `046f655`（2026-11-11）。
+
+**服务器不会自动更新** —— reflog 显示只在 10-06 / 10-11 / 10-18 / 10-22 被手工 merge 过 4 次。
+所以 10-22 之后的**所有**本地产出（建图通知收口、`boot_id`、视频导入队列、前端聊天交互重构…）
+**全部没上线**。前端静态产物更老，还停在 2026-10-11 的构建。
+
+更新步骤（已验证网络可达，回滚点 `ai-tutor:rollback-20261018` 在）：
+
+```bash
+ssh tutor-server
+cd /opt/ai-tutor
+git fetch origin && git reset --hard origin/main      # 该目录无未提交改动，已确认 clean
+docker compose build && docker compose up -d          # 重建后再验 /api/health
+```
+
+⚠️ 顺序：先确认 `data/` 挂载没丢（compose 里 9 个子目录逐个挂，`f2397ed` 又补了
+`llm/keys/bili` 三个卷）→ 再 `up -d`。构建前建议先按上一节确认磁盘（现已 29G 可用，够）。
+
+### 12.3 顺手记下的三个风险（未处理，等拍板）
+
+1. **18080 对公网开放**：`47.98.160.194:18080` 外网可达（302 → `/admin/` → 401 Basic），
+   那是同机的 **edututor** 项目后台，不属本项目。建议收进安全组白名单或只留 22/80。
+2. **无 TLS**：443 关闭、`/etc/letsencrypt` 不存在，网关口令与 JWT 全走明文 HTTP。
+3. **SSH 持续被爆破**：fail2ban `Currently failed: 85 / Total failed: 283 / 当前封禁 0`；
+   策略已是密钥-only（`PasswordAuthentication no`），暂无实际风险，但建议查 fail2ban 为何不封。
+
+另外：**演示模式仍是开启状态**（`/etc/nginx/tutor-demo.d/demo.conf`，从 2026-10-19 21:24 起）。
+即公网免口令直达 + 关闭注册 + 在线/并发各限 3。非演示期执行 `/root/tutor-demo.sh off` 恢复口令门。
+
+---
+
+## 13. Android 客户端（2026-11-12 新增：此前不在本表）
+
+> 分支 `feat/android-chat`（HEAD `5a17167`），**49 文件 / +6343 行**，尚未合入 `main`。
+> ⚠️ `AGENTS.md §5` 仍写"除 Hello World 外一行业务代码都没有"，**已过时**，动 Android 前先看本节。
+
+已完成（按分支提交）：
+
+| 提交 | 内容 |
+|---|---|
+| `ac0f3de` | 对话数据层 —— SSE 流解析与事件契约（`text_delta.token` 字段名、跳过 `:` 心跳帧） |
+| `0143fdf` | 引入 LaTeX 公式渲染（MIT 许可） |
+| `898c464` | Markdown 渲染 —— 表格、公式、HTML 标签与转义 |
+| `5a17167` | 对话页 —— 流式渲染、引用与消息工具栏 |
+
+测试：`MarkdownParserTest`（403 行）、`MarkdownRealContentTest`（240 行）、`QuotedMessageBuilderTest`（117 行）。
+
+未做（对照 `Android/README.md` 的里程碑）：登录链路端到端（RSA-OAEP 的 **MGF1-SHA256** 必须显式指定，
+见 `AGENTS.md §5.3-5`）、知识库 / 图谱 / 出题 tab、离线会话缓存。
+
+---
+
+## 14. 建议的下一步（按投入产出比排序，待拍板）
+
+| # | 事项 | 成本 | 为什么值得先做 |
+|---|---|---|---|
+| 1 | **服务器追平 origin/main**（§12.2） | ~20 分钟 | 本地已修的 66 个提交一次上线，比分头做新功能收益大得多 |
+| 2 | **GQ-4 合并重复节点**（§4） | ~30 分钟 | 工具早就写好，只差备份 + `--apply`；是"存量数据变干净"的唯一便宜路径 |
+| 3 | **B3.1/B3.2 接入口**（§6） | 半天 | adapter + 21 例测试都已就绪、**零调用方**；补一个 `POST /collector/preview` + 前端 URL 输入即可兑现两个 TODO |
+| 4 | **§11.4-B 建图断连保活** | 半天 | 刷新即取消是**真 bug**（不是显示问题）；`runtime.spawn` 项目已有，改动面小 |
+| 5 | **§10 P1 补 `learning_sessions` 两列 + API** | 1 天 | 表已存在，补 API + 前端消费即可兑现"中断可续"，是 §10 里最便宜的一段 |
+| 6 | **§3 消除 `_build_learn_block` 的 9 处 ⛔** | 1~2 天 | 唯一的架构根因级债务；但风险最高（改的是每轮注入），建议单独开窗做 |
+| 7 | **§7 评价体系** | 数天 | 整块空白，但自述"非本人职责" → **先确认还要不要做** |
+
+⚠️ 做 #5 之前先定 §2 那条「前端 store 耦合」的调性（`chatStore.js` 已 1467 行），
+否则新能力会继续堆进同一个文件。
 
 ---

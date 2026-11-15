@@ -178,7 +178,7 @@ backend\venv\Scripts\python.exe scripts\eval_graph_rag.py --embed api  --max-doc
 backend\venv\Scripts\python.exe scripts\eval_rag.py --embed api
 
 # 3) 回归
-backend\venv\Scripts\python.exe -m pytest backend/tests -q -m "not llm_api"   # 962 passed, 7 deselected
+backend\venv\Scripts\python.exe -m pytest backend/tests -q -m "not llm_api"   # 1968 passed, 1 skipped, 7 deselected（2026-11-15 复核）
 ```
 
 评测产物目录 `backend/eval_data/graph_eval/` 与 `kb_eval/` 为临时数据，可用 `--keep-graph` / `--keep-index` 加速二次运行。
