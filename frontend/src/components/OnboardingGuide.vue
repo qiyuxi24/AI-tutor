@@ -19,6 +19,7 @@
  */
 
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import AppIcon from './AppIcon.vue'
 
 /* ================================================================
    组件 Props / Events
@@ -40,24 +41,23 @@ const currentStep = ref(0)
 
 /* ================================================================
    引导步骤内容
-   icon = 硬编码的 SVG 内容串（非用户输入），用 v-html 注入，风格与活动栏一致
+   icon = utils/icons.js 的键名，由 <AppIcon> 渲染（与活动栏同一份图形）
    ================================================================ */
 const steps = [
   {
-    icon: '<path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/>'
-        + '<path d="M19 15l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>',
+    icon: 'sparkles',
     title: '欢迎使用 AI Tutor',
-    description: '以「知识图谱」为核心的自适应学习系统 —— AI 陪你对话，同时把你的知识织成一张可生长的网。',
+    description: '一个会记着你在学什么的导学助手。它把你学到的东西存成图谱，再据此决定下一步讲什么、出什么题。',
     features: [
       '对话式学习：像聊天一样探索知识，AI 边教边更新你的图谱',
       '知识图谱：把零散知识点按前置关系连成一张学习地图',
-      '越用越懂你：学习画像与掌握度随每一次对话和做题持续积累',
+      '学习画像与掌握度随每一次对话和做题慢慢累积，不用自己记',
       '数据都在你自己的账号下，模型与主题都可以自行配置',
     ],
     tip: '接下来按「对话 → 图谱 → 知识库 → 出题 → 进度」的顺序带你看一遍，随时可在 设置 · 引导 重新查看。',
   },
   {
-    icon: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    icon: 'chat',
     title: '对话学习',
     description: '把想学的内容直接说给 AI：提问、追问、让它讲、让它出题都可以，说一句话就能开一轮学习。',
     features: [
@@ -69,9 +69,7 @@ const steps = [
     tip: '不需要特意「喂」背景，也不用手动切换教学模式——AI 会自己挑合适的讲法。',
   },
   {
-    icon: '<circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="12" cy="19" r="2.5"/>'
-        + '<line x1="7.5" y1="6.5" x2="15.8" y2="8.4"/><line x1="16.5" y1="8.8" x2="13.1" y2="17"/>'
-        + '<line x1="7.3" y1="7.3" x2="10.7" y2="16.8"/>',
+    icon: 'graph',
     title: '知识图谱',
     description: '每个知识点是一个节点，前置与相关关系是边。图谱就是你的学习地图，也回答「接下来该学什么」。',
     features: [
@@ -84,8 +82,7 @@ const steps = [
     tip: '节点颜色对应掌握度四档：未接触 / 没学好 / 学习中 / 已掌握。',
   },
   {
-    icon: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>'
-        + '<path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="m9 15 3-3 3 3"/>',
+    icon: 'fileUpload',
     title: '知识库：把资料变成图谱',
     description: '上传教材、讲义、PDF / Word / Excel / 图片，AI 读完后可以一键生成整门学科的图谱。',
     features: [
@@ -98,8 +95,7 @@ const steps = [
     tip: '上传与建图是两步：先上传索引好，再决定用哪些建图，不必一次全用上。',
   },
   {
-    icon: '<path d="M9 11l3 3L22 4"/>'
-        + '<path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+    icon: 'quiz',
     title: '出题与掌握度',
     description: '出题页按主题、难度、题型、题量生成练习，答完立刻判分并给出解析。',
     features: [
@@ -109,20 +105,20 @@ const steps = [
       '题目可导出、按批次回看历史练习与正确率',
       '从节点详情「去出题」可直接聚焦某个知识点',
     ],
-    tip: '想让 AI 更懂你，多做题比多聊天更有效——掌握度只认真实作答。',
+    tip: '想让它更贴合你，多做题比多聊天更有效——掌握度只认真实作答。',
   },
   {
-    icon: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+    icon: 'route',
     title: '学习进度与个性化',
-    description: '仪表盘是概览层，所有数字都从图谱掌握度聚合而来——图谱变了，进度就跟着变。',
+    description: '进度不单独占一页：学科侧栏看掌握度，学习路径看「先学什么」，出题把掌握度往上推。',
     features: [
-      '总览掌握 / 学习 / 薄弱 / 未接触分布，支持按学科筛选',
-      '薄弱点与「下一步学什么」推荐，点一下直接聚焦图谱节点',
-      '学习路径：图谱左侧展开分层看板，先学什么、卡在哪一目了然',
+      '学科侧栏：顶部一条全局汇总，每个学科都有节点数与掌握度进度条',
+      '学习路径：图谱左侧「学习路径」tab 按先修关系排好顺序，前置只是建议、不挡跳级',
+      '掌握度四色：未开始 / 薄弱 / 学习中 / 已掌握，图谱与侧栏图例同口径',
       '悬浮球：不在对话页也能随手问一句（设置 · 悬浮球）',
       '模型与主题自配：每人独立 Key、主备自动降级（设置 · 模型 / 外观）',
     ],
-    tip: '随时可以在 设置 · 引导 重新打开这份说明，开始探索吧！',
+    tip: '随时可以在 设置 · 引导 重新打开这份说明。',
   },
 ]
 
@@ -221,11 +217,7 @@ defineExpose({
             <Transition name="ob-fade" mode="out-in">
               <div class="ob-step" :key="currentStep">
                 <div class="ob-icon">
-                  <svg
-                    width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
-                    v-html="steps[currentStep].icon"
-                  ></svg>
+                  <AppIcon :name="steps[currentStep].icon" :size="26" :stroke="1.8" />
                 </div>
 
                 <h2 id="ob-title" class="ob-title">{{ steps[currentStep].title }}</h2>
@@ -233,21 +225,13 @@ defineExpose({
 
                 <ul class="ob-features">
                   <li v-for="feat in steps[currentStep].features" :key="feat">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                         stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
+                    <AppIcon name="check" :size="14" />
                     <span>{{ feat }}</span>
                   </li>
                 </ul>
 
                 <p class="ob-tip">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                       stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="12" y1="16" x2="12" y2="12" />
-                    <line x1="12" y1="8" x2="12.01" y2="8" />
-                  </svg>
+                  <AppIcon name="info" :size="14" />
                   <span>{{ steps[currentStep].tip }}</span>
                 </p>
               </div>
@@ -259,19 +243,12 @@ defineExpose({
 
               <div class="ob-buttons">
                 <button v-if="currentStep > 0" class="ob-btn ob-prev" @click="prev">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                       stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="m15 18-6-6 6-6" />
-                  </svg>
+                  <AppIcon name="chevronLeft" :size="14" />
                   上一步
                 </button>
                 <button class="ob-btn ob-next" @click="next">
                   {{ isLast ? '开始使用' : '下一步' }}
-                  <svg v-if="!isLast" width="14" height="14" viewBox="0 0 24 24" fill="none"
-                       stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                       stroke-linejoin="round">
-                    <path d="m9 18 6-6-6-6" />
-                  </svg>
+                  <AppIcon v-if="!isLast" name="chevronRight" :size="14" />
                 </button>
               </div>
             </footer>
