@@ -19,7 +19,6 @@ const props = defineProps({
   edges: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
   error: { type: String, default: '' },
-  nextNodeId: { type: String, default: '' },
   sourceNodes: { type: Array, default: () => [] },
   // 虚拟根显示名（传当前学科名，让用户知道这张树是哪个切片的）
   rootLabel: { type: String, default: '' },
@@ -97,7 +96,6 @@ function render() {
 
   const all = enter.merge(nodeSel)
   all.attr('transform', (d) => `translate(${d.y},${d.x})`)
-    .classed('is-next', (d) => !!props.nextNodeId && d.data.id === props.nextNodeId)
     .classed('is-source', (d) => sourceSet.value.has(d.data.id))
     .classed('is-root', (d) => d.data.kind === 'root')
   all.select('.mm-dot').attr('fill', (d) => (d.data.kind === 'root' ? 'var(--color-accent)' : nodeFill(d.data.mastery)))
@@ -202,9 +200,8 @@ watch(tree, (t) => {
 })
 
 // 高亮态变化只需要刷类名，不必重排
-watch([() => props.nextNodeId, () => props.sourceNodes], () => {
+watch(() => props.sourceNodes, () => {
   gRoot?.selectAll('g.mm-node')
-    .classed('is-next', (d) => !!props.nextNodeId && d.data.id === props.nextNodeId)
     .classed('is-source', (d) => sourceSet.value.has(d.data.id))
 })
 </script>
@@ -230,7 +227,7 @@ watch([() => props.nextNodeId, () => props.sourceNodes], () => {
   height: 100%;
   position: relative;
   background: var(--color-bg-primary);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 .mm-canvas { display: block; cursor: grab; }
@@ -245,7 +242,7 @@ watch([() => props.nextNodeId, () => props.sourceNodes], () => {
   font-family: inherit;
   font-size: 11px;
   border: 1px solid var(--color-border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--color-bg-primary);
   color: var(--color-text-secondary);
   cursor: pointer;
@@ -301,9 +298,7 @@ watch([() => props.nextNodeId, () => props.sourceNodes], () => {
 }
 .mindmap-view :deep(.mm-toggle:hover circle) { stroke: var(--color-accent); fill: var(--color-accent-light); }
 
-/* ── 联动高亮：推荐节点 / 来源命中 ── */
-.mindmap-view :deep(g.is-next .mm-dot) { stroke: var(--color-accent); stroke-width: 3; }
-.mindmap-view :deep(g.is-next .mm-label) { font-weight: 600; }
+/* ── 来源命中高亮（知识库「在图谱中显示」） ── */
 .mindmap-view :deep(g.is-source .mm-dot) { stroke: var(--color-accent); stroke-width: 2.5; }
 .mindmap-view :deep(g.is-source .mm-label) { fill: var(--color-accent); }
 </style>

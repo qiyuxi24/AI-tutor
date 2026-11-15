@@ -13,6 +13,7 @@ import { useChatStore } from '../stores/chatStore'
 import { useContextMenu } from '../utils/contextMenu'
 import ContextMenu from './ContextMenu.vue'
 import ItemMoreButton from './ItemMoreButton.vue'
+import AppIcon from './AppIcon.vue'
 
 const store = useChatStore()
 
@@ -98,10 +99,7 @@ async function handleDelete() {
       @click="handleNew"
       :title="store.isCurrentEmpty ? '当前已是新对话' : '新建对话'"
     >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-        <line x1="12" y1="5" x2="12" y2="19" />
-        <line x1="5" y1="12" x2="19" y2="12" />
-      </svg>
+      <AppIcon name="plus" :size="16" />
       新对话
     </button>
 
@@ -121,9 +119,7 @@ async function handleDelete() {
           @keydown.enter.self="handleSwitch(conv.id)"
           @keydown.space.self.prevent="handleSwitch(conv.id)"
         >
-          <svg class="chat-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-          </svg>
+          <AppIcon class="chat-icon" name="chat" :size="16" />
           <input
             v-if="editingId === conv.id"
             :ref="setEditInput"
@@ -154,10 +150,7 @@ async function handleDelete() {
           @keydown.space.self.prevent="close(); startRename(menuConv)"
         >
           <span class="menu-icon">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-            </svg>
+            <AppIcon name="pencil" :size="14" />
           </span>
           重命名对话
         </div>
@@ -168,14 +161,7 @@ async function handleDelete() {
           @keydown.space.self.prevent="close(); handleDelete()"
         >
           <span class="menu-icon">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 6h18" />
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-              <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-              <line x1="10" y1="11" x2="10" y2="17" />
-              <line x1="14" y1="11" x2="14" y2="17" />
-            </svg>
+            <AppIcon name="trash" :size="14" />
           </span>
           删除对话
         </div>
@@ -217,7 +203,7 @@ async function handleDelete() {
   margin: 0 14px 14px;
   padding: 10px 14px;
   border: 1px solid var(--color-border-light);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: transparent;
   color: var(--color-text-primary);
   font-size: 14px;
@@ -243,15 +229,13 @@ async function handleDelete() {
 .history-list::-webkit-scrollbar { width: 4px; }
 .history-list::-webkit-scrollbar-thumb {
   background: var(--color-border-light);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
 }
 
 .date-label {
   font-size: var(--font-size-xs);
   font-weight: 600;
   color: var(--color-text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
   padding: 12px 10px 6px;
 }
 
@@ -260,7 +244,7 @@ async function handleDelete() {
   align-items: center;
   gap: 8px;
   padding: 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   border-left: 3px solid transparent;
   transition: background 0.15s;
@@ -295,7 +279,7 @@ async function handleDelete() {
   line-height: 1.3;
   padding: 2px 6px;
   border: 1px solid var(--color-accent);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: var(--color-bg-primary);
   color: var(--color-text-primary);
   outline: none;

@@ -111,7 +111,7 @@ onUnmounted(() => {
   height: 100%;
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
 }
 </style>

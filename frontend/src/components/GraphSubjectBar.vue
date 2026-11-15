@@ -8,6 +8,7 @@
  *
  * 数据流：
  *   store.subjectSummaries（学科 + 节点数/掌握度统计） → 渲染
+ *   store.graphOverall（跨学科聚合，原「学习进度」整页撤掉后并入这里） → 顶部汇总行
  *   store.currentSubject（当前选中） → 高亮
  *   store.setSubject()（左键点击） → 按需拉取该学科子图
  *   store.deleteSubjectGraph()（条目菜单） → 删除该学科整张图
@@ -28,9 +29,10 @@ import { useChatStore } from '../stores/chatStore'
 import { useContextMenu } from '../utils/contextMenu'
 import ContextMenu from './ContextMenu.vue'
 import ItemMoreButton from './ItemMoreButton.vue'
+import AppIcon from './AppIcon.vue'
 
 const store = useChatStore()
-const { subjectSummaries, currentSubject } = storeToRefs(store)
+const { subjectSummaries, currentSubject, graphOverall } = storeToRefs(store)
 
 // 条目菜单：与画布共用同一套开关，由常驻三点按钮触发；targetData = 该学科摘要对象
 const {
@@ -111,6 +113,19 @@ async function handleDelete() {
       <span class="subject-bar-count">{{ subjectSummaries.length }}</span>
     </div>
 
+    <!-- 跨学科汇总行：原「学习进度」整页撤掉后只保留这一层全局视角（2026-11-15）。
+         口径与学科条目一致 = mastery_avg，不引「完成率」，避免两处百分比打架。 -->
+    <div v-if="graphOverall && graphOverall.node_count" class="subject-overview">
+      <div class="so-row">
+        <span class="so-label">全部</span>
+        <span class="so-count">{{ graphOverall.node_count }} 点 · 已掌握 {{ graphOverall.mastered_count }}</span>
+      </div>
+      <div class="subject-bar">
+        <span class="subject-bar-fill" :style="{ width: masteryPct(graphOverall) + '%' }"></span>
+      </div>
+      <div class="so-hint">平均掌握度 {{ masteryPct(graphOverall) }}%</div>
+    </div>
+
     <div class="subject-list">
       <div
         v-for="s in subjectSummaries"
@@ -120,12 +135,7 @@ async function handleDelete() {
         :title="`${s.subject}：${s.node_count} 节点，已掌握 ${s.mastered_count}`"
         @click="handleSelect(s)"
       >
-        <svg class="subject-icon" width="16" height="16" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" />
-          <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" />
-          <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />
-        </svg>
+        <AppIcon class="subject-icon" name="layers" :size="16" />
 
         <span class="subject-body">
           <span class="subject-row">
@@ -156,24 +166,14 @@ async function handleDelete() {
         <template v-if="menuSubject && !menuSubject.unclassified">
           <div class="menu-item" @click="close(); handleRename()">
             <span class="menu-icon">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-              </svg>
+              <AppIcon name="pencil" :size="14" />
             </span>
             重命名学科
           </div>
           <div class="menu-divider"></div>
           <div class="menu-item menu-item-danger" @click="close(); handleDelete()">
             <span class="menu-icon">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 6h18" />
-                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                <line x1="10" y1="11" x2="10" y2="17" />
-                <line x1="14" y1="11" x2="14" y2="17" />
-              </svg>
+              <AppIcon name="trash" :size="14" />
             </span>
             删除「{{ menuSubject.subject }}」图谱
           </div>
@@ -195,7 +195,7 @@ async function handleDelete() {
   flex-shrink: 1;
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 
@@ -220,6 +220,36 @@ async function handleDelete() {
   color: var(--color-text-muted);
 }
 
+/* 跨学科汇总行（原学习进度整页撤掉后并入侧栏，一处定义、不压画布） */
+.subject-overview {
+  flex-shrink: 0;
+  margin: 0 12px 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-tertiary);
+}
+.so-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.so-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.so-count {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+.so-hint {
+  margin-top: 5px;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
 .subject-list {
   display: flex;
   flex-direction: column;
@@ -232,7 +262,7 @@ async function handleDelete() {
 .subject-list::-webkit-scrollbar { width: 4px; }
 .subject-list::-webkit-scrollbar-thumb {
   background: var(--color-border-light);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
 }
 
 /* 条目：与 ConversationSidebar 的 .history-item 同款（无边框 + 左侧色条选中） */
@@ -241,7 +271,7 @@ async function handleDelete() {
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border-left: 3px solid transparent;
   cursor: pointer;
   transition: background 0.15s;
@@ -307,7 +337,7 @@ async function handleDelete() {
 .subject-bar {
   display: block;
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--color-border-light);
   overflow: hidden;
 }
@@ -315,7 +345,7 @@ async function handleDelete() {
 .subject-bar-fill {
   display: block;
   height: 100%;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background: var(--color-accent);
   transition: width 0.25s ease;
 }

@@ -7,7 +7,7 @@
  *
  * 三态：loading（不占高，避免弹窗跳动）/ error（一行弱提示）/ 空（**整卡不渲染**）。
  * 空时用 `v-if` 整个拿掉而不是留一块"暂无视频出处"的灰框：节点大多是文字资料来的，
- * 绝大多数节点没有视频出处，留一个常驻空卡会把真正有用的区块（前置知识/相关节点）往下挤。
+ * 绝大多数节点没有视频出处，留一个常驻空卡只会白占一行的空间。
  *
  * `t_url` 可能是空串（该资料没有视频链接，比如普通 PDF）：那种条目只显示文字，
  * 不给一个点了没反应的链接。
@@ -22,6 +22,7 @@
 import { onMounted, ref, watch } from 'vue'
 import { getNodeVideoSources } from '../api/kb.js'
 import { tStartFromLocator } from '../utils/lecture.js'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
   nodeId: { type: String, required: true },
@@ -94,12 +95,7 @@ function openExternal(url) {
           title="在新标签页打开原视频"
           @click.stop="openExternal(src.t_url)"
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-            <polyline points="15 3 21 3 21 9" />
-            <line x1="10" y1="14" x2="21" y2="3" />
-          </svg>
+          <AppIcon name="share" :size="12" />
         </button>
       </li>
     </ul>
@@ -107,9 +103,8 @@ function openExternal(url) {
 </template>
 
 <style scoped>
-/* 视觉上与 NodeDetail 里既有的 .relations-section 同级（同样的内边距），
-   但分隔线用最浅一档：它可能紧跟在小节溯源（自带 border-bottom）之后，
-   两条 1px 贴在一起会变成一道明显更粗的线。 */
+/* 与正文区用一条最浅的分隔线隔开：它可能紧跟在小节溯源（自带 border-bottom）
+   之后，两条 1px 贴在一起会变成一道明显更粗的线。 */
 .vs-card {
   padding: 10px 24px 12px;
   border-top: 1px solid var(--color-border-soft);

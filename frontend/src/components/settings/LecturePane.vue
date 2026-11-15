@@ -337,7 +337,7 @@ onBeforeUnmount(stopQrTimer)
 .qr-img {
   width: 200px;
   height: 200px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: #fff;
 }
 
@@ -348,7 +348,7 @@ onBeforeUnmount(stopQrTimer)
   align-items: center;
   justify-content: center;
   border: 1px dashed var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 12px;
   color: var(--color-text-tertiary);
 }

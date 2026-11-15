@@ -16,7 +16,6 @@ const props = defineProps({
   nodes: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
   error: { type: String, default: '' },
-  nextNodeId: { type: String, default: '' },
   sourceNodes: { type: Array, default: () => [] },
 })
 
@@ -32,7 +31,6 @@ const collapsed = reactive(new Set())
 const ctx = {
   collapsed,
   toggle: (id) => { collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id) },
-  isNext: (id) => !!props.nextNodeId && id === props.nextNodeId,
   isSource: (id) => sourceSet.value.has(id),
   open: (id) => emit('open-node', id),
 }
@@ -90,7 +88,7 @@ defineExpose({ focusNode })
   height: 100%;
   position: relative;
   background: var(--color-bg-primary);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 
@@ -100,7 +98,7 @@ defineExpose({ focusNode })
   padding: 12px 14px 24px;
 }
 .brace-tree::-webkit-scrollbar { width: 6px; }
-.brace-tree::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
+.brace-tree::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: var(--radius-sm); }
 
 .brace-overlay {
   position: absolute;

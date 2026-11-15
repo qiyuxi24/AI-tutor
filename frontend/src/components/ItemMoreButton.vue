@@ -14,6 +14,7 @@
  * 补不出被挤出容器的按钮。父级须给文字节点 min-width:0（见调用方注释）。
  */
 import { ref } from 'vue'
+import AppIcon from './AppIcon.vue'
 
 defineProps({
   title: { type: String, default: '更多操作' },
@@ -32,9 +33,7 @@ const btn = ref(null)
     :title="title"
     @click.stop="emit('click', btn)"
   >
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <circle cx="12" cy="5" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="12" cy="19" r="1.7" />
-    </svg>
+    <AppIcon name="moreVertical" :size="16" />
   </button>
 </template>
 
@@ -48,7 +47,7 @@ const btn = ref(null)
   height: 22px;
   padding: 0;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;

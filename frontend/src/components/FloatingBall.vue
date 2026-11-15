@@ -15,6 +15,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ChatArea from './ChatArea.vue'
 import { ballPrefs, ballPrefsMeta, BALL_SIZE_PRESETS } from '../utils/floatingBall.js'
 import { BRAND_ICON } from '../utils/brandAssets.js'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
   /** 是否允许显示（父级传入：非对话页 且 用户已开启） */
@@ -429,9 +430,7 @@ onBeforeUnmount(() => {
         >
           <span class="bw-title">AI 学习助手</span>
           <button class="bw-min" type="button" aria-label="收起小窗" @click="open = false">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-              <line x1="6" y1="12" x2="18" y2="12" />
-            </svg>
+            <AppIcon name="minus" :size="16" />
           </button>
         </header>
         <div class="bw-body">
@@ -455,10 +454,7 @@ onBeforeUnmount(() => {
           @pointerup="onGripPointerUp"
           @pointercancel="onGripPointerUp"
         >
-          <svg v-if="dir === 'se'" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
-            <path d="M14 7 L7 14" />
-            <path d="M14 11 L11 14" />
-          </svg>
+          <AppIcon v-if="dir === 'se'" name="grip" :size="12" :stroke="1.4" />
         </div>
       </div>
 
@@ -541,7 +537,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--color-border);
-  border-radius: 14px;
+  border-radius: var(--radius-xl);
   background: var(--color-bg-primary);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.24);
 }
@@ -569,7 +565,7 @@ onBeforeUnmount(() => {
   width: 28px;
   height: 28px;
   border: none;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
   cursor: pointer;

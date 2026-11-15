@@ -11,6 +11,7 @@ import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../../stores/authStore'
 import { avatarState, removeAvatar, uploadAvatar } from '../../utils/avatar.js'
+import AppIcon from '../AppIcon.vue'
 
 defineEmits(['switch-account'])
 
@@ -94,10 +95,7 @@ async function submitPassword() {
     <div class="sc-row">
       <div class="avatar-preview">
         <img v-if="avatarState.url" class="avatar-preview-img" :src="avatarState.url" alt="当前头像" />
-        <svg v-else class="avatar-preview-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-          <circle cx="12" cy="7" r="4" />
-        </svg>
+        <AppIcon v-else class="avatar-preview-icon" name="user" />
       </div>
       <div class="sc-row-info">
         <div class="sc-row-title">{{ avatarState.url ? '当前头像' : '默认头像' }}</div>
@@ -212,7 +210,7 @@ async function submitPassword() {
   margin-bottom: 10px;
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
 }
 
 .form-row {

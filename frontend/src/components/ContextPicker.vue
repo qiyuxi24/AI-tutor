@@ -14,6 +14,7 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { getKbTree } from '../api/kb.js'
 import { useChatStore } from '../stores/chatStore'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
   /** 打开时默认停在哪个 tab：docs | nodes（由点的是哪颗胶囊决定） */
@@ -160,10 +161,7 @@ onMounted(() => {
 <template>
   <div class="pk" role="dialog" aria-label="引用资料或知识点" @keydown="handleKeydown">
     <div class="pk-head">
-      <svg class="pk-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none"
-           stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-        <circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" />
-      </svg>
+      <AppIcon class="pk-search-icon" name="search" :size="14" />
       <input
         ref="inputRef"
         v-model="query"
@@ -174,8 +172,7 @@ onMounted(() => {
       />
       <span v-if="loading" class="pk-spinner" aria-hidden="true"></span>
       <button v-else-if="query" class="pk-clear-q" aria-label="清空搜索" @click="query = ''">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="3" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+        <AppIcon name="x" :size="11" />
       </button>
     </div>
 
@@ -213,25 +210,14 @@ onMounted(() => {
           @click="pick({ kind: 'docs', item: d })"
         >
           <span class="pk-ico" :class="d.type">
-            <svg v-if="d.type === 'folder'" width="14" height="14" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z" />
-            </svg>
-            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-            </svg>
+            <AppIcon :name="d.type === 'folder' ? 'folder' : 'file'" :size="14" />
           </span>
           <span class="pk-text">
             <span class="pk-name">{{ d.name }}</span>
             <span class="pk-sub">{{ d.path }}</span>
           </span>
           <span v-if="isPicked('docs', d.id)" class="pk-check">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
+            <AppIcon name="check" :size="13" />
           </span>
         </button>
       </template>
@@ -249,8 +235,7 @@ onMounted(() => {
           @click="pick({ kind: 'nodes', item: n })"
         >
           <span class="pk-ico node">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2"><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="3" /></svg>
+            <AppIcon name="target" :size="13" />
           </span>
           <span class="pk-text">
             <span class="pk-name">{{ n.name }}</span>
@@ -258,10 +243,7 @@ onMounted(() => {
           </span>
           <span v-if="n.mastery" class="pk-mastery">{{ n.mastery }}%</span>
           <span v-if="isPicked('nodes', n.id)" class="pk-check">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
+            <AppIcon name="check" :size="13" />
           </span>
         </button>
       </template>
@@ -379,7 +361,7 @@ onMounted(() => {
 .pk-body::-webkit-scrollbar { width: 4px; }
 .pk-body::-webkit-scrollbar-thumb {
   background: var(--color-border);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
 }
 
 .pk-empty {
@@ -473,7 +455,7 @@ onMounted(() => {
   color: var(--color-text-secondary);
   background: var(--color-bg-card);
   border: 1px solid var(--color-border-soft);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 .pk-foot-tip { margin-left: auto; }
 

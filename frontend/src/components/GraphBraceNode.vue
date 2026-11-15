@@ -13,7 +13,7 @@ import { masteryLevel } from '../utils/forceGraphEngine'
 
 const props = defineProps({
   node: { type: Object, required: true },
-  // 共享上下文（GraphBrace 传下来的同一对象）：collapsed / toggle / isNext / isSource / open
+  // 共享上下文（GraphBrace 传下来的同一对象）：collapsed / toggle / isSource / open
   ctx: { type: Object, required: true },
 })
 
@@ -25,7 +25,6 @@ const isGroup = computed(() => props.node.kind === 'subject' || props.node.kind 
 const collapsed = computed(() => props.ctx.collapsed.has(props.node.id))
 const statusClass = computed(() => (isGroup.value ? '' : STATUS[masteryLevel(props.node.mastery)]))
 const highlightClass = computed(() => ({
-  'is-next': !isGroup.value && props.ctx.isNext(props.node.id),
   'is-source': !isGroup.value && props.ctx.isSource(props.node.id),
 }))
 
@@ -70,7 +69,7 @@ function onRowClick() {
   align-items: center;
   gap: 6px;
   padding: 4px 8px 4px 4px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   border-left: 3px solid transparent;
   font-size: 12.5px;
   color: var(--color-text-primary);
@@ -98,7 +97,7 @@ function onRowClick() {
   flex-shrink: 0;
   font-size: 10px;
   padding: 0 5px;
-  border-radius: 20px;
+  border-radius: var(--radius-xl);
   border: 1px dashed var(--color-border-light);
   color: var(--color-text-muted);
 }
@@ -119,8 +118,7 @@ function onRowClick() {
 .bn-row.st-unstarted { border-left-color: var(--color-border-light); }
 .bn-row.st-unstarted .bn-dot { background: var(--color-graph-node); }
 
-/* ── 联动高亮：推荐节点（下一步该学） / 来源命中（「在图谱中显示」） ── */
-.bn-row.is-next { background: var(--color-accent-light); border-left-color: var(--color-accent); }
+/* ── 来源命中高亮（知识库「在图谱中显示」） ── */
 .bn-row.is-source { outline: 1px solid var(--color-accent); outline-offset: -1px; }
 
 /* ── 子级缩进 + 引导线（大括号的连接线的纯 CSS 部分） ── */

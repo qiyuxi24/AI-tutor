@@ -264,7 +264,7 @@ async function remove(m) {
   margin-bottom: 12px;
   background: var(--color-accent-light);
   border: 1px solid var(--color-accent);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
 }
 .effective-label {
@@ -283,7 +283,7 @@ async function remove(m) {
   padding: 14px 16px;
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   margin-bottom: 10px;
 }
 .model-card.is-disabled {
@@ -310,7 +310,7 @@ async function remove(m) {
 .badge {
   font-size: var(--font-size-xs);
   padding: 1px 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-xl);
   border: 1px solid var(--color-border);
   color: var(--color-text-tertiary);
 }
@@ -369,7 +369,7 @@ async function remove(m) {
   font-size: 13px;
   color: var(--color-text-tertiary);
   border: 1px dashed var(--color-border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
 }
 
 .add-btn {

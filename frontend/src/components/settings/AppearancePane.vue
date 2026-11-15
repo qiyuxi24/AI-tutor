@@ -8,6 +8,7 @@
 import { useTheme } from '../../utils/theme'
 import { useMdTheme, MD_THEMES } from '../../utils/mdTheme'
 import { renderMarkdown } from '../../utils/markdown.js'
+import AppIcon from '../AppIcon.vue'
 
 const { mode, setTheme } = useTheme()
 const { mdTheme, setMdTheme } = useMdTheme()
@@ -43,9 +44,7 @@ const mdPreviewHtml = renderMarkdown(MD_PREVIEW_SAMPLE)
           :class="{ active: mode === 'dark' }"
           @click="setTheme('dark')"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-          </svg>
+          <AppIcon name="moon" :size="16" />
           深色
         </button>
         <button
@@ -53,17 +52,7 @@ const mdPreviewHtml = renderMarkdown(MD_PREVIEW_SAMPLE)
           :class="{ active: mode === 'light' }"
           @click="setTheme('light')"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="4" />
-            <line x1="12" y1="2" x2="12" y2="4" />
-            <line x1="12" y1="20" x2="12" y2="22" />
-            <line x1="4.93" y1="4.93" x2="6.34" y2="6.34" />
-            <line x1="17.66" y1="17.66" x2="19.07" y2="19.07" />
-            <line x1="2" y1="12" x2="4" y2="12" />
-            <line x1="20" y1="12" x2="22" y2="12" />
-            <line x1="4.93" y1="19.07" x2="6.34" y2="17.66" />
-            <line x1="17.66" y1="6.34" x2="19.07" y2="4.93" />
-          </svg>
+          <AppIcon name="sun" :size="16" />
           浅色
         </button>
         <button
@@ -71,11 +60,7 @@ const mdPreviewHtml = renderMarkdown(MD_PREVIEW_SAMPLE)
           :class="{ active: mode === 'system' }"
           @click="setTheme('system')"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="2" y="3" width="20" height="14" rx="2" />
-            <line x1="8" y1="21" x2="16" y2="21" />
-            <line x1="12" y1="17" x2="12" y2="21" />
-          </svg>
+          <AppIcon name="monitor" :size="16" />
           跟随系统
         </button>
       </div>
@@ -106,7 +91,7 @@ const mdPreviewHtml = renderMarkdown(MD_PREVIEW_SAMPLE)
   flex-shrink: 0;
   padding: 7px 12px;
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--color-bg-secondary);
   color: var(--color-text-primary);
   font-size: 13px;
@@ -124,7 +109,7 @@ html.dark .md-theme-select {
   padding: 14px 18px;
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   font-size: 13px;
   line-height: 1.6;
   color: var(--color-text-primary);
@@ -143,14 +128,14 @@ html.dark .md-theme-select {
 .md-preview :deep(code) {
   background: var(--color-bg-hover);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-family: 'Consolas', 'Courier New', monospace;
 }
 .md-preview :deep(pre) {
   background: var(--color-bg-tertiary);
   color: var(--color-text-primary);
   padding: 14px 16px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   overflow-x: auto;
   margin: 0;
 }

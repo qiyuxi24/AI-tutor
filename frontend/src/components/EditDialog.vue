@@ -233,7 +233,7 @@ function handleCancel() {
 .dialog-panel {
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-popup);
   width: 420px;
   max-width: 90vw;
@@ -310,7 +310,7 @@ function handleCancel() {
 .form-textarea {
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   color: var(--color-text-primary);
   padding: 8px 12px;
   font-size: 13px;

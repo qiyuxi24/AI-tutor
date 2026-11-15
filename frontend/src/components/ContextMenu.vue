@@ -117,7 +117,7 @@ watch(() => props.visible, async (val) => {
   min-width: 170px;
   background: var(--color-bg-primary, #ffffff);
   border: 1px solid var(--color-border, #e5e7eb);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   box-shadow: var(--shadow-popup, 0 4px 16px rgba(0,0,0,0.12));
   padding: 6px 0;
   font-size: 13px;

@@ -15,6 +15,7 @@
  */
 
 import { ref, computed, watch, nextTick } from 'vue'
+import AppIcon from './AppIcon.vue'
 
 /* ================================================================
    组件 Props
@@ -137,10 +138,7 @@ defineExpose({ focus: () => inputRef.value?.focus(), close: closeSearch })
 <template>
   <div class="graph-search" :class="{ focused: focused }">
     <div class="search-input-wrapper">
-      <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-        <circle cx="11" cy="11" r="8"/>
-        <path d="m21 21-4.35-4.35"/>
-      </svg>
+      <AppIcon class="search-icon" name="search" :size="14" />
       <input
         ref="inputRef"
         v-model="query"
@@ -152,9 +150,7 @@ defineExpose({ focus: () => inputRef.value?.focus(), close: closeSearch })
         @blur="onBlur"
       />
       <button v-if="query" class="search-clear" @mousedown.prevent="closeSearch" title="清除">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-        </svg>
+        <AppIcon name="x" :size="12" />
       </button>
     </div>
 
@@ -223,13 +219,13 @@ defineExpose({ focus: () => inputRef.value?.focus(), close: closeSearch })
   height: 32px;
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border-subtle);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .graph-search.focused .search-input-wrapper {
   border-color: var(--color-accent);
-  box-shadow: 0 0 0 2px var(--color-accent-light, rgba(59, 130, 246, 0.15));
+  box-shadow: 0 0 0 2px var(--color-accent-light);
 }
 
 .search-icon {
@@ -261,7 +257,7 @@ defineExpose({ focus: () => inputRef.value?.focus(), close: closeSearch })
   background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   flex-shrink: 0;
   padding: 0;
 }
@@ -277,7 +273,7 @@ defineExpose({ focus: () => inputRef.value?.focus(), close: closeSearch })
   right: 0;
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-popup);
   z-index: 50;
   overflow: hidden;
@@ -324,9 +320,9 @@ defineExpose({ focus: () => inputRef.value?.focus(), close: closeSearch })
 }
 
 .result-name mark {
-  background: var(--color-accent-light, rgba(59, 130, 246, 0.2));
+  background: var(--color-accent-light);
   color: var(--color-accent);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   padding: 0 1px;
 }
 
@@ -363,7 +359,7 @@ defineExpose({ focus: () => inputRef.value?.focus(), close: closeSearch })
   color: var(--color-text-secondary);
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 
 /* ════════════════════════════════════════════

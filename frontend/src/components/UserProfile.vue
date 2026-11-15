@@ -476,7 +476,7 @@ async function removeNote(noteId) {
 .profile-panel {
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-popup);
   width: 680px;
   max-width: 92vw;
@@ -519,14 +519,14 @@ async function removeNote(noteId) {
   width: 110px;
   height: 8px;
   background: var(--color-bg-secondary);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 
 .completeness-bar {
   height: 100%;
-  background: linear-gradient(90deg, var(--color-blue), var(--color-blue-hover, var(--color-blue)));
-  border-radius: 4px;
+  background: var(--color-primary);
+  border-radius: var(--radius-sm);
   transition: width 0.3s ease;
 }
 
@@ -545,7 +545,7 @@ async function removeNote(noteId) {
 
 .btn {
   padding: 6px 14px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -695,7 +695,7 @@ async function removeNote(noteId) {
   display: inline-block;
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 2px 8px;
   margin: 2px 6px 2px 0;
   font-size: 12px;
@@ -712,7 +712,7 @@ async function removeNote(noteId) {
 .pf-note {
   border: 1px solid var(--color-border);
   border-left: 3px solid var(--color-blue);
-  border-radius: 0 8px 8px 0;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
   background: var(--color-bg-surface);
   padding: 8px 12px;
 }
@@ -783,7 +783,7 @@ async function removeNote(noteId) {
   padding: 8px 10px;
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   color: var(--color-text-primary);
   font-size: 13px;
   line-height: 1.5;
@@ -854,7 +854,7 @@ async function removeNote(noteId) {
   padding: 8px 14px;
   border-left: 3px solid var(--color-blue);
   background: var(--color-bg-surface);
-  border-radius: 0 6px 6px 0;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
   font-size: 13px;
   color: var(--color-text-secondary);
   line-height: 1.6;
@@ -881,7 +881,7 @@ async function removeNote(noteId) {
   padding: 14px;
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--color-text-primary);
   font-size: 13px;
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;

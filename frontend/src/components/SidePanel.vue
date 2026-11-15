@@ -25,6 +25,7 @@
  * 初始化时若存过值会 emit 修正，之后每次变更自动写入。父级只给默认值即可。
  */
 import { ref, watch, onMounted } from 'vue'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
   /** 面板在哪一侧：left = 贴容器左缘（边线在右），right 反之 */
@@ -93,10 +94,7 @@ function startResize(e) {
       @click="emit('update:collapsed', !collapsed)"
       :title="`${collapsed ? '展开' : '收起'}${label}`"
     >
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2.5" />
-        <line :x1="side === 'left' ? 9 : 15" y1="3" :x2="side === 'left' ? 9 : 15" y2="21" />
-      </svg>
+      <AppIcon :name="side === 'left' ? 'panelLeft' : 'panelRight'" :size="15" />
     </button>
   </div>
 </template>
@@ -181,7 +179,7 @@ function startResize(e) {
   height: 26px;
   padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-tertiary);
   cursor: pointer;

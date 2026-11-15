@@ -3,7 +3,7 @@
  * ActivityBar.vue — 最左侧活动栏（VSCode / ima 风格，沉浸式无顶部栏）
  *
  * 职责：
- *   1. 页面入口图标导航（对话 / 学习进度 / 图谱 / 出题）
+ *   1. 页面入口图标导航（对话 / 图谱 / 出题）
  *      ⚠️ 资源采集已改为后端 AI 工具（`search_resources` / `collect_resources`），
  *         前端入口整体下线：本导航项已移除，CollectorView.vue 保留但不再挂载。
  *      知识库有两个入口、同一个组件（KbPanel）：独立页（KbView）+ 图谱页右侧可收起的侧栏
@@ -12,6 +12,7 @@
  *   3. 底部：主题切换 / 设置 / 用户菜单（含用户画像、切换账号）
  *
  * 组件自包含主题与账号逻辑，HomeView 无需参与。
+ * 图标一律走 <AppIcon>（图形定义在 utils/icons.js）。
  */
 
 import { ref } from 'vue'
@@ -19,6 +20,7 @@ import { useTheme } from '../utils/theme'
 import { useAuthStore } from '../stores/authStore'
 import { avatarState } from '../utils/avatar.js'
 import { BRAND_ICON } from '../utils/brandAssets.js'
+import AppIcon from './AppIcon.vue'
 
 defineProps({
   activeView: { type: String, default: 'chat' },
@@ -30,13 +32,12 @@ const { isDark, toggleTheme } = useTheme()
 const authStore = useAuthStore()
 const showUserMenu = ref(false)
 
-// 导航项
+// 导航项：icon 直接是 icons.js 的键
 const items = [
   { id: 'chat', title: '对话', icon: 'chat' },
-  { id: 'dashboard', title: '学习进度', icon: 'dashboard' },
   { id: 'graph', title: '知识图谱', icon: 'graph' },
-  { id: 'kb', title: '知识库', icon: 'kb' },
-  { id: 'lecture', title: '视频导入', icon: 'lecture' },
+  { id: 'kb', title: '知识库', icon: 'database' },
+  { id: 'lecture', title: '视频导入', icon: 'film' },
   { id: 'quiz', title: '出题', icon: 'quiz' },
 ]
 
@@ -68,46 +69,7 @@ function handleUserMenu(action) {
         :title="item.title"
         @click="handleSelect(item.id)"
       >
-        <!-- 对话图标 -->
-        <svg v-if="item.icon === 'chat'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-        </svg>
-        <!-- 仪表盘图标（gauge） -->
-        <svg v-else-if="item.icon === 'dashboard'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="m12 14 4-4" />
-          <path d="M3.34 19a10 10 0 1 1 17.32 0" />
-        </svg>
-        <!-- 图谱图标 -->
-        <svg v-else-if="item.icon === 'graph'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="6" cy="5" r="2.5" />
-          <circle cx="18" cy="7" r="2.5" />
-          <circle cx="12" cy="19" r="2.5" />
-          <line x1="7.5" y1="6.5" x2="15.8" y2="8.4" />
-          <line x1="16.5" y1="8.8" x2="13.1" y2="17" />
-          <line x1="7.3" y1="7.3" x2="10.7" y2="16.8" />
-        </svg>
-        <!-- 知识库图标（database） -->
-        <svg v-else-if="item.icon === 'kb'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <ellipse cx="12" cy="5" rx="9" ry="3" />
-          <path d="M3 5v14a9 3 0 0 0 18 0V5" />
-          <path d="M3 12a9 3 0 0 0 18 0" />
-        </svg>
-        <!-- 视频导入图标（film） -->
-        <svg v-else-if="item.icon === 'lecture'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
-          <line x1="7" y1="2" x2="7" y2="22" />
-          <line x1="17" y1="2" x2="17" y2="22" />
-          <line x1="2" y1="12" x2="22" y2="12" />
-          <line x1="2" y1="7" x2="7" y2="7" />
-          <line x1="2" y1="17" x2="7" y2="17" />
-          <line x1="17" y1="17" x2="22" y2="17" />
-          <line x1="17" y1="7" x2="22" y2="7" />
-        </svg>
-        <!-- 出题图标（测验/试题） -->
-        <svg v-else-if="item.icon === 'quiz'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M9 11l3 3L22 4" />
-          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-        </svg>
+        <AppIcon :name="item.icon" :size="22" />
       </button>
     </nav>
 
@@ -115,20 +77,7 @@ function handleUserMenu(action) {
     <div class="ab-bottom">
       <!-- 主题切换 -->
       <button class="ab-item" :title="isDark ? '切换浅色模式' : '切换深色模式'" @click="toggleTheme">
-        <svg v-if="!isDark" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="4" />
-          <line x1="12" y1="2" x2="12" y2="4" />
-          <line x1="12" y1="20" x2="12" y2="22" />
-          <line x1="4.93" y1="4.93" x2="6.34" y2="6.34" />
-          <line x1="17.66" y1="17.66" x2="19.07" y2="19.07" />
-          <line x1="2" y1="12" x2="4" y2="12" />
-          <line x1="20" y1="12" x2="22" y2="12" />
-          <line x1="4.93" y1="19.07" x2="6.34" y2="17.66" />
-          <line x1="17.66" y1="6.34" x2="19.07" y2="4.93" />
-        </svg>
-        <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-        </svg>
+        <AppIcon :name="isDark ? 'moon' : 'sun'" :size="20" />
       </button>
 
       <!-- 设置入口 -->
@@ -138,10 +87,7 @@ function handleUserMenu(action) {
         title="设置"
         @click="handleSelect('settings')"
       >
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-        </svg>
+        <AppIcon name="settings" :size="22" />
       </button>
 
       <!-- 用户菜单 -->
@@ -149,10 +95,7 @@ function handleUserMenu(action) {
         <button class="ab-item ab-avatar" :title="authStore.username || '用户'" @click="showUserMenu = !showUserMenu">
           <!-- 设置了自定义头像就显示照片，否则回落到人形图标 -->
           <img v-if="avatarState.url" class="ab-avatar-img" :src="avatarState.url" alt="" />
-          <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-            <circle cx="12" cy="7" r="4" />
-          </svg>
+          <AppIcon v-else name="user" :size="20" />
         </button>
 
         <!-- 用户下拉菜单 -->
@@ -164,19 +107,11 @@ function handleUserMenu(action) {
             </div>
             <div class="ab-user-divider"></div>
             <button class="ab-user-item" @click="handleUserMenu('profile')">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                <circle cx="12" cy="7" r="4" />
-              </svg>
+              <AppIcon name="user" :size="14" />
               用户画像
             </button>
             <button class="ab-user-item" @click="handleUserMenu('switch-account')">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M8 3 4 7l4 4" />
-                <path d="M4 7h16" />
-                <path d="m16 21 4-4-4-4" />
-                <path d="M20 17H4" />
-              </svg>
+              <AppIcon name="switch" :size="14" />
               切换账号
             </button>
           </div>
@@ -246,7 +181,7 @@ function handleUserMenu(action) {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   transition: background 0.15s, color 0.15s;
 }
 
@@ -269,7 +204,7 @@ function handleUserMenu(action) {
   width: 3px;
   height: 22px;
   background: var(--color-accent);
-  border-radius: 0 3px 3px 0;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
 /* 用户头像 */
@@ -303,7 +238,7 @@ function handleUserMenu(action) {
   min-width: 170px;
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-popup);
   z-index: 100;
   overflow: hidden;
@@ -341,7 +276,7 @@ function handleUserMenu(action) {
   width: 100%;
   padding: 8px 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-primary);
   font-size: 13px;
