@@ -32,7 +32,14 @@ MAX_PARAGRAPH_CHARS = 220     # 单段字数上限 → 强制切段（无静默�
 
 # 章节切分：按固定时长而不是静默 —— 语音转写路径的段落本身就是 2 分钟一段，
 # 用"静默 ≥90s"会把每一段都判成章节；固定 10 分钟对两条路（字幕/转写）都稳定。
+# ⚠️ 这只是**兜底**：结构化讲义路径（`kb/timeline.py` + `lecture_segments`）由调用方
+# 传 `compose_lecture(chapter_starts=...)` 按知识点切章；固定时间格子不是知识点边界的替代品。
 CHAPTER_SECS = 600.0
+
+# 切段吸附窗口：字数上限触发的硬切，若附近（±N 字符）有句读就改切在标点之后
+SNAP_WINDOW = 6
+# 句读集合（含半角空格）：切点优先落在这些字符**之后**（与 `kb/timeline.py` 同口径）
+BREAK_CHARS = "。！？；：，、,.!?;: "
 
 # CJK 与全角标点：这两类字符之间**不插空格**（中文不是按词空格书写的）
 _CJK_RE = re.compile(r"[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]")
@@ -132,11 +139,34 @@ def join_parts(parts: list[str]) -> str:
     return out
 
 
+def _snap_cut(text: str, limit: int) -> int:
+    """在 `limit` 附近（±`SNAP_WINDOW`）找"切在标点之后"的位置；找不到 → 0。
+
+    返回的是**保留的字符数**（切点）。0 表示窗口里没有句读 —— 调用方按原规则
+    整段切（在字幕条边界上），不从词中间截断（与 `kb/timeline.py` 同一取舍）。
+    """
+    hi = min(len(text) - 1, limit + SNAP_WINDOW)
+    lo = max(1, limit - SNAP_WINDOW)
+    best: tuple[int, int] | None = None
+    for position in range(lo, hi + 1):
+        if text[position - 1] not in BREAK_CHARS:
+            continue
+        distance = abs(position - limit)
+        if best is None or distance < best[0] or (distance == best[0] and position < best[1]):
+            best = (distance, position)
+    return best[1] if best else 0
+
+
 def to_paragraphs(cues: list[tuple[float, float, str]],
                   gap: float = DEFAULT_GAP_SECS,
                   max_segment: float = DEFAULT_MAX_SEGMENT_SECS
                   ) -> list[tuple[float, str]]:
-    """把字幕块合并成段落 `[(start_sec, 正文)]`；三条切段规则见模块 docstring。"""
+    """把字幕块合并成段落 `[(start_sec, 正文)]`；三条切段规则见模块 docstring。
+
+    字数上限那一条的落点**优先吸附到标点**（±`SNAP_WINDOW` 内切在句读之后，
+    后半段留给下一段，内容一个字不丢）；窗口里没有句读则按原规则在字幕条边界整段切。
+    这样"切段"不再从词中间截断 —— 词中间断开的正文会污染嵌入与出题上下文。
+    """
     paras: list[tuple[float, str]] = []
     cur: list[str] = []
     cur_start = 0.0
@@ -146,8 +176,17 @@ def to_paragraphs(cues: list[tuple[float, float, str]],
         if cur and (start - cur_end > gap
                     or start - cur_start > max_segment
                     or len(join_parts(cur)) > MAX_PARAGRAPH_CHARS):
-            paras.append((cur_start, join_parts(cur)))
-            cur = []
+            text = join_parts(cur)
+            cut = _snap_cut(text, MAX_PARAGRAPH_CHARS) if len(text) > MAX_PARAGRAPH_CHARS else 0
+            if 0 < cut < len(text):
+                paras.append((cur_start, text[:cut]))
+                # 后半段接着攒；锚点取**当前这条**的起点（近似值：切点在它内部或之前，
+                # 不会晚于真实内容；比编一个精确时间更诚实）
+                cur = [text[cut:]]
+                cur_start = start
+            else:
+                paras.append((cur_start, text))
+                cur = []
         if not cur:
             cur_start = start
         cur.append(body)
@@ -164,7 +203,16 @@ def cue_paragraphs(content: bytes) -> list[tuple[float, str]]:
     公开给视频导入用：它需要**段落**（而不是渲染好的字符串）去套统一的讲义骨架，
     而解码/去重的细节不该在 `kb/video_import.py` 里再抄一遍。
     """
-    return to_paragraphs(dedupe_rolling(parse_cues(_decode(content))))
+    return to_paragraphs(file_cues(content))
+
+
+def file_cues(content: bytes) -> list[tuple[float, float, str]]:
+    """字幕文件字节 → **去重后的原始 cues**（解码 → 抽块 → 去滚动重复）。
+
+    与 `cue_paragraphs` 的唯一差别：不做分段。时间线（`kb/timeline.py`）需要每条字幕
+    的**原始起止时间**，而 `to_paragraphs` 的产物已经把时间抹平成段首锚点了。
+    """
+    return dedupe_rolling(parse_cues(_decode(content)))
 
 
 def format_paragraphs(paras: list[tuple[float, str]],
@@ -190,9 +238,32 @@ def format_paragraphs(paras: list[tuple[float, str]],
 
 
 def to_sections(paras: list[tuple[float, str]],
-                chapter: float = CHAPTER_SECS) -> list[list[tuple[float, str]]]:
-    """按固定时长把段落分组为章节（首章从 0 开始，见 `CHAPTER_SECS` 的说明）。"""
-    sections: list[list[tuple[float, str]]] = []
+                chapter: float = CHAPTER_SECS,
+                chapter_starts: list[float] | None = None
+                ) -> list[list[tuple[float, str]]]:
+    """把段落分组为章节。
+
+    - `chapter_starts=None`（默认）：**按固定时长**分章（首章从 0 开始，见 `CHAPTER_SECS`）——
+      与改造前逐字节一致，老调用方（字幕上传路径）行为不变；
+    - 传了边界列表：按**调用方给的时间点**分章（结构化讲义按知识点切章就靠它），
+      边界不需要与段落锚点精确对齐；段落归入「起点 ≤ 它的最后一个边界」。
+    """
+    if chapter_starts:
+        bounds = sorted(float(x) for x in chapter_starts)
+        sections: list[list[tuple[float, str]]] = []
+        current = None
+        for para in paras:
+            index = 0
+            for idx, bound in enumerate(bounds):
+                if bound <= para[0]:
+                    index = idx
+            if current != index:
+                sections.append([])
+                current = index
+            sections[-1].append(para)
+        return sections
+
+    sections = []
     for para in paras:
         if not sections or para[0] - sections[-1][0][0] >= chapter:
             sections.append([para])
@@ -203,12 +274,18 @@ def to_sections(paras: list[tuple[float, str]],
 
 def compose_lecture(paras: list[tuple[float, str]], *, title: str = "",
                     source: str = "", uploader: str = "",
-                    images: list[tuple[float, str]] = ()) -> str:
+                    images: list[tuple[float, str]] = (),
+                    chapter_starts: list[float] | None = None) -> str:
     """把段落组装成**讲义正文**（标题 + 来源行 + 章节 + 可选插图）。
 
     为什么要有骨架：纯 `[hh:mm:ss] 正文` 平铺进知识库后，标题只存在于文件名，
-    图谱/出题拿到的正文完全不知道"这是谁的什么课"。章节只是**导航**（按 10 分钟），
-    不做 LLM 命名 —— 命名要额外一次调用，且引入"标题对不对"的新失败面。
+    图谱/出题拿到的正文完全不知道"这是谁的什么课"。
+
+    章节来源有两种（`chapter_starts`）：
+    - 不传（默认）：按固定 10 分钟切 —— 这是**兜底**，行为与改造前逐字节一致，
+      老调用方（字幕上传）不受影响；
+    - 传了：按调用方给的**知识点边界**切章（结构化讲义路径）。没有边界时不再造
+      "第 N 章" 标题 —— 固定时间格子不是知识点边界的替代品（这是原先的产物层缺陷）。
 
     单章时不渲染 `##` 标题：只有一个章节的"分章"是噪音。
 
@@ -221,7 +298,7 @@ def compose_lecture(paras: list[tuple[float, str]], *, title: str = "",
     if meta:
         blocks.append("> " + "｜".join(meta))
 
-    sections = to_sections(paras)
+    sections = to_sections(paras, chapter_starts=chapter_starts)
     ordered = sorted(images)
     for idx, section in enumerate(sections):
         if len(sections) > 1:

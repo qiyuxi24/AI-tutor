@@ -60,17 +60,19 @@ from app.core.kb.kb_manager import chunk_text, kb_manager
 from app.core.kb.embedder import HashEmbedder, get_embedder
 # 填充阶段要按 KnowledgeGraph 的唯一模板重渲染 MD（AGENTS.md §2：调用方不得自拼模板）
 from app.core.knowledge_graph import (CONTENT_STATUS_FILLED, CONTENT_STATUS_SKELETON,
-                                      render_node_markdown)
+                                      is_meta_concept_name, render_node_markdown)
 
 logger = logging.getLogger("ai-tutor")
 
 # ── 同用户建图互斥（GQ-15）────────────────────────────────────────────
 # 同一用户已有一轮建图在跑时，拒绝新的整批重跑。状态放在**本模块**（建图的唯一实现）
-# 而非某个 API 路由：kb / knowledge 两个路由模块都只调这三个函数，互不 import。
-# 建图在请求内 await 完成（非后台任务），模块级 set 即可；`uvicorn --workers 1`
-# 是硬约束（AGENTS.md §1）→ 进程内锁足够，无需跨进程分布式锁。
+# 而非某个 API 路由：kb / knowledge 两个路由模块都只调这几个函数，互不 import。
+# `uvicorn --workers 1` 是硬约束（AGENTS.md §1）→ 进程内锁足够，无需跨进程分布式锁。
 # ⚠ 占位后必须在 finally 释放（异常 / 超时 / 取消都要），否则该用户被永久锁死。
-_GRAPH_INFLIGHT: set[int] = set()
+# 2026-11-15：建图改为后台任务（`runtime.spawn`，见 `api/v1/kb.py`）→ 值顺带记**学科名**，
+# 供 `GET /kb/graph/status` 在刷新/换设备后恢复"生成中"状态（原先请求内 await，
+# 客户端一断连就被取消，刷新回来也查不到任何痕迹）。
+_GRAPH_INFLIGHT: dict[int, str] = {}
 
 
 def is_graph_building(user_id: int) -> bool:
@@ -78,20 +80,25 @@ def is_graph_building(user_id: int) -> bool:
     return user_id in _GRAPH_INFLIGHT
 
 
-def try_begin_graph_build(user_id: int) -> bool:
+def graph_build_subject(user_id: int) -> str:
+    """该用户正在建图的学科名（没在跑 → 空串）。"""
+    return _GRAPH_INFLIGHT.get(user_id, "")
+
+
+def try_begin_graph_build(user_id: int, subject: str = "") -> bool:
     """原子占位：已在建图返回 False（调用方转 409），否则占位并返回 True。
 
     调用方必须保证"检查 + 置位"之间无 await（单事件循环下即原子）。
     """
     if user_id in _GRAPH_INFLIGHT:
         return False
-    _GRAPH_INFLIGHT.add(user_id)
+    _GRAPH_INFLIGHT[user_id] = subject
     return True
 
 
 def end_graph_build(user_id: int) -> None:
     """释放占位（必须放 finally）。"""
-    _GRAPH_INFLIGHT.discard(user_id)
+    _GRAPH_INFLIGHT.pop(user_id, None)
 
 
 # 语义去重：嵌入相似度候选阈值（近似粗筛，最终由 LLM 二次确认）。
@@ -995,7 +1002,8 @@ class GraphGenerator:
                               existing_nodes: list[dict] | None = None,
                               board: str = "",
                               source_ref: str = "",
-                              source_ref_by_id: dict[str, str] | None = None) -> dict:
+                              source_ref_by_id: dict[str, str] | None = None,
+                              board_by_id: dict[str, str] | None = None) -> dict:
         """
         阶段 1 落库：把 LLM 规划出的**结构**写进知识图谱（含语义去重）。
 
@@ -1008,6 +1016,8 @@ class GraphGenerator:
             source_ref: 来源定位串（见 _make_source_ref）—— 跨会话续填靠它找回原文
             source_ref_by_id: {LLM 节点 id: 来源定位串} —— 逐节点覆盖 source_ref
                         （全局概念树里每个概念的来源不同，无法用单一 source_ref）
+            board_by_id: {LLM 节点 id: 板块名} —— 逐节点覆盖 board（概念树的分组）。
+                        `board` 参数非空时优先（显式文件夹名是更强的信号）。
 
         返回:
             {"created_nodes": [...], "pending_node_ids": [...], "created_edges": n,
@@ -1016,6 +1026,7 @@ class GraphGenerator:
         """
         if existing_nodes is None:
             existing_nodes = kg.get_nodes_by_subject(subject)
+        board_by_id = board_by_id or {}
         created_nodes = []
         pending_ids: list[str] = []      # 骨架态待填充（含并轨命中的已有骨架节点）
         skipped_nodes = []
@@ -1069,7 +1080,7 @@ class GraphGenerator:
                 "file": f"nodes/{nid}.md",
                 "tags": tags,
                 "subject": subject,
-                "board": (board or "").strip(),
+                "board": (board or board_by_id.get(nid, "") or "").strip(),
                 "summary": n.get("summary", ""),
                 "mastery": 0,
                 "added_by": "ai",
@@ -1171,7 +1182,17 @@ class GraphGenerator:
         nodes: list[dict] = []
         # 概念 id → (汇总原文, 来源条目, 材料列表)
         gathered: dict[str, tuple[str, list[dict], list[dict]]] = {}
+        # 概念 id → 板块名：`boards[].name` 是 LLM 给出的一级**主题分组**
+        # （提示词 graph_generator.py:157 要求沿用现有板块名）。早先这里只把概念
+        # 拍平进 nodes、板块名整批丢弃 → 落库后 board 全空（线上 116/123 个节点如此，
+        # 备份里也没有，无法补回）。2026-11-15 改为逐节点带 board 落库。
+        board_by_id: dict[str, str] = {}
+        # GQ-7 入库侧：拦下元概念（「…概览/…分类/…总结」）—— 它们不是知识点，而是
+        # **分组标签**（SKOS 的 Collection，与 Concept 互斥；提示词第 167 行早已禁止，
+        # 但入库侧从未执行）。拦下的名字进 `dropped_meta` 点名，不静默。
+        dropped_meta: list[dict] = []
         for b in boards:
+            bname = str(b.get("name") or "").strip()
             for c in (b.get("concepts") or []):
                 if not isinstance(c, dict):
                     continue
@@ -1179,9 +1200,17 @@ class GraphGenerator:
                 cname = str(c.get("name") or "").strip()
                 if not nid or not cname:
                     continue
+                if is_meta_concept_name(cname):
+                    dropped_meta.append({"id": nid, "name": cname, "board": bname})
+                    continue
                 nodes.append(c)
                 gathered[nid] = _gather_concept_sources(cname, all_units)
+                if bname:
+                    board_by_id[nid] = bname
         nodes = nodes[:GRAPH_CONCEPT_MAX]          # 概念数软上限（防模型跑飞）
+        # 截断后只保留仍在册的概念，避免给被丢弃的 id 建无用映射
+        board_by_id = {nid: b for nid, b in board_by_id.items()
+                       if nid in {str(c.get("id") or "").strip() for c in nodes}}
         name_by_id = {str(c.get("id") or "").strip(): str(c.get("name") or "").strip()
                       for c in nodes}
         # 逐概念来源定位：主来源单元的首条决定 source_ref（断点续填按它重读原书）
@@ -1191,7 +1220,7 @@ class GraphGenerator:
         write = await self._write_skeleton(
             kg, subject, {"nodes": nodes, "edges": result.get("edges") or []},
             existing_nodes=existing_nodes, board=board,
-            source_ref_by_id=source_ref_by_id)
+            source_ref_by_id=source_ref_by_id, board_by_id=board_by_id)
         id_by_name = write.get("node_ids_by_name", {})
         pending_ids = set(write.get("pending_node_ids") or [])
 
@@ -1243,6 +1272,11 @@ class GraphGenerator:
         write["pending_concepts"] = pending_concepts
         write["hit_node_ids"] = hit_node_ids
         write["hit_fills"] = hit_fills
+        write["dropped_meta"] = dropped_meta
+        if dropped_meta:
+            logger.info(
+                f"概念树拦下 {len(dropped_meta)} 个元概念（不是知识点、是分组标签，GQ-7）："
+                f"{'、'.join(m['name'] for m in dropped_meta[:10])}")
         return write
 
     async def _fill_concept(self, kg, subject: str, section: str, source_text: str,
@@ -1552,6 +1586,8 @@ class GraphGenerator:
             "created_edges": 0,
             "skipped_nodes": [],
             "merged_nodes": [],
+            # GQ-7：被拦下的元概念（分组标签被误当概念）—— 点名，不静默丢弃
+            "dropped_meta": [],
             "filled_nodes": [],
             "rejected_shallow": [],
             "failed_fills": 0,
@@ -1657,6 +1693,7 @@ class GraphGenerator:
         aggregate["created_edges"] += stats["created_edges"]
         aggregate["skipped_nodes"].extend(stats["skipped_nodes"])
         aggregate["merged_nodes"].extend(stats["merged_nodes"])
+        aggregate["dropped_meta"].extend(stats.get("dropped_meta") or [])
         if stats.get("dedup_status", "ok") != "ok":
             aggregate["dedup_status"] = stats["dedup_status"]
         new_items = stats.get("pending_concepts", [])

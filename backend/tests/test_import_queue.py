@@ -9,6 +9,8 @@
 - **进度落库**：阶段与开始时间写进分集（刷新页面后还能还原现场）、分集耗时/ETA
 - 分集级操作：单集重试、单集取消（不再只能整批重来）
 - 导入前预检：集数 / 总时长 / 字幕可用性 / 缺依赖
+- **视频资产层**：有 cues 就把原始时间线落进 `lectures`（url 归一化 + cues 原文可回读）；
+  没有 cues 不建行；落库失败不拖垮导入；平台名归一
 """
 import asyncio
 import sqlite3
@@ -18,6 +20,7 @@ import pytest
 from app.core.kb import import_queue as iq
 from app.core.kb.kb_manager import KbManager
 from app.core.kb.kb_store import KbStore
+from app.core.kb.timeline import load_jsonl
 
 USER = 7
 
@@ -291,3 +294,101 @@ def test_inspect_keeps_going_when_one_link_fails(queue, monkeypatch):
 
     assert "接口挂了" in row["note"], "单条失败写进 note，不炸整批"
     assert row["episodes"] == 0
+
+
+# ── 视频资产层：导入时顺手把原始时间线落进 `lectures`（2026-11-15 二期）──
+#
+# 为什么要有这一层：原先转写正文直接覆盖进 documents.extract_text，改一次提示词
+# 就要重花一次 ASR 的钱，而且**视频链接根本没存**。现在 cues 落到 `lectures.raw_timeline`
+# （JSONL，只追加不改），`/kb/lecture/{id}/restructure` 直接读它重跑结构化。
+
+def _with_cues(monkeypatch, iq_mod, cues, frames=None, title="第 1 讲"):
+    async def fake_fetch(url, workdir, **kwargs):
+        meta = {"chars": 3, "source": "bilibili-track", "source_label": "平台字幕",
+                "title": title, "cues": cues}
+        if frames is not None:
+            meta["frames"] = frames
+        return "# 讲义\n", meta
+
+    monkeypatch.setattr(iq_mod.video_import, "fetch_lecture", fake_fetch)
+
+
+def test_import_stores_raw_timeline(queue, monkeypatch):
+    """导入成功 → `lectures` 有 url/title/raw_timeline，且 cues 原文可回读。"""
+    iq_mod, manager, _ = queue
+    _with_cues(monkeypatch, iq_mod,
+               [{"start": 0.0, "end": 5.0, "text": "第一句。", "raw": "第一句。"},
+                {"start": 5.0, "end": 9.0, "text": "第二句。", "raw": "第二具。"}],
+               frames=[{"t": 0.0, "image": "0001.jpg"}])
+
+    async def scenario():
+        result = await iq_mod.submit(
+            USER, ["https://www.bilibili.com/video/BV1xx411c7mD"], expand=False)
+        return await _drain(iq_mod, result["task_id"])
+
+    task = _run(scenario())
+    store = manager.store(USER)
+    docs = store.list_lecture_docs()
+    assert len(docs) == 1, "有 cues 的导入要留下视频资产行"
+    lecture = store.get_lecture(docs[0])
+    assert lecture["url"] == "https://www.bilibili.com/video/BV1xx411c7mD"
+    assert lecture["title"] == "第 1 讲"
+    assert lecture["source_kind"] == "bilibili-track"
+    assert lecture["platform"] == "bilibili"
+    assert lecture["video_id"] == "BV1xx411c7mD"
+    assert lecture["raw_timeline"], "原始时间线必须落库（重跑结构化不重花 ASR 的钱）"
+    frames, speech = load_jsonl(lecture["raw_timeline"])
+    assert [f.image for f in frames] == ["0001.jpg"]
+    assert [e.raw for e in speech] == ["第一句。", "第二具。"]
+    assert task["status"] == "done"
+
+
+def test_import_without_cues_writes_no_lecture_row(queue, monkeypatch):
+    """没有 cues（老调用方 / 字幕缺失）→ **不建 lectures 行**：没有原料的视频资产毫无用处。"""
+    iq_mod, manager, _ = queue
+
+    async def fake_fetch(url, workdir, **kwargs):
+        return "# 讲义\n", {"chars": 3, "source": "x", "source_label": "x", "title": "t"}
+
+    monkeypatch.setattr(iq_mod.video_import, "fetch_lecture", fake_fetch)
+
+    async def scenario():
+        result = await iq_mod.submit(USER, ["https://a/1"], expand=False)
+        return await _drain(iq_mod, result["task_id"])
+
+    _run(scenario())
+    assert manager.store(USER).list_lecture_docs() == []
+
+
+def test_timeline_failure_does_not_break_import(queue, monkeypatch):
+    """时间线落库失败**绝不能**拖垮导入（那集讲义已经生成好了）。"""
+    iq_mod, manager, uploaded = queue
+    _with_cues(monkeypatch, iq_mod, [{"start": 0.0, "end": 1.0, "text": "一", "raw": None}])
+
+    def boom(*a, **kw):
+        raise RuntimeError("磁盘满了")
+
+    monkeypatch.setattr(KbStore, "upsert_lecture", boom)   # 存储层抛错，主流程照走
+
+    async def scenario():
+        result = await iq_mod.submit(USER, ["https://a/1"], expand=False)
+        return await _drain(iq_mod, result["task_id"])
+
+    task = _run(scenario())
+    assert task["status"] == "done", "导入仍然成功"
+    assert len(uploaded) == 1
+
+
+def test_platform_of_covers_bilibili_youtube_local_and_other():
+    """平台名归一：bilibili / youtube / local / other（别的站不硬塞成 youtube）。"""
+    from app.core.kb.bili import urls as bili_urls
+
+    assert iq._platform_of(bili_urls.normalize("BV1xx411c7mD"), "") == "bilibili"
+    assert iq._platform_of(bili_urls.normalize("https://youtu.be/abc"),
+                           "https://youtu.be/abc") == "youtube"
+    assert iq._platform_of(bili_urls.normalize("https://www.youtube.com/watch?v=abc"),
+                           "https://www.youtube.com/watch?v=abc") == "youtube"
+    assert iq._platform_of(bili_urls.normalize("file:///C:/a.mp4"),
+                           "file:///C:/a.mp4") == "local"
+    assert iq._platform_of(bili_urls.normalize("https://coursera.org/x"),
+                           "https://coursera.org/x") == "other"

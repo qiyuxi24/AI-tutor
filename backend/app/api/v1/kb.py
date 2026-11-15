@@ -6,7 +6,8 @@
   POST   /kb/folder                  - 新建文件夹
   POST   /kb/upload                  - 上传文件（解析 + 向量化）
   DELETE /kb/node/{node_id}          - 删除文件/文件夹（递归）
-  GET    /kb/node/{node_id}/text     - 读取文件节点正文（预览用，超长截断）
+  GET    /kb/node/{node_id}/text     - 读取文件节点正文（预览截断 / full=1 取全文）
+  PUT    /kb/node/{node_id}/text     - 覆盖文件节点正文（仅 md/markdown/txt，重建索引走后台）
   GET    /kb/node/{node_id}/raw      - 读取文件节点原件（预览用，inline）
   GET    /kb/search                  - 在目录范围内语义检索
   POST   /kb/context                 - 收集目录范围内的文件节点（进上下文用）
@@ -19,6 +20,11 @@
   GET    /kb/bili/login/qrcode       - B 站扫码登录：取二维码（PNG data URL）
   GET    /kb/bili/login/poll         - B 站扫码登录：轮询状态（成功后凭证落盘）
   GET    /kb/stats                   - 索引统计
+  POST   /kb/graph/generate          - 建图（入队即返回，结果走 graph_updated 通知）
+  GET    /kb/graph/status            - 建图状态（是否在跑 + 学科 + 已写正文进度）
+  GET    /kb/lecture/{doc_id}        - 结构化讲义（视频资产 + 知识点切片 + 可点时间链接）
+  GET    /kb/lecture/{doc_id}/timeline - 原始时间线（cues + frames，重跑结构化的原料）
+  POST   /kb/lecture/{doc_id}/restructure - 重跑结构化（入队即返回，结果走 kb_updated 通知）
 
 说明：
 - 所有接口需要 JWT 认证，按用户隔离
@@ -27,17 +33,22 @@
 import asyncio
 import logging
 import mimetypes
+from datetime import datetime
 from urllib.parse import quote
 from fastapi import (APIRouter, Depends, HTTPException, Query, UploadFile, File,
                      Body)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
+from app.core import runtime
 from app.core.auth import get_current_user
-from app.core.event_bus import GRAPH_UPDATED, notify
+from app.core.event_bus import GRAPH_UPDATED, KB_UPDATED, notify
+from app.core.error_codes import ErrorCode
 from app.core.kb.bili import login as bili_login
 from app.core.kb.kb_manager import kb_manager
-from app.core.kb import graph_generator, import_queue, video_import
+from app.core.kb import (graph_generator, import_queue, lecture_structurer,
+                         timeline as kb_timeline, video_import)
+from app.core.knowledge_graph import CONTENT_STATUS_FILLED, KnowledgeGraph
 
 logger = logging.getLogger("ai-tutor")
 router = APIRouter()
@@ -64,6 +75,20 @@ class GraphGenerateRequest(BaseModel):
 
 # 正文预览一次最多下发多少字符：超长书籍/网页不整体塞给前端（marked 渲染会卡）
 KB_PREVIEW_MAX_CHARS = 20_000
+
+# 阅读器里**可编辑**的格式：只有纯文本类。PDF/Word/Excel/图片是二进制原件，
+# 改正文没有意义（解析正文只是它的一个投影，改回去也拼不出原件）。
+KB_EDITABLE_EXTS = (".md", ".markdown", ".txt")
+
+# 保存正文的上限：与上传的 50MB 不同 —— 这是纯文本正文，2M 字符（≈2MB UTF-8 中文）
+# 已经远超任何正常讲义；再大要么是误粘贴，要么该拆文件。超限明确报错而不是静默截断
+# （截断保存 = 静默数据丢失）。
+KB_EDIT_MAX_CHARS = 2_000_000
+
+
+class KbTextUpdate(BaseModel):
+    """覆盖文件正文的请求体"""
+    content: str = Field(..., description="新的完整正文（Markdown / 纯文本）")
 
 
 class ContextRequest(BaseModel):
@@ -342,13 +367,20 @@ async def delete_node(node_id: int, user_id: int = Depends(get_current_user)):
 
 
 @router.get("/kb/node/{node_id}/text")
-async def get_node_text(node_id: int, user_id: int = Depends(get_current_user)):
+async def get_node_text(node_id: int,
+                        full: bool = Query(False, description="true=返回全文（编辑用）"),
+                        user_id: int = Depends(get_current_user)):
     """
-    读取文件节点已解析的正文（Markdown/纯文本原文），供前端预览弹窗渲染。
+    读取文件节点已解析的正文（Markdown/纯文本原文），供前端渲染。
 
     只读、无副作用：不改库、不改索引、不落盘。正文经 `kb_manager.get_document_text`
-    （读正文的唯一出口，带用户隔离），超长截断到 `KB_PREVIEW_MAX_CHARS`；
-    `chars < total_chars` 即表示"看到的不是全文"，由前端提示。
+    （读正文的唯一出口，带用户隔离）。
+
+    `full=False`（默认，预览）：截断到 `KB_PREVIEW_MAX_CHARS`，`chars < total_chars`
+    即表示"看到的不是全文"，由前端提示。
+    `full=True`（编辑器）：返回全文 —— **截断的正文被保存就是数据丢失**，所以编辑
+    路径必须拿到全文；相应地前端要自己承担大文本的渲染开销（编辑态是 textarea，
+    不进 marked，代价可控）。
     """
     node = kb_manager.get_node(user_id, node_id)
     if node is None or node.get("user_id") != user_id:
@@ -362,15 +394,100 @@ async def get_node_text(node_id: int, user_id: int = Depends(get_current_user)):
                             detail="该文件没有可预览的正文（未解析或解析失败）")
 
     total = len(text)
+    limit = total if full else min(total, KB_PREVIEW_MAX_CHARS)
     return {
         "status": "ok",
         "node_id": node_id,
         "name": node.get("name", ""),
-        "markdown": text[:KB_PREVIEW_MAX_CHARS],
-        "chars": min(total, KB_PREVIEW_MAX_CHARS),
+        "markdown": text[:limit],
+        "chars": limit,
         "total_chars": total,
-        "truncated": total > KB_PREVIEW_MAX_CHARS,
+        "truncated": total > limit,
+        "editable": _is_editable(node),
     }
+
+
+def _is_editable(node: dict) -> bool:
+    """该文件能否在阅读器里编辑：只看扩展名白名单（格式支持面 = `KB_EDITABLE_EXTS`）。"""
+    name = (node.get("name") or "").lower()
+    return name.endswith(KB_EDITABLE_EXTS)
+
+
+@router.put("/kb/node/{node_id}/text")
+async def update_node_text(node_id: int, req: KbTextUpdate,
+                           user_id: int = Depends(get_current_user)):
+    """
+    覆盖文件节点的正文（知识库阅读器的「保存」）。
+
+    与 GET 同一套校验，另加三条：
+      1. 只有 `KB_EDITABLE_EXTS`（.md/.markdown/.txt）可写 —— PDF/Word/Excel/图片
+         的正文只是原件的投影，改它拼不回原件；
+      2. 正文长度上限 `KB_EDIT_MAX_CHARS`，超限 400 而不是静默截断；
+      3. 空正文允许（清空一个文件是合法操作），但**不改** `documents.status`。
+
+    写库与写原件是原子的（`kb_manager.write_document_text` 一次做完两份真相）。
+    索引重建**不在请求里 await**：大文件分块+嵌入是分钟级，卡住会让前端超时、
+    客户端断连还会连带取消 —— 与建图同一条教训（见 `generate_graph`）。所以这里
+    `runtime.spawn` 一个后台任务，完成后 `notify(KB_UPDATED)` 让前端刷新统计。
+    """
+    node = kb_manager.get_node(user_id, node_id)
+    if node is None or node.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if node.get("type") != "file":
+        raise HTTPException(status_code=400, detail="该节点是文件夹，请选择一个文件")
+    if not _is_editable(node):
+        raise HTTPException(
+            status_code=400,
+            detail=f"该格式不支持编辑（仅 {'/'.join(KB_EDITABLE_EXTS)}），请用「在浏览器中打开」查看原件",
+        )
+    if len(req.content) > KB_EDIT_MAX_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"正文过长（{len(req.content)} 字符，上限 {KB_EDIT_MAX_CHARS}）",
+        )
+
+    try:
+        written = kb_manager.write_document_text(user_id, node_id, req.content)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    runtime.spawn(_reindex_after_save(user_id, node_id, node.get("name") or ""))
+
+    total = len(req.content)
+    return {
+        "status": "ok",
+        "node_id": node_id,
+        "name": node.get("name", ""),
+        "chars": total,
+        "total_chars": total,
+        "bytes": written,
+        "truncated": False,
+    }
+
+
+async def _reindex_after_save(user_id: int, node_id: int, name: str) -> None:
+    """保存后的后台索引重建。失败只记日志 + 通知，不影响已经落库的正文。"""
+    error_msg = ""
+    try:
+        chunks = await kb_manager.reindex_file(user_id, node_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        error_msg = f"重建索引失败: {str(e)}"
+        logger.warning(f"保存正文后重建索引失败（node_id={node_id}）: {e}")
+        chunks = 0
+    # 通知必须单独 try：这里抛异常会顶掉上面的结果（`finally` 里发通知同理）
+    try:
+        notify(user_id, KB_UPDATED, {
+            "node_id": node_id,
+            "name": name,
+            "chunks": chunks,
+            "ok": not error_msg,
+            "error": error_msg,
+            "reason": "text_saved",
+        })
+    except Exception as e:
+        logger.warning(f"保存正文的完成通知发送失败（node_id={node_id}）: {e}")
 
 
 @router.get("/kb/node/{node_id}/raw")
@@ -502,66 +619,351 @@ async def generate_graph(req: GraphGenerateRequest,
     ⚠ GQ-15 并发互斥：同一用户**已有建图在跑**时直接返回 409 —— 否则同一批文件会被
     反复整批重跑（每次 LLM 重新命名 → 精确同名判重失效 → 同一概念累积多个碎片节点）。
 
-    ⚠ **结果必须走通知，不能只靠 HTTP 响应**（2026-11-10 修）：实测单本教材要跑
-    15 分钟量级（37 单元 / 22 概念逐概念成文），而 axios 与 Vite 代理的 timeout 都是
-    300s —— 前端必然先超时；用户中途切页面 / 刷新 / 断线时，响应更是没人接。只靠
-    「请求返回后自己 refreshGraph」的话，后台明明建完了、前端却纹丝不动，只能手动刷新。
-    故 `finally` 里发一条 `graph_updated`（走 `notify` → 先落库再推）：在线端立刻刷新，
-    离线的端下次连上经 `/knowledge/notices/pending` 补拉，与出题 / 导入同一套投递语义。
+    ⚠ **入队即返回，建图在后台跑**（2026-11-15 修）：实测单本教材 15 分钟量级
+    （37 单元 / 22 概念逐概念成文），而 axios 与 Vite 代理的 timeout 都是 300s。
+    旧实现直接 `await` 生成 —— 客户端一断连（刷新 / 关页 / 切网络）FastAPI 就取消
+    handler 协程，**建图真的停在半路**（TODO §11.3 实测确认，不是"显示丢了"）。
+    现在改用 `runtime.spawn`（项目既有工具，强引用防 GC）：请求返回后它继续跑完，
+    断连不影响；刷新回来的前端靠 `GET /kb/graph/status` 恢复"生成中"状态。
+
+    ⚠ **结果必须走通知，不能只靠 HTTP 响应**（2026-11-10 修）：响应早就返回了，
+    真正的结果在 `finally` 里发 `graph_updated`（走 `notify` → 先落库再推）：
+    在线端立刻刷新，离线的端下次连上经 `/knowledge/notices/pending` 补拉。
     失败也发（payload 带 `error`），否则前端永远停在"生成中"。
 
     返回:
-      {
-        "subject": str,
-        "board": str,
-        "processed_books": int,
-        "created_nodes": [str, ...],
-        "created_edges": int,
-        "skipped_nodes": [str, ...],
-        "error": str | None
-      }
+      {"status": "accepted", "subject": str, "message": str}
+      —— 只表示"已入队"。结果与明细一律看 `graph_updated` 通知。
     """
     if not req.node_ids:
         raise HTTPException(status_code=400, detail="请选择至少一个文件或文件夹作为书籍来源")
 
     # 占位必须在任何 await 之前完成：单事件循环里"检查 + 置位"之间无 await 即原子，
     # 两个并发请求只有一个能进（另一个在置位前就被拒）。
-    if not graph_generator.try_begin_graph_build(user_id):
+    if not graph_generator.try_begin_graph_build(user_id, req.subject):
         raise HTTPException(status_code=409, detail="上一次建图尚未完成，请稍后再试")
 
+    # 后台化：锁已占，交给后台任务跑完并释放（`_run_graph_build` 的 finally）。
+    # 用 runtime.spawn 而非裸 create_task —— 后者返回值没人持有，可能被 GC 掉。
+    runtime.spawn(_run_graph_build(user_id, req.subject, req.node_ids))
+    return {
+        "status": "accepted",
+        "subject": req.subject,
+        "message": "已开始建图（分钟级任务），完成后会通知你",
+    }
+
+
+async def _run_graph_build(user_id: int, subject: str, node_ids: list[int]) -> None:
+    """后台建图任务：跑完 → 发 `graph_updated` → 释放互斥锁（顺序由 finally 保证）。
+
+    调用前提：互斥锁**已被端点占位**（`try_begin_graph_build` 成功）。
+    本函数不向任何人抛异常（后台任务的异常没人接）；取消时 `finally` 照发通知，
+    然后把 `CancelledError` 继续抛出（asyncio 的取消语义要求如此）。
+    """
     outcome: dict | None = None      # 成功 = aggregate；进通知 payload 供前端展示结果
     error_msg = ""
     try:
-        result = await graph_generator.generate_graph(user_id, req.subject, req.node_ids)
+        result = await graph_generator.generate_graph(user_id, subject, node_ids)
         outcome = result
-
         if result.get("error"):
             error_msg = result["error"]
-            raise HTTPException(status_code=422, detail=result["error"])
-        return {"status": "ok", **result}
-    except HTTPException as e:
-        error_msg = error_msg or str(e.detail)
-        raise
-    except Exception as e:
+    except asyncio.CancelledError:
+        raise                              # 交给 finally 发通知后再抛
+    except Exception as e:                 # noqa: BLE001 —— 后台任务不能把异常漏出去
         error_msg = f"生成学科图谱失败: {str(e)}"
         logger.error(error_msg)
-        raise HTTPException(status_code=500, detail=error_msg)
     finally:
-        # 异常 / 超时 / 取消（CancelledError 属 BaseException，也会走到 finally）都要释放，
-        # 否则该用户被永久锁死、此后每次建图都 409。
+        # 异常 / 取消（CancelledError 属 BaseException）都要释放，否则该用户被永久锁死、
+        # 此后每次建图都 409。
         graph_generator.end_graph_build(user_id)
-        # 走到 finally 却既没有结果也没有错误 = 被取消（CancelledError 是 BaseException，
-        # 上面两个 except 都捕不到）。这恰恰是最常见的场景：用户关掉页面/切走 →
-        # 前端已经没有响应可接，只有这条通知能告诉它"这轮结束了"。
+        # 走到 finally 却既没有结果也没有错误 = 被取消（服务重启 / 关停）。
         if outcome is None and not error_msg:
-            error_msg = "建图已中断（连接断开或服务重启），已写入的部分保留"
-        # 结果只经 HTTP 响应传达是不够的（见 docstring）：响应可能早被 300s 超时掐断、
-        # 或根本没人接。这条通知才是"建完了"的唯一可靠出口，所以放在 finally ——
-        # 成功、失败、取消都要发，前端才不会永远停在"生成中"。
-        # 单独 try 包住：finally 里抛出的异常会**顶掉**原来的结果/错误，让真正的失败
-        # 原因（422/500 的 detail、CancelledError）彻底丢失 —— 通知只是尽力而为。
+            error_msg = "建图已中断（服务重启或关闭），已写入的部分保留"
+        # 这条通知才是"建完了"的唯一可靠出口：成功、失败、取消都要发，
+        # 前端才不会永远停在"生成中"。
+        # 单独 try 包住：finally 里抛出的异常会**顶掉**原来的结果/错误 —— 通知只是尽力而为。
         try:
             notify(user_id, GRAPH_UPDATED,
-                   _graph_generated_payload(req.subject, outcome, error_msg))
+                   _graph_generated_payload(subject, outcome, error_msg))
         except Exception as e:                     # noqa: BLE001 —— 不让通知失败污染结果
-            logger.warning(f"建图完成通知发送失败（subject={req.subject}）: {e}")
+            logger.warning(f"建图完成通知发送失败（subject={subject}）: {e}")
+
+
+@router.get("/kb/graph/status")
+async def graph_status(user_id: int = Depends(get_current_user)):
+    """建图状态（前端刷新 / 换设备后据此恢复"生成中"任务卡）。
+
+    为什么需要：建图已后台化（见 `generate_graph`），请求返回后任务还在跑；
+    前端只知道"我发过请求"，刷新就丢。`is_graph_building` 原先只用于判 409，
+    没有任何端点能查（TODO §11.3 缺口表第一条）。
+
+    进度口径 = `filled / total`（TODO §11.1，**content_status 是进度真源**，不另建表）：
+    阶段①把概念树落成 `skeleton` 节点，阶段②逐概念写正文并翻成 `filled`。
+    ⚠ 建图是**增量补全**（已有学科会并轨）→ 比例不是从 0 开始，前端必须同时给绝对数。
+
+    返回:
+      {"building": bool, "subject": str, "progress": {"total": int, "filled": int,
+       "percent": int}}   —— 没在建图时 subject 为空串、progress 为 None。
+    """
+    if not graph_generator.is_graph_building(user_id):
+        return {"building": False, "subject": "", "progress": None}
+
+    subject = graph_generator.graph_build_subject(user_id)
+    progress = None
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        nodes = kg.get_nodes_by_subject(subject) if subject else list(kg.nodes)
+        total = len(nodes)
+        filled = sum(1 for n in nodes if n.get("content_status") == CONTENT_STATUS_FILLED)
+        progress = {
+            "total": total,
+            "filled": filled,
+            "percent": round(filled * 100 / total) if total else 0,
+        }
+    except Exception as e:                     # noqa: BLE001 —— 进度只是锦上添花
+        logger.warning(f"建图进度统计失败（user={user_id} subject={subject}）: {e}")
+    finally:
+        kg.close()
+
+    return {"building": True, "subject": subject, "progress": progress}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  结构化讲义（视频资产 + 知识点切片 + 时间轴）
+# ══════════════════════════════════════════════════════════════════
+#
+# 数据层在 `KbStore`（`lectures` / `lecture_segments`），时间线在 `kb/timeline.py`，
+# 切片在 `kb/lecture_structurer.py`。契约（前端已按它实现，**字段名不能改**）：
+#   GET  /kb/lecture/{doc_id}            讲义全文（含每段可点的时间链接）
+#   GET  /kb/lecture/{doc_id}/timeline   原始时间线（cues + frames）
+#   POST /kb/lecture/{doc_id}/restructure 重跑结构化（后台，结果走通知）
+#
+# 为什么读取要**校验 node_id**：`lecture_segments.node_id` 是跨库软引用
+# （kb.db 与 knowledge.db 是两个库），可能悬空 → 降级成 `node_ok: false`，
+# 让前端把"视频出处"当失效标注，而不是点进去 404。
+
+# 重跑结构化的进程内互斥（user 内按 doc 去重）：dict[doc_id, bool]。
+# 后台化后锁必须在 `_run_restructure` 的 finally 里释放（见建图的同一条教训）。
+_RESTRUCTURE_INFLIGHT: dict[int, bool] = {}
+
+
+def _lecture_error(code_tuple: tuple, detail: str = "") -> HTTPException:
+    """把错误码拼成 `[E-KB-xxx] …` 的 detail（前端按前缀区分"不是讲义"）。"""
+    message = ErrorCode.user_message(code_tuple)
+    return HTTPException(status_code=404,
+                         detail=f"{message}{('：' + detail) if detail else ''}")
+
+
+def _slide_url_of(asset_key: str, slide: str) -> str:
+    """切片截图 → 可直接给 `<img>` 的 URL（截图为空 → 空串）。
+
+    路径与 `get_slide` 端点一致：`/api/v1/kb/slides/{asset_key}/{name}`，
+    其中 `name` = `documents.asset_key` 目录下的文件名（`0001.jpg`）。
+    """
+    if not slide or not asset_key:
+        return ""
+    return f"/api/v1/kb/slides/{asset_key}/{slide}"
+
+
+def _node_exists(kg: KnowledgeGraph, node_id: str) -> bool:
+    """软引用校验：节点存在且属当前用户 → True（空 id / 悬空 → False）。"""
+    if not node_id:
+        return False
+    try:
+        return kg.get_node(node_id) is not None
+    except Exception as e:                       # noqa: BLE001 —— 校验失败只降级
+        logger.debug("节点校验失败 node=%s: %s", node_id, e)
+        return False
+
+
+@router.get("/kb/lecture/{doc_id}")
+async def get_lecture(doc_id: int, user_id: int = Depends(get_current_user)):
+    """结构化讲义：视频资产 + 知识点切片（每段带可点的时间链接）。
+
+    与 `/kb/node/{id}/text` 的分工：后者给**正文**（任何人上传的文件都有），
+    本端点给**结构**（只有视频导入且结构化过的文件才有）：标题、来源 URL、
+    时长、每段的知识点标题/讲解/时间区间/截图/关联节点。
+
+    `watch_url` 与每段的 `t_url` 由后端直接拼好（**前端不要自己拼** ——
+    参数删除/`file://` 用 `#t=` 这些规则只该有一份实现，见 `timeline.timestamp_url`）。
+
+    返回: 见模块 docstring 的契约示例。没有 `lectures` 行 → 404 `[E-KB-001]`，
+    前端据此把该文件当**普通文件**处理（这是运行时的正常分支，不是故障）。
+    """
+    store = kb_manager.store(user_id)
+    lecture = store.get_lecture(doc_id)
+    if lecture is None:
+        raise _lecture_error(ErrorCode.KB_NOT_LECTURE)
+
+    doc = store.get_document(doc_id) or {}
+    segments = store.list_lecture_segments(doc_id)
+    url = lecture.get("url") or ""
+    asset_key = doc.get("asset_key") or ""
+
+    kg = KnowledgeGraph(user_id=user_id)
+    try:
+        payload_segments = [{
+            "seq": seg["seq"],
+            "title": seg["title"],
+            "kind": seg["kind"],
+            "brief": seg["brief"],
+            "content": seg["content"],
+            "t_start": seg["t_start"],
+            "t_end": seg["t_end"],
+            "t_label": kb_timeline.fmt_ts(seg["t_start"]),
+            "t_url": kb_timeline.timestamp_url(url, seg["t_start"]) if url else "",
+            "slide_url": _slide_url_of(asset_key, seg.get("slide") or ""),
+            "node_id": seg.get("node_id") or "",
+            "node_ok": _node_exists(kg, seg.get("node_id") or ""),
+        } for seg in segments]
+    finally:
+        kg.close()
+
+    watch_url = ""
+    if url and segments:
+        watch_url = kb_timeline.timestamp_url(url, segments[0]["t_start"])
+
+    return {
+        "doc_id": doc_id,
+        "title": lecture.get("title") or "",
+        "url": url,
+        "platform": lecture.get("platform") or "",
+        "uploader": lecture.get("uploader") or "",
+        "duration": float(lecture.get("duration") or 0),
+        "structured": lecture.get("structured_at") is not None,
+        # `structured_at` 单独给出：前端重跑结构化时要判断"这一轮跑完了没有"。
+        # 只靠 `structured` 布尔不够 —— 已经结构化过的再重跑，它恒为 true，
+        # 轮询第一轮就立即返回，用户会以为秒完（实际后台还在跑）。
+        # 给出时间戳后，前端记下提交时的值，变了才是真的跑完了。
+        "structured_at": lecture.get("structured_at") or "",
+        "watch_url": watch_url,
+        "segments": payload_segments,
+    }
+
+
+@router.get("/kb/lecture/{doc_id}/timeline")
+async def get_lecture_timeline(doc_id: int,
+                               user_id: int = Depends(get_current_user)):
+    """原始时间线（`cues` + `frames`）：重跑结构化的原料，也可直接画时间轴。
+
+    数据来源 = `lectures.raw_timeline`（JSONL 原始件，只追加不改）+
+    `lecture_segments`（截图文件名补充）。
+
+    **空时间线不是错误**：`raw_timeline` 为空（老数据 / 转写路径没存）→ 返回两个空数组，
+    不 500、不 404 —— 前端据此显示"这集没有时间线"，而不是把整页打成错误态。
+    """
+    store = kb_manager.store(user_id)
+    lecture = store.get_lecture(doc_id)
+    if lecture is None:
+        raise _lecture_error(ErrorCode.KB_NOT_LECTURE)
+
+    frames, speech = kb_timeline.load_jsonl(lecture.get("raw_timeline") or "")
+    if not frames:
+        # 兜底：raw_timeline 里没有帧（老数据只存了 cues）时，用切片的截图当作帧
+        frames = [kb_timeline.FrameEvent(t=seg["t_start"], image=seg["slide"])
+                  for seg in store.list_lecture_segments(doc_id)
+                  if seg.get("slide")]
+
+    return {
+        "cues": [{"start": event.start, "end": event.end,
+                  "text": event.text, "raw": event.raw} for event in speech],
+        "frames": [{"t": frame.t, "image": frame.image} for frame in frames],
+    }
+
+
+@router.post("/kb/lecture/{doc_id}/restructure")
+async def restructure_lecture(doc_id: int,
+                              user_id: int = Depends(get_current_user)):
+    """重跑结构化：**不重新取词、不重新 ASR**（`raw_timeline` 就是为此存的）。
+
+    与 `generate_graph` 同一套长任务纪律（这条是硬约束，不是风格）：
+    - 入队即返回 `{"status": "accepted"}`，真正的结果走 `kb_updated` 通知
+      （`apiClient`/Vite 代理 timeout 都是 300s，分钟级任务必然先超时）；
+    - 进程内互斥 `_RESTRUCTURE_INFLIGHT` 防重复触发，锁在后台任务的 `finally` 释放；
+    - 后台任务不向任何人抛异常（没人接），失败也要发通知。
+
+    ⚠️ 本阶段只做到"骨架 + 校验 + 通知"：LLM 知识点切片尚未接入
+    （见 `kb/lecture_structurer.py`），当前按 `MIN_SEGMENT_SECS` 时间等分兜底，
+    通知里的 `structured=True` 表示"有切片可用"，不代表切片是知识点边界。
+    """
+    store = kb_manager.store(user_id)
+    lecture = store.get_lecture(doc_id)
+    if lecture is None:
+        raise _lecture_error(ErrorCode.KB_NOT_LECTURE)
+    if not (lecture.get("raw_timeline") or "").strip():
+        raise _lecture_error(ErrorCode.KB_EMPTY_TIMELINE)
+    # 占位在任何 await 之前完成：单事件循环里"检查 + 置位"之间无 await 即原子
+    if _RESTRUCTURE_INFLIGHT.get(doc_id):
+        raise HTTPException(status_code=409,
+                            detail=ErrorCode.user_message(ErrorCode.KB_RESTRUCTURE_BUSY))
+    _RESTRUCTURE_INFLIGHT[doc_id] = True
+
+    node = store.get_node(doc_id) or {}
+    runtime.spawn(_run_restructure(user_id, doc_id, node.get("name") or ""))
+    return {"status": "accepted"}
+
+
+async def _run_restructure(user_id: int, doc_id: int, doc_name: str) -> None:
+    """后台重跑结构化：读原始时间线 → 切片 → 落库 → 发 `kb_updated` → 释放锁。
+
+    调用前提：锁**已被端点占位**（见 `restructure_lecture`）。
+    本函数不向任何人抛异常（后台任务的异常没人接）；取消时 `finally` 照发通知，
+    然后把 `CancelledError` 继续抛出（asyncio 的取消语义要求如此）。
+    """
+    ok = False
+    error = ""
+    stamp = ""
+    try:
+        # 先让出一次事件循环：本函数主体是 CPU 段（解析/合并/切片），全程不 await
+        # 的话**取消只能发生在启动前**（协程还没进 try，finally 里的解锁根本轮不到），
+        # 关停时就可能把该文件锁死到进程重启。一个 yield 换"取消在重活之前就生效"。
+        await asyncio.sleep(0)
+        store = kb_manager.store(user_id)
+        lecture = store.get_lecture(doc_id) or {}
+        frames, speech = kb_timeline.load_jsonl(lecture.get("raw_timeline") or "")
+        sections = kb_timeline.merge(frames, speech,
+                                    float(lecture.get("duration") or 0))
+        kb_timeline.coalesce_sections(sections)
+        result = lecture_structurer.structure(sections,
+                                             float(lecture.get("duration") or 0))
+        segments = result["segments"]
+        if not segments:
+            error = ErrorCode.user_message(ErrorCode.KB_EMPTY_TIMELINE)
+        else:
+            # 时间戳**只取一次**：写库一个值、通知里一个值 —— 取两次会差一秒，
+            # 前端拿通知里的值去比对详情接口的 `structured_at` 就对不上了。
+            stamp = _now_iso()
+            store.replace_lecture_segments(doc_id, segments)
+            store.upsert_lecture(doc_id, structured_at=stamp)
+            ok = True
+            if result.get("note"):
+                logger.info("讲义结构化 user=%s doc=%s：%s", user_id, doc_id,
+                            result["note"])
+    except asyncio.CancelledError:
+        raise                                  # 交给 finally 发通知后再抛
+    except Exception as e:                     # noqa: BLE001 —— 后台任务不能漏异常
+        error = f"重跑结构化失败：{str(e)}"
+        logger.error("讲义结构化失败 user=%s doc=%s: %s", user_id, doc_id, e)
+    finally:
+        # 异常 / 取消（CancelledError 属 BaseException）都要释放，否则该文件被永久锁死、
+        # 此后每次重跑都 409。
+        _RESTRUCTURE_INFLIGHT.pop(doc_id, None)
+        if not ok and not error:
+            error = "结构化已中断（服务重启或关闭），已有切片保留"
+        # 单独 try 包住：finally 里抛出的异常会**顶掉**原来的结果/错误。
+        try:
+            notify(user_id, KB_UPDATED, {
+                "node_id": doc_id, "filename": doc_name,
+                "lecture": True, "structured": ok, "error": error,
+                # 带 `structured_at`：前端重跑时靠它判断"这一轮真的跑完了"，
+                # 只认 `structured` 布尔的话，已结构化过的再重跑会第一轮就误判完成。
+                "structured_at": stamp,
+            })
+        except Exception as e:                 # noqa: BLE001 —— 通知只是尽力而为
+            logger.warning("结构化完成通知发送失败（doc=%s）: %s", doc_id, e)
+
+
+def _now_iso() -> str:
+    """当前时间的 ISO 串（`structured_at` 用；不引新依赖）。"""
+    return datetime.now().isoformat(timespec="seconds")
+

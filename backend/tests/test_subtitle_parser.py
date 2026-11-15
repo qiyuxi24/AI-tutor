@@ -112,6 +112,33 @@ def test_paragraphs_split_on_max_segment():
     assert joined.count("连续内容") == 40, "切段不得丢内容"
 
 
+def test_paragraph_split_prefers_punctuation_over_hard_cut():
+    """超长段落切在**标点之后**（不是按字数从词中间截断）。
+
+    为什么在意：词中间断开的正文会污染嵌入与出题上下文（"拉普拉斯变" +
+    "换的微分性质"），且这种错误不报错、只在检索命中率上体现。
+    """
+    # 每句 17 字，15 句累计 255 字 > MAX_PARAGRAPH_CHARS(220)
+    sentence = "这是一个完整的句子用来把段落撑长。"
+    cues = [(float(i), float(i) + 1.0, sentence) for i in range(15)]
+    paras = to_paragraphs(cues)
+
+    assert len(paras) > 1, "超长必须切"
+    for _, text in paras:
+        assert text.endswith("。"), f"每段都应切在句末：{text[-10:]!r}"
+    assert "".join(p[1] for p in paras).count("。") == 15, "不丢句"
+
+
+def test_paragraph_split_without_punctuation_falls_back_to_cue_boundary():
+    """窗口内没有句读 → 按原规则（字幕条边界）整段切，不硬拆词。"""
+    blob = "无标点的连续文本" * 20          # 全是汉字，没有句读
+    cues = [(float(i), float(i) + 1.0, blob) for i in range(6)]
+    paras = to_paragraphs(cues)
+
+    assert len(paras) > 1
+    assert "".join(p[1] for p in paras) == blob * 6, "内容一个字都不能丢"
+
+
 # ── 拼接与成文 ──
 
 def test_paragraph_join_does_not_insert_space_in_chinese():
@@ -129,6 +156,49 @@ def test_to_sections_groups_by_ten_minutes():
     paras = [(0.0, "第一段"), (610.0, "第二段")]
     sections = to_sections(paras)
     assert [s[0][0] for s in sections] == [0.0, 610.0]
+
+
+def test_to_sections_accepts_caller_provided_boundaries():
+    """传了 `chapter_starts` → 按**知识点边界**分组（不再按 10 分钟时间格子）。
+
+    这是产物层的核心改动：固定时间格子不是知识点边界，按它切章等于把
+    "第 26 分钟到第 36 分钟"当成一个知识点（真实边界可能在第 28 分钟）。
+    """
+    paras = [(0.0, "一"), (100.0, "二"), (500.0, "三"), (900.0, "四")]
+    sections = to_sections(paras, chapter_starts=[0.0, 400.0, 800.0])
+
+    assert [[p[0] for p in s] for s in sections] == [[0.0, 100.0], [500.0], [900.0]]
+
+
+def test_to_sections_boundaries_need_not_align_with_paragraphs():
+    """边界落在段中间也照常分组：段落归入「起点 ≤ 它的最后一个边界」。"""
+    paras = [(10.0, "一"), (300.0, "二")]
+    sections = to_sections(paras, chapter_starts=[0.0, 200.0])
+
+    assert len(sections) == 2
+    assert [s[0][0] for s in sections] == [10.0, 300.0]
+
+
+def test_to_sections_empty_boundaries_falls_back_to_fixed_chapters():
+    """空列表 = 没给边界（不是"一个章节都不要"），退回固定分章。"""
+    paras = [(0.0, "第一段"), (610.0, "第二段")]
+    assert len(to_sections(paras, chapter_starts=[])) == 2
+    assert len(to_sections(paras, chapter_starts=None)) == 2
+
+
+def test_compose_lecture_with_knowledge_boundaries_has_no_fake_chapters():
+    """传了边界 → 章节标题用**该节真实起点时间**，不造"第 N 章"。
+
+    原先固定 10 分钟分章会产出 `## [00:10:00]` 这种与知识点无关的标题，
+    前端拿去当目录就是"每十分钟一个知识点"的假结构。
+    """
+    paras = [(0.0, "开场"), (754.0, "知识点一"), (1020.0, "知识点二")]
+    text = compose_lecture(paras, title="第二十六讲",
+                           chapter_starts=[0.0, 754.0, 1020.0])
+
+    assert "## [00:12:34]" in text and "## [00:17:00]" in text
+    assert "第 1 章" not in text and "## [00:10:00]" not in text
+    assert "[00:12:34] 知识点一" in text
 
 
 def test_compose_lecture_has_title_source_and_chapters():

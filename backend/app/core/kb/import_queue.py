@@ -30,12 +30,14 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from app.core import runtime
 from app.core.event_bus import ERROR, IMPORT_PROGRESS, KB_UPDATED, notify
 from app.core.kb import video_import
 from app.core.kb.bili import urls as bili_urls
 from app.core.kb.kb_manager import kb_manager
+from app.core.kb.timeline import FrameEvent, TranscriptEvent, dump_jsonl
 
 logger = logging.getLogger("ai-tutor")
 
@@ -214,11 +216,72 @@ async def _process_item(user_id: int, task: dict, item: dict, index: int,
             raise
         logger.info("课程导入完成 user=%s node=%s source=%s 来自 %s",
                     user_id, node_id, meta.get("source"), item["url"])
+        _store_timeline(store, user_id, node_id, item, meta)
         notify(user_id, KB_UPDATED, {"node_id": node_id, "filename": filename,
                                      "title": meta.get("title", "")})
         return node_id, meta.get("chars", 0), meta.get("source_label") or ""
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _store_timeline(store, user_id: int, node_id: int, item: dict,
+                    meta: dict) -> None:
+    """入库成功后**顺手**把原始时间线存进 `lectures`（视频资产层）。
+
+    为什么在这里而不是 `fetch_lecture` 里：时间线的落点要 `doc_id`，而 `doc_id`
+    是入库之后才有的（`upload_and_index` 返回的 node_id）。所以只能在两步之间补一刀。
+
+    ⚠️ 这一刀**绝不能拖垮主流程**（提示词正在导入的是一集已经成功的讲义）：
+    视频资产只是"重跑结构化不重花 ASR 的钱"的优化，写失败就是少一次优化 ——
+    记 warning 后继续。也正因如此它放在 `return` 之前而不是包在 `try` 外层里。
+    """
+    cues = meta.get("cues") or []
+    if not cues:
+        return
+    try:
+        speech = [TranscriptEvent(start=c["start"], end=c["end"],
+                                  text=c.get("text") or "", raw=c.get("raw"))
+                  for c in cues]
+        frames = [FrameEvent(t=f["t"], image=f.get("image") or "")
+                  for f in (meta.get("frames") or [])]
+        try:
+            ref = bili_urls.normalize(item["url"])
+        except ValueError:
+            ref = None
+        fields: dict = {
+            # 存**归一化后**的链接而不是用户粘的那串：`lectures.url` 会被直接喂给
+            # `timeline.timestamp_url` 拼点击链接，裸 BV 号 / 缺 scheme 的输入拼不出
+            # 可点的 URL（`timestamp_url` 对非 http(s) 原样返回）。
+            "url": (ref.url if ref is not None else item["url"]),
+            "title": meta.get("title") or item.get("title") or "",
+            "source_kind": meta.get("source") or "",
+            "raw_timeline": dump_jsonl(frames, speech),
+        }
+        if ref is not None:
+            fields["platform"] = _platform_of(ref, item["url"])
+            fields["video_id"] = ref.bvid or (f"av{ref.aid}" if ref.aid else "")
+            fields["page"] = ref.page
+        store.upsert_lecture(node_id, **fields)
+    except Exception as e:  # noqa: BLE001 - 见 docstring：优化失败不许拖垮导入
+        logger.warning("时间线落库失败 user=%s node=%s（不影响本次导入）：%s",
+                       user_id, node_id, e)
+
+
+def _platform_of(ref: bili_urls.VideoRef, url: str) -> str:
+    """归一成 `bilibili` / `youtube` / `local`（前端按它选图标与文案）。
+
+    别的站（Coursera、自家录屏等）落 `other`：不是枚举里的三项，但也不该硬塞进
+    `youtube` —— 那个字段会被前端用来显示平台名，撒谎比多一个值更糟。
+    """
+    if ref.is_bilibili:
+        return "bilibili"
+    parsed = urlparse(ref.url or url)
+    if parsed.scheme.lower() == "file":
+        return "local"
+    host = (parsed.netloc or "").lower()
+    if "youtube" in host or "youtu.be" in host:
+        return "youtube"
+    return "other"
 
 
 def _progress(user_id: int, store, task_id: str, item: dict, index: int, total: int,
