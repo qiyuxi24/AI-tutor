@@ -45,6 +45,7 @@ data/agent_runs/
 data/agent_debug/
 data/llm/
 data/keys/
+data/bili/
 data/traces/
 backend/eval_data/
 
