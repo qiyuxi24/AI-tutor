@@ -9,7 +9,7 @@
   Layer 2（真值）：请求完成后从 response.usage 提取供应商返回的精确 token 数
     → 计费审计、trace 落盘、成本监控
 
-模型适配：
+模型适配（2026-11-16 起由 `llm/provider.py` 的方言表统一给出）：
   - Qwen/DashScope：官方推荐 o200k_base 编码，近似精确
   - MiniMax-M3：Python tiktoken 无 MiniMax 编码，用 o200k_base + 校准系数
   - 通用 OpenAI 兼容：o200k_base 作为安全兜底
@@ -25,15 +25,8 @@ _encoding = None
 # 默认编码：o200k_base（Qwen 官方推荐，对中文友好，也是 GPT-4o 系列编码）
 _DEFAULT_ENCODING = "o200k_base"
 
-# 模型校准系数：本地 o200k_base 编码与目标模型实际 tokenizer 的经验比值
-# < 1.0 = 本地计数偏高需下调；> 1.0 = 本地计数偏低需上调
-_MODEL_CALIBRATION = {
-    "minimax": 1.15,   # MiniMax M3 tokenizer 与 o200k_base 有差异，经验值 ~1.15
-    "abab":   1.15,    # MiniMax 旧模型系列前缀
-    "qwen":   1.0,     # Qwen 官方推荐 o200k_base，近似精确
-    "gpt":    1.0,     # OpenAI 系列原生支持
-    "deepseek": 1.1,   # DeepSeek V3 tokenizer 与 o200k_base 有微小差异
-}
+# 模型校准系数：字面值在 `llm/provider.py` 的方言表里（换 provider 只改一处），
+# 本模块只负责查表 —— 原先这里另抄了一张 `_MODEL_CALIBRATION`，且缺少 glm。
 
 # 每条消息的结构开销（role 标签、分隔符等 framing tokens）
 # 参考 OpenAI cookbook：每条 message 约 4 tokens overhead
@@ -63,12 +56,13 @@ def _get_encoding():
 
 
 def _get_calibration_factor(model: str) -> float:
-    """根据模型名匹配校准系数。"""
-    model_lower = (model or "").lower()
-    for prefix, factor in _MODEL_CALIBRATION.items():
-        if prefix in model_lower:
-            return factor
-    return 1.0
+    """根据模型名匹配校准系数（查方言表，见 `llm/provider.py`）。
+
+    未知模型 → 1.0（o200k_base 原样，安全兜底）。GLM 等原先没有表项的模型
+    从这里自动获得 1.0，不必再手工维护第二张表。
+    """
+    from app.core.llm.provider import provider_for
+    return provider_for(model).calibration
 
 
 def count_tokens(text: str, model: str | None = None) -> int:

@@ -5,7 +5,7 @@
 
 事件类型注册表：
   - text_delta    — AI 文本增量（兼容旧 "token"）
-  - thinking      — AI 思考过程（MiniMax reasoning_details）
+  - thinking      — AI 思考过程（MiniMax `reasoning_details` / DeepSeek `reasoning_content`）
   - tool_start    — 工具开始执行 {tool, args_head}
   - tool_result   — 工具执行完毕 {tool, ok, summary, duration_ms}
   - agent_start   — Agent 循环开始 {max_rounds}

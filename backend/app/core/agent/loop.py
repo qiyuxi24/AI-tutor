@@ -79,7 +79,8 @@ from app.core.config import settings
 from app.core.llm.clients import MODEL_NAME
 from app.core.llm.fallback import chat_create as _chat_create
 from app.core.llm.stream import chat_create_stream as _chat_create_stream
-from app.core.llm.thinking import LLM_EXTRA_BODY as _LLM_EXTRA_BODY, strip_think_tags as _strip_think_tags
+from app.core.llm.provider import reasoning_texts as _reasoning_texts
+from app.core.llm.thinking import strip_think_tags as _strip_think_tags
 from app.core.llm.usage import record as _record_llm_usage
 from app.core.token_counter import (
     TokenUsage,
@@ -240,7 +241,7 @@ async def _chat_once(api_messages: list[dict], *, temperature: float,
 
     **on_delta 非空 = 流式**（2026-10-10，TODO「流式名不副实」）：正文逐 chunk 回调
     on_delta（首屏延迟 = 首 chunk 时间，而非整段生成时间）；返回值仍是**与非流式同形**
-    的响应对象（content / tool_calls / reasoning_details / usage / model 齐全），
+    的响应对象（content / tool_calls / 思考字段 / usage / model 齐全），
     所以调用点后面的逻辑一行都不用分叉。on_delta=None 保持原非流式行为（测试桩）。
 
     on_reasoning 非空 = 思考也逐片回调（2026-11-15）；与 on_delta 一起给才算真流式，
@@ -250,7 +251,9 @@ async def _chat_once(api_messages: list[dict], *, temperature: float,
         "messages": api_messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "extra_body": _LLM_EXTRA_BODY,
+        # 思考开关交给 chat_create 按**该档服务商**翻译成 extra_body（2026-11-16）。
+        # 这里原先硬发 MiniMax 专有的 `reasoning_split`，换 deepseek/GLM 会报 400 或被静默忽略。
+        "thinking": True,
     }
     if tools:
         kwargs["tools"] = tools
@@ -649,13 +652,13 @@ async def _loop_core(
         # 思考内容 → 实时事件（截断 200 字友好展示）+ 证据 step（全文保留）
         # 流式已逐片推过（reasoning_count > 0）→ 不再补整条（否则前端思考面板重复）；
         # 没推过（非流式 / 旧测试桩 / 网关不给 reasoning delta）才补一条整段。
-        rd = getattr(msg, "reasoning_details", None)
-        if rd:
-            rd_text = " ".join(r.get("text", "") for r in (rd if isinstance(rd, list) else [rd]))
-            if rd_text:
-                if pump.reasoning_count == 0:
-                    emitter.emit(THINKING, text=rd_text[:200])
-                steps.append({"ts": time.time(), "kind": "thinking", "text": _clip(rd_text)})
+        # 字段按网关**实际下发**的取（`reasoning_texts`）：MiniMax 是 reasoning_details，
+        # DeepSeek / GLM 是 reasoning_content —— 原先只认前者，换 provider 后思考面板全空。
+        rd_text = " ".join(_reasoning_texts(msg))
+        if rd_text:
+            if pump.reasoning_count == 0:
+                emitter.emit(THINKING, text=rd_text[:200])
+            steps.append({"ts": time.time(), "kind": "thinking", "text": _clip(rd_text)})
 
         # 自然终止：模型不再请求工具
         if not msg.tool_calls:

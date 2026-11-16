@@ -112,6 +112,10 @@ class ErrorCode:
     QUIZ_INVALID_TYPE      = ("E-QUIZ-005", "不支持的题型")
     # 节点试题链接列表加载失败（侧边栏数据源）；端点是**降级语义**：失败返回空列表不抛
     QUIZ_LIST_FAILED       = ("E-QUIZ-006", "题目列表加载失败")
+    # 出题规格（`question_plan`）没被满足且 `strict=True` → 一道都不落库。
+    # 与 QUIZ_PARSE_ERROR 的区别：那次是"模型输出不成形"，这次是"输出成形但不够"，
+    # 用户该看到的是缺了哪些题型/考点（紧跟在本码后面），不是"格式异常"。
+    QUIZ_PLAN_SHORTFALL    = ("E-QUIZ-007", "出题未满足规格")
 
     # ── 资源采集模块 (E-COLL) ──
     COLL_TASK_NOT_FOUND = ("E-COLL-001", "采集任务不存在")

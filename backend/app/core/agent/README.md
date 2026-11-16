@@ -22,7 +22,7 @@
 | `loop.py` | `agent_loop.py` | 主循环：LLM ↔ 工具 多轮串联（纯编排，不碰图谱/RAG 内部） | 唯一决定"要不要再来一轮工具"的地方；护栏：**轮数** `max_rounds=5`、**单工具超时** 60s，安全边界问 `loop_guard` |
 | `loop_guard.py` | （2026-09-19 拆出） | 工具调用安全边界：`LoopGuard` + 终止原因 `STOP_*` + 拒绝文案 | **只判定不执行**；边界：**调用总次数** 12、**run 墙钟** 180s、**同参数重复** ≤2 次、**连续失败熔断** 3 次 |
 | `debug_log.py` | （2026-09-19 新） | 调试日志：控制台 + SQLite 双写（`agent_debug_logs`），跨 run 按 run_id 回看 | 排查"为什么输出无用数据"的第一站；记录范围见下节，**不记**学生正文与工具全文 |
-| `context.py` | `agent_context.py` | run 内 API 消息序列的持有与写入 + **Tool Result Clearing**（较早工具批次正文换占位符） | **唯一往 `messages` 里 append 的地方**：assistant 带 `tool_calls` 快照、`reasoning_details` 随轮保留、tool 回填按 `tool_call_id` 配对 |
+| `context.py` | `agent_context.py` | run 内 API 消息序列的持有与写入 + **Tool Result Clearing**（较早工具批次正文换占位符） | **唯一往 `messages` 里 append 的地方**：assistant 带 `tool_calls` 快照、思考块**按网关实际下发的字段**随轮保留、tool 回填按 `tool_call_id` 配对 |
 | `guard.py` | `context_guard.py` | 发送前预算守卫：按预算线裁最旧历史 + 插省略说明 | **唯一裁历史的地方**（入口一次性；loop 内刻意不裁） |
 | `estimator.py` | `token_estimator.py` | 发送前 token 预估：prompt 计数 + completion 预估（历史中位数 / 关键词规则）+ 成本换算 | **唯一做"发送前预估"的地方**；结果进 `AgentRunResult.token_estimate` → `agent_runs.token_estimate` 字段，与真值 `token_usage` 同表可对照 |
 | `events.py` | `agent_events.py` | 事件发射：run_id 自动注入 + per-user 路由 | loop 对 `event_bus` 的**唯一入口**（loop 不再直调 bus） |
@@ -103,7 +103,11 @@ chat_service.process_message_stream(messages, mode, user_id)
 ## 6. 改代码时的坑
 
 1. **别在 loop 里直接 `messages.append({...})`** —— 一律走 `AgentContext.append_*`。协议细节（`tool_calls` 快照、`reasoning_details` 回填、tool id 配对）全靠这一处收敛。
-2. **`reasoning_details` 必须随轮保留** —— MiniMax 的 Interleaved Thinking 要求多轮工具调用时回填思考块，丢了会掉进"模型不思考"的退化。
+2. **思考块必须随轮保留** —— 但**按网关实际下发的字段**保留（MiniMax → `reasoning_details`，
+   DeepSeek reasoner → `reasoning_content`）。DeepSeek 不回填会直接 400
+   （`"The reasoning_content in the thinking mode must be passed back to the API"`）。
+   别在这里查 provider 表加判断：它给过的字段它必然认得，它没给的就别塞。
+   回归 `tests/test_llm_provider_dialect.py`。
 3. **传了 `user_id` 就自动落库**：调用方**不要**再自己 `save_run` / `save_trace`（历史上两套记录并存过）。
 4. **token 真值优先用 `AgentRunResult.token_usage`**（API `usage` 提取），`context_tokens` 是旧字段，仅向后兼容。
 5. **`user_id=None` 是纯测试模式**：不推事件、不落库 —— 写测试时用它，别 mock 整个 event_bus。

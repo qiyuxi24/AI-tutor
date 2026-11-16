@@ -21,8 +21,8 @@
 语义保证：
   - 构造即完成 system_prompt + 对话历史 → API 消息格式（复用 build_api_messages，
     dict / Pydantic ChatMessage 双形兼容）
-  - reasoning_details（思考块）随 assistant 快照保留：MiniMax 多轮工具调用需回填
-    以维持思维链连续（官方 Interleaved Thinking 最佳实践）
+  - 思考块随 assistant 快照保留，**按网关实际下发的字段**（`reasoning_details` /
+    `reasoning_content`）—— 2026-11-16 起不再只认 MiniMax 那一个（见 `assistant_snapshot`）
 """
 from app.core.llm.messages import build_api_messages
 
@@ -38,7 +38,13 @@ TOOL_RESULTS_KEEP_BATCHES = 2
 def assistant_snapshot(msg) -> dict:
     """把模型带 tool_calls 的回复按协议快照为 assistant 消息（纯函数）。
 
-    保留思考块：reasoning_split 默认开启时该字段才会返回，多轮工具调用需回填。
+    思考块**按收到的字段原样回填**（2026-11-16）：不查 provider 表、不做判断。
+    理由：网关自己下发的字段，它必然认得；我们只回填它给过的东西。
+      · MiniMax（`reasoning_split`）→ `reasoning_details`，多轮维持思维链连续；
+      · DeepSeek reasoner → `reasoning_content`，**不回填直接 400**
+        （"The reasoning_content in the thinking mode must be passed back to the API"）；
+      · GLM / 无思考模型 → 两个字段都没有，快照里也就不出现。
+    原先这里只认 `reasoning_details`，导致换 DeepSeek 后第二轮必挂。
     """
     snap = {
         "role": "assistant",
@@ -52,6 +58,9 @@ def assistant_snapshot(msg) -> dict:
     rd = getattr(msg, "reasoning_details", None)
     if rd:
         snap["reasoning_details"] = rd if isinstance(rd, list) else [rd]
+    rc = getattr(msg, "reasoning_content", None)
+    if isinstance(rc, str) and rc:
+        snap["reasoning_content"] = rc
     return snap
 
 
