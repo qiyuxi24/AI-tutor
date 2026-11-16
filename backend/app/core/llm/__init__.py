@@ -5,7 +5,8 @@
 - clients.fallback_client                       备用服务客户端（可选，见 fallback）
 - embed.embed_texts                              **检索侧**嵌入唯一出口（kb/rag 向量化共用；
                                                   语义去重侧走 kb/embedder.py，共用同名常量）
-- thinking.LLM_EXTRA_BODY / strip_think_tags    MiniMax-M3 思考内容适配（请求拆分/响应兜底）
+- thinking.LLM_EXTRA_BODY / strip_think_tags    思考内容适配（请求拆分 / 响应兜底）
+- provider.provider_for / extra_body_for         **服务商方言表**（换 provider 只改这张表）
 - messages.build_api_messages                   system_prompt + 历史 → OpenAI 消息格式
 - retry.is_retryable / with_retry / map_api_error  瞬时重试与 API 错误码映射
 - fallback.chat_create                          对话唯一出口（主备回退，供 agent_loop）
@@ -24,6 +25,7 @@ from app.core.llm.embed import EMBED_BATCH_SIZE, EMBEDDING_MODEL, MAX_EMBED_CHAR
 from app.core.llm.fallback import chat_create
 from app.core.llm.json_extract import extract_json
 from app.core.llm.messages import build_api_messages
+from app.core.llm.provider import PROVIDERS, extra_body_for, presets, provider_for
 from app.core.llm.retry import map_api_error, with_retry
 from app.core.llm.stream import chat_create_stream
 from app.core.llm.thinking import LLM_EXTRA_BODY, strip_think_tags
@@ -33,6 +35,7 @@ __all__ = [
     "MODEL_NAME", "client", "embed_client", "fallback_client", "ModelStore",
     "EMBEDDING_MODEL", "EMBED_BATCH_SIZE", "MAX_EMBED_CHARS", "embed_texts",
     "LLM_EXTRA_BODY", "strip_think_tags",
+    "PROVIDERS", "provider_for", "extra_body_for", "presets",
     "build_api_messages", "chat_create", "chat_create_stream", "call_llm", "extract_json",
     "with_retry", "map_api_error",
 ]

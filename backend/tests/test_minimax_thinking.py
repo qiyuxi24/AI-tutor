@@ -60,8 +60,12 @@ def _install_fake_chat(monkeypatch, responses: list) -> list:
 
 # ─── 用例 ─────────────────────────────────────────────────
 
-def test_extra_body_reasoning_split_passed(monkeypatch):
-    """所有 LLM 调用透传 reasoning_split=True（含 chat_once）。"""
+def test_thinking_flag_passed_not_extra_body(monkeypatch):
+    """loop 只传 `thinking=True`，方言化的 extra_body 由 chat_create 按档注入（2026-11-16）。
+
+    原先这里断言 `extra_body == {"reasoning_split": True}` —— 那是 MiniMax 专有字段，
+    无条件发给 deepseek/GLM 会 400 或被静默忽略。现在 loop 不再知道任何方言细节。
+    """
     captured = {}
 
     async def fake_chat_create(**kwargs):
@@ -71,7 +75,8 @@ def test_extra_body_reasoning_split_passed(monkeypatch):
     # _chat_once 已收敛到 llm.fallback.chat_create（瞬时重试 + 模型回退统一入口）
     monkeypatch.setattr(agent_loop, "_chat_create", fake_chat_create)
     asyncio.run(agent_loop._chat_once([{"role": "user", "content": "hi"}], temperature=0.3))
-    assert captured.get("extra_body") == {"reasoning_split": True}
+    assert captured.get("thinking") is True
+    assert "extra_body" not in captured
 
 
 def test_strip_think_tags_removes_block():

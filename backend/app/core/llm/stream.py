@@ -25,6 +25,7 @@
 from types import SimpleNamespace
 
 from app.core.llm.fallback import chat_create
+from app.core.llm.provider import reasoning_texts as _reasoning_texts
 
 __all__ = ["chat_create_stream", "STREAM_OPTIONS"]
 
@@ -47,11 +48,16 @@ def _collect_tool_deltas(slots: dict, deltas) -> None:
                 slot["arguments"] += fn.arguments
 
 
-def _to_response(*, model, usage, finish, content, reasoning, tool_slots):
+def _to_response(*, model, usage, finish, content, reasoning, reasoning_content, tool_slots):
     """拼成与非流式 `chat.completions.create` 返回对象**同形**的轻量结构。
 
     下游（loop / assistant_snapshot / extract_usage / _resp_model）只按属性访问，
     所以 SimpleNamespace 足够；字段名与 OpenAI 对象保持一致。
+
+    思考字段**按网关实际下发的那一个**原样带上（2026-11-16）：MiniMax 是
+    `reasoning_details`（列表），DeepSeek / GLM 是 `reasoning_content`（字符串）。
+    两个都置空 = 该模型没思考。下游（`assistant_snapshot`）**按收到的字段回填**，
+    不查 provider 表 —— 它给过的它必然认得。
     """
     tool_calls = [
         SimpleNamespace(id=slot["id"], type="function",
@@ -60,7 +66,8 @@ def _to_response(*, model, usage, finish, content, reasoning, tool_slots):
         for _, slot in sorted(tool_slots.items())
     ] or None
     message = SimpleNamespace(content=content, tool_calls=tool_calls,
-                              reasoning_details=reasoning or None)
+                              reasoning_details=reasoning or None,
+                              reasoning_content=reasoning_content or None)
     return SimpleNamespace(
         model=model or "",
         usage=usage,
@@ -72,7 +79,8 @@ async def _accumulate(stream, on_delta, on_reasoning=None) -> SimpleNamespace:
     """消费 chunk 流：正文逐片回调 `on_delta`、思考逐片回调 `on_reasoning`，
     返回同形响应对象。"""
     content_parts: list[str] = []
-    reasoning: list = []
+    reasoning: list = []          # MiniMax 方言：reasoning_details 的原始元素
+    reasoning_content: list[str] = []   # DeepSeek / GLM 方言：裸字符串分片
     tool_slots: dict = {}
     model, usage, finish = "", None, None
 
@@ -94,20 +102,23 @@ async def _accumulate(stream, on_delta, on_reasoning=None) -> SimpleNamespace:
             content_parts.append(text)
             if on_delta is not None:
                 on_delta(text)
+        # 思考：两个方言都收（`provider.reasoning_texts` 就是这条「按实际字段取」的规则）
         rd = getattr(delta, "reasoning_details", None)
         if rd:
             reasoning.extend(rd if isinstance(rd, list) else [rd])
-            if on_reasoning is not None:
-                for r in (rd if isinstance(rd, list) else [rd]):
-                    piece = r.get("text") if isinstance(r, dict) else None
-                    if piece:
-                        on_reasoning(piece)
+        rc = getattr(delta, "reasoning_content", None)
+        if isinstance(rc, str) and rc:
+            reasoning_content.append(rc)
+        if on_reasoning is not None:
+            for piece in _reasoning_texts(delta):
+                on_reasoning(piece)
         tcs = getattr(delta, "tool_calls", None)
         if tcs:
             _collect_tool_deltas(tool_slots, tcs)
 
     return _to_response(model=model, usage=usage, finish=finish,
                         content="".join(content_parts), reasoning=reasoning,
+                        reasoning_content="".join(reasoning_content),
                         tool_slots=tool_slots)
 
 
@@ -125,8 +136,9 @@ async def chat_create_stream(*, user_id: int | None = None, on_delta=None,
         user_id:  透传 `chat_create`（走该用户自有模型链，未配置则回落系统默认档）。
 
     返回:
-        与非流式响应同形的对象：`choices[0].message.{content,tool_calls,reasoning_details}`、
-        `usage`（`include_usage` 生效时非空）、`model`、`choices[0].finish_reason`。
+        与非流式响应同形的对象：`choices[0].message.{content,tool_calls,reasoning_details,
+        reasoning_content}`、`usage`（`include_usage` 生效时非空）、`model`、
+        `choices[0].finish_reason`。思考字段按网关实际下发的那一个带上（2026-11-16）。
 
     异常:
         `chat_create` 映射后的 RuntimeError（建流阶段）。`stream_options` 被网关以

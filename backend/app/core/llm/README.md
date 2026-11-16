@@ -16,7 +16,8 @@
 |---|---|---|---|
 | `clients.py` | 客户端单例 | `client` `embed_client` `fallback_client` `MODEL_NAME` | 对话 / 嵌入 / 备用三个 `AsyncOpenAI`，**模块导入时创建** |
 | `messages.py` | 消息组装 | `build_api_messages` | `system_prompt` + 历史 → OpenAI 消息格式（dict / Pydantic 双形兼容） |
-| `thinking.py` | MiniMax-M3 适配 | `extra_body(thinking)` `strip_think_tags` `LLM_EXTRA_BODY` | 思考拆分到 `reasoning_content`、思考开关、响应兜底剥离 |
+| `thinking.py` | 思考响应兜底 | `strip_think_tags` `extra_body(thinking)` `LLM_EXTRA_BODY` | MiniMax 方言的薄别名 + 响应侧剥离 `ϩ…ϩ` 思考块（**请求侧方言已收口到 `provider.py`**） |
+| `provider.py` | **服务商方言表**（2026-11-16） | `PROVIDERS` `provider_for` `extra_body_for` `reasoning_texts` `presets` `is_known` | 换 provider 只改这张表：请求 `extra_body` / 思考字段名 / token 校准 / 探测 `max_tokens` |
 | `retry.py` | 请求健壮性 | `with_retry` `is_retryable` `map_api_error` | 指数退避 + 抖动重试；异常 → 错误码 `RuntimeError` |
 | `fallback.py` | 主备回退 | `chat_create` `LLM_CANDIDATES` | **对话调用唯一出口**：候选链顺序尝试，失败静默切下一个 |
 | `stream.py` | 流式变体 | `chat_create_stream` | `chat_create` + `stream=True`：正文**逐 chunk** 回调，并把 chunk 累积成**与非流式同形**的响应对象 |
@@ -61,6 +62,9 @@ kb.embedder.ApiEmbedder ─→ 同步 OpenAI（同一模型；语义去重专用
 - **传 `user_id`**（两条真路径都会透传）：优先用**该用户自有模型链**
   （`user_models.ModelStore.candidates()`：当前使用 → 其余可用），
   该用户没配任何模型时回落 `LLM_CANDIDATES`（.env **系统默认档**），行为与旧版一致。
+- **传 `thinking=True/False`**（2026-11-16）：不要自己拼 `extra_body` —— 本函数按**每一档
+  各自的方言**翻译（主备可能分属不同服务商，一个进程级 extra_body 必然对某一档发错字段）。
+  调用方显式给 `extra_body` 时原样透传（逃生口，测试用）。
 - 实际生效的那一档回写到 `models.json` 的 `effective_id` —— 设置页「当前生效档位」
   读它，主模型降级到备用时用户能看见。
 - 全部档失败 → 抛 `map_api_error` 分类后的 `RuntimeError`（**调用方不必再映射**）。
@@ -132,11 +136,23 @@ M3 把思考裹在 `ϩ…ϩ` 标签里（`thinking.py`），且**思考消耗的
 具体表现为工具在 `asyncio.to_thread` 工作线程里 `asyncio.run(...)` 后崩。
 这是"工具必须有异步入口"的根因（见 `agent_tools/README.md` §5 不变量 2）。
 
-### 4.5 服务商差异
+### 4.5 服务商差异（vendor 方言表 = `provider.py`）
 
 默认对话模型 MiniMax-M3（`LLM_API_KEY` / `LLM_BASE_URL` / `MODEL_NAME`），
 嵌入固定阿里 `text-embedding-v4`（`DASHSCOPE_API_KEY` / `EMBED_BASE_URL`，**key 独立**）。
-`extra_body` 里的 `thinking.type=disabled` **仅 M3 支持**，换模型后该字段可能被忽略或报错。
+
+**换 provider 只需要改一张表**（`provider.py::PROVIDERS`，加一行 = 加一家）。四个差异：
+
+| 差异 | 谁在用 | 不搞定的后果 |
+|---|---|---|
+| 请求 `extra_body` 键名 | `fallback.chat_create` 按**每一档**注入 | 无条件发 `reasoning_split` → 严格网关 400 / 宽容网关静默忽略（思考永远拿不到） |
+| 响应思考字段 | `provider.reasoning_texts` + `stream._accumulate` | 只认 `reasoning_details` → DeepSeek/GLM 的 `reasoning_content` 全丢，思考面板空白 |
+| 多轮回填 | `agent/context.py::assistant_snapshot` **按实际下发的字段**回填 | DeepSeek reasoner 不回填 `reasoning_content` → 第二轮 400 `"must be passed back to the API"` |
+| token 校准 / 探测 `max_tokens` | `token_counter._get_calibration_factor`、`api/v1/llm_models._probe_model` | 少算 token；`max_tokens=1` 探测把 reasoner 误判 `unavailable` |
+
+**关键不变量**：未知 provider **一个字段都不发**，而不是"发个默认值试试"
+（`reasoning_split` 对 MiniMax 是必需、对别人是未知字段 —— 混成一个常量就是这个 bug 的根因）。
+用户接的自建网关若确实是 MiniMax 兼容，在设置页显式选 MiniMax（`models.json` 的 `provider` 字段）。
 
 ---
 
@@ -156,7 +172,7 @@ M3 把思考裹在 `ϩ…ϩ` 标签里（`thinking.py`），且**思考消耗的
 cd backend
 venv/Scripts/python.exe -m pytest tests/test_llm_call.py tests/test_llm_fallback.py \
     tests/test_minimax_thinking.py tests/test_json_extract.py tests/test_embed_texts.py \
-    tests/test_llm_stream.py -q
+    tests/test_llm_stream.py tests/test_llm_provider_dialect.py -q
 venv/Scripts/python.exe -m pytest tests/ -q -m "not llm_api"     # 离线全量
 venv/Scripts/python.exe -m pytest tests/test_agent_loop_real_api.py -q -m llm_api   # 真实付费 API（需 pytest-asyncio）
 ```

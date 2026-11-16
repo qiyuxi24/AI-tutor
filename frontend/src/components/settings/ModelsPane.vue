@@ -24,14 +24,36 @@ const STATUS_TEXT = {
   disabled: '已停用',
 }
 
-const state = ref({ models: [], active_id: null, effective_id: null, system_default: {} })
+const state = ref({
+  models: [], active_id: null, effective_id: null, system_default: {}, presets: [],
+})
 const loading = ref(false)
 const busyId = ref('')          // 正在测试 / 切换的模型 id
 
 const dialogVisible = ref(false)
 const editingId = ref('')       // 空 = 新建
 const saving = ref(false)
-const form = ref({ name: '', base_url: '', api_key: '', model: '' })
+const form = ref({ name: '', base_url: '', api_key: '', model: '', provider: '' })
+
+/** 服务商预设（含"OpenAI 兼容（通用）"兜底项）：选了自动填地址与常见模型名提示。
+ *  真值在后端 `llm/provider.py` 的方言表 —— 前端只展示，不自己维护第二份。 */
+const presets = computed(() => state.value.presets || [])
+
+const presetHint = computed(() => {
+  const p = presets.value.find((x) => x.key === form.value.provider)
+  if (!p) return ''
+  if (!p.key || p.key === 'openai-compat') return '不知道是哪家时选它：不会发送任何厂商专有参数'
+  return p.models?.length ? `常见模型：${p.models.join(' / ')}` : ''
+})
+
+/** 选预设：只在用户还没自己填地址时覆盖，别把已经填好的值冲掉 */
+function applyPreset(key) {
+  form.value.provider = key
+  const p = presets.value.find((x) => x.key === key)
+  if (!p) return
+  if (p.base_url && !form.value.base_url.trim()) form.value.base_url = p.base_url
+  if (p.models?.length && !form.value.model.trim()) form.value.model = p.models[0]
+}
 
 /** 当前生效档位文案：降级到备用模型时这里会跟着变，用户能看出"用哪个在跑"。 */
 const effectiveText = computed(() => {
@@ -57,14 +79,17 @@ onMounted(load)
 
 function openCreate() {
   editingId.value = ''
-  form.value = { name: '', base_url: '', api_key: '', model: '' }
+  form.value = { name: '', base_url: '', api_key: '', model: '', provider: '' }
   dialogVisible.value = true
 }
 
 function openEdit(m) {
   editingId.value = m.id
   // Key 不回显：留空 = 不修改
-  form.value = { name: m.name, base_url: m.base_url, api_key: '', model: m.model }
+  form.value = {
+    name: m.name, base_url: m.base_url, api_key: '', model: m.model,
+    provider: m.provider || '',
+  }
   dialogVisible.value = true
 }
 
@@ -83,6 +108,7 @@ async function submit() {
   try {
     const payload = {
       name: f.name.trim(), base_url: f.base_url.trim(), model: f.model.trim(),
+      provider: f.provider || '',
       ...(apiKey ? { api_key: apiKey } : {}),
     }
     if (editingId.value) {
@@ -227,6 +253,22 @@ async function remove(m) {
       <div class="form-row">
         <label>名称</label>
         <el-input v-model="form.name" placeholder="例如：校内网关" maxlength="64" />
+      </div>
+      <div class="form-row">
+        <label>服务商</label>
+        <el-select
+          :model-value="form.provider"
+          placeholder="自动识别（按模型名判断）"
+          style="width: 100%"
+          @update:model-value="applyPreset"
+        >
+          <el-option label="自动识别（按模型名判断）" value="" />
+          <el-option
+            v-for="p in presets" :key="p.key"
+            :label="p.label" :value="p.key"
+          />
+        </el-select>
+        <p v-if="presetHint" class="form-hint">{{ presetHint }}</p>
       </div>
       <div class="form-row">
         <label>接入地址</label>

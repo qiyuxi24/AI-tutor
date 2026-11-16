@@ -15,11 +15,18 @@
 `chat_create` 是**所有带工具/不带工具 LLM 对话调用的唯一出口**（agent_loop 与 call_llm
 都收敛到此）：按候选链顺序尝试，每档内做瞬时重试；实际生效的档位回写到用户配置，
 供设置页显示「当前生效档位」。
+
+## 方言注入（2026-11-16）
+`thinking=True/False` 由**本函数按每一档的模型名**翻译成该服务商认的 `extra_body`
+（见 `llm/provider.py`）。为什么在这里而不是调用方：候选链里主备可能属于不同服务商，
+"进程级一个 extra_body"必然对某一档发错字段。调用方显式传 `extra_body` 时原样透传
+（测试与特殊场景的逃生口）。
 """
 import logging
 
 from app.core.config import settings
 from app.core.llm import clients as _clients
+from app.core.llm import provider as _provider
 from app.core.llm.retry import map_api_error, with_retry
 from app.core.llm.user_models import ModelStore
 
@@ -60,8 +67,9 @@ def _model_store(user_id: int) -> ModelStore:
 
 
 def user_candidates(user_id: int | None) -> list | None:
-    """用户自有候选链 [(client, model, model_id)]；无配置 / 读盘失败 → None（回落系统默认档）。
+    """用户自有候选链 [(client, model, model_id, provider)]；无配置 / 读盘失败 → None。
 
+    第 4 元是 `models.json` 里的方言键（空串 = 按模型名自动判定，见 `provider.provider_for`）。
     公开导出名：语音转写（`llm/transcribe.py`）等其它 LLM 原语共用同一份配置读取，
     不各自去 new 一个 ModelStore。
     """
@@ -81,7 +89,7 @@ def user_candidates(user_id: int | None) -> list | None:
         if cand is None:
             cand = _build_client(m["base_url"], m["api_key"])
             _CLIENT_CACHE[key] = cand
-        chain.append((cand, m["model"], m["id"]))
+        chain.append((cand, m["model"], m["id"], m.get("provider", "")))
     return chain
 
 
@@ -94,14 +102,14 @@ def _mark_effective_safe(user_id: int, model_id: str) -> None:
 
 
 def resolve_candidates(user_id: int | None) -> list[tuple]:
-    """统一的候选链解析：用户自有链（id 非空）→ 系统默认档（id=None）。
+    """统一的候选链解析：用户自有链（id 非空）→ 系统默认档（id=None，provider 自动判）。
 
     「用户配了模型就用用户的、没配就回落 .env 系统档」这条规则**只能有一份实现**：
     对话（`chat_create`）与语音转写（`llm/transcribe.py`）都走它。
     """
     candidates = user_candidates(user_id)
     if candidates is None:
-        return [(c, m, None) for c, m in default_candidates()]
+        return [(c, m, None, "") for c, m in default_candidates()]
     return candidates
 
 
@@ -118,19 +126,39 @@ def should_fallback(e: Exception) -> bool:
     return isinstance(e, (APITimeoutError, APIConnectionError))
 
 
-async def chat_create(*, user_id: int | None = None, **kwargs):
+def _unpack(cand: tuple) -> tuple:
+    """候选元组归一成 `(client, model, id, provider)`。
+
+    测试桩历史上有 2 元（`test_llm_fallback`）与 3 元（`test_user_model_routing`）写法，
+    第 4 元 provider 是 2026-11-16 加的 —— 缺省空串 = 按模型名自动判定。
+    """
+    c, m = cand[0], cand[1]
+    cid = cand[2] if len(cand) > 2 else None
+    prov = cand[3] if len(cand) > 3 else ""
+    return c, m, cid, prov
+
+
+async def chat_create(*, user_id: int | None = None, thinking: bool = True, **kwargs):
     """OpenAI 兼容 chat.completions.create：按候选链顺序尝试，静默降级。
 
     用法：不传 model —— 本函数为每档注入 model 并做瞬时重试；传 user_id 则优先用
     该用户的自有模型链（没配就回落 .env 系统默认档）。
+
+    thinking: 允许模型思考。由本函数**按档**翻译成该服务商的 extra_body（见模块 docstring）。
+        调用方自己在 kwargs 里给了 `extra_body` → 原样透传，不再注入（逃生口）。
+
     全部档失败或错误不可降级时，抛 map_api_error 分类后的 RuntimeError（调用方无需再映射）。
     """
     candidates = resolve_candidates(user_id)
+    inject_body = "extra_body" not in kwargs
 
-    for idx, (cand_client, cand_model, cand_id) in enumerate(candidates):
+    for idx, cand in enumerate(candidates):
+        cand_client, cand_model, cand_id, cand_provider = _unpack(cand)
+        extra = {"extra_body": _provider.extra_body_for(
+            _provider.provider_for(cand_model, cand_provider), thinking)} if inject_body else {}
         try:
             resp = await with_retry(
-                cand_client.chat.completions.create, model=cand_model, **kwargs)
+                cand_client.chat.completions.create, model=cand_model, **extra, **kwargs)
         except Exception as e:
             if idx == len(candidates) - 1 or not should_fallback(e):
                 raise map_api_error(e) from e

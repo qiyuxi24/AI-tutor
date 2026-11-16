@@ -11,7 +11,7 @@ from app.core.error_codes import ErrorCode, log_error
 logger = logging.getLogger("ai-tutor")
 from app.core.llm.fallback import chat_create
 from app.core.llm.messages import build_api_messages
-from app.core.llm.thinking import extra_body, strip_think_tags
+from app.core.llm.thinking import strip_think_tags
 from app.core.llm.usage import record as record_llm_usage
 from app.core.token_counter import TokenUsage, extract_usage
 
@@ -69,7 +69,8 @@ async def call_llm(system_prompt: str, messages: list,
             messages=api_messages,
             temperature=0.7,
             max_tokens=attempt_tokens,
-            extra_body=extra_body(thinking),
+            # 思考开关交给 chat_create 按该档服务商翻译成 extra_body（方言见 llm/provider.py）
+            thinking=thinking,
         )
         usage = usage.add(extract_usage(response))
         choice = response.choices[0]

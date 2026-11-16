@@ -26,6 +26,7 @@ def _patch(monkeypatch, responses):
 
 
 def test_thinking_flag_maps_to_extra_body():
+    """`thinking.extra_body` 是 **MiniMax 方言**的薄别名（真值在 `llm/provider.py`）。"""
     assert "thinking" not in extra_body(True)          # 默认自适应思考
     assert extra_body(True)["reasoning_split"] is True
     assert extra_body(False)["thinking"] == {"type": "disabled"}
@@ -33,10 +34,12 @@ def test_thinking_flag_maps_to_extra_body():
 
 
 def test_call_llm_passes_thinking_off(monkeypatch):
+    """call_llm 只传布尔 `thinking`，方言化由 chat_create 按当前档完成（2026-11-16）。"""
     seen = _patch(monkeypatch, [_resp("正文")])
     asyncio.run(call_mod.call_llm("sys", [{"role": "user", "content": "hi"}],
                                   thinking=False))
-    assert seen[0]["extra_body"]["thinking"] == {"type": "disabled"}
+    assert seen[0]["thinking"] is False
+    assert "extra_body" not in seen[0]
 
 
 def test_call_llm_retries_once_when_empty(monkeypatch):

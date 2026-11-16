@@ -8,6 +8,7 @@
 """
 import pytest
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
 from app.api.v1 import llm_models as llm_api
 from app.core.auth import get_current_user
@@ -17,11 +18,11 @@ URL = "/api/v1/llm/models"
 USER = 3
 
 
-async def _ok_probe(base_url, api_key, model):
+async def _ok_probe(base_url, api_key, model, provider=""):
     return True, ""
 
 
-async def _fail_probe(base_url, api_key, model):
+async def _fail_probe(base_url, api_key, model, provider=""):
     return False, "HTTP 401 Unauthorized"
 
 
@@ -150,3 +151,75 @@ def test_models_are_isolated_per_user(ctx):
     client.post(URL, json=_payload())
     state["uid"] = USER + 1
     assert client.get(URL).json()["models"] == []
+
+
+# ─── 方言（2026-11-16）：对话框切换模型 / 设置页预设 ─────────────
+
+def test_list_exposes_dialect_presets(ctx):
+    """设置页「选服务商 → 自动填地址」的数据源在后端方言表，前端不另存一份。"""
+    client, _ = ctx
+    body = client.get(URL).json()
+    keys = [p["key"] for p in body["presets"]]
+    assert "deepseek" in keys and "glm" in keys
+    assert keys[-1] == "openai-compat"            # 逃生口放末尾
+    assert body["system_default"]["provider"]     # 系统默认档也标明方言
+
+
+def test_deactivate_falls_back_to_system_default(ctx):
+    """对话框里选「系统默认」= 取消激活，不是选了个叫"默认"的模型。"""
+    client, _ = ctx
+    mid = client.post(URL, json=_payload()).json()["id"]
+    client.post(f"{URL}/{mid}/activate")
+    assert client.get(URL).json()["active_id"] == mid
+
+    assert client.post(f"{URL}/deactivate").json()["active_id"] is None
+    body = client.get(URL).json()
+    assert body["active_id"] is None and body["effective_id"] is None
+    assert [m["id"] for m in body["models"]] == [mid]   # 模型本身还在
+
+
+def test_provider_field_round_trips(ctx, monkeypatch):
+    """provider 随模型存下来，并在改参数后退回未验证（与其它接入参数同口径）。"""
+    client, _ = ctx
+    created = client.post(URL, json=_payload(provider="deepseek")).json()
+    assert created["provider"] == "deepseek"
+
+    monkeypatch.setattr(llm_api, "_probe_model", _ok_probe)
+    client.post(f"{URL}/{created['id']}/test")
+    updated = client.patch(f"{URL}/{created['id']}", json={"provider": "glm"}).json()
+    assert updated["provider"] == "glm"
+    assert updated["status"] == "unverified"
+
+
+def test_unknown_provider_rejected(ctx):
+    """写错方言键要当场报错（否则会静默按模型名猜→发错字段）。"""
+    client, _ = ctx
+    assert client.post(URL, json=_payload(provider="openrouter")).status_code == 400
+    mid = client.post(URL, json=_payload()).json()["id"]
+    assert client.patch(f"{URL}/{mid}", json={"provider": "nope"}).status_code == 400
+
+
+def test_probe_uses_dialect_tokens(monkeypatch):
+    """探测按方言表取 max_tokens：DeepSeek reasoner 拒绝 1，通用档才用 1。
+
+    原先硬编码 `max_tokens=1` → 好模型被误判 unavailable（"能用的模型显示不可用"）。
+    """
+    import asyncio
+
+    from app.core.llm import provider as prov
+
+    seen = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(llm_api, "AsyncOpenAI", lambda **kw: SimpleNamespace(
+        chat=SimpleNamespace(completions=_FakeCompletions())))
+
+    asyncio.run(llm_api._probe_model("https://x/v1", "k", "deepseek-reasoner"))
+    assert seen["max_tokens"] == prov.PROVIDERS["deepseek"].probe_tokens
+    assert "extra_body" in seen and seen["extra_body"] == {}   # 该方言不发 reasoning_split
+
+    asyncio.run(llm_api._probe_model("https://x/v1", "k", "some-gateway-model"))
+    assert seen["max_tokens"] == 1

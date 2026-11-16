@@ -139,6 +139,10 @@ export const testLlmModel = (modelId) =>
 export const activateLlmModel = (modelId) =>
   apiClient.post(`/api/v1/llm/models/${modelId}/activate`)
 
+/** 取消激活 → 回落系统默认档（对话框里「用系统默认」就是它） */
+export const deactivateLlmModel = () =>
+  apiClient.post('/api/v1/llm/models/deactivate')
+
 /**
  * 流式发送对话消息（两阶段分离）
  *

@@ -31,7 +31,7 @@ STATUS_UNAVAILABLE = "unavailable"  # 连通性测试失败（last_error 说明�
 STATUS_DISABLED = "disabled"        # 用户停用：不进候选链
 
 # 改动后需要重测的字段（接入参数）
-_ACCESS_FIELDS = ("name", "base_url", "api_key", "model")
+_ACCESS_FIELDS = ("name", "base_url", "api_key", "model", "provider")
 
 
 def default_data_dir() -> Path:
@@ -98,17 +98,26 @@ class ModelStore:
                 out.append({
                     "id": m["id"], "name": m["name"], "model": m["model"],
                     "base_url": m["base_url"], "api_key": m["api_key"],
+                    # 方言键（空串 = 按模型名自动判定），见 `llm/provider.py`
+                    "provider": m.get("provider", ""),
                 })
         return out
 
     # ══════════════ 写入 ══════════════
 
-    def add(self, *, name: str, base_url: str, api_key: str, model: str) -> dict:
-        """新建模型（未验证态）。"""
+    def add(self, *, name: str, base_url: str, api_key: str, model: str,
+            provider: str = "") -> dict:
+        """新建模型（未验证态）。
+
+        provider: 方言键（`minimax` / `deepseek` / `glm` / `qwen` / `openai` /
+            `openai-compat`）。**空串 = 按模型名自动判定**（见 `llm/provider.py`），
+            绝大多数情况够用；只有"模型名看不出来"的自建网关才需要显式指定。
+        """
         now = time.time()
         entry = {
             "id": f"m_{uuid.uuid4().hex[:8]}",
             "name": name, "base_url": base_url, "api_key": api_key, "model": model,
+            "provider": provider or "",
             "status": STATUS_UNVERIFIED,
             "last_error": "", "last_check_at": 0.0,
             "created_at": now, "updated_at": now,
@@ -156,6 +165,18 @@ class ModelStore:
         doc["active_id"] = model_id
         self._save(doc)
         return self._public(entry)
+
+    def clear_active(self) -> dict:
+        """取消激活：回到「没有显式选择」的状态。
+
+        候选链仍有 `available` 备用可跑；一个都没有 → 回落 .env 系统默认档
+        （与从未配置过的用户完全一致）。对话框中「切回系统默认」就是它。
+        """
+        doc = self._load()
+        doc["active_id"] = None
+        doc["effective_id"] = None
+        self._save(doc)
+        return {"active_id": None, "effective_id": None}
 
     def set_status(self, model_id: str, status: str) -> dict:
         """直接设置配置态（仅供「停用 / 恢复」这类显式操作使用）。"""
