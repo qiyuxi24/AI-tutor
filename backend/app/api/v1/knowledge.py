@@ -741,7 +741,8 @@ async def get_node_quizzes(node_id: str, user_id: int = Depends(get_current_user
     2. 路由：`manifest.quizzes` 把题挂到某个小节（`str(题目id) == str(ref.id)` 匹配，
        与 `add_quiz_ref` 写入的形态无关），命中 → 回填 `section_id`，未挂号 → `""`。
 
-    返回：`{"node_id", "quizzes": [{...题目字段..., "section_id"}]}`；节点不存在 → 404。
+    返回：`{"node_id", "quizzes": [{...题目字段..., "section_id", "wrong"}]}`；节点不存在 → 404。
+    `wrong=true` = 该题**最近一次作答为错**（错题本派生口径，订正答对后自动变 false）。
 
     **降级铁律**：题库不可用 / 查询异常一律返回 `quizzes: []` 并 `log_error` ——
     侧边栏只是节点详情页的一块附属信息，绝不能因为题库故障把详情页打挂。
@@ -761,8 +762,17 @@ async def get_node_quizzes(node_id: str, user_id: int = Depends(get_current_user
         quizzes: list[dict] = []
         try:
             store = quiz_manager._get_store(user_id)
+            try:
+                wrong_ids = store.wrong_question_ids()
+            except Exception as we:
+                # 新增的附属查询失败不能打挂整块试题列表（降级铁律）
+                log_error(ErrorCode.QUIZ_LIST_FAILED, detail=str(we),
+                          context={"user_id": user_id, "node_id": node_id,
+                                   "op": "wrong_ids"}, exception=we)
+                wrong_ids = set()
             for q in store.list_by_knowledge_point(node_id):
                 q["section_id"] = section_of.get(str(q.get("id")), "")
+                q["wrong"] = int(q["id"]) in wrong_ids
                 quizzes.append(q)
         except Exception as e:
             log_error(ErrorCode.QUIZ_LIST_FAILED, detail=str(e),

@@ -398,6 +398,22 @@ class QuizStore:
             """, (question_id, user_answer, score, max_score, int(correct), comment))
             return cur.lastrowid
 
+    def wrong_question_ids(self) -> set[int]:
+        """当前处于「答错」状态的题目 id（错题本派生口径，**不建表、不加列**）。
+
+        判据 = 该题**最近一次作答** `correct=0`（`attempts.id` 自增，MAX(id) 即最近）。
+        学生订正（换答案再答对）后自动移出 → 不需要"移出"接口或状态列。
+        老库无 attempts 行 → 空集。异常由调用方降级处理（侧边栏不能因此打挂）。
+        """
+        rows = self._conn.execute("""
+            SELECT a.question_id
+            FROM attempts a
+            WHERE a.correct = 0
+              AND a.id = (SELECT MAX(b.id) FROM attempts b
+                          WHERE b.question_id = a.question_id)
+        """).fetchall()
+        return {int(r["question_id"]) for r in rows}
+
     @staticmethod
     def _row_to_question(row: dict) -> dict:
         """将数据库行转成 Question.dict() 结构（供前端展示）"""

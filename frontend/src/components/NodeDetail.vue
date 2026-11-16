@@ -528,6 +528,7 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
                             <span class="quiz-type-badge">{{ quizTypeLabel(q.type) }}</span>
                             <span class="quiz-text">{{ truncateText(q.question) }}</span>
                           </span>
+                          <span v-if="q.wrong" class="quiz-wrong-mark" title="最近一次作答为错，订正后自动消失">答错过</span>
                           <span v-if="q.section_id" class="quiz-node-mark">属 {{ sectionTitle(q.section_id) }}</span>
                           <span v-if="quizDocLabel(q)" class="quiz-doc-mark">来源：{{ quizDocLabel(q) }}</span>
                         </button>
@@ -742,6 +743,11 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
   background: var(--color-accent-light); color: var(--color-accent);
 }
 .quiz-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 「答错过」= 该题最近一次作答为错（错题挂知识点，订正答对后后端自动置 false） */
+.quiz-wrong-mark {
+  align-self: flex-start; flex-shrink: 0; padding: 0 5px; border-radius: var(--radius-md);
+  font-size: 11px; font-weight: 600; color: var(--color-red); background: var(--color-red-light);
+}
 .quiz-node-mark { font-size: 11px; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .quiz-doc-mark { font-size: 11px; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .quiz-empty { display: flex; flex-direction: column; gap: 6px; padding: 4px 2px; font-size: 12px; color: var(--color-text-muted); }

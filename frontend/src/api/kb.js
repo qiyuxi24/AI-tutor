@@ -174,8 +174,10 @@ export const saveNodeSection = (nodeId, sectionId, content) =>
 /**
  * 列出节点下的试题（懒加载：打开节点详情时才请求，不随图谱列表批量拉）
  * resp: { node_id, quizzes: [{ id, type, question, difficulty, knowledge_point,
- *         section_id, source_docs, created_at }] }
+ *         section_id, source_docs, wrong, created_at }] }
  * `source_docs` = 题目来源文件 `[{doc_id, doc_name}]`；`section_id` 非空即挂在该小节下。
+ * `wrong=true` = 该题**最近一次作答为错**（错题本派生口径：不建表不加列，订正答对后
+ * 自动变 false，前端据此在侧边栏显示「答错过」角标）。
  * 节点不存在 → 404；题库读取异常 → quizzes: []
  */
 export const fetchNodeQuizzes = (nodeId) =>

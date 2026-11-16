@@ -187,7 +187,7 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(knowledge_module.quiz_manager, "_get_store", lambda uid: store)
 
     app.dependency_overrides[get_current_user] = lambda: USER_ID
-    yield {"client": TestClient(app), "kg": fk, "qids": qids}
+    yield {"client": TestClient(app), "kg": fk, "qids": qids, "store": store}
     app.dependency_overrides.clear()
     store.close()
 
@@ -485,3 +485,24 @@ def test_node_quizzes_store_failure_degrades(api, monkeypatch):
 
     assert r.status_code == 200
     assert r.json() == {"node_id": "new_node", "quizzes": []}
+
+
+def test_node_quizzes_marks_wrong_question(api):
+    """最近一次答错的那道题 → wrong=True，其余 False。"""
+    store, qids = api["store"], api["qids"]
+    store.record_attempt(qids[0], "B", 0, 10, False, "错")
+    r = api["client"].get("/api/v1/knowledge/node/new_node/quizzes")
+    by_id = {q["id"]: q for q in r.json()["quizzes"]}
+    assert by_id[qids[0]]["wrong"] is True
+    assert by_id[qids[1]]["wrong"] is False
+    assert by_id[qids[2]]["wrong"] is False
+
+
+def test_node_quizzes_corrected_question_not_wrong(api):
+    """订正后标记消失（同一端点，无需新接口）。"""
+    store, qid = api["store"], api["qids"][0]
+    store.record_attempt(qid, "B", 0, 10, False, "错")
+    store.record_attempt(qid, "A", 10, 10, True, "订正答对")
+    r = api["client"].get("/api/v1/knowledge/node/new_node/quizzes")
+    by_id = {q["id"]: q for q in r.json()["quizzes"]}
+    assert by_id[qid]["wrong"] is False
