@@ -386,11 +386,12 @@
 
 ### P2 — 复习与长期闭环
 
-- [ ] **一期 · 错题挂知识点 + 答错降级（2026-11-16 立项，实施计划见 `docs/教学模块/错题本与答错降级_实施计划_2026-11-16.md`）** `[改]`
+- [x] **一期 · 错题挂知识点 + 答错降级（2026-11-16 立项并落地，实施计划见 `docs/教学模块/错题本与答错降级_实施计划_2026-11-16.md`）** `[改]`
   - 用户口径：「错题先挂在相应知识点/小节上，**不新增页面**；题目做错了就改掌握度，最低到『了解』那一档」。
   - 决策：节点级答错 **−20 / 下限 10**；小节级按节数比例 **penalty = max(1, round(20/N))**、同下限；「了解」在四档里无对应档 → 定为 10（weak 1–29 桶、>0，永不退回 unstarted），只改常量即可调整。
-  - 落地：掌握度唯一增量入口 `kg.add_mastery` 加 `floor` 钳位（留写事务内）；`chat_grade` 两个判分出口补降级；`quiz_store.wrong_question_ids()` 派生「最近一次作答为错」（订正自动移出，**不建表不加列**）；`GET /knowledge/node/{id}/quizzes` 回填 `wrong`；`NodeDetail.vue` 加一个纯文本角标。**不新增前端页面/路由/图标、不新增表/列、不碰 `_JOBS`**。
-  - 验收：答错 → 掌握度下降且不低于 10、mastery=0 的节点不被抬高；错题在节点详情可见、订正后消失；`mastery_events` 有 `quiz_wrong` 负 delta；前后端三套测试零失败。
+  - 落地：掌握度唯一增量入口 `kg.add_mastery` 加 `floor` 钳位（留写事务内、**只夹扣分**）；`chat_grade` 两个判分出口补降级；`quiz_store.wrong_question_ids()` 派生「最近一次作答为错」（订正自动移出，**不建表不加列**）；`GET /knowledge/node/{id}/quizzes` 回填 `wrong`；`NodeDetail.vue` 加一个纯文本角标。**不新增前端页面/路由/图标、不新增表/列、不碰 `_JOBS`**。
+  - ✅ 2026-11-16 实测：后端 **2370 passed + 1 skipped / 7 deselected**（112.18s，+15 例）、前端 **137 passed（10 files）**、`npm run build` 通过、后台 43 passed 未动。回归 `test_mastery_floor.py`(5)、`test_wrong_question_ids.py`(3)、`test_chat_grade.py`、`test_section_grade_flow.py`、`test_quiz_grade_mastery.py`、`test_api_node_sections.py`。
+  - ⚠️ 计划书自述的一处口径写反了，实跑纠正：`Question.id` 是**必填**（不传会 `ValidationError`），不是"多传 id 会报错"。
 - [ ] **二期 · 到期队列 / 间隔重复 / 日历视图**（待一期验收后开工，`[待议]`）
   - 从 `attempts.correct + created_at` 派生**固定间隔阶梯 1/3/7/15/30 天**（答错回第 1 档），**不写 SM-2**（旧口径，措辞已在 `docs/比赛/四人分工与TODO认领表.md` D3 更正）；在 `main.py::_prune_once` 的 `_JOBS` 旁加**按日**常驻调度，每日一条 `notify` 摘要；日历 = 该到期队列的按天视图，**不新增功能实体**。
   - ⚠️ 三套时区口径必须先统一：`attempts.created_at` 是 SQLite `datetime('now')`=**UTC**、`mastery_events.created_at` 是 Python `datetime.now()`=**本地**、`conversations.created_at` 是 `time.time()`=**epoch 秒**；前端 `frontend/src/utils/time.js` 不管时区 → 二期**全程只传 `YYYY-MM-DD` 日期粒度**，不传时间戳。

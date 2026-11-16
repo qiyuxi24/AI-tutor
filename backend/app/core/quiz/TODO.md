@@ -57,8 +57,11 @@
   收紧会破坏 `test_fuzzy_match_reverse`（该用例断言 `'栈'` 对 `'栈是一种数据结构'` 判对），需要先定口径。
 - [ ] **难度不是行字段**：`difficulty` 只能整批传参（`save_questions(difficulty=...)`），一套 500 题全是 `medium`。
   出题器因此没有目标函数，做不了 IRT / 错题归因。`_ensure_columns` 已有补列范式可复用。
-- [ ] **`attempts` 只写不读**：无 `next_review_at` / 无错题队列 / 无任何 API 暴露正确率（`stats()` 只有 `COUNT(*)`）。
+- [x] **`attempts` 只写不读**：无 `next_review_at` / 无错题队列 / 无任何 API 暴露正确率（`stats()` 只有 `COUNT(*)`）。
   复习调度（`learning/session.py` 刻意留空的 `review` 动作）依赖它。
+  - ✅ 2026-11-16 **错题那半已接上读路径**：`QuizStore.wrong_question_ids()` 按「最近一次作答为错」派生错题池
+    （不建表/不加列，订正答对自动移出），`GET /knowledge/node/{id}/quizzes` 给每题回填 `wrong`，节点详情侧边栏显示「答错过」。
+  - ⏳ 仍缺：`next_review_at` / 到期队列 / 间隔重复（二期，见根 `TODO.md §10 P2`）。
 - [ ] **出题不去重跨批次**：`avoid_questions` 只在本节点内生效；12 个题集里同一考点反复出现。
 - [ ] **无 judge 环节**：`quality.py` 只有规则过滤（长度 / 外部依赖 / 文本归一化去重），
   没有"这题考的是不是这个节点""干扰项是不是都错得合理"的语义复核。
@@ -70,8 +73,11 @@
 - [ ] **试卷拆分接不进来**：`collector/quiz_splitter.py::split_quiz` 实现完整但零调用。
       障碍是结构性的：没有 `papers` 实体表、`kb.upload_and_index` 只返回 `int` 节点 id（拿不回解析文本）、
       `MIN_PARSE_TEXT_LEN=200` 会把 5 道题的小测卷直接拒掉。**属 A1/A2 级工作量，别顺手做。**
-- [ ] **掌握度是计数器不是估计量**：答对 +20、答错不变、全节通过置 100，单向棘轮没有降级路径。
+- [x] ~~**掌握度是计数器不是估计量**：答对 +20、答错不变、全节通过置 100，单向棘轮没有降级路径。~~
       ALEKS / Khan 都允许掉级。改 BKT 后验估计需要先有稳定题库（见 P1 的调度项）。
+  - ✅ 2026-11-16 **棘轮已拆**（用户口径「做错了就下调掌握度，最低到『了解』」）：答错 −20、下限 10
+    （`kg.add_mastery(..., floor=10)`，只夹扣分、绝不抬高）；小节题按 **20/N** 分摊（`section_wrong_penalty`）；
+    新增 `mastery_events.reason = quiz_wrong`。仍是**启发式计数器**（不是 BKT），换估计量那条继续留在本项。
 
 ---
 
