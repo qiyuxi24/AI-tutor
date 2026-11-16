@@ -23,6 +23,7 @@ class FakeKG:
         self.manifests = {}                     # node_id -> {"sections": [...]}
         self.writes = {}                        # (node_id, section_id) -> content
         self.update_info_calls = []             # [(node_id, data)]
+        self.status_calls = []                  # [(node_id, status, caller)]
 
     # 节点/边读取
     def get_node(self, node_id):
@@ -84,6 +85,11 @@ class FakeKG:
     def update_node_info(self, node_id, data, caller="human", **kw):
         self.update_info_calls.append((node_id, data))
         self._nodes[node_id].update(data)
+
+    # 填充状态翻转（成文成功后由 SectionGenerator 调用）
+    def set_content_status(self, node_id, status, caller="human"):
+        self.status_calls.append((node_id, status, caller))
+        self._nodes[node_id]["content_status"] = status
 
 
 def _make_fake_llm(monkeypatch, plan_json, write):
@@ -174,6 +180,36 @@ def test_generate_calls_remove_skeleton_md_after_creating_sections(monkeypatch):
 
     assert result["status"] == "ok" and result["created"]
     assert kg.skeleton_remove_calls == ["double_integral"]
+
+
+def test_generate_flips_content_status_to_filled_after_creating_sections(monkeypatch):
+    """成文成功 → 节点翻 filled。
+
+    不翻的话图谱把节点画成**空心**（点开却有完整正文），断点续填也会反复重跑。
+    这条路径原先只在建图管线里翻，`POST /knowledge/node/{id}/sections/generate` 永远不翻
+    —— 实测演示账号有 3 个高中物理节点「4~5 个小节 + skeleton 状态」。
+    """
+    plan = '{"sections":[{"title":"定义","kind":"definition","brief":"是什么"}],"summary":""}'
+    _make_fake_llm(monkeypatch, plan, lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(kg, "double_integral"))
+
+    assert result["status"] == "ok" and result["created"]
+    assert kg.status_calls == [("double_integral", "filled", "ai")]
+
+
+def test_generate_does_not_flip_status_when_nothing_created(monkeypatch):
+    """没有任何小节成文（append 无新侧面）→ 不翻状态（节点本来就没正文可指）。"""
+    _make_fake_llm(monkeypatch, '{"sections":[]}', lambda prompt: LONG)
+    kg = FakeKG(nodes=[_node()])
+    kg.manifests["double_integral"] = {"sections": [{"id": "s01", "title": "旧", "status": "filled"}]}
+
+    result = asyncio.run(sg.SectionGenerator(user_id=1).generate(
+        kg, "double_integral", append=True))
+
+    assert result["status"] == "skipped"
+    assert kg.status_calls == []
 
 
 def test_generate_skips_remove_skeleton_md_when_nothing_created(monkeypatch):

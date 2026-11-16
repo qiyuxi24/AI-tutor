@@ -519,6 +519,12 @@ class SectionGenerator:
         message = (f"生成小节 {len(created)} 个"
                    + (f"，失败 {len(failed)} 个" if failed else ""))
         logger.info(f"节点小节化（{node_id}）：{message}")
+        # 成文成功 → 把节点翻 filled。正文已经在 manifest / 小节 MD 里，节点 MD 仍是骨架占位，
+        # 不翻状态会让图谱继续把它画成**空心**（点开却有完整正文），断点续填也会反复重跑。
+        # 放在本模块（而不是只让建图管线翻）的理由：本模块是两条入口的唯一实现，
+        # POST /knowledge/node/{id}/sections/generate 走的正是它 —— 原先那条路径永远不翻。
+        if created:
+            self._mark_filled(kg, node_id)
         # A4-3：小节化成功后删掉主 MD 的骨架占位（`{id}.md` 只含「待完善...」，正文已进小节）；
         # 只有小节真正成文（created 非空）才删，失败/增补无新侧面时保留原样。
         # 走 getattr + try：测试替身 kg 可能没有该方法（或缺能力），降级语义：不毁小节化。
@@ -824,6 +830,22 @@ class SectionGenerator:
         except Exception as e:                            # noqa: BLE001
             logger.debug(f"查询节点 {node_id} 小节状态失败（当作无 manifest）：{e}")
             return False
+
+    @staticmethod
+    def _mark_filled(kg, node_id: str) -> None:
+        """把节点翻成 `filled`（正文已在小节里）。
+
+        防御式口径与建图管线一致：测试替身 / 缺能力 / 人类创建的节点（AI 无权改）→ 静默跳过，
+        **不抛**（翻状态只是元数据，不该毁掉已经写成的小节）。
+        """
+        from app.core.knowledge_graph import CONTENT_STATUS_FILLED   # 惰性导入：避免包级循环
+        fn = getattr(kg, "set_content_status", None)
+        if not callable(fn):
+            return
+        try:
+            fn(node_id, CONTENT_STATUS_FILLED, caller="ai")
+        except Exception as e:                            # noqa: BLE001 —— 降级语义：不抛
+            logger.debug(f"标记节点 {node_id} 已填充失败（忽略）：{e}")
 
     @staticmethod
     def _error(message: str) -> dict:
