@@ -45,11 +45,19 @@ def _build_kb_context(request: ChatRequest) -> dict | None:
     }
 
 
-def _check_chat_rate_limit(request: Request) -> bool:
-    """检查聊天接口频率限制，超限返回 429。"""
-    client_ip = request.client.host if request.client else "unknown"
-    if not chat_rate_limiter.is_allowed(client_ip):
-        retry_after = chat_rate_limiter.get_retry_after(client_ip)
+def _check_chat_rate_limit(request: Request, user_id: int | None) -> JSONResponse | None:
+    """检查聊天接口频率限制，超限返回 429。
+
+    限流维度是**用户**不是 IP：校园网 / 公司 NAT 下多个用户共用同一个出口 IP，
+    按 IP 计数会让 A 的多话把 B 顶成 429（真实部署必然踩到）。`user_id` 由
+    `Depends(get_current_user)` 在进入函数体前解析好，这里直接用；拿不到时
+    （正常不会）退回 IP，保证不因参数缺失而放行或崩溃。
+    """
+    key = f"u:{user_id}" if user_id is not None else (
+        request.client.host if request.client else "unknown"
+    )
+    if not chat_rate_limiter.is_allowed(key):
+        retry_after = chat_rate_limiter.get_retry_after(key)
         return JSONResponse(
             status_code=429,
             content={"detail": f"请求过于频繁，请 {retry_after} 秒后重试"},
@@ -74,7 +82,7 @@ async def handle_chat(request: ChatRequest, raw_request: Request,
 
     多端串行：同一用户同一对话的回合排队执行（见 `core/keyed_lock`）。
     """
-    rate_limit_resp = _check_chat_rate_limit(raw_request)
+    rate_limit_resp = _check_chat_rate_limit(raw_request, user_id)
     if rate_limit_resp:
         return rate_limit_resp
 
@@ -100,7 +108,7 @@ async def handle_chat_stream(request: ChatRequest, raw_request: Request,
     多端串行：锁包住**整个回合**的产出（含全部 SSE 事件），所以第二端要等第一端
     跑完才开始推流 —— 等待期间前端没有任何输出，这是"按对象串行"的既定代价。
     """
-    rate_limit_resp = _check_chat_rate_limit(raw_request)
+    rate_limit_resp = _check_chat_rate_limit(raw_request, user_id)
     if rate_limit_resp:
         return rate_limit_resp
 

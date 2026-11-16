@@ -64,6 +64,15 @@ class RateLimiter:
         oldest = min(active)
         return max(0, int(self.window_seconds - (now - oldest)))
 
+    def reset(self, key: str) -> None:
+        """清掉某个 key 的历史记录（配额立即恢复）。
+
+        key 不存在时静默返回，**不**在 dict 里凭空建条目（与 `get_retry_after`
+        同一只读纪律，见模块 docstring ①）。用途：登录成功归还配额 —— 成功不该
+        算作一次撞库尝试；chat 侧按 `u:<user_id>` 记账，需要时可单独清某个用户。
+        """
+        self.attempts.pop(key, None)
+
     def sweep(self, now: float | None = None) -> int:
         """清掉所有"窗口内已无有效时间戳"的 IP，返回删除的 IP 数。
 

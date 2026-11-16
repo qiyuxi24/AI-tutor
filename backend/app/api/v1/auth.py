@@ -211,6 +211,10 @@ async def login(req: LoginRequest, request: Request):
         )
         conn.commit()
 
+        # 登录成功归还限流配额：max_requests=5 是防撞库，不该罚正常用户
+        # （切号 / 刷新重登 5 次就被锁 60 秒）。失败路径**故意不动** —— 那才是本体。
+        login_rate_limiter.reset(client_ip)
+
         return {
             "token": access_token,
             "user": {"id": user["id"], "username": user["username"], "role": acct["role"] if acct else "user"},
