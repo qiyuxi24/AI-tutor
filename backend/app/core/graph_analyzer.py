@@ -20,6 +20,18 @@ from app.core.error_codes import ErrorCode, log_error, log_info, publish_error_e
 
 logger = logging.getLogger("ai-tutor")
 
+# 图谱分析的输出预算（2026-11-16 关思考时一并定档）：默认 2000 对这条 prompt 偏小。
+# 依据不是"思考多给了余量"，而是**正文本身**就不止 2000：SYSTEM_PROMPT 规则 7 要求
+# 每个 add_node 附完整 Markdown 讲解（定义/要点/示例），一次给出 2~3 个新概念就顶穿。
+# 实测（data/agent_runs/llm_usage，kind=graph_analyze，共 44 次）：
+#   · 未撞顶的调用里，正文（completion - reasoning）最大值 1845、次高 1753
+#     —— 距 2000 只剩不到 10% 余量；
+#   · 2026-10-10 22:30 有一次 completion 直接撞满 2000（finish=length）→ 硬截断、
+#     JSON 解析失败（E-GRAPH-002「分析结果格式异常」），整轮图谱建议被丢。
+# 关思考**不改变**正文该写多长（只把被思考挤掉的预算还给正文），所以撞顶概率只升不降
+# → 抬到 4000（≈ 最大成功正文的 2 倍余量，仍低于 call_llm 空回复重试的 8000 档）。
+GRAPH_ANALYZE_MAX_TOKENS = 4000
+
 
 # ── 图谱分析专用系统提示词 ──
 # 要求模型以严格的 JSON 格式返回分析结果
@@ -576,6 +588,12 @@ AI导师：{ai_reply}
                 full_system_prompt,
                 analysis_messages,
                 kind="graph_analyze",
+                # 只输出 {"suggestions":[...]} 这类短结构化 JSON：思考与正文**共享**
+                # max_tokens 预算（见 llm/thinking.py），开思考会把预算先烧在推理上，
+                # 正文只剩空串或被硬截断 → JSON 解析必失败。
+                thinking=False,
+                # 正文本身（含每节点完整 Markdown）就接近 2000，见常量处实测依据
+                max_tokens=GRAPH_ANALYZE_MAX_TOKENS,
             )
         except Exception as e:
             # LLM 调用失败时，记录错误并发布事件，返回空建议
@@ -674,6 +692,9 @@ AI导师：{ai_reply}
                 self.DECOMPOSE_SYSTEM_PROMPT,
                 [{"role": "user", "content": decompose_prompt}],
                 kind="graph_decompose",
+                # 只输出 {target,nodes,edges} 的骨架 JSON（节点只有 id/name/tags）：
+                # 思考与正文共享 max_tokens 预算，开思考就会挤掉正文 → 空正文/硬截断。
+                thinking=False,
             )
         except Exception as e:
             logger.warning(f"问题拆解 LLM 调用失败: {e}")
