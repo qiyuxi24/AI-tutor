@@ -767,46 +767,68 @@ export const useChatStore = defineStore('chat', () => {
     }
     conversations.value = saved
 
-    // 第 2 步：与服务端对齐（P0-1/C3a）
-    //   上行本地副本 = 老用户迁移入口；返回的是库里权威状态（旧快照被拒、墓碑被剔除）。
-    //   对齐完成后本地缓存不再承担"真相"角色，只是下一次离线的底稿。
-    await syncWithServer()
+    // ── 首屏三组请求并发发出（2026-11-16）──
+    // 旧实现是一条串行 await 链：一次刷新要等 4 个来回才连得上 SSE。但三者之间
+    // **没有**数据依赖，只有组**内**才有（见各组注释）：
+    //   ① 会话组        只碰 conversations / currentId / currentNode
+    //   ② 学科组        只碰 subjectSummaries / subjects / currentSubject / 图谱
+    //   ③ 建图状态组    只碰 graphGenerating / graphBuildProgress（+ 进度轮询）
+    // 四个被调用函数各自 try/catch 吞错（见 syncWithServer / fetchSubjects /
+    // fetchGraph / restoreGraphBuildStatus），因此这里不存在 rejection 路径 ——
+    // Promise.all 不会因为某一组失败而提前短路，降级行为与串行版逐条一致。
+    const sessionGroup = (async () => {
+      // 第 2 步：与服务端对齐（P0-1/C3a）
+      //   上行本地副本 = 老用户迁移入口；返回的是库里权威状态（旧快照被拒、墓碑被剔除）。
+      //   对齐完成后本地缓存不再承担"真相"角色，只是下一次离线的底稿。
+      await syncWithServer()
 
-    // 第 3 步：恢复当前对话（本地选中的那条若还在就用它，否则取最新一条）
-    const cid = localStorage.getItem(STORAGE_KEY_CURRENT)
-    if (cid && conversations.value.some((c) => c.id === cid)) {
-      currentId.value = cid
-    } else if (conversations.value.length > 0) {
-      currentId.value = conversations.value[0].id
-    }
-
-    // 第 3 步：仍没有当前对话（本地和后端都没有数据）→ 自动创建新对话
-    if (!currentId.value) {
-      const conv = {
-        id: generateId(),
-        title: '新对话',
-        messages: [],
-        createdAt: Date.now(),
+      // 第 3 步：恢复当前对话（本地选中的那条若还在就用它，否则取最新一条）
+      // ⚠️ 必须留在 sync 之后：两处读的都是**对齐后**的 conversations。
+      const cid = localStorage.getItem(STORAGE_KEY_CURRENT)
+      if (cid && conversations.value.some((c) => c.id === cid)) {
+        currentId.value = cid
+      } else if (conversations.value.length > 0) {
+        currentId.value = conversations.value[0].id
       }
-      conversations.value.unshift(conv)
-      currentId.value = conv.id
-    }
 
-    // 回填当前教学位置（缺陷 B-4）：以当前对话的 nodeId 绑定为准，否则刷新后
-    // 学习模式会丢失（currentNode 从不持久化）。
-    currentNode.value = currentConversation.value?.nodeId || ''
+      // 第 3 步：仍没有当前对话（本地和后端都没有数据）→ 自动创建新对话
+      if (!currentId.value) {
+        const conv = {
+          id: generateId(),
+          title: '新对话',
+          messages: [],
+          createdAt: Date.now(),
+        }
+        conversations.value.unshift(conv)
+        currentId.value = conv.id
+      }
 
-    // 一次性加载知识图谱：先取学科列表并自动选中一个
-    // （一次只渲染一个学科，不再默认拉全量）
-    //
-    // ensureSubjectSelected 会告诉我们「它自己已经动过图了」：自动选中学科（走
-    // setSubject → fetchGraph(true)）与学科为空（清画布）这两个分支内部都已处理，
-    // 这里就不必再补一次。只有「当前学科本来就有效、那边什么都没做」时由这里拉。
-    await fetchSubjects()
-    if (!(await ensureSubjectSelected())) await fetchGraph()
+      // 回填当前教学位置（缺陷 B-4）：以当前对话的 nodeId 绑定为准，否则刷新后
+      // 学习模式会丢失（currentNode 从不持久化）。
+      currentNode.value = currentConversation.value?.nodeId || ''
+    })()
+
+    const subjectGroup = (async () => {
+      // 一次性加载知识图谱：先取学科列表并自动选中一个
+      // （一次只渲染一个学科，不再默认拉全量）
+      //
+      // ensureSubjectSelected 会告诉我们「它自己已经动过图了」：自动选中学科（走
+      // setSubject → fetchGraph(true)）与学科为空（清画布）这两个分支内部都已处理，
+      // 这里就不必再补一次。只有「当前学科本来就有效、那边什么都没做」时由这里拉。
+      // ⚠️ 组内两层顺序都不能动：ensureSubjectSelected 读 subjectSummaries，
+      //    必须先 fetchSubjects 落地（②③ 是强依赖）。
+      await fetchSubjects()
+      if (!(await ensureSubjectSelected())) await fetchGraph()
+    })()
+
+    // 建图状态：与上面两组**无数据依赖**，只写 graphGenerating / graphBuildProgress。
     // 建图是后台任务：刷新后要问一次"还在跑吗"，否则按钮显示空闲、用户再点撞 409。
-    await restoreGraphBuildStatus()
+    const buildStatusGroup = restoreGraphBuildStatus()
+
+    await Promise.all([sessionGroup, subjectGroup, buildStatusGroup])
+
     // 连接 SSE，后端数据变更时自动刷新图谱
+    // ⚠️ 必须最后：连上就可能立刻收到事件，不能早于上面三组把状态就位。
     // （init = "开始工作"的唯一入口，顺带解除 dispose/disconnectSSE 的永久断开，
     //  否则开发态 HMR 重挂 HomeView 后就再也连不上了）
     sseStopped = false

@@ -997,3 +997,164 @@ describe('回前台补偿（TODO §2 P1：切回来就补拉一次）', () => {
     expect(statsGets() - before).toBe(1)
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// init 的请求并发（2026-11-16）
+//
+// 旧实现是一条串行 await 链：会话同步 → 学科列表 → 图谱 → 建图状态 → 连 SSE。
+// 但其中**三组互不依赖**，串行等纯属浪费首屏时间：
+//   ① 会话组   syncWithServer → 恢复 currentId → 回填 currentNode（只碰 conversations/currentId）
+//   ② 学科组   fetchSubjects → ensureSubjectSelected（可能内部 fetchGraph）
+//   ③ 建图状态 restoreGraphBuildStatus（只碰 graphGenerating/graphBuildProgress）
+//
+// 不变量（下面逐条锁死）：
+//   · 组**间**不等待：sync 还没回来时，stats / graph-status 就该已经发出（旧实现要等）；
+//   · 组**内**顺序不变：②③ 是强依赖 —— subjectSummaries 没回来不许发图请求；
+//   · 连上 SSE 仍必须是最后一步（连上就可能立刻收到事件，不能早于状态就位）；
+//   · 任一请求失败时的降级行为与串行版一致（四个函数内部各自吞错）。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('init 的请求并发（三组互不等待）', () => {
+  /** 可手动落地的 promise：用来在"A 还没回"的瞬间观察 B 是否已经发出。 */
+  function deferred() {
+    let resolve, reject
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+
+  /** 已发出的全部请求 URL（GET + POST，按发出顺序）。 */
+  function startedUrls() {
+    return [
+      ...apiClient.get.mock.calls.map(([u]) => u),
+      ...apiClient.post.mock.calls.map(([u]) => u),
+    ]
+  }
+
+  /** 冲掉已排队的微任务（用真定时器，deferred 不落地也能跑完）。 */
+  const flush = () => new Promise((r) => setTimeout(r, 0))
+
+  /**
+   * 三组的端点各自绑到一个 deferred（不传则立即 resolve）。
+   * 其余端点一律给"空"响应，让 init 能走完全程。
+   */
+  function mockThreeGroups({ sync, stats, status } = {}) {
+    apiClient.post.mockImplementation((url) => {
+      if (url === '/api/v1/conversations/sync') {
+        return sync ? sync.promise : Promise.resolve({ data: { conversations: [], tombstones: [] } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+    apiClient.get.mockImplementation((url) => {
+      if (url === '/api/v1/knowledge/stats') {
+        return stats ? stats.promise : Promise.resolve({ data: { by_subject: [] } })
+      }
+      if (url === '/api/v1/kb/graph/status') {
+        return status ? status.promise : Promise.resolve({ data: { building: false } })
+      }
+      if (url === '/api/v1/knowledge/graph') return Promise.resolve({ data: { nodes: [], edges: [] } })
+      return Promise.resolve({ data: {} })
+    })
+  }
+
+  it('会话同步还没回来 → 学科列表与建图状态的请求已经发出（组间不串行等）', async () => {
+    const sync = deferred()
+    const stats = deferred()
+    const status = deferred()
+    mockThreeGroups({ sync, stats, status })
+    localStorage.setItem('ai_tutor_token', 't')
+
+    const store = useChatStore()
+    const inited = store.init()
+    await flush()          // 串行实现此刻只发出 sync 一个请求
+
+    const urls = startedUrls()
+    expect(urls).toContain('/api/v1/knowledge/stats')   // ② 不等 ①
+    expect(urls).toContain('/api/v1/kb/graph/status')   // ④ 不等 ①
+
+    // 收尾：三组都落地，init 才能走到 connectSSE
+    sync.resolve({ data: { conversations: [], tombstones: [] } })
+    stats.resolve({ data: { by_subject: [] } })
+    status.resolve({ data: { building: false } })
+    await inited
+    expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it('②③ 的强依赖不变：stats 未返回前不发图请求，且整次 init 只发一次', async () => {
+    const stats = deferred()
+    mockThreeGroups({ stats })
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+
+    const inited = store.init()
+    await flush()
+    // 学科列表还没回来 → ensureSubjectSelected 不能跑，图请求必须还没发
+    expect(startedUrls()).not.toContain('/api/v1/knowledge/graph')
+
+    stats.resolve({ data: { by_subject: [{ subject: '数据结构' }] } })
+    await inited
+
+    const graphCalls = apiClient.get.mock.calls.filter(([u]) => u === '/api/v1/knowledge/graph')
+    expect(graphCalls).toHaveLength(1)
+    expect(graphCalls[0][1].params.subject).toBe('数据结构')   // 自动选中第一个学科
+    expect(store.currentSubject).toBe('数据结构')
+  })
+
+  it('connectSSE 仍在最后：三组都落地后才建连', async () => {
+    const status = deferred()
+    mockThreeGroups({ status })
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+
+    const inited = store.init()
+    await flush()
+    expect(FakeEventSource.instances).toHaveLength(0)   // 建图状态还没回 → 不连
+
+    status.resolve({ data: { building: false } })
+    await inited
+    expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it('① 失败（离线/未登录）不拖垮其余组：学科与建图状态照常就位', async () => {
+    mockThreeGroups({})
+    apiClient.post.mockImplementation((url) => {
+      if (url === '/api/v1/conversations/sync') return Promise.reject(new Error('offline'))
+      return Promise.resolve({ data: {} })
+    })
+    apiClient.get.mockImplementation((url) => {
+      if (url === '/api/v1/knowledge/stats') {
+        return Promise.resolve({ data: { by_subject: [{ subject: '数据结构' }] } })
+      }
+      if (url === '/api/v1/kb/graph/status') {
+        return Promise.resolve({ data: { building: true, subject: '操作系统', progress: null } })
+      }
+      if (url === '/api/v1/knowledge/graph') return Promise.resolve({ data: { nodes: [], edges: [] } })
+      return Promise.resolve({ data: {} })
+    })
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+
+    await expect(store.init()).resolves.toBeUndefined()   // syncWithServer 内部吞错 → 不抛
+    expect(store.currentSubject).toBe('数据结构')
+    expect(store.graphGenerating).toBe('操作系统')
+
+    store.dispose()          // building=true 开了轮询，收尾别留定时器
+  })
+
+  it('② 失败（stats 挂了）→ 不抛错，仍清空画布，④ 照常恢复「生成中」', async () => {
+    mockThreeGroups({})
+    apiClient.get.mockImplementation((url) => {
+      if (url === '/api/v1/knowledge/stats') return Promise.reject(new Error('stats down'))
+      if (url === '/api/v1/kb/graph/status') {
+        return Promise.resolve({ data: { building: true, subject: '数据结构', progress: null } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+
+    await expect(store.init()).resolves.toBeUndefined()
+    expect(store.knowledgeNodes).toEqual([])        // 无学科 → 空画布
+    expect(store.graphGenerating).toBe('数据结构')    // 不被 stats 失败牵连
+
+    store.dispose()
+  })
+})
