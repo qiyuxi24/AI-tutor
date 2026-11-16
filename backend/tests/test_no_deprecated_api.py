@@ -106,9 +106,30 @@ def test_jwt_token_is_still_valid_and_utc(monkeypatch):
     assert abs(payload["iat"] - time.time()) < 120
 
 
-def test_created_token_round_trips_through_auth_layer():
-    """`create_access_token` → `get_current_user_from_token` 端到端仍通。"""
+def test_created_token_round_trips_through_auth_layer(tmp_path, monkeypatch):
+    """`create_access_token` → `get_current_user_from_token` 端到端仍通。
+
+    ⚠️ 必须先把 uid 落进 users 表（2026-11-16 起 `get_current_user_from_token` 会查
+    `users.status`，禁用账号的旧 token 要立刻失效）。这里用 tmp 库，不碰真实库。
+    """
+    import sqlite3
+
     from app.core import auth
+
+    db = tmp_path / "knowledge" / "knowledge.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,"
+        " password_hash TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')),"
+        " status TEXT DEFAULT 'active', role TEXT DEFAULT 'user', last_login_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO users (id, username, password_hash, status) VALUES (42, 'u42', 'x', 'active')"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(auth, "_users_db_path", lambda: db)
 
     assert auth.get_current_user_from_token(auth.create_access_token(42)) == 42
 

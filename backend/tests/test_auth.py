@@ -6,6 +6,7 @@ auth token 解析的回归测试。
 本文件锁死：成功路径静默，失败路径才告警。
 """
 import logging
+import sqlite3
 import time
 
 import pytest
@@ -17,6 +18,31 @@ from app.core.error_codes import ErrorCode
 
 _LOGGER = "ai-tutor"
 _INVALID_CODE = ErrorCode.code_only(ErrorCode.AUTH_TOKEN_INVALID)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_users_db(tmp_path, monkeypatch):
+    """把 auth 层的 users 库指向 tmp，并建出本文件用到的 uid=42。
+
+    背景（2026-11-16）：`get_current_user_from_token` 现在会查一次 `users.status`
+    （禁用账号的旧 token 必须立刻失效，见 `test_auth_disabled_user.py`）。本文件的
+    用例只关心"验签层"的语义，用的是随手写的 uid=42 —— 那个用户在真实库里并不存在，
+    于是会被判成 `[E-AUTH-003] 用户不存在`。这里给它建一行，让用例只测它想测的东西。
+    """
+    db = tmp_path / "knowledge" / "knowledge.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,"
+        " password_hash TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')),"
+        " status TEXT DEFAULT 'active', role TEXT DEFAULT 'user', last_login_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO users (id, username, password_hash, status) VALUES (42, 'testuser42', 'x', 'active')"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(auth, "_users_db_path", lambda: db)
 
 
 def _make_token(sub: str = "42", exp_delta: int = 600) -> str:
