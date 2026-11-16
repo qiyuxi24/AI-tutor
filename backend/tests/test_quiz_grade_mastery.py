@@ -7,7 +7,7 @@
 
 本次锁住三件事：
   1. 题上有 `knowledge_point`（= 图谱节点 id）→ 答对回写 +20，响应带 `mastery_note`/`mastery`；
-  2. 答错不扣分（`apply_mastery_after_answer` 的既有口径）；
+  2. 答错 → 回写 −20、下限 10（2026-11-16 起；下限不得把 mastery=0 的节点抬高）；
   3. 题上没有 `knowledge_point`（老题 / 未传 graph_node_id）→ 不构造图谱、不写、不报错。
 
 另锁出题侧：`POST /quiz/generate` 带 `graph_node_id` 时，入库题目的
@@ -101,8 +101,9 @@ def test_correct_answer_writes_mastery(client, store, kg):
     assert kg.get_node("n1")["mastery"] == 20
 
 
-def test_wrong_answer_does_not_touch_mastery(client, store, kg):
-    """答错不扣分（既有口径），也不该写出一条空说明。"""
+def test_wrong_answer_lowers_mastery(client, store, kg):
+    """答错 → 图谱 −20（60→40），响应带可展示的说明与当前值。"""
+    kg.add_mastery("n1", 60, caller="human", reason="manual")
     qid = _add(store)
 
     resp = client.post(f"/api/v1/quiz/{qid}/grade", params={"user_answer": "B"})
@@ -110,6 +111,19 @@ def test_wrong_answer_does_not_touch_mastery(client, store, kg):
     assert resp.status_code == 200
     data = resp.json()
     assert data["correct"] is False
+    assert "掌握度" in data["mastery_note"]
+    assert data["mastery"] == 40
+    assert kg.get_node("n1")["mastery"] == 40
+
+
+def test_wrong_answer_at_zero_stays_zero(client, store, kg):
+    """mastery=0 的节点答错 → 仍是 0，且不写"没变"的空话（下限不得抬高，D3）。"""
+    qid = _add(store)
+
+    resp = client.post(f"/api/v1/quiz/{qid}/grade", params={"user_answer": "B"})
+
+    assert resp.status_code == 200
+    data = resp.json()
     assert data["mastery_note"] == ""
     assert kg.get_node("n1")["mastery"] == 0
 

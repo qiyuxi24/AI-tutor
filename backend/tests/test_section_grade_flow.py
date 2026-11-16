@@ -18,7 +18,7 @@ import asyncio
 import pytest
 
 from app.core.knowledge_graph import KnowledgeGraph
-from app.core.quiz.chat_grade import auto_grade_pending, grade_pending
+from app.core.quiz.chat_grade import auto_grade_pending, grade_pending, section_wrong_penalty
 from app.core.quiz.quiz_store import QuizStore
 
 USER_ID = 11
@@ -191,3 +191,35 @@ def test_quiz_store_persists_section_id(store):
     assert q["section_id"] == "s02"
     assert store.get_question(q["id"])["section_id"] == "s02"
     assert store.list_by_knowledge_point("n1")[0]["section_id"] == "s02"
+
+
+# ── 小节级答错 → 按 20/N 下调节点掌握度（2026-11-16） ──────────────
+
+def test_section_wrong_penalty_is_proportional():
+    """20 分按节数均摊，最少 1 分（N=40 时 round(0.5)=0 必须被兜住）。"""
+    assert [section_wrong_penalty(n) for n in (1, 2, 3, 4, 7, 40)] == [20, 10, 7, 5, 3, 1]
+
+
+def test_section_wrong_lowers_node_mastery_by_20_over_n(kg, store):
+    """fixture 有 2 节 → 单节答错只扣 10；从 60 掉到 50。"""
+    kg.add_mastery("n1", 60, caller="human", reason="manual")
+    _add(store, section_id="s01")
+    r = asyncio.run(grade_pending("B", kg=kg, store=store))
+
+    assert r["next_action"] == "retry"          # 原状态机不变
+    assert kg.get_node("n1")["mastery"] == 50
+    assert "掌握度已从 60 调整为 50" in r["section_note"]
+
+
+def test_section_wrong_respects_floor_and_never_raises(kg, store):
+    """下限 10；mastery=0 的节点答错不抬高。"""
+    kg.add_mastery("n1", 12, caller="human", reason="manual")
+    _add(store, section_id="s01", qid="q_floor")
+    asyncio.run(grade_pending("B", kg=kg, store=store))
+    assert kg.get_node("n1")["mastery"] == 10
+
+    _add(store, section_id="s01", qid="q_zero")
+    # ⚠️ update_node_info 的关键字是 mastery_reason（不是 reason），没有 **meta 兜底
+    kg.update_node_info("n1", {"mastery": 0}, caller="human", mastery_reason="manual")
+    asyncio.run(grade_pending("B", kg=kg, store=store))
+    assert kg.get_node("n1")["mastery"] == 0

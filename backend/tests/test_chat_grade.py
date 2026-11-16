@@ -3,7 +3,7 @@
 
 覆盖（`core/quiz/chat_grade.py`，与出题侧 `test_chat_quiz.py` 分开）：
 - 待作答题目反查 → 规则判分 → 记录作答 → **答对确定性抬升掌握度**
-- 答错不扣分（不做惩罚性扣分）
+- 答错 −20 / 下限 10（2026-11-16 起双向；下限不得把 mastery=0 的节点抬高）
 - 掌握度封顶 100、人类创建的节点无权限时静默降级
 - 没有待作答题目 / 空作答 的友好降级
 - **可复用性契约**：题库可注入、不传 kg 时纯判分（不碰图谱）、结构化返回、source 可选
@@ -47,12 +47,18 @@ class _FakeKg:
         self.mastery_meta.append((meta.get("mastery_reason"), meta.get("mastery_evidence")))
         self._nodes.setdefault(node_id, {})["mastery"] = data.get("mastery")
 
-    def add_mastery(self, node_id, delta, *, caller="human", reason="manual", evidence=""):
-        """增量替身：与真实实现同口径（基于当前值累加 + 封顶 100，返回落库值）。"""
+    def add_mastery(self, node_id, delta, *, caller="human", reason="manual",
+                    evidence="", floor=None):
+        """增量替身：与真实实现同口径（floor 钳位 + 封顶 100，返回落库值）。"""
         if self._mastery_fails:
             raise PermissionError("人类创建的节点")
         cur = int(self._nodes.get(node_id, {}).get("mastery") or 0)
-        after = max(0, min(100, cur + int(delta)))
+        delta = int(delta)
+        raw = min(100, cur + delta)
+        if floor is not None and delta < 0:
+            after = min(cur, max(int(floor), raw))
+        else:
+            after = max(0, raw)
         self._nodes.setdefault(node_id, {})["mastery"] = after
         self.mastery_updates.append((node_id, after))
         self.mastery_meta.append((reason, evidence))
@@ -91,18 +97,32 @@ def test_grade_answer_correct_grades_and_raises_mastery(tmp_path):
     assert store.get_pending_question() is None      # 已作答，不再待答
 
 
-def test_grade_answer_wrong_keeps_mastery(tmp_path):
-    """答错 → 0 分、掌握度**不变**（不做惩罚性扣分），并要求模型继续追问。"""
+def test_grade_answer_wrong_lowers_mastery_from_40(tmp_path):
+    """答错 → 掌握度 −20（40→20），reason=quiz_wrong，仍要求模型继续追问。"""
     store = _store(tmp_path)
-    _seed_question(store, source="chat", question_text="栈的特点是什么？",
-                   knowledge_point="stack")
+    qid = _seed_question(store, source="chat", question_text="栈的特点是什么？",
+                         knowledge_point="stack")
 
     kg = _FakeKg({"stack": {"id": "stack", "name": "栈", "mastery": 40}})
     out = _run(chat_grade.grade_pending_answer(kg, "D", store=store))
 
     assert "答错" in out
-    assert kg.mastery_updates == []                  # 不扣分
+    assert kg.increment_calls == [("stack", -20)]
+    assert kg.mastery_updates == [("stack", 20)]
+    assert kg.mastery_meta == [("quiz_wrong", f"question:{qid}")]
     assert "不要直接给出答案" in out
+
+
+def test_wrong_answer_never_raises_mastery_from_zero(tmp_path):
+    """mastery=0 的节点答错 → 仍是 0（下限不得抬高掌握度，D3 实测边界）。"""
+    store = _store(tmp_path)
+    _seed_question(store, source="chat", question_text="栈的特点是什么？",
+                   knowledge_point="stack")
+
+    kg = _FakeKg({"stack": {"id": "stack", "name": "栈", "mastery": 0}})
+    _run(chat_grade.grade_pending_answer(kg, "D", store=store))
+
+    assert kg.get_node("stack")["mastery"] == 0
 
 
 def test_grade_answer_mastery_carries_event_evidence(tmp_path):
@@ -295,8 +315,8 @@ def test_auto_grade_correct_updates_mastery_without_model(tmp_path):
     assert store.get_pending_question() is None     # 已记录作答，不会重复判
 
 
-def test_auto_grade_wrong_keeps_mastery(tmp_path):
-    """答错 → 照常判分与记录，但掌握度不变（不做惩罚性扣分）。"""
+def test_auto_grade_wrong_lowers_mastery(tmp_path):
+    """自动判分链路同样降级（起始 40 → 20），不只是工具链路。"""
     store = _store(tmp_path)
     _seed_question(store, source="chat", question_text="栈的特点是什么？",
                    knowledge_point="stack")
@@ -305,7 +325,7 @@ def test_auto_grade_wrong_keeps_mastery(tmp_path):
     note = _run(chat_grade.auto_grade_pending(kg, "B", store=store))
 
     assert "答错" in note
-    assert kg.mastery_updates == []
+    assert kg.mastery_updates == [("stack", 20)]
     assert store.get_pending_question() is None
 
 

@@ -104,7 +104,8 @@ class _MasteryMixin:
         self._invalidate_cache()
 
     def add_mastery(self, node_id: str, delta: int, *, caller: str = "human",
-                    reason: str = "manual", evidence: str = "") -> int:
+                    reason: str = "manual", evidence: str = "",
+                    floor: int | None = None) -> int:
         """掌握度**增量**写入（多端并发安全），封顶 100，返回更新后的掌握度。
 
         为什么单独一个方法（而不是给 `update_node_info` 加参数）：
@@ -118,8 +119,13 @@ class _MasteryMixin:
         参数:
             delta:    增量（可为负；结果夹在 [0, 100]）
             caller:   "human" / "ai"（AI 不得改人类创建的节点）
-            reason:   事件 reason（quiz_correct / self_report / manual …）
+            reason:   事件 reason（quiz_correct / quiz_wrong / self_report / manual …）
             evidence: 证据引用（如 `question:12`）
+            floor:    **扣分下限**（只在 delta<0 时生效；None = 沿用旧的 [0,100] 夹取）。
+                      扣分结果 = `min(before, max(floor, min(100, before+delta)))`：
+                      既不低于 floor，也**不高于扣分前的 before** —— 否则 mastery=0
+                      的节点答错会被抬到 floor，反而是"答错涨分"（2026-11-16 实测边界）。
+                      正向 delta 一律走旧分支（floor 传了也不生效，避免把加分夹掉）。
 
         异常:
             ValueError: 节点不存在
@@ -135,7 +141,11 @@ class _MasteryMixin:
             if row is None:
                 raise ValueError(f"节点不存在：{node_id}")
             before = int(row["mastery"] or 0)
-            after = max(0, min(100, before + delta))
+            raw = min(100, before + delta)
+            if floor is not None and delta < 0:
+                after = min(before, max(int(floor), raw))
+            else:
+                after = max(0, raw)
             self._conn.execute(
                 "UPDATE nodes SET mastery = ?, updated_at = ? WHERE id = ? AND user_id = ?",
                 (after, datetime.now().isoformat(), node_id, self.user_id),

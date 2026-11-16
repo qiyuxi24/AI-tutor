@@ -54,6 +54,17 @@ DEFAULT_SOURCE = "chat"
 # 答对一道题的确定性掌握度增益（"答对就直接更新进度"）
 MASTERY_CORRECT_GAIN = 20
 
+# 答错的确定性掌握度扣减（2026-11-16 用户口径：做错了就下调掌握度）。
+# 节点级题考的是整个知识点 → 扣满额；小节级题按 20/N 分摊（见 apply_section_after_answer）。
+MASTERY_WRONG_PENALTY = 20
+
+# 扣分下限 = 用户说的「了解」那一档（四档 = 0 未开始 / 1–29 薄弱 / 30–69 学习中 / ≥70 已掌握）。
+# 定为 10：落在薄弱桶、仍 >0 → 答错过的知识点**永不退回「从未接触」**，图谱颜色仍是"学过但没学牢"。
+MASTERY_WRONG_FLOOR = 10
+
+# 答错掌握度事件 reason（mastery_events 没有 kind 列，靠 reason 区分）
+REASON_QUIZ_WRONG = "quiz_wrong"
+
 # 小节题答错几次后把「已懂」降级为「不懂」（用户口径：先讲解 + 再出一题，第二次仍错才降级）
 SECTION_RETRY_BEFORE_DOWNGRADE = 1
 
@@ -91,6 +102,16 @@ def resolve_node_id(kg: KnowledgeGraph, *candidates: str) -> str:
         if node and node.get("id"):
             return str(node["id"])
     return ""
+
+
+def section_wrong_penalty(section_count: int) -> int:
+    """小节题答错时节点掌握度的扣分量 = 20 分按节数均摊，最少 1 分。
+
+    用户口径（2026-11-16）：「每个小节按数量进行一个比例的拆解」。
+    节点级题考整个知识点 → 扣满 20；小节级题只考 1/N → 扣 20/N。
+    max(1, ...) 是守卫：N=40 时 round(20/40)=0，不兜底就"答错不掉分"。
+    """
+    return max(1, round(MASTERY_WRONG_PENALTY / max(1, int(section_count))))
 
 
 def apply_section_after_answer(kg: KnowledgeGraph, *, node_id: str, section_id: str,
@@ -134,6 +155,21 @@ def apply_section_after_answer(kg: KnowledgeGraph, *, node_id: str, section_id: 
 
     attempts = int(state.get("attempts") or 0)
     kg.set_section_learn(node_id, section_id, bump_attempts=True)
+    # 答错 → 按「本节占整个知识点的 1/N」下调节点掌握度（2026-11-16 用户口径）。
+    # 图谱坏了不能吞掉判分与小节状态机 —— 只记 warning，note 少一句而已。
+    mastery_clause = ""
+    try:
+        total = int(kg.section_learn_progress(node_id)["total"] or 0)
+        penalty = section_wrong_penalty(total)
+        before = int((kg.get_node(node_id) or {}).get("mastery") or 0)
+        after = kg.add_mastery(node_id, -penalty, caller="human",
+                               reason=REASON_QUIZ_WRONG, evidence=evidence,
+                               floor=MASTERY_WRONG_FLOOR)
+        if after != before:
+            mastery_clause = (f"；该知识点掌握度已从 {before} 调整为 {after}"
+                              f"（本节占 1/{max(1, total)}，保底 {MASTERY_WRONG_FLOOR} 分）")
+    except Exception as e:
+        logger.warning(f"小节答错下调节点掌握度失败（{node_id}/{section_id}）: {e}")
     if attempts < SECTION_RETRY_BEFORE_DOWNGRADE:
         # ⚠️ 这里**不再自动重出题**（2026-09-30 用户口径：出题前必须先问学生）——
         # 旧版在判分那一刻就排期并写"系统已自动再推一道本节题"，学生没点过头就被考；
@@ -141,11 +177,12 @@ def apply_section_after_answer(kg: KnowledgeGraph, *, node_id: str, section_id: 
         return {"applied": True, "action": "retry",
                 "note": ("这一节第一次没答对：**先讲清错在哪**（本次不降级）；"
                          "然后**问一句**「要不要再来一道同类的练练？」，"
-                         "他答应了下一轮再出题 —— **不要直接出**。")}
+                         "他答应了下一轮再出题 —— **不要直接出**。" + mastery_clause)}
     kg.set_section_learn(node_id, section_id, mark=LEARN_MARK_CONFUSED,
                          mark_by=LEARN_MARK_BY_AI)
     return {"applied": True, "action": "downgrade",
-            "note": "这一节连续两次没答对：已把它的标记改成「不懂」，接下来就按不懂来讲。"}
+            "note": ("这一节连续两次没答对：已把它的标记改成「不懂」，接下来就按不懂来讲。"
+                     + mastery_clause)}
 
 
 def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
@@ -153,15 +190,15 @@ def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
     """
     判分后**确定性**更新掌握度（这就是"答对就直接更新进度"）。
 
-    规则（刻意简单可解释）：
-      - 答对 → mastery = min(100, 当前 + MASTERY_CORRECT_GAIN)
-      - 答错 → **不变**。不做惩罚性扣分：答错说明还没学牢，交给 AI 用苏格拉底追问补救，
-        扣分只会打击学生。
+    规则（2026-11-16 起双向，刻意简单可解释）：
+      - 答对 → +20，封顶 100（reason=quiz_correct）
+      - 答错 → −20，下限 10（reason=quiz_wrong）。下限只在本次扣分里生效，
+        **绝不把 mastery=0 的节点抬高**（真实演示库那道错题的节点就是 0 分）。
 
     ⚠️ 走**增量**接口 `kg.add_mastery`（2026-10-07 多端修复）：旧实现先 `get_node`
     读出旧值、再写绝对值 `min(100, current + 20)` —— 同一账户两端同时判分答对时，
     两端都基于同一快照算 → 只 +20 而不是 +40（lost update）。increment 在写事务内
-    读当前值，天然免疫。
+    读当前值，天然免疫；floor 钳位也留在那个事务里。
 
     参数:
         node_id:  图谱节点 id。传进来的是知识点**名字**也接受（`resolve_node_id`
@@ -170,8 +207,6 @@ def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
 
     返回一句给模型看的状态描述（空字符串 = 没更新）。
     """
-    if not correct:
-        return ""
     node_id = resolve_node_id(kg, node_id)
     if not node_id:
         return ""
@@ -180,19 +215,29 @@ def apply_mastery_after_answer(kg: KnowledgeGraph, node_id: str,
         return ""
     current = int(node.get("mastery", 0) or 0)
     name = node.get("name") or node_id
-    if current >= 100:
+    if correct and current >= 100:
         return f"「{name}」掌握度已是满值 100，无需再提升。"
+    delta = MASTERY_CORRECT_GAIN if correct else -MASTERY_WRONG_PENALTY
+    extra = ({"reason": "quiz_correct"} if correct
+             else {"reason": REASON_QUIZ_WRONG, "floor": MASTERY_WRONG_FLOOR})
     try:
         # caller="human"：这是**用户答题**的结果，不是 AI 自作主张。
         # 原先写 "ai" 会被 `_guard_human_content` 拦下（AI 无权改人类创建的节点）→
         # 用户手动建的知识点**永远无法通过答题提分**（静默写不进去，只留一条 warning）。
         # 2026-09-29 补测试时暴露。
-        new = kg.add_mastery(node_id, MASTERY_CORRECT_GAIN, caller="human",
-                             reason="quiz_correct", evidence=evidence)
+        new = kg.add_mastery(node_id, delta, caller="human",
+                             evidence=evidence, **extra)
     except Exception as e:
         # 人类创建的节点 AI 无权改（PermissionError）——判分照常返回，只是不改进度
         logger.warning(f"判分后更新掌握度失败（{node_id}）: {e}")
         return ""
+    if not correct:
+        if new == current:
+            # 已在下限（或本来就是 0）→ 什么都没变，别给模型一句"调整了但没变"的话
+            return ""
+        logger.info(f"判分答错 → 掌握度 {node_id}: {current} → {new}")
+        return (f"已把「{name}」的掌握度从 {current} 下调到 {new}"
+                f"（答错，保底 {MASTERY_WRONG_FLOOR} 分）。")
     logger.info(f"判分答对 → 掌握度 {node_id}: {current} → {new}")
     return f"已把「{name}」的掌握度从 {current} 提升到 {new}。"
 
