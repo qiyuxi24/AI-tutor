@@ -72,7 +72,7 @@ Info "打包工作区 → $stage"
     --exclude=./data/quiz --exclude=./data/kb --exclude=./data/rag `
     --exclude=./data/traces --exclude=./data/collector `
     --exclude=./data/agent_runs --exclude=./data/agent_debug `
-    --exclude=./data/llm --exclude=./data/keys `
+    --exclude=./data/llm --exclude=./data/keys --exclude=./data/bili `
     --exclude=./reports --exclude=*.pyc --exclude=*.log --exclude=*.db `
     --exclude=./.pytest_cache --exclude=./.mypy_cache .
 if ($LASTEXITCODE -ne 0) { Fail "tar 打包失败" }
@@ -85,7 +85,7 @@ Info "上传到 ${Server}:/tmp ..."
 if ($LASTEXITCODE -ne 0) { Fail "scp 上传失败" }
 Ok "上传完成"
 
-Remote "mkdir -p $RemoteDir/data/knowledge $RemoteDir/data/conversations $RemoteDir/data/profiles $RemoteDir/data/kb $RemoteDir/data/rag $RemoteDir/data/quiz $RemoteDir/data/collector $RemoteDir/data/agent_runs $RemoteDir/data/agent_debug && tar -xzf /tmp/ai-tutor-deploy.tgz -C $RemoteDir && rm -f /tmp/ai-tutor-deploy.tgz"
+Remote "mkdir -p $RemoteDir/data/knowledge $RemoteDir/data/conversations $RemoteDir/data/profiles $RemoteDir/data/kb $RemoteDir/data/rag $RemoteDir/data/quiz $RemoteDir/data/collector $RemoteDir/data/agent_runs $RemoteDir/data/agent_debug $RemoteDir/data/llm $RemoteDir/data/keys $RemoteDir/data/bili && tar -xzf /tmp/ai-tutor-deploy.tgz -C $RemoteDir && rm -f /tmp/ai-tutor-deploy.tgz"
 Ok "远端代码已更新：$RemoteDir"
 
 # ---------- 4. 构建 + 启动 ----------
