@@ -51,6 +51,20 @@ describe('buildTaxonomyTree（归属树）', () => {
     expect(buildTaxonomyTree(undefined).children).toEqual([])
   })
 
+  it('保留 contentStatus（骨架节点画空心、写完翻实心）', () => {
+    // 建图阶段①落 skeleton，阶段②写完才翻 filled —— 两个树视图都靠这个字段决定空心/实心。
+    // 字段丢了不会有报错，只会"永远是实心"，所以必须锁住。
+    const t = buildTaxonomyTree([
+      node({ id: 's', content_status: 'skeleton' }),
+      node({ id: 'f', content_status: 'filled' }),
+      node({ id: 'legacy' }),        // 老数据没有该字段 → 空串（按非骨架处理）
+    ])
+    const leaves = t.children[0].children[0].children
+    expect(leaves.find((n) => n.id === 's').contentStatus).toBe('skeleton')
+    expect(leaves.find((n) => n.id === 'f').contentStatus).toBe('filled')
+    expect(leaves.find((n) => n.id === 'legacy').contentStatus).toBe('')
+  })
+
   it('节点顺序确定化：同一份数据两次派生逐字节一致', () => {
     const ns = [node({ id: 'b', name: '乙' }), node({ id: 'a', name: '甲' }), node({ id: 'c', name: '丙' })]
     expect(JSON.stringify(buildTaxonomyTree(ns))).toBe(JSON.stringify(buildTaxonomyTree(ns)))

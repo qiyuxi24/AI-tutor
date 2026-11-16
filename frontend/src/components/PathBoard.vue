@@ -3,8 +3,10 @@
  * PathBoard.vue — 「学习路径」（图谱页左侧导航的一个 tab）
  *
  * 定位：图谱画布回答"知识点之间是什么关系"；本面板回答"我该按什么顺序学"。
- * 表现形式 = GitLens / 鱼骨式**依赖脊**：一条紫色主干把全部未掌握节点串成 commit 序列，
- * 左侧灰弧是前置依赖，行内挂状态徽标，第一项高亮为「建议起点」。
+ * 表现形式 = GitLens / 鱼骨式**依赖脊**：一条主色主干把全部未掌握节点串成 commit 序列，
+ * 左侧虚线弧只在**点选某一行**时出现（画的是这一行的直接前置），行内挂状态徽标，第一项高亮为「建议起点」。
+ * （旧版把"全部前置"的弧无条件画出来 —— gutter 只有 19px，一屏十几条弧会退化成贴主干的一团
+ * 近竖直细线，即用户反馈的"杂乱的线"；几何与理由见 `utils/pathRail.js`。）
  *
  * 前置**不是硬门槛**（2026-11-15）：`recommended` 是后端算好的**完整建议全序**（全部未掌握
  * 节点，不剔除被挡的、不截断）。`blocked_by` / `hint` / `trace` 只是"建议先补谁"的软提示，
@@ -17,6 +19,7 @@
  */
 
 import { computed, nextTick, ref, watch } from 'vue'
+import { ROW, GUT, CX, arcsForSelection, arcPath } from '../utils/pathRail'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
@@ -49,37 +52,8 @@ const total = computed(() => props.items.length)
 const masteredCount = computed(() => done.value.length)
 const percent = computed(() => (total.value ? Math.round((masteredCount.value / total.value) * 100) : 0))
 
-// ── 依赖脊几何：行高固定，SVG 才能和行一一对齐 ─────────────
-const ROW = 48
-const GUT = 50
-const CX = 19
+// ── 依赖脊几何：行高固定，SVG 才能和行一一对齐（常量在 utils/pathRail.js）──
 const railHeight = computed(() => path.value.length * ROW)
-
-// 依赖弧：path 节点 j 的「未掌握直接前置」若也在 path 里（索引 i），画一条灰弧。
-// ponytail: 弧线只是结构装饰，密集时截断避免糊成一团 —— 真正的"补谁"由行内 hint 承载。
-const arcs = computed(() => {
-  const idx = Object.fromEntries(path.value.map((n, i) => [n.id, i]))
-  const seen = new Set()
-  const out = []
-  path.value.forEach((n, j) => {
-    for (const p of n.prerequisites || []) {
-      const i = idx[p.id]
-      if (i === undefined || i === j) continue
-      const key = `${Math.min(i, j)}-${Math.max(i, j)}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      out.push([Math.min(i, j), Math.max(i, j)])
-    }
-  })
-  return out.slice(0, 20)
-})
-
-function arcPath(a, b, k) {
-  const y1 = ROW / 2 + a * ROW
-  const y2 = ROW / 2 + b * ROW
-  const bx = CX - 6 - (k % 3) * 4
-  return `M ${CX} ${y1} C ${bx} ${y1} ${bx} ${y2} ${CX} ${y2}`
-}
 
 // ── 展示辅助 ────────────────────────────────────────────
 function statusOf(node) {
@@ -102,6 +76,10 @@ function focusTarget(node) {
 const selectedId = ref('')
 const selected = computed(() => (selectedId.value ? byId.value[selectedId.value] : null))
 const showDone = ref(false)
+
+// 前置弧：**只画选中行的**（默认零条）。无条件画全部前置在 19px 的 gutter 里会叠成一团细线，
+// 见 utils/pathRail.js 顶部说明与 pathRail.test.js「默认状态不画任何弧」。
+const arcs = computed(() => arcsForSelection(path.value, selectedId.value))
 
 function rowById(id) {
   const nodes = bodyRef.value?.querySelectorAll?.('[data-node]') || []
@@ -185,7 +163,7 @@ watch(() => props.items, () => {
           <template v-else>
             <div class="pb-legend">
               <span><i class="lg-spine"></i>建议路径</span>
-              <span><i class="lg-arc"></i>前置依赖</span>
+              <span><i class="lg-arc"></i>点选看前置</span>
               <span class="pb-legend-seq">按建议顺序</span>
             </div>
 
@@ -211,7 +189,7 @@ watch(() => props.items, () => {
             <div class="pb-rail" :style="{ height: railHeight + 'px' }">
               <svg class="pb-rail-svg" :width="GUT" :height="railHeight" aria-hidden="true">
                 <line :x1="CX" :y1="ROW / 2" :x2="CX" :y2="railHeight - ROW / 2" class="rail-spine" />
-                <path v-for="([a, b], k) in arcs" :key="`${a}-${b}`" :d="arcPath(a, b, k)" class="rail-arc" />
+                <path v-for="arc in arcs" :key="`${arc.a}-${arc.b}`" :d="arcPath(arc)" class="rail-arc" />
                 <template v-for="(n, i) in path" :key="n.id">
                   <circle v-if="i === 0" :cx="CX" :cy="ROW / 2 + i * ROW" r="9" class="rail-halo" />
                   <circle
@@ -341,7 +319,7 @@ watch(() => props.items, () => {
 }
 .pb-legend i { display: inline-block; width: 14px; height: 0; vertical-align: middle; margin-right: 4px; }
 .lg-spine { border-top: 2px solid var(--color-accent); }
-.lg-arc { border-top: 2px solid var(--color-border); }
+.lg-arc { border-top: 2px dashed var(--color-accent); }
 .pb-legend-seq { margin-left: auto; }
 
 /* ── 选中 inspector ── */
@@ -385,7 +363,16 @@ watch(() => props.items, () => {
 .pb-rail { position: relative; }
 .pb-rail-svg { position: absolute; left: 0; top: 0; z-index: 1; pointer-events: none; overflow: visible; }
 .rail-spine { stroke: var(--color-accent); stroke-width: 2.5; stroke-linecap: round; }
-.rail-arc { fill: none; stroke: var(--color-border); stroke-width: 1.6; }
+/* 前置弧：虚线 + 主色 —— 一眼看出是"连到哪一行"，而不是又一根主干。
+   默认不存在（只有选中行才有），所以不会退回旧版"一团细线"。 */
+.rail-arc {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+  stroke-linecap: butt;
+  opacity: 0.9;
+}
 .rail-halo { fill: none; stroke: var(--color-accent); stroke-width: 1.5; opacity: 0.45; }
 .rail-dot { fill: var(--color-bg-card); stroke: var(--color-accent); stroke-width: 2.5; }
 .rail-dot-start { fill: var(--color-accent); }

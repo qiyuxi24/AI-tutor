@@ -78,6 +78,15 @@ function nodeOpacity(mastery) {
   return 0.5 + Math.min(100, Math.max(1, mastery)) / 200
 }
 
+/**
+ * 骨架节点：建图阶段①先落概念（`content_status='skeleton'`），阶段②逐概念写正文后才翻
+ * `filled`（进度口径 = filled/total，见 `api/v1/kb.py::graph_status`）。
+ * 画成空心 = "概念已定、正文还没有"，用户能看着它一个个变实心（2026-11-16）。
+ */
+function isSkeleton(d) {
+  return d.content_status === 'skeleton'
+}
+
 function edgeDisplayLabel(relation) {
   return RELATION_LABELS[relation] || relation || ''
 }
@@ -117,8 +126,11 @@ function normalizeLinks(rawEdges, nodeIdSet) {
 }
 
 function graphFingerprint(nodes, links) {
+  // content_status 必须进指纹：建图过程中节点 id 与 mastery 都不变，只有它从
+  // skeleton 翻 filled —— 漏了它，进度推进时重拉的画布会被指纹判定"没变"直接返回，
+  // 看上去就是"节点永远是空心的"。
   const nodeIds = nodes
-    .map((n) => `${n.id}:${n.mastery}`)
+    .map((n) => `${n.id}:${n.mastery}:${n.content_status || ''}`)
     .sort()
     .join(',')
   const edgeKeys = links
@@ -213,11 +225,13 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
 
   /** 来源命中的节点加粗描边（非来源节点维持默认样式 1 / 0.3） */
   function nodeBodyStrokeWidth(d) {
-    return isSourceNode(d.id) ? 3.2 : 1
+    if (isSourceNode(d.id)) return 3.2
+    return isSkeleton(d) ? 1.6 : 1          // 空心节点全靠这圈描边，太细会看不见
   }
 
   function nodeBodyStrokeOpacity(d) {
-    return isSourceNode(d.id) ? 1 : 0.3
+    if (isSourceNode(d.id)) return 1
+    return isSkeleton(d) ? 0.9 : 0.3
   }
 
   /* ---------- 画布骨架 ---------- */
@@ -541,9 +555,11 @@ export function createForceGraphEngine({ container, forces, highlight, handlers 
 
     nodeSelection = nodeEnter.merge(nodeJoin)
 
-    // ── 节点圆形（科技树四档配色 + 路径描边） ──
+    // ── 节点圆形（科技树四档配色 + 路径描边；骨架节点空心） ──
     nodeSelection.select('.node-body')
-      .attr('fill', (d) => nodeFill(d.mastery))
+      // 骨架节点还没正文 → 空心（只留描边），写完了才填色。颜色仍是掌握度那套，
+      // 建图刚出来的节点 mastery=0，空心的"未开始色"正好不喧宾夺主。
+      .attr('fill', (d) => (isSkeleton(d) ? 'none' : nodeFill(d.mastery)))
       .attr('stroke', nodeBodyStroke)
       .attr('stroke-width', nodeBodyStrokeWidth)
       .attr('stroke-opacity', nodeBodyStrokeOpacity)

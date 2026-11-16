@@ -24,6 +24,8 @@ const children = computed(() => props.node.children || [])
 const isGroup = computed(() => props.node.kind === 'subject' || props.node.kind === 'board')
 const collapsed = computed(() => props.ctx.collapsed.has(props.node.id))
 const statusClass = computed(() => (isGroup.value ? '' : STATUS[masteryLevel(props.node.mastery)]))
+// 骨架节点（建图中，正文还没写）：四色点改成空心圈，写完翻实心
+const isSkeleton = computed(() => !isGroup.value && props.node.contentStatus === 'skeleton')
 const highlightClass = computed(() => ({
   'is-source': !isGroup.value && props.ctx.isSource(props.node.id),
 }))
@@ -38,7 +40,7 @@ function onRowClick() {
   <div class="bn">
     <div
       class="bn-row"
-      :class="[statusClass, highlightClass, { group: isGroup }]"
+      :class="[statusClass, highlightClass, { group: isGroup, 'is-skeleton': isSkeleton }]"
       :data-node-id="node.id"
       :title="isGroup ? `${node.name}（${children.length}）` : node.name"
       @click="onRowClick"
@@ -120,6 +122,9 @@ function onRowClick() {
 
 /* ── 来源命中高亮（知识库「在图谱中显示」） ── */
 .bn-row.is-source { outline: 1px solid var(--color-accent); outline-offset: -1px; }
+
+/* ── 骨架节点（建图中，正文还没写）：空心的四色点 ── */
+.bn-row.is-skeleton .bn-dot { background: transparent; border: 1.5px solid var(--color-text-muted); }
 
 /* ── 子级缩进 + 引导线（大括号的连接线的纯 CSS 部分） ── */
 .bn-kids {

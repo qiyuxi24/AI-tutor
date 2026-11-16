@@ -38,7 +38,15 @@ function byName(a, b) {
 const groupId = (kind, ...parts) => `${kind}:${JSON.stringify(parts)}`
 
 function leaf(n) {
-  return { id: n.id, name: text(n.name) || String(n.id), kind: 'node', mastery: Number(n.mastery) || 0 }
+  return {
+    id: n.id,
+    name: text(n.name) || String(n.id),
+    kind: 'node',
+    mastery: Number(n.mastery) || 0,
+    // 骨架态（建图阶段①已落概念、正文未写）→ 两个树视图都把它画成空心。
+    // 只是渲染提示，不参与排序/去重（那把 `byName` / `visited` 的判断就都跟着变了）。
+    contentStatus: n.content_status || '',
+  }
 }
 
 /**

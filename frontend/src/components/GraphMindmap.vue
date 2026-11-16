@@ -98,7 +98,13 @@ function render() {
   all.attr('transform', (d) => `translate(${d.y},${d.x})`)
     .classed('is-source', (d) => sourceSet.value.has(d.data.id))
     .classed('is-root', (d) => d.data.kind === 'root')
-  all.select('.mm-dot').attr('fill', (d) => (d.data.kind === 'root' ? 'var(--color-accent)' : nodeFill(d.data.mastery)))
+  all.classed('is-skeleton', (d) => d.data.kind === 'node' && d.data.contentStatus === 'skeleton')
+  all.select('.mm-dot')
+    .attr('fill', (d) => {
+      if (d.data.kind === 'root') return 'var(--color-accent)'
+      // 骨架节点（正文还没写）画空心圆：建图中能看着它一个个变实心
+      return d.data.contentStatus === 'skeleton' ? 'none' : nodeFill(d.data.mastery)
+    })
   all.select('.mm-label').text((d) => d.data.name)
   all.select('.mm-toggle').style('display', (d) => (hasKids(d) ? null : 'none'))
   all.select('.mm-toggle-sign').text((d) => (collapsed.has(d.data.id) ? '+' : '−'))
@@ -282,6 +288,11 @@ watch(() => props.sourceNodes, () => {
 .mindmap-view :deep(.mm-dot) { stroke: var(--color-bg-primary); stroke-width: 1.5; }
 .mindmap-view :deep(g.is-root .mm-dot) { stroke: var(--color-accent); }
 .mindmap-view :deep(g.is-root .mm-label) { font-weight: 600; fill: var(--color-text-secondary); }
+
+/* 骨架节点（建图中，正文还没写）：空心圆 + 半透明标签，写完翻实心。
+   空心圆的 fill 由 render() 置 none，描边色 = 掌握度色（建图出来的节点 mastery=0）。 */
+.mindmap-view :deep(g.is-skeleton .mm-dot) { stroke: var(--color-graph-node); stroke-width: 2; }
+.mindmap-view :deep(g.is-skeleton .mm-label) { fill: var(--color-text-muted); }
 
 /* 折叠开关：默认低调，悬停才明显 —— 它不是主操作（点节点才是） */
 .mindmap-view :deep(.mm-toggle) { cursor: pointer; }
