@@ -613,6 +613,96 @@ describe('建图结果由 graph_updated 通知收口（不靠 HTTP 响应）', (
   })
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// init 只走一次图：ensureSubjectSelected 已经做过的事不再补一遍（2026-11-16）
+//
+// 旧 init：`await ensureSubjectSelected()` 之后**无条件** `await fetchGraph()`。
+// 首次进入时 ensureSubjectSelected 走 setSubject(names[0]) → 内部已 fetchGraph(true)，
+// 于是 fetchGraph 在一次 init 里被调用两次。
+//
+// ⚠️ 实测澄清（别被"47.9KB 浪费"带偏）：**成功路径上旧代码也只发 1 个请求** ——
+// 第二次 fetchGraph 被 `if (!force && graphLoaded.value) return` 守卫直接返回，
+// 根本到不了网络。真正多发的只有**失败路径**：fetchGraph 抛错后 graphLoaded 仍是
+// false，第二次调用照样进发请求 → 同一张图连打两次、第二次没有退避也没有意义。
+//
+// 不变量：任何**原本会拉图**的路径改完后仍然拉，且只拉一次。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('init 加载图谱的请求数', () => {
+  /** 让 stats 返回给定学科列表；graph 返回空图（或按需失败）。 */
+  function mockBackend({ subjects = [], graphFails = false } = {}) {
+    apiClient.get.mockImplementation((url) => {
+      if (url === '/api/v1/knowledge/stats') {
+        return Promise.resolve({
+          data: { by_subject: subjects.map(subject => ({ subject, node_count: 1 })) },
+        })
+      }
+      if (url === '/api/v1/knowledge/graph') {
+        if (graphFails) return Promise.reject(new Error('graph down'))
+        return Promise.resolve({ data: { nodes: [], edges: [] } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+  }
+
+  /** fetchGraph 发出的请求数（唯一可观测信号就是这个端点）。 */
+  function graphGets() {
+    return apiClient.get.mock.calls.filter(([u]) => u === '/api/v1/knowledge/graph')
+  }
+
+  it('首次 init（未选学科、有学科列表）→ 图请求正好 1 次，且带自动选中的学科', async () => {
+    mockBackend({ subjects: ['数据结构', '操作系统'] })
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+    expect(store.currentSubject).toBeNull()
+
+    await store.init()
+
+    const calls = graphGets()
+    expect(calls).toHaveLength(1)
+    expect(calls[0][1].params.subject).toBe('数据结构')  // 自动选中第一个学科
+    expect(store.currentSubject).toBe('数据结构')
+    expect(store.graphLoaded).toBe(true)
+  })
+
+  it('已选学科且仍在列表里 → init 仍要拉图 1 次（不许因为这次改动漏拉）', async () => {
+    mockBackend({ subjects: ['数据结构', '操作系统'] })
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+    store.currentSubject = '操作系统'                    // 上一轮已选、仍然有效
+
+    await store.init()
+
+    const calls = graphGets()
+    expect(calls).toHaveLength(1)                        // ensureSubjectSelected 提前返回 → 由 init 负责
+    expect(calls[0][1].params.subject).toBe('操作系统')
+    expect(store.currentSubject).toBe('操作系统')        // 不被自动选中改写成第一个
+  })
+
+  it('学科列表为空（新用户）→ 仍然清空画布，且不发图请求', async () => {
+    mockBackend({ subjects: [] })
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+
+    await store.init()
+
+    expect(graphGets()).toHaveLength(0)                  // 无学科 = 不请求，空态
+    expect(store.knowledgeNodes).toEqual([])
+    expect(store.graphLoaded).toBe(true)
+  })
+
+  it('图请求失败 → 不在同一次 init 里立刻重打一遍（旧实现会发 2 次）', async () => {
+    // 这是本次改动**唯一**真正省下的请求：成功路径本来就被 graphLoaded 守卫挡住了。
+    mockBackend({ subjects: ['数据结构'], graphFails: true })
+    localStorage.setItem('ai_tutor_token', 't')
+    const store = useChatStore()
+
+    await store.init()
+
+    expect(graphGets()).toHaveLength(1)
+    expect(store.graphError).toBeTruthy()                // 失败仍然可见，不静默
+  })
+})
+
 describe('刷新后恢复「生成中」（TODO §11.3/§11.4-B）', () => {
   // 背景：建图已后台化（后端 `runtime.spawn`），刷新**不再取消**它。
   // 但前端 `graphGenerating` 是纯内存 ref —— 刷新后归零，按钮显示"一键生成图谱"，

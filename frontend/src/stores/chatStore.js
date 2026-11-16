@@ -413,16 +413,21 @@ export const useChatStore = defineStore('chat', () => {
    *   - 已选但已消失（学科被删或改名）→ 回退到第一个学科
    *   - 未选（首次进入/图从空变非空）→ 自动选中第一个学科
    * 学科列表为空（新用户、图空）→ 保持 null，画布空态由 fetchGraph 处理。
+   *
+   * @returns {Promise<boolean>} 本次是否**已经动过图**（拉取或清空）。true = 调用方
+   *   别再 fetchGraph（后两个分支内部已经做过）；false = 当前学科原样保留、这里
+   *   没碰图，由调用方自己决定拉不拉。
    */
   async function ensureSubjectSelected() {
     const names = subjectSummaries.value.map(s => s.subject)
-    if (currentSubject.value && names.includes(currentSubject.value)) return
+    if (currentSubject.value && names.includes(currentSubject.value)) return false
     currentSubject.value = null   // 置空，避免 setSubject 因"值未变"提前返回
     if (names.length) {
       await setSubject(names[0])
     } else {
       await fetchGraph(true)      // 无学科 → 清空画布
     }
+    return true
   }
 
   /**
@@ -784,9 +789,12 @@ export const useChatStore = defineStore('chat', () => {
 
     // 一次性加载知识图谱：先取学科列表并自动选中一个
     // （一次只渲染一个学科，不再默认拉全量）
+    //
+    // ensureSubjectSelected 会告诉我们「它自己已经动过图了」：自动选中学科（走
+    // setSubject → fetchGraph(true)）与学科为空（清画布）这两个分支内部都已处理，
+    // 这里就不必再补一次。只有「当前学科本来就有效、那边什么都没做」时由这里拉。
     await fetchSubjects()
-    await ensureSubjectSelected()
-    await fetchGraph()
+    if (!(await ensureSubjectSelected())) await fetchGraph()
     // 建图是后台任务：刷新后要问一次"还在跑吗"，否则按钮显示空闲、用户再点撞 409。
     await restoreGraphBuildStatus()
     // 连接 SSE，后端数据变更时自动刷新图谱
