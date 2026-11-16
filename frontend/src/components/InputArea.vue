@@ -4,16 +4,23 @@
  *
  * 结构参考业界主流（DeepSeek / Codex 的输入框，2026-11）：
  *   **一个整块容器**装下"引用区 + 输入框 + 工具栏"，而不是"输入框旁边散着几个按钮"。
- *   外壳统一圆角 + 焦点环，工具栏沉到容器底部，左侧是能力入口（资料/知识点），
- *   右侧是发送 —— 视觉上只有一块，焦点态也只亮一块。
+ *   外壳统一圆角 + 焦点环，工具栏沉到容器底部，左侧一个 `+`，右侧是发送 ——
+ *   视觉上只有一块，焦点态也只亮一块。
  *
  * 引用的两套机制（调研结论，别混）：
  *   **选区（chip）** vs  **@ 内联 mention** —— 这里是选区：选中即"这段对话都看这些"，
  *   跨轮次常驻，撤销点 chip 上的 ×。不做只对下一条生效的一次性附件（每问一句重选太烦）。
+ *
+ * 入口只有一个 `+`（2026-11-16）：资料与知识点都在同一个面板里选，面板内用 tab 区分。
+ * 曾经是「资料」「知识点」两颗胶囊 + 知识库侧栏右键 + 侧栏底部「当前对话上下文」四条路，
+ * 底层（`conv.selection`）本来就只有一份 —— 重复的只是入口。多选靠面板里逐行点、再点取消，
+ * 选中数显示在 `+` 的角标和面板底部「完成（N）」上。
  */
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
 import { useChatStore } from '../stores/chatStore'
+import { listLlmModels } from '../api/index.js'
 import ContextPicker from './ContextPicker.vue'
+import ModelPicker from './ModelPicker.vue'
 import AppIcon from './AppIcon.vue'
 
 const store = useChatStore()
@@ -22,29 +29,49 @@ const text = ref('')
 const textareaRef = ref(null)
 const focused = ref(false)
 
-// 候选面板：同一个面板承载两类数据，用 tab 区分入口（哪颗胶囊点的就开哪个 tab）
+// 候选面板：`+` 打开，面板内 tab 切「资料 / 知识点」
 const pickerOpen = ref(false)
-const pickerTab = ref('docs')
+
+// 模型切换（2026-11-16）：对话中途换模型是常态动作，所以在输入区直接可切，
+// 不必跳去设置页。标签只显示"当前选的是谁"，真值始终在后端（设置页同一份）。
+const modelOpen = ref(false)
+const modelLabel = ref('')
+
+async function loadModelLabel() {
+  try {
+    const { data } = await listLlmModels()
+    const active = (data.models || []).find((m) => m.id === data.active_id)
+    modelLabel.value = active ? active.name : (data.system_default?.model || '系统默认')
+  } catch {
+    modelLabel.value = ''      // 读不到就不显示，输入区不该因为这件事报错
+  }
+}
+
+onMounted(loadModelLabel)
+
+function closeModelPicker() { modelOpen.value = false }
+
+/** 两个浮层互斥：同时开着会互相压住（都从 composer 上沿展开）。 */
+function togglePicker() {
+  pickerOpen.value = !pickerOpen.value
+  if (pickerOpen.value) modelOpen.value = false
+}
+
+/** 点开面板前先对齐一次标签：用户可能在设置页改过模型（那页不经过本组件）。 */
+function toggleModelPicker() {
+  if (!modelOpen.value) loadModelLabel()
+  modelOpen.value = !modelOpen.value
+  if (modelOpen.value) pickerOpen.value = false
+}
 
 // 当前对话的选区（每对话绑定，见 chatStore.selection）：资料 + 知识点两类 chip
 const selDocs = computed(() => store.selection?.docs || [])
 const selNodes = computed(() => store.selection?.nodes || [])
-const hasSelection = computed(() => selDocs.value.length > 0 || selNodes.value.length > 0)
+const selectedCount = computed(() => selDocs.value.length + selNodes.value.length)
 
 function removeDoc(d) { store.toggleSelectionItem('docs', d) }
 function removeNode(n) { store.toggleSelectionItem('nodes', n) }
-function clearAll() { store.clearSelection() }
 function closePicker() { pickerOpen.value = false }
-
-/** 点同一颗胶囊 = 收起；点另一颗 = 切到它的 tab（面板不闪一下再开）。 */
-function togglePicker(tab) {
-  if (pickerOpen.value && pickerTab.value === tab) {
-    pickerOpen.value = false
-    return
-  }
-  pickerTab.value = tab
-  pickerOpen.value = true
-}
 
 function docLabel(d) {
   const suffix = d.type === 'folder' && d.fileCount ? `（${d.fileCount} 个文件）` : ''
@@ -94,7 +121,7 @@ function handleKeydown(e) {
   <div class="composer-wrap">
     <div class="composer" :class="{ 'is-focus': focused }">
       <!-- 已引用：chip 行贴在输入框上方（没选时不占位，保持输入区干净） -->
-      <div v-if="hasSelection" class="composer-chips">
+      <div v-if="selectedCount" class="composer-chips">
         <span class="chips-label">引用</span>
         <span
           v-for="d in selDocs" :key="'d' + d.id"
@@ -135,42 +162,45 @@ function handleKeydown(e) {
       ></textarea>
 
       <!-- 工具栏沉在容器底部：左侧能力入口，右侧发送。
-           面板锚在胶囊组上、点外面即收（全局 v-click-outside，见 main.js）：
+           面板锚在整块 composer 上、点外面即收（全局 v-click-outside，见 main.js）：
            点在输入框里也算"外面"—— 用户开始打字就该让面板让位。 -->
       <div class="composer-toolbar">
         <div class="picker-anchor" v-click-outside="closePicker">
           <button
-            class="tool-pill"
-            :class="{ active: pickerOpen && pickerTab === 'docs', filled: selDocs.length }"
+            class="add-btn"
+            :class="{ active: pickerOpen, filled: selectedCount }"
             :disabled="store.loading"
-            aria-label="引用资料"
-            @click="togglePicker('docs')"
+            :aria-label="selectedCount ? `引用资料或知识点（已选 ${selectedCount} 项）` : '引用资料或知识点'"
+            title="引用资料或知识点"
+            @click="togglePicker"
           >
-            <AppIcon name="file" :size="14" />
-            <span>资料</span>
-            <span v-if="selDocs.length" class="pill-count">{{ selDocs.length }}</span>
-          </button>
-
-          <button
-            class="tool-pill"
-            :class="{ active: pickerOpen && pickerTab === 'nodes', filled: selNodes.length }"
-            :disabled="store.loading"
-            aria-label="引用知识点"
-            @click="togglePicker('nodes')"
-          >
-            <AppIcon name="target" :size="14" />
-            <span>知识点</span>
-            <span v-if="selNodes.length" class="pill-count">{{ selNodes.length }}</span>
+            <AppIcon name="plus" :size="16" />
+            <span v-if="selectedCount" class="add-count">{{ selectedCount }}</span>
           </button>
 
           <ContextPicker
             v-if="pickerOpen"
-            :initial-tab="pickerTab"
             @close="closePicker"
           />
         </div>
 
         <div class="toolbar-right">
+          <!-- 模型切换：沉在工具栏右侧、发送键左边。只显示当前档位名字，
+               点开才是列表 —— 输入区里不摊开一个下拉占地方。 -->
+          <div class="model-anchor" v-click-outside="closeModelPicker">
+            <button
+              class="model-btn"
+              :class="{ active: modelOpen }"
+              :aria-expanded="modelOpen"
+              :title="modelLabel ? `当前模型：${modelLabel}` : '切换模型'"
+              @click="toggleModelPicker"
+            >
+              <AppIcon name="sparkles" :size="13" />
+              <span class="model-name">{{ modelLabel || '模型' }}</span>
+            </button>
+            <ModelPicker v-if="modelOpen" @close="closeModelPicker" @changed="loadModelLabel" />
+          </div>
+
           <!-- 生成中：同一位置换成「停止」（方形 = 停止符，公认语义）。
                忙碌时把发送位变成停止位是这个位置的通行做法，也省一个按钮位。 -->
           <button
@@ -203,13 +233,10 @@ function handleKeydown(e) {
 
 <style scoped>
 /* 与消息列同宽对齐：`ChatArea.message-list` 把正文封顶在 760px 并居中，这里照抄同一
-   口径（外层留 24px 兜底边距），否则宽屏下输入框会顶到窗口两边、和上面的对话不在一条轴上。
-   `container-type` 是**必须**的：输入区是 `.chat-body` 的**兄弟节点**，借不到外层那个
-   容器上下文，不自己声明一条的话下面 `@container` 的窄窗规则永远不会命中。 */
+   口径（外层留 24px 兜底边距），否则宽屏下输入框会顶到窗口两边、和上面的对话不在一条轴上。 */
 .composer-wrap {
   padding: 10px 24px 6px;
   background: var(--color-bg-primary);
-  container-type: inline-size;
 }
 
 .composer {
@@ -343,40 +370,42 @@ function handleKeydown(e) {
   gap: 6px;
 }
 
-/* 能力入口胶囊：参照 DeepSeek 的「深度思考 / 智能搜索」，低饱和描边 + 选中才上色 */
-.tool-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+/* 引用入口：一个 `+` 圆钮（DeepSeek / ChatGPT 的位置与形状），有选区时右上角带数量。
+   只有一颗：资料与知识点的区分交给面板里的 tab，不在工具栏上再分两颗胶囊。 */
+.add-btn {
+  position: relative;
+  flex-shrink: 0;
+  width: 30px;
   height: 30px;
-  padding: 0 11px;
   border-radius: var(--radius-full);
   border: 1px solid var(--color-border);
   background: transparent;
   color: var(--color-text-secondary);
-  font-size: 12.5px;
-  font-family: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
-.tool-pill:hover:not(:disabled) {
+.add-btn:hover:not(:disabled) {
   color: var(--color-accent);
   border-color: var(--color-accent);
 }
-.tool-pill.active {
-  color: var(--color-accent);
-  border-color: var(--color-accent);
-  background: var(--color-accent-light);
-}
-/* 有引用时保持浅色高亮（不必展开面板也能看出"这段对话引了东西"） */
-.tool-pill.filled {
+/* 面板开着 / 已有选区 → 都亮成浅强调色：不必展开面板也能看出"这段对话引了东西" */
+.add-btn.active,
+.add-btn.filled {
   color: var(--color-accent-hover);
-  border-color: var(--color-accent-light);
+  border-color: var(--color-accent);
   background: var(--color-accent-light);
 }
-.tool-pill:disabled { cursor: not-allowed; opacity: 0.5; }
+.add-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+.add-btn:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 
-.pill-count {
+/* 角标压在圆钮右上角外侧一点，不挤图标 */
+.add-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -395,6 +424,45 @@ function handleKeydown(e) {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* ─── 模型切换（工具栏右侧，发送键左边） ───
+   同样不设 position：面板相对**整块 composer** 定位，与引用面板同一口径。
+   anchor 只负责点击外部判定。 */
+.model-anchor {
+  display: flex;
+  align-items: center;
+}
+
+.model-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 150px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.model-btn:hover,
+.model-btn.active {
+  color: var(--color-accent-hover);
+  border-color: var(--color-accent);
+  background: var(--color-accent-light);
+}
+.model-btn:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+
+/* 模型名可能长（"MiniMax-M3"、"deepseek-reasoner"）→ 省略号保住工具栏宽度 */
+.model-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 发送：圆形，空输入时灰、有内容时实心强调色（视觉重量随可用性变化） */
@@ -443,13 +511,7 @@ function handleKeydown(e) {
   color: var(--color-text-muted);
 }
 
-/* 窄容器（悬浮小窗）：工具按钮只留图标省横向空间 */
-@container (max-width: 480px) {
-  .tool-pill span:not(.pill-count) { display: none; }
-  .tool-pill { padding: 0 9px; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .composer, .tool-pill, .send-btn, .chip-x { transition: none; }
+  .composer, .add-btn, .send-btn, .chip-x { transition: none; }
 }
 </style>

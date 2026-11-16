@@ -2,8 +2,11 @@
 /**
  * ContextPicker.vue — 引用候选面板（资料 / 知识点）
  *
- * 业界范式（2026-11 调研）：从输入区的一颗胶囊展开一个**统一候选面板**，
+ * 业界范式（2026-11 调研）：从输入区的一个 `+` 展开一个**统一候选面板**，
  * 里面可切类别、可搜、可多选；选中项回到输入区变成 chip。
+ *
+ * 多选就一条规则（别加复选框、别加"确认添加"）：**点一行 = 勾上，再点 = 取消**，
+ * 面板不关 —— 一次进来勾几份是常态。底部实时显示「已选 N」，点「完成」或 Esc 收起。
  *
  * 两类数据走**两条通路**（这是它们的本质区别，别合并）：
  *   资料   → 目录树 `GET /kb/tree` + 本地过滤。树不大，本地过滤零延迟；
@@ -16,16 +19,11 @@ import { getKbTree } from '../api/kb.js'
 import { useChatStore } from '../stores/chatStore'
 import AppIcon from './AppIcon.vue'
 
-const props = defineProps({
-  /** 打开时默认停在哪个 tab：docs | nodes（由点的是哪颗胶囊决定） */
-  initialTab: { type: String, default: 'docs' },
-})
-
 const emit = defineEmits(['close'])
 const store = useChatStore()
 
 const query = ref('')
-const activeTab = ref(props.initialTab === 'nodes' ? 'nodes' : 'docs')
+const activeTab = ref('docs')
 const flatDocs = ref([])          // [{id,name,type,path}]
 const nodes = ref([])             // [{id,name,subject,...}]
 const selectedIndex = ref(0)
@@ -152,6 +150,11 @@ function isPicked(kind, id) {
   return (store.selection?.[kind] || []).some(x => x.id === id)
 }
 
+/** 已选总数（底部「完成（N）」与关闭按钮共用；空选区时不给括号数字） */
+const pickedCount = computed(
+  () => (store.selection?.docs?.length || 0) + (store.selection?.nodes?.length || 0)
+)
+
 onMounted(() => {
   loadTree()
   nextTick(() => inputRef.value?.focus())
@@ -206,6 +209,7 @@ onMounted(() => {
           v-for="(d, i) in docResults" :key="'d' + d.id"
           class="pk-item"
           :class="{ 'is-active': selectedIndex === indexOfDoc(i), 'is-picked': isPicked('docs', d.id) }"
+          :aria-pressed="isPicked('docs', d.id)"
           @mouseenter="selectedIndex = indexOfDoc(i)"
           @click="pick({ kind: 'docs', item: d })"
         >
@@ -216,8 +220,9 @@ onMounted(() => {
             <span class="pk-name">{{ d.name }}</span>
             <span class="pk-sub">{{ d.path }}</span>
           </span>
-          <span v-if="isPicked('docs', d.id)" class="pk-check">
-            <AppIcon name="check" :size="13" />
+          <!-- 常驻方框 = 一眼看出"这里能多选"，勾上才填色（不是只在选中后才冒出来的对勾） -->
+          <span class="pk-box" :class="{ on: isPicked('docs', d.id) }" aria-hidden="true">
+            <AppIcon v-if="isPicked('docs', d.id)" name="check" :size="11" />
           </span>
         </button>
       </template>
@@ -231,6 +236,7 @@ onMounted(() => {
           v-for="(n, i) in nodes" :key="'n' + n.id"
           class="pk-item"
           :class="{ 'is-active': selectedIndex === indexOfNode(i), 'is-picked': isPicked('nodes', n.id) }"
+          :aria-pressed="isPicked('nodes', n.id)"
           @mouseenter="selectedIndex = indexOfNode(i)"
           @click="pick({ kind: 'nodes', item: n })"
         >
@@ -242,16 +248,19 @@ onMounted(() => {
             <span class="pk-sub">{{ n.subject || '未分类' }}{{ n.board ? ` · ${n.board}` : '' }}</span>
           </span>
           <span v-if="n.mastery" class="pk-mastery">{{ n.mastery }}%</span>
-          <span v-if="isPicked('nodes', n.id)" class="pk-check">
-            <AppIcon name="check" :size="13" />
+          <span class="pk-box" :class="{ on: isPicked('nodes', n.id) }" aria-hidden="true">
+            <AppIcon v-if="isPicked('nodes', n.id)" name="check" :size="11" />
           </span>
         </button>
       </template>
     </div>
 
     <div class="pk-foot">
-      <kbd>↑</kbd><kbd>↓</kbd> 选择 <kbd>Enter</kbd> 加入 <kbd>Esc</kbd> 关闭
-      <span class="pk-foot-tip">可多选，再次点击取消</span>
+      <span class="pk-foot-tip">点一行加入，再点取消 · ↑↓ + Enter 同效</span>
+      <span v-if="pickedCount" class="pk-foot-count">已选 {{ pickedCount }} 项</span>
+      <button class="pk-done" @click="emit('close')">
+        {{ pickedCount ? '完成' : '关闭' }}
+      </button>
     </div>
   </div>
 </template>
@@ -425,39 +434,56 @@ onMounted(() => {
   font-variant-numeric: tabular-nums;
 }
 
-.pk-check {
+/* 多选标记：常驻空心方框（一眼看出这行能勾），勾上填成强调色 + 对勾 */
+.pk-box {
   display: flex;
   align-items: center;
-  color: var(--color-accent);
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-inverse);
   flex-shrink: 0;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.pk-box.on {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
-/* ─── 底部提示 ─── */
+/* ─── 底部：左提示 / 中已选数 / 右完成 ─── */
 .pk-foot {
   display: flex;
   align-items: center;
-  gap: 3px;
-  padding: 7px 12px;
+  gap: 8px;
+  padding: 6px 10px 6px 12px;
   border-top: 1px solid var(--color-border-soft);
   background: var(--color-bg-hover);
   font-size: 10.5px;
   color: var(--color-text-muted);
 }
-.pk-foot kbd {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 15px;
-  height: 15px;
-  padding: 0 3px;
-  font-family: inherit;
-  font-size: 9.5px;
-  color: var(--color-text-secondary);
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-border-soft);
-  border-radius: var(--radius-sm);
+.pk-foot-tip { flex: 1; min-width: 0; }
+.pk-foot-count {
+  color: var(--color-accent-hover);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
-.pk-foot-tip { margin-left: auto; }
+.pk-done {
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 12px;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-full);
+  background: var(--color-accent-light);
+  color: var(--color-accent-hover);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.pk-done:hover { background: var(--color-accent); color: var(--color-text-inverse); }
+.pk-done:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 
 @media (prefers-reduced-motion: reduce) {
   .pk-spinner { animation: none; }

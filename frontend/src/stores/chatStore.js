@@ -719,6 +719,17 @@ export const useChatStore = defineStore('chat', () => {
    * 后端 `GET /kb/graph/status` 的 `progress` 是**增量补全**口径 —— 已有学科会并轨，
    * 所以百分比不是从 0 开始，UI 必须同时显示 `filled/total` 绝对数。
    * `building` 翻 false 就停表：再轮询没有意义（完成提示由 `graph_updated` 给）。
+   *
+   * **进度推进时顺手重拉画布**（2026-11-16）：建图是分钟级任务，画布原先只在收尾的
+   * `graph_updated` 时才刷新 —— 整个过程九个字"生成中"，看着像卡死。现在按
+   * `total`（阶段①落了新骨架）/ `filled`（阶段②写完了某个概念）的变化重拉一次，
+   * 新节点由内核的入场过渡从半径 0 长出来，骨架转实心 = 这个知识点写完了。
+   * 只在数字**变了**时拉：3 秒一拍，多数拍子没有变化，不能无脑刷。
+   *
+   * 用 `refreshGraph`（而非 `fetchGraph`）：**首次建图时 `currentSubject` 还是 null**
+   * （学科列表要等阶段①写入骨架后才有这个学科），靠 refreshGraph → fetchSubjects →
+   * ensureSubjectSelected 自动把新学科选中并上屏。这也是最该看到"它在长"的场景。
+   * 用户正在看**别的**学科时不动作 —— 后台建的不该掀掉眼前的图。
    */
   function startGraphStatusPoll() {
     if (graphPollTimer) return
@@ -732,7 +743,13 @@ export const useChatStore = defineStore('chat', () => {
         stopGraphStatusPoll()
         return
       }
-      graphBuildProgress.value = data.progress || null
+      const next = data.progress || null
+      const prev = graphBuildProgress.value
+      graphBuildProgress.value = next
+      const advanced = next && (!prev || next.total !== prev.total || next.filled !== prev.filled)
+      const watchingOther = currentSubject.value && data.subject
+        && data.subject !== currentSubject.value
+      if (advanced && !watchingOther) refreshGraph()
     }, GRAPH_STATUS_POLL_MS)
   }
 

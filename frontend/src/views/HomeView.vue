@@ -592,6 +592,18 @@ const slideTransition = {
             @open-node="handleNodeDblClick"
           />
 
+          <!-- 建图中的画布内进度（2026-11-16）：KbPanel 里那条在右栏，收起/切页就看不见，
+               而建图是分钟级后台任务，用户在看图时得知道"还在长"。空心节点是骨架态，
+               填色 = 正文已写好（口径 filled/total，后端 graph_status）。 -->
+          <div v-if="store.graphBuildProgress" class="build-progress-chip">
+            <span class="bp-dot"></span>
+            <span class="bp-text">正在生成知识图谱</span>
+            <span class="bp-count">
+              {{ store.graphBuildProgress.filled || 0 }}/{{ store.graphBuildProgress.total || 0 }}
+            </span>
+            <span class="bp-bar"><i :style="{ width: (store.graphBuildProgress.percent || 0) + '%' }"></i></span>
+          </div>
+
           <!-- 「在图谱中显示」时的来源高亮提示条（可手动取消） -->
           <div v-if="sourceHighlight" class="source-hl-chip">
             <span class="source-hl-text">
@@ -739,10 +751,12 @@ const slideTransition = {
   left: 0;
 }
 
-/* ── 左侧栏顶部的知识节点搜索（挂在卡片内，随侧栏一起收起） ── */
+/* ── 左侧栏顶部的知识节点搜索（挂在卡片内，随侧栏一起收起） ──
+   这一行就是侧栏首行，左侧让开折叠按钮（按钮 26px 高、top:9px，居中在 22px；
+   搜索框 32px 高 + 6px 上内边距 → 中心也是 22px，两者对得上）。 */
 .graph-nav-search {
   flex-shrink: 0;
-  padding: 10px 10px 8px;
+  padding: 6px 10px 8px var(--sp-head-pad-l, 10px);
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -860,6 +874,35 @@ const slideTransition = {
 .graph-nav .graph-subject-bar {
   flex: 1 1 auto;
 }
+
+/* 建图中的画布内进度：贴画布底部居中（顶部正上方是来源高亮条、右下角是缩放控件，
+   三处互不打架）。水平只让开右栏宽度 —— 左栏是浮动面板且宽度拿不到变量，
+   居中比贴左更稳（帖左会压在左栏上面）。 */
+.build-progress-chip {
+  position: absolute; z-index: 5;
+  left: 50%; bottom: 20px;
+  transform: translateX(calc(-50% - var(--kb-w, 0px) / 2));
+  display: flex; align-items: center; gap: 8px;
+  max-width: min(340px, 60vw);
+  padding: 6px 10px;
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-secondary); border: 1px solid var(--color-border);
+  color: var(--color-text-secondary); font-size: 12px;
+  box-shadow: var(--shadow-popup);
+}
+/* 呼吸点：没有它这条像是"静止的提示"，有它才看得出还在跑 */
+.bp-dot {
+  flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--color-accent); animation: bp-pulse 1.2s ease-in-out infinite;
+}
+@keyframes bp-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+.bp-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bp-count { flex-shrink: 0; font-variant-numeric: tabular-nums; color: var(--color-text-primary); }
+.bp-bar {
+  flex-shrink: 0; width: 64px; height: 3px; border-radius: 2px;
+  background: var(--color-border-light); overflow: hidden;
+}
+.bp-bar i { display: block; height: 100%; background: var(--color-accent); transition: width 0.3s ease; }
 
 /* 来源高亮提示条：浮在画布顶部居中 —— 只让开右栏宽度（左栏宽度是侧栏内部状态，拿不到变量） */
 .source-hl-chip {

@@ -12,7 +12,8 @@
  *
  * 结构：[内容 + 内缘宽度热区] + [顶部一角的折叠按钮]
  *   - 折叠按钮：常驻可见，图标是「面板」方块（竖线在面板那一侧）；收起后同一按钮浮在原位，
- *     点它就是「展开」
+ *     点它就是「展开」。**2026-11-16 起按钮与内容首行（标题）同一行**，不再独占一条 32px 空白带：
+ *     按钮那一角由 `--sp-head-pad-l/r` 让出来，子面板首行按该变量加内边距即可对齐
  *   - 宽度热区：hover 显强调色竖线，按住左右拖（left 侧向右变宽，right 侧反向）
  *
  * 定位交给父级：组件自己吃满父级高度，父级用 class 给 position/top/left/right/bottom（图谱页）
@@ -108,7 +109,14 @@ function startResize(e) {
   flex-shrink: 0;
   height: 100%;
   min-width: 0;
+  /* 首行给折叠按钮让出的水平内边距（2026-11-16：按钮与首行标题同行，不再独占一条 32px 空白带）。
+     子面板首行写 `padding-left: max(自己的内边距, var(--sp-head-pad-l))` 即可 ——
+     在右栏里该变量是 0，max() 自然回落到自己的内边距，一套写法两边都对。 */
+  --sp-head-pad-l: 0px;
+  --sp-head-pad-r: 0px;
 }
+.sp-left { --sp-head-pad-l: 42px; }   /* 按钮 left:8 + 宽 26 + 8px 间距 */
+.sp-right { --sp-head-pad-r: 42px; }
 
 .sp-body {
   position: relative;
@@ -122,14 +130,13 @@ function startResize(e) {
 .sp-left .sp-body { border-right: 1px solid var(--color-border); }
 .sp-right .sp-body { border-left: 1px solid var(--color-border); }
 
-/* basis 用 auto（而非 flex:1 的 0）：内容才撑得出真实高度。
-   顶部那条 32px 是折叠按钮的固定位置（三处侧栏一致），子面板自己的首行紧接其下。 */
+/* 2026-11-16：原先这里留 32px 给折叠按钮独占一行，现在按钮与内容首行同行（首行让出 42px），
+   所以不再预留顶部空白带 —— 子面板首行自己加 var(--sp-head-pad-l/r) 即可。 */
 .sp-content {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
-  padding-top: 32px;
   overflow: hidden;
 }
 
@@ -173,7 +180,9 @@ function startResize(e) {
 /* ── 折叠 / 展开按钮 ── */
 .sp-toggle {
   position: absolute;
-  top: 3px;
+  /* 2026-11-16：与内容首行（标题）垂直居中 —— 各子面板首行都是 12px 上内边距 + 13px 字号。
+     原先 top:3px 是因为它独占一条 32px 空白带，那条带已经删了。 */
+  top: 9px;
   z-index: 5;
   width: 26px;
   height: 26px;

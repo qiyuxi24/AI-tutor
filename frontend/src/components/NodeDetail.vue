@@ -41,6 +41,7 @@ import { formatError } from '../utils/errorCodes.js'
 import { useDetailPrefs } from '../utils/detailPrefs.js'
 import DocWorkspace from './DocWorkspace.vue'
 import VideoSourceCard from './VideoSourceCard.vue'
+import SidePanel from './SidePanel.vue'
 import AppIcon from './AppIcon.vue'
 
 const props = defineProps({
@@ -66,7 +67,10 @@ const sections = computed(() => props.nodeInfo?.sections || [])
 const LEGACY_DOC = { id: '__content__', title: '正文', kind: 'custom', status: 'filled' }
 const docList = computed(() => (hasSections.value ? sections.value : [LEGACY_DOC]))
 const activeSectionId = ref('')
-const sidebarCollapsed = ref(false)     // 侧栏可伸缩：收起后只剩一条 36px 窄边 + 展开按钮
+/* 侧栏外观/折叠/拖宽/宽度记忆一律交给全站统一的 SidePanel（与对话历史、图谱导航、出题历史同一套），
+   本组件只留一个宽度与折叠态，不再自己写 aside + 折叠条。 */
+const sidebarCollapsed = ref(false)
+const sideWidth = ref(230)
 
 /* ── 正文交给共用工作区（DocWorkspace）──
    本组件不再渲染正文/编辑器，只回答三个问题：现在该看哪一节、正文从哪读、存到哪。
@@ -428,12 +432,11 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
             </button>
             <!-- 全屏：读长讲义/写长文的唯一诉求。只改面板尺寸，不换路由也不换组件 -->
             <button
-              class="action-btn"
+              class="action-btn icon-only"
               :title="fullscreen ? '退出全屏（Esc）' : '全屏阅读'"
               @click="fullscreen = !fullscreen"
             >
               <AppIcon :name="fullscreen ? 'minimize' : 'maximize'" :size="16" />
-              {{ fullscreen ? '退出全屏' : '全屏' }}
             </button>
             <button class="action-btn close-btn" @click="emit('close')" title="关闭">
               <AppIcon name="x" :size="18" />
@@ -441,95 +444,110 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
           </div>
         </div>
 
-        <!-- 主体：左侧栏（有 manifest → 小节列表；老节点 → 单项「正文」）+ 右侧共用工作区 -->
+        <!-- 主体：左侧栏（小节 / 试题）复用全站统一的 SidePanel（拖宽 / 折叠 / 宽度记忆），
+             不再自带「折叠按钮独占一条空白带」的旧写法；右侧仍是共用工作区 DocWorkspace。 -->
         <div class="sections-layout">
-          <!-- 侧栏外观走设计系统（styles/components.css 的 .sidebar / .sidebar-body /
-               .sidebar-nav / .sidebar-item），本组件只补宽度、折叠与状态色 -->
-          <aside class="sidebar section-sidebar" :class="{ collapsed: sidebarCollapsed }">
-            <!-- 可伸缩：收起后只剩这一条窄边与按钮 -->
-            <button
-              type="button"
-              class="sidebar-toggle"
-              :title="sidebarCollapsed ? '展开侧栏' : '收起侧栏'"
-              @click="sidebarCollapsed = !sidebarCollapsed"
-            >
-              <AppIcon :name="sidebarCollapsed ? 'chevronRight' : 'chevronLeft'" :size="14" />
-            </button>
-            <div class="sidebar-body section-sidebar-body">
-              <ul class="sidebar-nav section-list">
-                <li v-for="s in docList" :key="s.id" class="section-row">
-                  <button
-                    type="button"
-                    class="sidebar-item section-item"
-                    :class="{ 'is-active': s.id === activeSectionId, 'is-failed': s.status === 'failed',
-                              'is-pending': s.status === 'pending', 'is-source-hit': sectionHasSource(s) }"
-                    :title="s.title"
-                    @click="selectDoc(s)"
-                  >
-                    <AppIcon class="section-kind-icon" :name="kindIcon(s.kind)" :size="16" />
-                    <span class="section-title">{{ s.title }}</span>
-                    <!-- 学习状态：通过 > 已懂 > 不懂 > 已读（未标记不占位） -->
-                    <span
-                      v-if="hasSections && s.id !== LEGACY_DOC.id && learnTag(s).text"
-                      class="section-learn-tag"
-                      :class="learnTag(s).cls"
-                      :title="learnTag(s).title"
-                    >{{ learnTag(s).text }}</span>
-                  </button>
-                  <!-- 按小节出题（老节点的「正文」项没有小节 id，不显示） -->
-                  <button
-                    v-if="hasSections && s.id !== LEGACY_DOC.id"
-                    type="button"
-                    class="section-quiz-btn"
-                    :disabled="!!sectionQuiz"
-                    :title="sectionQuiz === s.id ? '出题中，约 40 秒' : '针对本节出一道题'"
-                    @click.stop="quizFromSection(s)"
-                  >
-                    <AppIcon name="plusCircle" :size="13" />
-                  </button>
-                </li>
-              </ul>
-              <p v-if="sectionQuizError" class="save-error section-gen-error">{{ sectionQuizError }}</p>
+          <SidePanel
+            side="left"
+            label="小节"
+            v-model:width="sideWidth"
+            v-model:collapsed="sidebarCollapsed"
+            :min="150"
+            :max="360"
+            storage-key="nodeDetail"
+            :style="{ height: 'auto', alignSelf: 'stretch' }"
+          >
+            <div class="nd-side">
+              <div class="nd-side-head">
+                <span class="nd-side-title">小节</span>
+                <span class="nd-side-count">{{ docList.length }}</span>
+                <button
+                  type="button"
+                  class="nd-quiz-new"
+                  title="按这个知识点去出题"
+                  @click="openQuizCreator"
+                >
+                  <AppIcon name="plusCircle" :size="14" />
+                  出题
+                </button>
+              </div>
+              <div class="sidebar-body nd-side-body">
+                <ul class="sidebar-nav section-list">
+                  <li v-for="s in docList" :key="s.id" class="section-row">
+                    <button
+                      type="button"
+                      class="sidebar-item section-item"
+                      :class="{ 'is-active': s.id === activeSectionId, 'is-failed': s.status === 'failed',
+                                'is-pending': s.status === 'pending', 'is-source-hit': sectionHasSource(s) }"
+                      :title="s.title"
+                      @click="selectDoc(s)"
+                    >
+                      <AppIcon class="section-kind-icon" :name="kindIcon(s.kind)" :size="16" />
+                      <span class="section-title">{{ s.title }}</span>
+                      <!-- 学习状态：通过 > 已懂 > 不懂 > 已读（未标记不占位） -->
+                      <span
+                        v-if="hasSections && s.id !== LEGACY_DOC.id && learnTag(s).text"
+                        class="section-learn-tag"
+                        :class="learnTag(s).cls"
+                        :title="learnTag(s).title"
+                      >{{ learnTag(s).text }}</span>
+                    </button>
+                    <!-- 按小节出题（老节点的「正文」项没有小节 id，不显示） -->
+                    <button
+                      v-if="hasSections && s.id !== LEGACY_DOC.id"
+                      type="button"
+                      class="section-quiz-btn"
+                      :disabled="!!sectionQuiz"
+                      :title="sectionQuiz === s.id ? '出题中，约 40 秒' : '针对本节出一道题'"
+                      @click.stop="quizFromSection(s)"
+                    >
+                      <AppIcon name="plusCircle" :size="13" />
+                    </button>
+                  </li>
+                </ul>
+                <p v-if="sectionQuizError" class="save-error section-gen-error">{{ sectionQuizError }}</p>
 
-              <!-- 试题分组（同一侧边栏，小节列表下方）：懒加载，点击跳查出题页 -->
-              <div class="quiz-group">
-                <div class="sidebar-group-title quiz-group-head">试题</div>
-                <p v-if="quizzesLoading" class="section-hint quiz-group-hint">加载中…</p>
-                <p v-else-if="quizzesError" class="save-error section-gen-error">{{ quizzesError }}</p>
-                <template v-else>
-                  <ul v-if="quizzes.length" class="quiz-list">
-                    <li v-for="q in quizzes" :key="q.id">
-                      <button
-                        type="button"
-                        class="sidebar-item quiz-item"
-                        :class="{ 'is-source-hit': quizHasSource(q) }"
-                        :title="q.question"
-                        @click="openQuiz(q)"
-                      >
-                        <span class="quiz-item-main">
-                          <span class="quiz-type-badge">{{ quizTypeLabel(q.type) }}</span>
-                          <span class="quiz-text">{{ truncateText(q.question) }}</span>
-                        </span>
-                        <span v-if="q.section_id" class="quiz-node-mark">属 {{ sectionTitle(q.section_id) }}</span>
-                        <span v-if="quizDocLabel(q)" class="quiz-doc-mark">来源：{{ quizDocLabel(q) }}</span>
-                      </button>
-                    </li>
-                  </ul>
-                  <div v-else class="quiz-empty">
-                    <span>还没有试题</span>
-                    <button type="button" class="quiz-goto-btn" @click="openQuizCreator">去出题</button>
+                <!-- 试题分组（同一侧栏，小节列表下方）：懒加载，点击跳查出题页 -->
+                <div class="quiz-group">
+                  <div class="sidebar-group-title quiz-group-head">
+                    试题<span v-if="quizzes.length" class="quiz-count">{{ quizzes.length }}</span>
                   </div>
-                </template>
+                  <p v-if="quizzesLoading" class="section-hint quiz-group-hint">加载中…</p>
+                  <p v-else-if="quizzesError" class="save-error section-gen-error">{{ quizzesError }}</p>
+                  <template v-else>
+                    <ul v-if="quizzes.length" class="quiz-list">
+                      <li v-for="q in quizzes" :key="q.id">
+                        <button
+                          type="button"
+                          class="sidebar-item quiz-item"
+                          :class="{ 'is-source-hit': quizHasSource(q) }"
+                          :title="q.question"
+                          @click="openQuiz(q)"
+                        >
+                          <span class="quiz-item-main">
+                            <span class="quiz-type-badge">{{ quizTypeLabel(q.type) }}</span>
+                            <span class="quiz-text">{{ truncateText(q.question) }}</span>
+                          </span>
+                          <span v-if="q.section_id" class="quiz-node-mark">属 {{ sectionTitle(q.section_id) }}</span>
+                          <span v-if="quizDocLabel(q)" class="quiz-doc-mark">来源：{{ quizDocLabel(q) }}</span>
+                        </button>
+                      </li>
+                    </ul>
+                    <div v-else class="quiz-empty">
+                      <span>还没有试题</span>
+                      <button type="button" class="quiz-goto-btn" @click="openQuizCreator">去出题</button>
+                    </div>
+                  </template>
+                </div>
               </div>
             </div>
-          </aside>
+          </SidePanel>
           <div class="section-content">
             <template v-if="hasSections">
               <!-- 学习状态操作条：用户自己标记“这一节我懂不懂 / 读完了没”。
                    这里是**用户**的入口；AI 讲完一节也会自动记「已懂」（mark_by='ai'，虚线描边区分）。
                    已懂 ≠ 通过 —— 进对话后会先出题验证（后端口径，见 section_learn）。 -->
               <div v-if="activeSectionId && activeSectionId !== LEGACY_DOC.id" class="section-learn-bar">
-                <span class="slb-label">这一节：</span>
                 <button
                   type="button" class="slb-btn"
                   :class="{ on: activeLearn.mark === 'understood' }"
@@ -634,20 +652,32 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
   white-space: nowrap;
 }
 .action-btn:hover { background: var(--color-bg-hover); border-color: var(--color-border-light); }
+/* 纯图标按钮（全屏/关闭）：不给文字，靠 title 说明，顶部栏因此少一截 */
+.icon-only { padding: 6px 8px; }
 .close-btn { border: none; background: transparent; color: var(--color-text-muted); padding: 6px; }
 .close-btn:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
 
-/* 可伸缩侧栏：收起后只剩顶部一个箭头按钮 */
-.sidebar-toggle {
-  display: flex; align-items: center; justify-content: center;
-  width: 100%; height: 28px; flex-shrink: 0;
-  border: none; border-bottom: 1px solid var(--color-border);
-  background: transparent; color: var(--color-text-muted);
-  cursor: pointer; transition: background 0.15s, color 0.15s;
+/* 侧栏内部：标题行 + 可滚列表。折叠/拖宽/宽度记忆全在 SidePanel，这里不再有折叠条。 */
+.nd-side { display: flex; flex-direction: column; flex: 1 1 auto; height: 100%; min-height: 0; }
+/* 首行与 SidePanel 的折叠按钮同一行：左内边距由 --sp-head-pad-l 让出（右栏时回落自己的 12px） */
+.nd-side-head {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  padding: 11px max(8px, var(--sp-head-pad-r, 0px)) 9px max(12px, var(--sp-head-pad-l, 0px));
+  border-bottom: 1px solid var(--color-border);
 }
-.sidebar-toggle:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
-.section-sidebar.collapsed { width: 36px; min-width: 36px; }
-.section-sidebar.collapsed .section-sidebar-body { display: none; }
+.nd-side-title { font-size: 13px; font-weight: 600; color: var(--color-text-primary); }
+.nd-side-count {
+  min-width: 18px; padding: 0 5px; border-radius: var(--radius-md);
+  background: var(--color-bg-hover); color: var(--color-text-muted);
+  font-size: 11px; line-height: 16px; text-align: center;
+}
+.nd-quiz-new {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px; border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: transparent; color: var(--color-text-secondary);
+  font-size: 12px; cursor: pointer; transition: all 0.15s;
+}
+.nd-quiz-new:hover { border-color: var(--color-accent); color: var(--color-accent); }
 
 /* 正文区：内部是 DocWorkspace（阅读 + 编辑），这里只给它一个能撑满的高度容器。
    排版样式（.markdown-body）原先由本组件维护，已随编辑器一起搬进 DocWorkspace —— 
@@ -658,15 +688,17 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
 }
 .save-error { color: var(--color-red); font-size: 13px; margin: 0; }
 
-/* 小节模式：左列表 / 右正文。
-   侧栏的壳 / 滚动区 / 列表 / 列表项外观全部来自设计系统（styles/components.css 的
-   .sidebar / .sidebar-body / .sidebar-nav / .sidebar-item），这里只留本弹窗特有的
-   宽度、折叠与状态色 —— 别再抄一份背景色/内边距/圆角。 */
+/* 小节模式：左列表 / 右正文。侧栏与宽度由 SidePanel 提供，
+   这里只留弹窗特有的状态色与列表行内部排版。 */
 .sections-layout { flex: 1; min-height: 0; display: flex; }
-.section-sidebar { width: 190px; min-width: 190px; flex-shrink: 0; }
+/* SidePanel 的根是 width:auto + height:100%，在这条 flex 行里两处都会落空：
+   ① 高度只长到内容高度（不跟右侧对齐）→ 根改 height:auto + align-self:stretch；
+   ② 宽度被右侧 flex:1 的正文挤成一条边线 → 内层 .sp-body 禁止收缩，
+      根按 .sp-body 的宽度（SidePanel 自己算的，含折叠/拖宽/过渡）定宽。 */
+.sections-layout :deep(.sp-body) { flex-shrink: 0; }
 .section-gen-error { margin: 8px 0 0; font-size: 12px; }
 /* .sidebar-body 已给弹性/滚动/内边距，这里补纵向排列（试题分组要接在小节列表下方） */
-.section-sidebar-body { display: flex; flex-direction: column; }
+.nd-side-body { display: flex; flex-direction: column; }
 /* .sidebar-nav 已给纵向列表与间距；ul 自身样式要清掉（含内边距，避免与外层叠成双份） */
 .section-list { list-style: none; margin: 0; padding: 0; }
 /* 小节行 = 小节按钮 + 「针对本节出题」按钮（行内 flex，按钮不挤走标题） */
@@ -688,8 +720,10 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
 .section-item.is-source-hit { background: var(--color-green-light); color: var(--color-green); font-weight: 600; }
 .section-kind-icon { flex-shrink: 0; display: inline-flex; }
 .section-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 试题分组（同侧边栏，小节列表下方） */
-.quiz-group { border-top: 1px solid var(--color-border); padding: 8px; }
+/* 试题分组（同一侧栏，小节列表下方）：只用一条分隔线与小节列表分开，不再叠一层内边距 */
+.quiz-group { border-top: 1px solid var(--color-border); margin-top: 8px; }
+.quiz-group-head { padding: 8px var(--space-sm) var(--space-xs); }
+.quiz-count { margin-left: 6px; font-weight: 400; color: var(--color-text-muted); }
 .quiz-group-hint { padding: 2px; margin: 0; font-size: 12px; }
 .quiz-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 /* 紧凑变体：外观（内边距 / 圆角 / hover）沿用 .sidebar-item，只把密度压小 ——
@@ -726,26 +760,23 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .section-hint { padding: 16px 24px; margin: 0; font-size: 13px; color: var(--color-text-muted); }
-@media (max-width: 560px) { .section-sidebar { width: 140px; min-width: 140px; } }
 
 /* 弹窗动画 */
 .modal-enter-active, .modal-leave-active { transition: opacity 0.2s ease; }
 .modal-enter-from, .modal-leave-to { opacity: 0; }
 .modal-enter-from .modal-panel, .modal-leave-to .modal-panel { transform: scale(0.95); }
-/* ── 小节学习状态（用户标记：已懂 / 不懂 / 已读完）── */
+/* ── 小节学习状态（用户标记：已懂 / 不懂 / 已读完）──
+   从「盒子卡片」改成一条贴边细行：与上面的溯源行、下面的正文保持同一左右内边距，
+   少一层描边和底色，读长文时视线不被框住。 */
 .section-learn-bar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 6px 9px;
-  margin-bottom: 8px;
-  border: 1px solid var(--color-border-default, #ddd);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-tertiary, rgba(127, 127, 127, 0.06));
+  padding: 6px 24px;
+  border-bottom: 1px solid var(--color-border);
   font-size: 12px;
 }
-.slb-label { color: var(--color-text-tertiary); }
 .slb-btn {
   font-family: inherit;
   font-size: 12px;

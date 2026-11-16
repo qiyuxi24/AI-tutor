@@ -185,7 +185,9 @@ async function handleDelete() {
 .cs-header {
   display: flex;
   align-items: center;
-  padding: 12px 14px 8px;
+  /* 左侧让开折叠按钮：它现在与这一行同名同行（SidePanel 的 --sp-head-pad-l 在左栏是 42px，
+     右栏为 0 时 max() 回落到 14px，所以一套写法两边都对） */
+  padding: 12px max(14px, var(--sp-head-pad-r, 0px)) 8px max(14px, var(--sp-head-pad-l, 0px));
   flex-shrink: 0;
 }
 

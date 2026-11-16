@@ -910,6 +910,54 @@ describe('建图进度轮询（TODO §11.4-B 剩余项：进度条）', () => {
 
     expect(vi.getTimerCount()).toBe(0)
   })
+
+  // ── 画布跟着进度长（2026-11-16）：只轮询数字不动画布的话，整个过程画布是静止的，
+  //    用户看到的只是"生成中"三个字，和卡死没区别。
+  // 观测信号取 `/knowledge/stats`：`refreshGraph()` 必先拉学科列表（新学科要它才出现），
+  // 比"图请求"更能代表"画布真的在跟着长"——首次建图时 currentSubject 还是 null，
+  // 图请求本来就不会发。
+  function statsGets() {
+    return apiClient.get.mock.calls.filter(([u]) => u === '/api/v1/knowledge/stats').length
+  }
+
+  it('进度推进（total / filled 变化）→ 顺手重拉学科与画布', async () => {
+    vi.useFakeTimers()
+    mockStatus({ building: true, subject: '数据结构', progress: { total: 10, filled: 4, percent: 40 } })
+    const store = await bootStore()
+    const before = statsGets()
+
+    mockStatus({ building: true, subject: '数据结构', progress: { total: 10, filled: 5, percent: 50 } })
+    await vi.advanceTimersByTimeAsync(3000)
+
+    expect(statsGets()).toBeGreaterThan(before)
+    store.dispose()
+  })
+
+  it('数字没变 → 不重拉（3 秒一拍，多数拍子没有变化，不能无脑刷）', async () => {
+    vi.useFakeTimers()
+    mockStatus({ building: true, subject: '数据结构', progress: { total: 10, filled: 4, percent: 40 } })
+    const store = await bootStore()
+    const before = statsGets()
+
+    await vi.advanceTimersByTimeAsync(9000)   // 三拍，payload 一模一样
+
+    expect(statsGets()).toBe(before)
+    store.dispose()
+  })
+
+  it('建的是别的学科 → 不动当前画布（别掀掉用户正在看的图）', async () => {
+    vi.useFakeTimers()
+    mockStatus({ building: true, subject: '数据结构', progress: { total: 10, filled: 4, percent: 40 } })
+    const store = await bootStore()
+    store.currentSubject = '线性代数'          // 用户看的是另一个学科
+    const before = statsGets()
+
+    mockStatus({ building: true, subject: '数据结构', progress: { total: 10, filled: 6, percent: 60 } })
+    await vi.advanceTimersByTimeAsync(3000)
+
+    expect(statsGets()).toBe(before)
+    store.dispose()
+  })
 })
 
 describe('回前台补偿（TODO §2 P1：切回来就补拉一次）', () => {
