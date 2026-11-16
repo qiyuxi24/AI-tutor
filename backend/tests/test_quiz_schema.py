@@ -141,6 +141,45 @@ def test_generate_request_subject_too_long():
         QuizGenerateRequest(subject="x" * 101)
 
 
+def test_missing_cover_keys_normalizes():
+    """「补齐缺失」的考点键：去空、去重、保序。
+
+    前端可能把 `#body`（未小节化节点的空 section_id）也带上来，空串要丢掉 ——
+    否则它会被当成一个"要补的考点"去匹配，永远匹配不上。
+    """
+    r = QuizGenerateRequest(
+        subject="二叉树", question_count=2,
+        question_plan=[{"type": "single", "count": 2}],
+        missing_cover_keys=[" n1/s02 ", "", "n1/s01", "n1/s02", "   "],
+    )
+    assert r.missing_cover_keys == ["n1/s02", "n1/s01"]
+
+
+def test_missing_cover_keys_defaults_empty():
+    r = QuizGenerateRequest(subject="二叉树")
+    assert r.missing_cover_keys == []
+
+
+def test_missing_cover_keys_rejected_on_legacy_path():
+    """老路径（无 question_plan）带它 → 报错而不是静默忽略。
+
+    静默忽略正是这个字段最初踩的坑：前端传了、后端吞了，用户点「补齐缺失」
+    却得到一整批新题。
+    """
+    with pytest.raises(ValidationError) as ei:
+        QuizGenerateRequest(subject="二叉树", missing_cover_keys=["n1/s02"])
+    assert "missing_cover_keys 只在 question_plan 路径下有效" in str(ei.value)
+
+
+def test_generate_request_plan_path_accepts_missing_keys():
+    r = QuizGenerateRequest(
+        subject="二叉树", question_count=1,
+        question_plan=[{"type": "single", "count": 1}],
+        missing_cover_keys=["n1/s02"],
+    )
+    assert r.effective_plan[0].count == 1
+
+
 # ─── QuizGradeRequest ────────────────────────────────────────────
 
 def test_grade_request_basic():

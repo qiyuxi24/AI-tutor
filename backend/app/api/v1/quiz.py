@@ -16,6 +16,7 @@
 """
 import logging
 import re
+from collections import Counter
 from datetime import datetime
 from urllib.parse import quote
 
@@ -26,14 +27,19 @@ from typing import List, Literal, Optional
 from app.core.auth import get_current_user
 from app.core.error_codes import ErrorCode, log_error
 from app.core.knowledge_graph import KnowledgeGraph
+from app.core.quiz import planning
+from app.core.quiz.blueprint import allocate
+from app.core.quiz.budget import compute_budget
 from app.core.quiz.chat_grade import (
     apply_mastery_after_answer, apply_section_after_answer, resolve_node_id,
 )
-from app.core.quiz.schema import QuizGenerateRequest, QuizGradeRequest
+from app.core.quiz.schema import (
+    PlanPreviewRequest, QuizGenerateRequest, QuizGradeRequest,
+)
 from app.core.quiz.generator import generate_quiz
 from app.core.quiz.grader import grade_question
 from app.core.quiz.quiz_store import quiz_manager
-from app.core.quiz.exporter import export_quiz as build_export
+from app.core.quiz.exporter import TYPE_LABELS, export_quiz as build_export
 
 logger = logging.getLogger("ai-tutor")
 router = APIRouter()
@@ -105,6 +111,126 @@ def _touch_graph(user_id: int, *, node_id: str, section_id: str,
     return out
 
 
+def _planned_by_cover_key(bp, cands, count: int) -> dict[str, int]:
+    """每个考点计划出几道（预览用）。
+
+    有蓝图（用户给了 `question_plan`）→ 直接数槽位，蓝图就是最终规格；
+    没有蓝图（`count_mode=auto/manual`，题型配比还没定）→ 按 `allocate` 的轮转口径
+    **估算**：`cands[i % len(cands)]`，即均摊、余数给前面的考点。
+
+    两者一致不是巧合：`allocate` 里的 cursor 每产出一个槽位就 +1、与题型无关，
+    所以「count 道题摊到候选考点上的分布」只取决于 count 与候选顺序。
+    这也是为什么这里能用算术代替真的分配 —— 不必为一个估算去造一份假 plan。
+    """
+    if bp is not None and bp.slots:
+        return dict(Counter(s.cover_key for s in bp.slots))
+    n = len(cands or [])
+    if n <= 0:
+        return {}
+    base, rest = divmod(max(0, int(count)), n)
+    return {c.cover_key: base + (1 if i < rest else 0)
+            for i, c in enumerate(cands)}
+
+
+@router.post("/quiz/plan/preview")
+async def preview_plan(req: PlanPreviewRequest,
+                       user_id: int = Depends(get_current_user)):
+    """题量预览：**纯计算，不落库、不调 LLM、不发通知**。
+
+    前端「自动」模式一打开出题页就打一次，用来回答"为什么是 N 道"：
+    `count` + `reason` 直接展示给用户，`sections` 逐节给出正文长度与计划题量。
+    用户不信任一个不解释的数字 —— 这正是旧的 `[3,5,8,10]` 下拉的问题。
+
+    为什么必须是纯计算：它会随"选知识点 / 改模式 / 改题量"被反复调用，
+    一旦掺进 LLM 或写库就变成"点一下扣一次钱"；也因为它什么都没写，
+    除了鉴权失败以外的任何情况都不该 500 —— 读不到图谱就按"无锚点"回答。
+
+    返回:
+        {
+          "count": int,             # 计划题量（auto→内容预算 / manual→question_count / plan→合计）
+          "reason": str,            # 一句可展示的依据
+          "count_mode": "auto" | "manual" | "plan",
+          "capped": bool,           # auto 是否撞了 QUIZ_MAX_QUESTIONS
+          "section_count": int,     # 参与计算的考点数（无锚点 = 0）
+          "content_chars": int,
+          "sections": [{section_id, title, chars, planned}],
+          "slot_preview": [Slot.dict(), ...]   # 无规格时为空
+        }
+    """
+    plan = list(req.question_plan or [])
+    # 一次读出候选考点 + 预算 + 蓝图。`graph_node_id` 是否属于当前用户由
+    # `planning.load_candidates` 内部经 `kg.get_node()`（带 user_id 护栏）判定。
+    bp, budget, cands = planning.plan_for_node(
+        user_id=user_id, graph_node_id=req.graph_node_id, plan=plan or None,
+    )
+    anchored = cands is not None
+    if budget is None:
+        # 无锚点（没给节点 / 节点不存在 / 非本用户）三种情况**响应必须完全一致** ——
+        # 否则这个端点就成了"别人的图谱里有没有这个节点"的探测器。
+        budget = compute_budget(sections=None, content_chars=None)
+
+    if req.count_mode == "manual":
+        count = int(req.question_count or budget.count)
+    elif req.count_mode == "plan":
+        count = sum(r.count for r in plan) or budget.count
+    else:
+        count = budget.count
+
+    sections: list[dict] = []
+    if anchored:
+        # 只有 count_mode=plan 才用蓝图里的槽位：另两种模式的题量由 auto/manual 决定，
+        # 蓝图里那份 `question_plan` 与 count 未必对得上。用算术估算保证
+        # `sum(planned) == count` 这个恒等式在三种模式下都成立（前端可直接对账）。
+        planned = _planned_by_cover_key(bp if req.count_mode == "plan" else None,
+                                        cands, count)
+        sections = [{"section_id": c.section_id, "title": c.label,
+                     "chars": c.chars, "planned": planned.get(c.cover_key, 0)}
+                    for c in cands]
+
+    return {
+        "count": count,
+        "reason": budget.reason,
+        "count_mode": req.count_mode,
+        "capped": budget.capped,
+        "section_count": len(sections),
+        "content_chars": budget.content_chars,
+        "sections": sections,
+        "slot_preview": (planning.blueprint_to_dict(bp) or {}).get("slots", []),
+    }
+
+
+def _plan_verdict(bp, questions: list[dict], plan: list) -> dict:
+    """把「蓝图规格 vs 实际产出」对齐，给出可断言的判定。
+
+    · `satisfied`：每个题型的数量都够 **且** 规格里的每个考点都出了题
+    · `shortfall`：按题型逐行累加 `max(0, 要求-实际)` —— "还差几道"
+    · `missing_cover_keys`：规格里要求、但一道题都没出的考点（可直接展示给学生）
+    · `plan_shortfall`：蓝图自身的承载缺口（候选考点撑不住这个题量，来自 `allocate`）
+
+    为什么题型与考点要**同时**判定：只比题型会漏掉"5 道全押在同一个考点"（旧病），
+    只比考点会漏掉"简答题一道没出"。两个都中才算满足规格。
+    """
+    want: dict[str, int] = {}
+    for row in plan:
+        want[row.type] = want.get(row.type, 0) + row.count
+    got = Counter(str(q.get("type") or "") for q in questions)
+
+    rows = [(t, int(got.get(t, 0)), n) for t, n in want.items()]
+    shortfall = sum(max(0, n - g) for _, g, n in rows)
+
+    covered = {str(q.get("cover_key") or "") for q in questions}
+    missing = [k for k in bp.cover_keys() if k not in covered]
+
+    return {
+        "satisfied": shortfall == 0 and not missing,
+        "shortfall": shortfall,
+        "missing_cover_keys": missing,
+        "plan_shortfall": int(bp.shortfall or 0),
+        # 稳定可断言的一条："单选题 3/5、判断题 2/2"（题型顺序跟随 plan）
+        "detail": "、".join(f"{TYPE_LABELS.get(t, t)} {g}/{n}" for t, g, n in rows),
+    }
+
+
 @router.post("/quiz/generate")
 async def create_quiz(req: QuizGenerateRequest,
                       user_id: int = Depends(get_current_user)):
@@ -118,7 +244,13 @@ async def create_quiz(req: QuizGenerateRequest,
     3. 质量过滤（长度/自包含/去重）+ Pydantic 结构校验；数量不足时自动补题
     4. 题目入库（quiz.questions 表），返回题目列表
 
-    返回:
+    **两条生成路径**（`question_plan` 是否为空决定）：
+      · 有 `question_plan` → 先按图谱小节摊成蓝图槽位，再按槽位出题；
+        出完了逐行核对，`strict=True` 且凑不齐时一道都不落库、抛 422。
+      · 无 `question_plan`（老路径）→ 与改动前**逐字节等价**：
+        `question_types` 原样传给生成器自由发挥，响应里也不加新字段。
+
+    返回（老路径）:
         {
           "status": "ok",
           "question_ids": [int, ...],
@@ -128,16 +260,43 @@ async def create_quiz(req: QuizGenerateRequest,
           "requested": int,          # 请求的题数
           "generated": int           # 实际生成并入库的题数
         }
+    返回（新路径，另加上面这些沿用字段）:
+        {
+          "satisfied": bool,             # 规格是否被完全满足
+          "shortfall": int,              # 还差几道（按题型逐行累加）
+          "missing_cover_keys": [...],   # 哪个考点一道题都没出
+          "plan_shortfall": int          # 蓝图层面的承载缺口
+        }
     """
-    try:
-        result = await generate_quiz(
-            user_id=user_id,
-            subject=req.subject,
-            node_id=req.node_id,
-            question_count=req.question_count,
-            difficulty=req.difficulty,
-            question_types=req.question_types,
+    plan = req.effective_plan
+    bp = None
+    if plan:
+        # 蓝图：把 question_plan 摊到该节点的小节上（考什么 → 一题一考点）
+        bp, _budget, cands = planning.plan_for_node(
+            user_id=user_id, graph_node_id=req.graph_node_id,
+            plan=plan, difficulty=req.difficulty,
+            # 「补齐缺失」：只摊到上次没铺到的考点上，不重出整卷
+            only_cover_keys=req.missing_cover_keys or None,
         )
+        if bp is None:
+            # 无锚点（没传 graph_node_id / 该节点不属于本用户）：题型与分值规格照样要遵守，
+            # 只是所有槽位落在同一个匿名考点上（cover_key = "no-anchor/#body"）。
+            # 注意此处**不**泄露节点是否存在 —— 与"根本没传"走同一条路。
+            bp = allocate(node_id=req.graph_node_id or "no-anchor", plan=plan,
+                          candidates=[], difficulty=req.difficulty)
+
+    kwargs = dict(
+        user_id=user_id,
+        subject=req.subject,
+        node_id=req.node_id,
+        question_count=req.question_count,
+        difficulty=req.difficulty,
+        question_types=req.question_types,
+    )
+    if bp is not None:
+        kwargs["blueprint"] = bp
+    try:
+        result = await generate_quiz(**kwargs)
     except ValueError as e:
         log_error(ErrorCode.QUIZ_PARSE_ERROR, detail=str(e), context={"user_id": user_id})
         raise HTTPException(status_code=422, detail=ErrorCode.user_message(ErrorCode.QUIZ_PARSE_ERROR))
@@ -145,11 +304,28 @@ async def create_quiz(req: QuizGenerateRequest,
         log_error(ErrorCode.QUIZ_GENERATE_FAILED, detail=str(e), context={"user_id": user_id}, exception=e)
         raise HTTPException(status_code=500, detail=ErrorCode.user_message(ErrorCode.QUIZ_GENERATE_FAILED))
 
+    # ── 蓝图路径：先核规，再决定落不落库 ──────────────────────────
+    verdict = _plan_verdict(bp, result["questions"], plan) if bp is not None else None
+    if verdict is not None and req.strict and not verdict["satisfied"]:
+        # strict：一道都不落库。**必须在 save_questions 之前**抛 ——
+        # 先落库再删会留下"秒出秒删"的空题集，而且删不干净（attempts 可能已挂上）。
+        log_error(ErrorCode.QUIZ_PLAN_SHORTFALL,
+                  detail=f"{verdict['detail']}；缺考点 {len(verdict['missing_cover_keys'])} 个",
+                  context={"user_id": user_id, "node": req.graph_node_id})
+        raise HTTPException(
+            status_code=422,
+            detail=f"{ErrorCode.user_message(ErrorCode.QUIZ_PLAN_SHORTFALL)}："
+                   f"{verdict['detail']}")
+
     # 题目入库
     store = quiz_manager._get_store(user_id)
     # 从节点详情进来时把图谱节点 id 写进 knowledge_point —— 判分要靠它回写掌握度。
     # 与对话内出题同一做法（chat_quiz.py：knowledge_point 是字符串字段，正好装图谱节点 id；
     # questions.node_id 是 INTEGER，装不下）。
+    #
+    # ⚠️ 这行不是可有可无的：`inspect_quiz_quality.py --user 5` 实测 20 个不同的
+    # knowledge_point 里 10 个是 LLM 现编的中文短语（"二叉树中序遍历规则"），
+    # `chat_grade.resolve_node_id` 两路都命中不了 → 判分不回写、答对也不涨掌握度。
     source_docs: list[dict] = []
     if req.graph_node_id:
         for q in result["questions"]:
@@ -166,6 +342,12 @@ async def create_quiz(req: QuizGenerateRequest,
                 kg.close()
         except Exception as e:                  # noqa: BLE001 —— 血统是附加信息
             logger.warning(f"出题取来源文件失败（忽略）: {e}")
+    elif bp is not None:
+        # 有规格但没图谱锚点：**保留**模型填的知识点名（清空等于把已有的弱关联也砍掉），
+        # 但要留一条日志 —— 这些题的判分回写不了掌握度，排查时要能立刻看到。
+        logger.warning(
+            f"用户 {user_id} 按规格出题但未传 graph_node_id："
+            f"该批 {len(result['questions'])} 道题无图谱锚点，判分不会回写掌握度")
     question_ids = store.save_questions(
         result["questions"],
         subject=req.subject,
@@ -173,7 +355,7 @@ async def create_quiz(req: QuizGenerateRequest,
         difficulty=req.difficulty,
         source_docs=source_docs,
     )
-    return {
+    resp = {
         "status": "ok",
         "question_ids": question_ids,
         "questions": result["questions"],
@@ -183,6 +365,15 @@ async def create_quiz(req: QuizGenerateRequest,
         "requested": result.get("requested", len(result["questions"])),
         "generated": len(result["questions"]),
     }
+    if verdict is not None:
+        # 新路径才加这四个字段 —— 老路径的响应结构与改动前逐字节一致
+        resp.update({
+            "satisfied": verdict["satisfied"],
+            "shortfall": verdict["shortfall"],
+            "missing_cover_keys": verdict["missing_cover_keys"],
+            "plan_shortfall": verdict["plan_shortfall"],
+        })
+    return resp
 
 
 @router.get("/quiz/questions")

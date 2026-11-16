@@ -80,7 +80,8 @@ function formatTime(s) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 14px 8px;
+  /* 左侧让开折叠按钮（它现在与这一行同名同行）；右栏下该变量为 0，max() 回落 14px */
+  padding: 12px max(14px, var(--sp-head-pad-r, 0px)) 8px max(14px, var(--sp-head-pad-l, 0px));
   flex-shrink: 0;
 }
 

@@ -59,6 +59,10 @@ class QuizStore:
                     source_docs    TEXT NOT NULL DEFAULT '', -- 题目来源**文件**：[{doc_id, doc_name}] 的 JSON
                     section_id     TEXT NOT NULL DEFAULT '', -- 题目归属的小节（空 = 节点级出题）
                     batch_id       TEXT NOT NULL DEFAULT '', -- 出题批次：一次出题 = 一个题集（历史记录分组用）
+                    cover_key      TEXT NOT NULL DEFAULT '', -- 考点键（蓝图槽位的 `{node_id}/{section_id}`）
+                    bloom_level    TEXT NOT NULL DEFAULT '', -- 认知层次（remember…create，空 = 未规划）
+                    option_count   INTEGER NOT NULL DEFAULT 0, -- 实际选项数（0 = 该题型不适用）
+                    plan_json      TEXT NOT NULL DEFAULT '', -- 该题槽位原文（JSON，便于复盘"当时为什么出这道"）
                     created_at     TEXT DEFAULT (datetime('now'))
                 )
             """)
@@ -88,6 +92,10 @@ class QuizStore:
         `batch_id` 是 2026-10-10 加的（出题历史记录）—— 一次出题 = 一个题集，
         没有这一列就无法把同一批题聚成"之前出的那套题"。老行留空，聚合查询按
         `legacy-<id>` 各自成组（不漏出历史）。
+        `cover_key` / `bloom_level` / `option_count` / `plan_json` 是 2026-11-16 加的
+        （蓝图出题）—— 出题从"下拉框选题型"改成"内容决定考什么"，一题对应一个槽位；
+        没有这四列就无法回答"这道题是为哪个考点、按什么认知层次出的"。老行留默认值
+        （空串 / 0），表示"未按蓝图出题"。
         """
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(questions)")}
         if "source_docs" not in cols:
@@ -102,6 +110,22 @@ class QuizStore:
             with self._conn:
                 self._conn.execute(
                     "ALTER TABLE questions ADD COLUMN batch_id TEXT NOT NULL DEFAULT ''")
+        if "cover_key" not in cols:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE questions ADD COLUMN cover_key TEXT NOT NULL DEFAULT ''")
+        if "bloom_level" not in cols:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE questions ADD COLUMN bloom_level TEXT NOT NULL DEFAULT ''")
+        if "option_count" not in cols:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE questions ADD COLUMN option_count INTEGER NOT NULL DEFAULT 0")
+        if "plan_json" not in cols:
+            with self._conn:
+                self._conn.execute(
+                    "ALTER TABLE questions ADD COLUMN plan_json TEXT NOT NULL DEFAULT ''")
         # 索引必须在补列之后建（老表此刻才有 batch_id 列）
         with self._conn:
             self._conn.execute(
@@ -130,20 +154,30 @@ class QuizStore:
             batch_id: 出题批次（历史记录分组用）。**留空则自动生成** —— 一次
                     `save_questions` 调用 = 一个题集，调用方无需关心；只有"多次
                     调用要归到同一套题"时才显式传同一个 id。
+
+        蓝图出题的四列（`cover_key` / `bloom_level` / `option_count` / `plan_json`）
+        **从题目 dict 里读，不在这里开新参数**：它们本来就是"这道题的属性"，
+        与题干、选项同级（见 `generator._generate_quiz_by_blueprint` 的组装），
+        再开一组同名参数只会让两处不一致。缺省/非 dict 一律落空值 —— 老调用方
+        （题库页、对话内出题、试卷拆题）传的 `Question` 没有这些键，行为不变。
         """
         docs_json = json.dumps(source_docs or [], ensure_ascii=False)
         batch_id = batch_id or uuid.uuid4().hex[:12]
         ids = []
         with self._conn:
             for q in questions:
+                extra = q if isinstance(q, dict) else {}
                 if isinstance(q, dict):
+                    # `Question` 只认自己的字段，多余键（蓝图那四个）在构造时被丢掉，
+                    # 所以必须先写进临时变量再构造。
                     q = Question(**q)
                 cur = self._conn.execute("""
                     INSERT INTO questions
                         (node_id, subject, type, question, options_json, answer_json,
                          points, difficulty, analysis, comment_prompt, knowledge_point,
-                         source, source_docs, section_id, batch_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         source, source_docs, section_id, batch_id,
+                         cover_key, bloom_level, option_count, plan_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     node_id,
                     subject,
@@ -158,8 +192,14 @@ class QuizStore:
                     q.knowledge_point,
                     source,
                     docs_json,
-                    section_id,
+                    # 逐题小节优先于调用方参数：蓝图路径一次出题会**同时**覆盖多个小节，
+                    # 用入参统一填会让所有题都挂到同一节（判分回写就全落到一节上）。
+                    str(extra.get("section_id") or section_id),
                     batch_id,
+                    str(extra.get("cover_key") or ""),
+                    str(extra.get("bloom_level") or ""),
+                    int(extra.get("option_count") or 0),
+                    str(extra.get("plan_json") or ""),
                 ))
                 ids.append(cur.lastrowid)
         return ids
@@ -377,6 +417,12 @@ class QuizStore:
             "source_docs": json.loads(row.get("source_docs") or "[]"),
             "section_id": row.get("section_id") or "",
             "batch_id": row.get("batch_id") or "",
+            # 蓝图出题的四列：老行没有值（'' / 0），读侧一律给默认值，
+            # 前端据此判断"这道题是否按蓝图出的"，不必再猜。
+            "cover_key": row.get("cover_key") or "",
+            "bloom_level": row.get("bloom_level") or "",
+            "option_count": int(row.get("option_count") or 0),
+            "plan_json": row.get("plan_json") or "",
             "created_at": row["created_at"],
         }
 

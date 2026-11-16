@@ -9,7 +9,7 @@
  *   - 判分：客观题规则判分、简答题 LLM 判分，展示解析
  */
 
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import AppIcon from '../components/AppIcon.vue'
 import SidePanel from '../components/SidePanel.vue'
@@ -17,6 +17,7 @@ import QuizHistorySidebar from '../components/QuizHistorySidebar.vue'
 import KbTextPreviewDialog from '../components/KbTextPreviewDialog.vue'
 import {
   generateQuiz,
+  previewQuizPlan,
   gradeQuizQuestion,
   getQuizStats,
   getQuizQuestion,
@@ -26,6 +27,21 @@ import {
   saveQuizBlob,
   readBlobError,
 } from '../api/quiz.js'
+import {
+  MIN_QUESTIONS,
+  MAX_QUESTIONS,
+  FALLBACK_COUNT,
+  MAX_ROW_COUNT,
+  OPTION_TYPES,
+  defaultPlanRows,
+  autoCountFromPreview,
+  buildQuizPayload,
+  sumPlanRows,
+  isPlanSubmittable,
+  summarizeSections,
+  formatMissingCovers,
+  canFillMissing,
+} from '../utils/quizPlan.js'
 
 /**
  * Props（均为可选，默认值即原行为）：
@@ -45,13 +61,43 @@ const props = defineProps({
 
 const emit = defineEmits(['mastery-changed'])
 
-// ─── 出题配置 ───
+// ─── 出题配置（三模式：自动按内容定题量 / 手动定题量 / 按题型配比）───
 const subject = ref('')               // 主题/知识点
 const difficulty = ref('medium')       // easy / medium / hard
-const questionCount = ref(5)
-const questionTypes = ref(['single', 'multiple', 'judge', 'fill', 'short_answer'])
 const generating = ref(false)
 const genError = ref('')
+
+/**
+ * 题量由"内容"决定，不是四个碰巧一致的数字：
+ *   auto   — 挂载/主题变化时问后端「这段内容大概值几道题」（不调 LLM，纯统计）
+ *   manual — 用户自己填 3~15
+ *   plan   — 五行固定配比（题型 + 数量 + 选项数），合计必须 1~15
+ */
+const countMode = ref('auto')          // auto / manual / plan
+const manualCount = ref(FALLBACK_COUNT)
+const planRows = ref(defaultPlanRows())
+const strictMode = ref(false)          // plan 模式下「凑不齐就整卷失败」
+
+const modeOptions = [
+  { label: '自动', value: 'auto' },
+  { label: '手动', value: 'manual' },
+  { label: '按题型配比', value: 'plan' },
+]
+
+// ─── 自动题量预览（previewQuizPlan）───
+const preview = ref({
+  count: FALLBACK_COUNT,   // 后端估算的题量；降级时就是 5
+  reason: '',              // 后端给的一句话依据
+  sections: [],            // [{title, planned}]
+  ok: false,               // false = 没能按内容估算（未登录/后端未实现/请求失败）
+  loading: false,
+})
+let previewTimer = null
+let previewSeq = 0          // 只认最后一次请求的响应（防抖 + 竞态）
+
+const autoCount = computed(() => preview.value.count)
+/** 自动模式的逐节计划摘要（最多 6 节，其余折成「等 N 节」） */
+const sectionSummary = computed(() => summarizeSections(preview.value.sections))
 
 const difficultyOptions = [
   { label: '简单', value: 'easy' },
@@ -59,13 +105,77 @@ const difficultyOptions = [
   { label: '困难', value: 'hard' },
 ]
 
-const typeOptions = [
-  { label: '单选题', value: 'single' },
-  { label: '多选题', value: 'multiple' },
-  { label: '判断题', value: 'judge' },
-  { label: '填空题', value: 'fill' },
-  { label: '简答题', value: 'short_answer' },
-]
+/** 配比表单的五种题型（固定五行，不做动态增删） */
+const planTypeLabels = {
+  single: '单选题',
+  multiple: '多选题',
+  judge: '判断题',
+  fill: '填空题',
+  short_answer: '简答题',
+}
+
+const planTotal = computed(() => sumPlanRows(planRows.value))
+const planSubmittable = computed(() => isPlanSubmittable(planTotal.value))
+
+/** 开始出题能不能点：配比模式合计 0 或超上限时禁掉（其余模式由后端兜底） */
+const canSubmit = computed(() => countMode.value !== 'plan' || planSubmittable.value)
+
+const planHint = computed(() => {
+  if (countMode.value !== 'plan') return ''
+  if (planTotal.value === 0) return `至少配 1 道（上限 ${MAX_QUESTIONS} 道）`
+  if (planTotal.value > MAX_QUESTIONS) return `合计 ${planTotal.value} 道，超过上限 ${MAX_QUESTIONS} 道`
+  return ''
+})
+
+/**
+ * 拉取自动题量。失败/未登录**静默降级**为 5 道 —— 用户没要求估算，
+ * 弹错误只会打断"填主题 → 开始出题"这条主路径。
+ */
+async function refreshPreview() {
+  const subj = subject.value.trim()
+  const seq = ++previewSeq
+  preview.value = { ...preview.value, loading: true }
+  try {
+    const res = await previewQuizPlan({
+      subject: subj,
+      graph_node_id: props.graphNodeId || '',
+      count_mode: 'auto',
+    })
+    if (seq !== previewSeq) return      // 已被更新的请求取代
+    const d = res.data || {}
+    preview.value = {
+      count: autoCountFromPreview(d),
+      reason: d.reason || '',
+      sections: Array.isArray(d.sections) ? d.sections : [],
+      ok: true,
+      loading: false,
+    }
+  } catch (e) {
+    if (seq !== previewSeq) return
+    // 未登录(401) / 接口未实现(404) / 后端报错 —— 都不打扰用户，落到 5 道并标注
+    preview.value = { count: FALLBACK_COUNT, reason: '', sections: [], ok: false, loading: false }
+  }
+}
+
+/** 400ms 防抖：连续的输入（打主题）只发最后一次 */
+function schedulePreview() {
+  if (previewTimer) clearTimeout(previewTimer)
+  previewTimer = setTimeout(() => {
+    previewTimer = null
+    refreshPreview()
+  }, 400)
+}
+
+// 主题 / 图谱节点变化 → 重新估算（仅自动模式需要；切模式时也补一次）
+watch(() => subject.value, schedulePreview)
+watch(() => props.graphNodeId, schedulePreview)
+watch(countMode, (m) => {
+  if (m === 'auto' && !preview.value.ok) schedulePreview()
+})
+
+onUnmounted(() => {
+  if (previewTimer) clearTimeout(previewTimer)
+})
 
 // ─── 题目列表与作答 ───
 const questions = ref([])              // 已出题目 [{id(本地), type, question, options, ...}]
@@ -105,14 +215,40 @@ async function loadStats() {
   }
 }
 
+/**
+ * 本轮出题的结果契约回执：`satisfied === false` 时按后端给的
+ * `missing_cover_keys` 提示「缺哪些考点」，并提供「补齐缺失」再请求一次。
+ * （字段缺席就整块不渲染 —— 不臆造后端没实现的契约）
+ */
+const coverResult = ref({ satisfied: true, shortfall: 0, missingCoverKeys: [], canFill: false })
+const fillingMissing = ref(false)
+
+function resetCoverResult() {
+  coverResult.value = { satisfied: true, shortfall: 0, missingCoverKeys: [], canFill: false }
+}
+
+/** 组装一次出题请求体（三模式共用）—— 形状由 utils/quizPlan.js 的纯函数产出 */
+function currentPayload() {
+  return buildQuizPayload({
+    mode: countMode.value,
+    subject: subject.value.trim(),
+    difficulty: difficulty.value,
+    graphNodeId: props.graphNodeId || '',
+    autoCount: autoCount.value,
+    manualCount: manualCount.value,
+    rows: planRows.value,
+    strict: strictMode.value,
+  })
+}
+
 async function handleGenerate() {
   const subj = subject.value.trim()
   if (!subj) {
     genError.value = '请输入出题主题或知识点，如"二叉树遍历"'
     return
   }
-  if (!questionTypes.value.length) {
-    genError.value = '请至少选择一种题型'
+  if (!canSubmit.value) {
+    genError.value = planHint.value || '题量不合法'
     return
   }
 
@@ -121,17 +257,10 @@ async function handleGenerate() {
   questions.value = []
   answers.value = {}
   results.value = {}
+  resetCoverResult()
 
   try {
-    const res = await generateQuiz({
-      subject: subj,
-      question_count: questionCount.value,
-      difficulty: difficulty.value,
-      question_types: questionTypes.value,
-      // 从节点详情进来时带上图谱节点 id：入库的 knowledge_point 记成它，
-      // 判分才能把掌握度回写到这个节点（不带则是纯出题，行为与原来一致）。
-      graph_node_id: props.graphNodeId || '',
-    })
+    const res = await generateQuiz(currentPayload())
     const d = res.data || {}
     // 后端返回 questions + question_ids（存库后的数据库 id），一一对应
     const qs = d.questions || []
@@ -145,12 +274,16 @@ async function handleGenerate() {
     rejectedCount.value = d.rejected || 0
     materialsUsed.value = d.materials_used || 0
     requestedCount.value = d.requested || questions.value.length
+    noteCoverResult(d)
     if (!questions.value.length) {
       ElMessage.warning('AI 未能生成合格题目，请调整主题后重试')
     } else {
-      const short = requestedCount.value - questions.value.length
-      if (short > 0) {
+      if (d.satisfied === false) {
+        // 题量够了但考点没铺满：明确告诉缺哪些，并把「补齐缺失」留给用户决定
+        ElMessage.warning(formatMissingCovers(d.missing_cover_keys, d.shortfall))
+      } else if (requestedCount.value > questions.value.length) {
         // 分批出题后仍凑不满（多轮补题也没补上），明确告知差额而不是静默少给
+        const short = requestedCount.value - questions.value.length
         ElMessage.warning(`请求 ${requestedCount.value} 道，实际生成 ${questions.value.length} 道（差 ${short} 道）`)
       } else {
         ElMessage.success(`已生成 ${questions.value.length} 道题目`)
@@ -163,6 +296,70 @@ async function handleGenerate() {
     ElMessage.error(genError.value)
   } finally {
     generating.value = false
+  }
+}
+
+/** 把响应里的 satisfied / shortfall / missing_cover_keys 收敛成可渲染状态 */
+function noteCoverResult(d) {
+  const keys = Array.isArray(d.missing_cover_keys) ? d.missing_cover_keys : []
+  coverResult.value = {
+    satisfied: d.satisfied !== false,
+    shortfall: Number(d.shortfall) || 0,
+    missingCoverKeys: keys,
+    canFill: canFillMissing(d),   // 后端没给该字段 → 不显示按钮
+  }
+}
+
+/**
+ * 补齐缺失考点：带着 `missing_cover_keys` 再请求一次，新题**追加**在已出题目之后
+ * （用户已经答过的部分不能丢）。只在后端真的返回了该字段时可用。
+ *
+ * 补题**只补缺口**：题量取「缺几个考点 / 差几道」而不是重发整卷 —— 否则会再生成
+ * 一整套（含已出过的题），追加后就成了重复题。故这一次固定用 manual 模式要 `gap` 道，
+ * 既尊重缺口数量，也保持「question_plan 合计 == question_count」的不变量。
+ */
+async function handleFillMissing() {
+  if (!coverResult.value.canFill || fillingMissing.value) return
+  const keys = coverResult.value.missingCoverKeys
+  const gap = Math.max(keys.length, coverResult.value.shortfall || 0)
+  fillingMissing.value = true
+  try {
+    const payload = {
+      ...buildQuizPayload({
+        mode: 'manual',
+        subject: subject.value.trim(),
+        difficulty: difficulty.value,
+        graphNodeId: props.graphNodeId || '',
+        manualCount: gap,
+      }),
+      missing_cover_keys: keys,
+    }
+    const res = await generateQuiz(payload)
+    const d = res.data || {}
+    const qs = d.questions || []
+    const ids = d.question_ids || []
+    const base = questions.value.length
+    questions.value = [
+      ...questions.value,
+      ...qs.map((q, i) => ({
+        ...q,
+        localIdx: base + i,
+        dbId: ids[i] != null ? ids[i] : null,
+      })),
+    ]
+    requestedCount.value = (requestedCount.value || base) + gap
+    noteCoverResult(d)
+    if (!qs.length) {
+      ElMessage.warning('未能补齐缺失考点，请调整主题后重试')
+    } else {
+      ElMessage.success(`已补齐 ${qs.length} 道`)
+      loadStats()
+      loadBatches()
+    }
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || e.message || '补齐失败')
+  } finally {
+    fillingMissing.value = false
   }
 }
 
@@ -412,6 +609,8 @@ onMounted(() => {
   if (props.focusQuestionId != null) {
     focusQuestion(props.focusQuestionId)
   }
+  // 自动模式：挂载即按内容估算题量（失败静默降级为 5 道）
+  schedulePreview()
 })
 </script>
 
@@ -460,24 +659,95 @@ onMounted(() => {
             <el-select v-model="difficulty" class="cfg-difficulty">
               <el-option v-for="d in difficultyOptions" :key="d.value" :label="d.label" :value="d.value" />
             </el-select>
-            <el-select v-model="questionCount" class="cfg-count">
-              <el-option v-for="n in [3, 5, 8, 10]" :key="n" :label="`${n} 题`" :value="n" />
-            </el-select>
-          </div>
-          <div class="cfg-row">
-            <div class="cfg-types">
-              <el-checkbox-group v-model="questionTypes">
-                <el-checkbox v-for="t in typeOptions" :key="t.value" :value="t.value" :label="t.label" />
-              </el-checkbox-group>
-            </div>
             <el-button
               type="primary"
               :loading="generating"
+              :disabled="!canSubmit"
               @click="handleGenerate"
             >
               {{ generating ? 'AI 出题中...' : '开始出题' }}
             </el-button>
           </div>
+
+          <!-- 模式切换：与页面既有控件同款分段样式（radio-button） -->
+          <div class="cfg-row cfg-mode-row">
+            <el-radio-group v-model="countMode" class="cfg-mode" size="small">
+              <el-radio-button v-for="m in modeOptions" :key="m.value" :value="m.value">
+                {{ m.label }}
+              </el-radio-button>
+            </el-radio-group>
+
+            <!-- 自动：题量 + 依据（内容决定，不是拍脑袋的数字） -->
+            <div v-if="countMode === 'auto'" class="cfg-auto">
+              <span class="cfg-auto-count">
+                <b>{{ autoCount }}</b> 道
+                <span v-if="preview.loading" class="cfg-auto-pending">估算中…</span>
+                <span v-else-if="!preview.ok" class="cfg-auto-fallback">（未能按内容估算）</span>
+              </span>
+              <span v-if="preview.ok && preview.reason" class="cfg-auto-reason">{{ preview.reason }}</span>
+              <span v-if="sectionSummary" class="cfg-auto-sections" :title="sectionSummary">
+                {{ sectionSummary }}
+              </span>
+            </div>
+
+            <!-- 手动：3~15，旁边给自动估算值作参考 -->
+            <div v-else-if="countMode === 'manual'" class="cfg-manual">
+              <el-input-number
+                v-model="manualCount"
+                :min="MIN_QUESTIONS"
+                :max="MAX_QUESTIONS"
+                :step="1"
+                step-strictly
+                size="small"
+                class="cfg-manual-input"
+                aria-label="题量"
+              />
+              <span class="cfg-manual-tip">自动估算 {{ autoCount }} 道</span>
+            </div>
+          </div>
+
+          <!-- 五行固定配比表单（刻意不做动态增删行） -->
+          <div v-if="countMode === 'plan'" class="cfg-plan-table">
+            <div v-for="row in planRows" :key="row.type" class="cfg-plan-row">
+              <span class="cfg-plan-type">{{ planTypeLabels[row.type] }}</span>
+              <el-input-number
+                v-model="row.count"
+                :min="0"
+                :max="MAX_ROW_COUNT"
+                :step="1"
+                step-strictly
+                size="small"
+                class="cfg-plan-count"
+                :aria-label="`${planTypeLabels[row.type]}数量`"
+              />
+              <span class="cfg-plan-unit">道</span>
+              <template v-if="OPTION_TYPES.includes(row.type)">
+                <span class="cfg-plan-opt-label">选项数</span>
+                <el-input-number
+                  v-model="row.optionCount"
+                  :min="2"
+                  :max="6"
+                  :step="1"
+                  step-strictly
+                  size="small"
+                  class="cfg-plan-opt"
+                  :aria-label="`${planTypeLabels[row.type]}选项数`"
+                />
+              </template>
+            </div>
+
+            <!-- 底部只读合计：0 道或超上限 → 提示 + 禁用「开始出题」 -->
+            <div class="cfg-plan-foot">
+              <span class="cfg-plan-total" :class="{ 'is-invalid': !planSubmittable }">
+                合计 {{ planTotal }} 道
+              </span>
+              <span v-if="planHint" class="cfg-plan-hint">{{ planHint }}</span>
+              <el-checkbox v-model="strictMode" size="small" class="cfg-strict">
+                严格模式：凑不齐就整卷失败
+              </el-checkbox>
+            </div>
+          </div>
+
           <p v-if="genError" class="cfg-error">{{ genError }}</p>
         </section>
 
@@ -499,6 +769,22 @@ onMounted(() => {
               materialsUsed ? `依据知识库 ${materialsUsed} 个片段` : '',
             ].filter(Boolean).join('；')"
           >· 详情</span>
+        </div>
+
+        <!-- 考点没铺满：说清缺哪几个，并给一次「补齐缺失」（后端支持 missing_cover_keys 时才出现） -->
+        <div v-if="questions.length && !coverResult.satisfied" class="quiz-cover-gap">
+          <AppIcon name="alertCircle" :size="14" />
+          <span class="cover-gap-text">{{ formatMissingCovers(coverResult.missingCoverKeys, coverResult.shortfall) }}</span>
+          <el-button
+            v-if="coverResult.canFill"
+            size="small"
+            type="primary"
+            plain
+            :loading="fillingMissing"
+            @click="handleFillMissing"
+          >
+            补齐缺失
+          </el-button>
         </div>
 
         <!-- 试卷导出：选格式 → 项目内预览 / 下载同一份 -->
@@ -731,13 +1017,187 @@ onMounted(() => {
   min-width: 220px;
 }
 
-.cfg-difficulty,
-.cfg-count {
+.cfg-difficulty {
   width: 110px;
 }
 
-.cfg-types {
+/* ── 三模式：自动 / 手动 / 按题型配比 ── */
+.cfg-mode-row {
+  align-items: flex-start;
+}
+
+.cfg-mode {
+  flex-shrink: 0;
+}
+
+/* 自动：题量数字 + 一句话依据 + 逐节摘要（内容决定题量，依据要看得见） */
+.cfg-auto {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
   flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.cfg-auto-count {
+  color: var(--color-text-primary);
+}
+
+.cfg-auto-count b {
+  font-size: 18px;
+  color: var(--color-accent);
+  margin-right: 2px;
+}
+
+.cfg-auto-pending {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+/* 没能按内容估算（未登录 / 后端未实现）：说清楚是兜底值，别假装是估算结果 */
+.cfg-auto-fallback {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+.cfg-auto-reason {
+  color: var(--color-text-secondary);
+}
+
+.cfg-auto-sections {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cfg-manual {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+}
+
+.cfg-manual-input {
+  width: 110px;
+}
+
+.cfg-manual-tip {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+/* 表单底部的只读合计 + 严格模式开关 */
+.cfg-plan-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+  font-size: 13px;
+}
+
+.cfg-plan-total {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.cfg-plan-total.is-invalid,
+.cfg-plan-hint {
+  color: var(--color-danger);
+}
+
+.cfg-plan-hint {
+  font-size: 12px;
+}
+
+/* 五行固定配比：题型 | 数量 道 | 选项数（仅单选/多选） */
+.cfg-plan-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-subtle);
+}
+
+.cfg-plan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.cfg-plan-type {
+  width: 68px;
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+
+.cfg-plan-count,
+.cfg-plan-opt {
+  width: 100px;
+}
+
+.cfg-plan-unit,
+.cfg-plan-opt-label {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+.cfg-plan-opt-label {
+  margin-left: 8px;
+}
+
+/* 结果提示：考点没铺满（缺 X 个考点：A、B + 补齐按钮） */
+.quiz-cover-gap {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--el-color-warning-light-5, var(--color-border));
+  border-radius: var(--radius-md);
+  background: var(--el-color-warning-light-9, var(--color-bg-subtle));
+  color: var(--el-color-warning, var(--color-warning));
+  font-size: 13px;
+}
+
+.cover-gap-text {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 窄屏：配比表单转紧凑堆叠（题型一行、数量/选项数换行） */
+@media (max-width: 600px) {
+  .cfg-plan-row {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .cfg-plan-type {
+    width: auto;
+    min-width: 56px;
+  }
+
+  .cfg-plan-count,
+  .cfg-plan-opt {
+    width: 84px;
+  }
+
+  .cfg-auto-sections {
+    display: none;   /* 窄屏下逐节摘要挤成一条省略号，不如只看题量+依据 */
+  }
 }
 
 .cfg-error {

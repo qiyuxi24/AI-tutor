@@ -7,6 +7,19 @@ export const generateQuiz = (data) => {
   return apiClient.post('/api/v1/quiz/generate', data, { timeout: 300000 })
 }
 
+/**
+ * 出题计划预览：按主题/图谱节点的内容量估算题量（**不调 LLM**，纯统计）
+ *
+ * 请求 { subject?, graph_node_id?, count_mode, question_count?, question_plan? }
+ * 响应 { count, reason, count_mode, capped, section_count, content_chars,
+ *        sections: [{section_id, title, chars, planned}], slot_preview }
+ *
+ * 它是「挂载即调、主题改一次调一次」的高频轻请求 → 超时给短的（8s），
+ * 失败由调用方静默降级成固定 5 道，所以不需要长超时。
+ */
+export const previewQuizPlan = (data) =>
+  apiClient.post('/api/v1/quiz/plan/preview', data, { timeout: 8000 })
+
 /** 列出题库中的题目 */
 export const listQuizQuestions = (subject = '', limit = 50, offset = 0) =>
   apiClient.get('/api/v1/quiz/questions', {
