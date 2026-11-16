@@ -94,7 +94,7 @@ const { urls: slideUrls, failed: slideFailed, load: loadSlides } = useSlideAsset
 
 /**
  * 整集是不是"只有兜底切片"：`kind === 'fallback'` 来自后端
- * `kb/lecture_structurer.py` 的时间等分兜底（LLM 知识点切片未接入时）。
+ * `kb/lecture_structurer.py` 的时间等分兜底（模型不可用 / 本集无语音时）。
  * 判"全部"而不是"任意"：混有真知识点时，提示应该消失 —— 否则用户会以为
  * 真的知识点也是假的。
  */
@@ -318,11 +318,13 @@ onBeforeUnmount(stopPoll)
 
         <!-- 正常：当前知识点的完整内容 -->
         <article v-else-if="activeSegment" class="ld-seg">
-          <!-- 兜底切片提示：kind='fallback' 表示 LLM 知识点切片还没接入，当前只是
-               按时间等分。必须说出来 —— 否则用户会以为这集真被切成了知识点。 -->
+          <!-- 兜底切片提示：kind='fallback' 表示这集没拿到语义切片，当前是按时间等分
+               （模型不可用 / 只有转写稿）。必须说出来 —— 否则用户会以为这集真被切成了
+               知识点。重跑一次通常就能拿到语义切片。 -->
           <p v-if="isFallbackOnly" class="ld-degraded">
             这集的分段是<strong>按时间等分</strong>的兜底结果，还不是真正的知识点边界
-            （语义切片待接入）。按时间跳转、看原文照常可用。
+            （模型不可用或本集无语音）。点右上「重新结构化」会用已有转写稿再切一次；
+            按时间跳转、看原文照常可用。
           </p>
 
           <h2 class="ld-seg-title">{{ activeSegment.title || '未命名知识点' }}</h2>

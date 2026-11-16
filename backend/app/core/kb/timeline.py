@@ -111,6 +111,11 @@ def _as_time(value) -> float:
         return 0.0
 
 
+def as_seconds(value) -> float:
+    """跨模块用的公开入口（`_as_time` 的薄包装，别直接 import 私有名）。"""
+    return _as_time(value)
+
+
 def _nan_safe(value: float) -> float:
     """NaN → 0.0（`sorted` 遇 NaN 不抛错，但会产出**不确定**顺序，静默错位）。
 
@@ -469,6 +474,7 @@ __all__ = [
     "FrameEvent",
     "TranscriptEvent",
     "Section",
+    "as_seconds",
     "merge",
     "split_at_natural_boundaries",
     "coalesce_sections",

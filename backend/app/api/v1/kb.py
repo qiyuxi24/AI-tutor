@@ -46,8 +46,8 @@ from app.core.event_bus import GRAPH_UPDATED, KB_UPDATED, notify
 from app.core.error_codes import ErrorCode
 from app.core.kb.bili import login as bili_login
 from app.core.kb.kb_manager import kb_manager
-from app.core.kb import (graph_generator, import_queue, lecture_structurer,
-                         timeline as kb_timeline, video_import)
+from app.core.kb import (graph_generator, import_queue, lecture_builder,
+                         lecture_structurer, timeline as kb_timeline, video_import)
 from app.core.knowledge_graph import CONTENT_STATUS_FILLED, KnowledgeGraph
 
 logger = logging.getLogger("ai-tutor")
@@ -113,6 +113,10 @@ class LectureImportRequest(BaseModel):
                                  description="字幕语言优先级；留空用默认（中文优先）")
     expand: bool = Field(True, description="展开 B 站多 P / 合集（一个链接导入全部集）")
     slides: bool = Field(False, description="抽幻灯片截图（要下载视频，慢一些）")
+    level: str = Field(
+        "lecture", pattern="^(lecture|transcript)$",
+        description="lecture=直接生成结构化讲义（切片+逐点成文，默认）；"
+                    "transcript=只存字幕稿（省模型额度）")
 
 
 class LectureInspectRequest(BaseModel):
@@ -274,6 +278,7 @@ async def import_lecture(req: LectureImportRequest,
             transcript_source=req.transcript_source,
             asr_model=req.asr_model or None, slides=req.slides, expand=req.expand,
             languages=tuple(req.languages) or video_import.DEFAULT_SUBTITLE_LANGS,
+            lecture_level=req.level,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -882,9 +887,8 @@ async def restructure_lecture(doc_id: int,
     - 进程内互斥 `_RESTRUCTURE_INFLIGHT` 防重复触发，锁在后台任务的 `finally` 释放；
     - 后台任务不向任何人抛异常（没人接），失败也要发通知。
 
-    ⚠️ 本阶段只做到"骨架 + 校验 + 通知"：LLM 知识点切片尚未接入
-    （见 `kb/lecture_structurer.py`），当前按 `MIN_SEGMENT_SECS` 时间等分兜底，
-    通知里的 `structured=True` 表示"有切片可用"，不代表切片是知识点边界。
+    切片与成文由 `kb/lecture_builder.py` 完成（与导入队列是**同一份实现**），
+    模型不可用时自动降级为时间等分 + 转写原文；`structured=True` 仍表示"有切片可用"。
     """
     store = kb_manager.store(user_id)
     lecture = store.get_lecture(doc_id)
@@ -899,46 +903,47 @@ async def restructure_lecture(doc_id: int,
     _RESTRUCTURE_INFLIGHT[doc_id] = True
 
     node = store.get_node(doc_id) or {}
-    runtime.spawn(_run_restructure(user_id, doc_id, node.get("name") or ""))
+    # `rewrite_doc=True`：重跑后把新讲义写回文件正文并重建索引（否则知识库里
+    # 还是导入那版，课时页却是新版 —— 同一集两种说法）。
+    runtime.spawn(_run_restructure(user_id, doc_id, node.get("name") or "",
+                                   rewrite_doc=True))
     return {"status": "accepted"}
 
 
-async def _run_restructure(user_id: int, doc_id: int, doc_name: str) -> None:
-    """后台重跑结构化：读原始时间线 → 切片 → 落库 → 发 `kb_updated` → 释放锁。
+async def _run_restructure(user_id: int, doc_id: int, doc_name: str, *,
+                           rewrite_doc: bool = False) -> None:
+    """后台重跑讲义：原始时间线 → 语义切片 + 逐点成文 → 落库 → 通知 → 释放锁。
 
     调用前提：锁**已被端点占位**（见 `restructure_lecture`）。
     本函数不向任何人抛异常（后台任务的异常没人接）；取消时 `finally` 照发通知，
     然后把 `CancelledError` 继续抛出（asyncio 的取消语义要求如此）。
+
+    `rewrite_doc` 默认 False：纯结构重跑不该触发 embedding 网络调用（测试/脚本用）；
+    端点显式传 True，把讲义回写进文件正文。
     """
     ok = False
     error = ""
     stamp = ""
     try:
-        # 先让出一次事件循环：本函数主体是 CPU 段（解析/合并/切片），全程不 await
-        # 的话**取消只能发生在启动前**（协程还没进 try，finally 里的解锁根本轮不到），
-        # 关停时就可能把该文件锁死到进程重启。一个 yield 换"取消在重活之前就生效"。
+        # 先让出一次事件循环：本函数主体是 CPU 段 + 模型调用，取消要能在重活之前生效，
+        # 否则关停时就可能把该文件锁死到进程重启。
         await asyncio.sleep(0)
         store = kb_manager.store(user_id)
         lecture = store.get_lecture(doc_id) or {}
         frames, speech = kb_timeline.load_jsonl(lecture.get("raw_timeline") or "")
-        sections = kb_timeline.merge(frames, speech,
-                                    float(lecture.get("duration") or 0))
-        kb_timeline.coalesce_sections(sections)
-        result = lecture_structurer.structure(sections,
-                                             float(lecture.get("duration") or 0))
-        segments = result["segments"]
-        if segments and result.get("degraded"):
-            # 兜底切片的正文是 ASR 口语，机械截句当标题等于没有标题 ——
-            # 让模型在**既定边界**上起名并写一句导语（不改边界，成本一次调用）。
-            # 失败返回空字典，保留机械标题、导语留空，不阻断。
-            named = await lecture_structurer.name_segments(
-                lecture.get("title") or "", segments, user_id=user_id)
-            for seg in segments:
-                got = named.get(seg["seq"]) or {}
-                if got.get("title"):
-                    seg["title"] = got["title"]
-                if got.get("brief"):
-                    seg["brief"] = got["brief"]
+        doc = store.get_document(doc_id) or {}
+        asset_key = doc.get("asset_key") or ""
+        result = await lecture_builder.build(
+            user_id, title=lecture.get("title") or doc_name,
+            frames=frames, speech=speech,
+            duration=float(lecture.get("duration") or 0),
+            url=lecture.get("url") or "",
+            uploader=lecture.get("uploader") or "",
+            source_label=video_import.SOURCE_LABELS.get(
+                lecture.get("source_kind") or "", lecture.get("source_kind") or ""),
+            slide_url_prefix=f"/api/v1/kb/slides/{asset_key}/" if asset_key else "",
+        )
+        segments = result.get("segments") or []
         if not segments:
             error = ErrorCode.user_message(ErrorCode.KB_EMPTY_TIMELINE)
         else:
@@ -951,6 +956,8 @@ async def _run_restructure(user_id: int, doc_id: int, doc_name: str) -> None:
             if result.get("note"):
                 logger.info("讲义结构化 user=%s doc=%s：%s", user_id, doc_id,
                             result["note"])
+            if rewrite_doc and result.get("text"):
+                await _rewrite_doc_text(user_id, doc_id, result["text"])
     except asyncio.CancelledError:
         raise                                  # 交给 finally 发通知后再抛
     except Exception as e:                     # noqa: BLE001 —— 后台任务不能漏异常
@@ -973,6 +980,24 @@ async def _run_restructure(user_id: int, doc_id: int, doc_name: str) -> None:
             })
         except Exception as e:                 # noqa: BLE001 —— 通知只是尽力而为
             logger.warning("结构化完成通知发送失败（doc=%s）: %s", doc_id, e)
+
+
+async def _rewrite_doc_text(user_id: int, doc_id: int, text: str) -> None:
+    """把新讲义写回文件正文并重建索引（**尽力而为**：失败只记日志，不推翻已落库的切片）。
+
+    为什么要回写：知识库里读正文（预览/AI 检索）与课时页读切片是**两个入口**，
+    只更新切片会让同一集出现两种说法；用户编辑过正文的集也会被这里覆盖 ——
+    重跑是显式操作，覆盖是它的语义（与"生成图谱"一致）。
+    """
+    try:
+        kb_manager.write_document_text(user_id, doc_id, text)
+    except Exception as e:                     # noqa: BLE001
+        logger.warning("讲义正文回写失败 user=%s doc=%s: %s", user_id, doc_id, e)
+        return
+    try:
+        await kb_manager.reindex_file(user_id, doc_id)
+    except Exception as e:                     # noqa: BLE001
+        logger.warning("讲义正文重建索引失败 user=%s doc=%s: %s", user_id, doc_id, e)
 
 
 def _now_iso() -> str:

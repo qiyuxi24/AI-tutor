@@ -115,6 +115,8 @@ STAGE_DOWNLOAD = "download"
 STAGE_EXTRACT = "extract"
 STAGE_TRANSCRIBE = "transcribe"
 STAGE_COMPOSE = "compose"
+# 结构化讲义（语义切片 + 逐点成文，见 `kb/lecture_builder.py`）：只在该档位出现
+STAGE_STRUCTURE = "structure"
 
 # 来源标签（写进讲义头部，也回给前端展示）；机器值仍留在 meta["source"] 里供溯源
 SOURCE_LABELS = {
@@ -737,6 +739,8 @@ async def fetch_lecture(url: str, workdir: Path, *, user_id: int | None = None,
             meta = {"source": source, "source_label": SOURCE_LABELS.get(source, source),
                     "title": title or ref.filename_stem, "file": "",
                     "chars": len(text), "slides": len(slides),
+                    "duration": _cues_duration(cues),
+                    "uploader": uploader,
                     "cues": _cue_dicts(cues)}
             if slides:
                 meta["frames"] = _slide_frames(slides)
@@ -773,12 +777,29 @@ async def fetch_lecture(url: str, workdir: Path, *, user_id: int | None = None,
     _report(on_progress, STAGE_COMPOSE)
     title = ref.filename_stem or "课程讲义"
     text = compose_lecture(paras, title=title, source=SOURCE_LABELS["asr"], images=slides)
+    cue_dicts = _paragraph_cues(paras)
     meta = {"source": "asr", "source_label": SOURCE_LABELS["asr"],
             "title": title, "file": audio.name, "chars": len(text),
-            "slides": len(slides), "cues": _paragraph_cues(paras)}
+            "slides": len(slides), "cues": cue_dicts, "uploader": "",
+            "duration": _cues_duration(cue_dicts)}
     if slides:
         meta["frames"] = _slide_frames(slides)
     return text, meta
+
+
+def _cues_duration(cues) -> float:
+    """时间条最末端的秒数 —— 就是这一集"讲义意义上的时长"。
+
+    为什么不用平台 API 的时长：B 站字幕接口不返回它，yt-dlp 也要多一次网络探测；
+    而字/转写本身就覆盖到片尾，用 `max(end)` 既零成本又和后续切片用的是同一把尺子。
+    """
+    ends = []
+    for cue in cues or ():
+        try:
+            ends.append(float(cue[1] if isinstance(cue, (tuple, list)) else cue.get("end")))
+        except (TypeError, ValueError):
+            continue
+    return round(max(ends), 3) if ends else 0.0
 
 
 def _cue_dicts(cues) -> list[dict]:

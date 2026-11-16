@@ -21,12 +21,25 @@ export const TRANSCRIPT_SOURCES = [
 
 const KEYS = TRANSCRIPT_SOURCES.map((s) => s.key)
 
+/**
+ * 讲义产出档位（key 与后端 `LectureImportRequest.level` 一致）
+ * - lecture：字幕/转写只是原料，导入时直接跑语义切片 + 逐点成文，入库的就是讲义
+ * - transcript：只存转写稿（省模型额度，之后再手动结构化也行）
+ */
+export const LECTURE_LEVELS = [
+  { key: 'lecture', title: '生成讲义', desc: '切片 + 逐点成文一起做，导入完就能读（推荐）' },
+  { key: 'transcript', title: '只存转写稿', desc: '不调模型，省额度；之后可在课时页手动结构化' },
+]
+
+const LEVEL_KEYS = LECTURE_LEVELS.map((s) => s.key)
+
 const DEFAULTS = {
   transcriptSource: 'auto',
   expand: true,      // 合集全量：B 站多 P / ugc_season 展开成全部集数
   slides: false,     // 幻灯片截图：要下载视频，默认关
   languages: '',     // 字幕语言优先级，留空用后端默认
   asrModel: '',      // 转写模型，留空用 .env 的 ASR_MODEL
+  lectureLevel: 'lecture',
 }
 
 function load() {
@@ -38,6 +51,7 @@ function load() {
     out.slides = saved.slides === true
     out.languages = typeof saved.languages === 'string' ? saved.languages : ''
     out.asrModel = typeof saved.asrModel === 'string' ? saved.asrModel : ''
+    if (LEVEL_KEYS.includes(saved.lectureLevel)) out.lectureLevel = saved.lectureLevel
   } catch {
     // 存储损坏 / 隐私模式：用默认值，本次会话仍可正常导入
   }

@@ -20,25 +20,87 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useChatStore } from '../stores/chatStore'
 import {
-  biliLoginPoll, biliLoginQrcode, getKbNodeText, importLecture, inspectLecture,
+  biliLoginPoll, biliLoginQrcode, getKbNodeText, getKbTree, importLecture, inspectLecture,
   lectureItemAction, lectureTaskAction, listLectureTasks, probeLectureImport,
   reorderLectureItem,
 } from '../api/kb.js'
 import { subtitleLanguages, useLectureSettings } from '../utils/lectureSettings.js'
 import KbTextPreviewDialog from '../components/KbTextPreviewDialog.vue'
+import SidePanel from '../components/SidePanel.vue'
+import LectureLibraryPanel from '../components/LectureLibraryPanel.vue'
 
 const emit = defineEmits(['go-kb', 'open-lecture'])
 
 const store = useChatStore()
 const settings = useLectureSettings()
 
+// ── 左栏「课程库」：与对话/图谱侧栏同一套 SidePanel（可拖宽 / 可折叠 / 持久化）──
+const libraryWidth = ref(268)
+const libraryCollapsed = ref(false)
+const mainRef = ref(null)
+/** KB 树里所有已结构化的讲义（队列只留最近 20 个任务，老讲义得从树里找） */
+const kbLectures = ref([])
+
+/** 目录树里 type=file 且 lecture=true 的就是结构化讲义（与 KbView 的判定一致） */
+function collectLectures(nodes, out = []) {
+  for (const n of nodes || []) {
+    if (n.type === 'file' && n.lecture) out.push({ docId: Number(n.id), title: n.name })
+    else if (n.children?.length) collectLectures(n.children, out)
+  }
+  return out
+}
+
+async function refreshKbLectures() {
+  try {
+    const { data } = await getKbTree()
+    kbLectures.value = collectLectures(data.tree || [])
+  } catch { /* 拉取失败不弹错：下次刷新/通知会再来 */ }
+}
+
+function scrollToTop() {
+  mainRef.value?.scrollTo?.({ top: 0, behavior: 'smooth' })
+}
+
+/** 侧栏点「导入中任务」→ 展开那一条的分集明细并滚回顶部 */
+function focusTask(taskId) {
+  const next = new Set(expanded.value)
+  next.add(taskId)
+  expanded.value = next
+  scrollToTop()
+}
+
+/**
+ * 侧栏点某一集讲义 → 走全屏课时页路由（与队列的「看讲义」、节点详情「视频出处」
+ * 同一条 open-lecture 通路）。课时页自带时间轴侧栏，给它整屏才不挤；返回时回到
+ * 本页，课程库侧栏与滚动位置都还在。
+ * 记住最后打开的那一集：返回后侧栏仍高亮它（本视图切换时会重挂，故存 localStorage）。
+ */
+const ACTIVE_DOC_KEY = 'lecture_active_doc'
+const activeDocId = ref(Number(localStorage.getItem(ACTIVE_DOC_KEY) || 0) || 0)
+
+function goLecture(docId, title = '') {
+  if (!docId) return
+  activeDocId.value = Number(docId)
+  localStorage.setItem(ACTIVE_DOC_KEY, String(activeDocId.value))
+  emit('open-lecture', { docId, title })
+}
+
+function selectLecture(item) {
+  if (!item?.docId) return
+  goLecture(item.docId, item.title || '')
+}
+
 // ── 状态字典（顺序 = 执行顺序；key 与后端 video_import.STAGE_* 一一对应）──
+// `structure` = 生成讲义（语义切片 + 逐点成文）：只有 `level=lecture` 才会出现，
+// `transcript` 档位停在 `compose`。放在 `compose` 之后是刻意的 —— compose 产出的是
+// 转写稿，structure 才是把转写稿变成讲义的那一步。
 const STEPS = [
   { key: 'subtitle', label: '查找字幕' },
   { key: 'download', label: '下载音频' },
   { key: 'extract', label: '提取音轨' },
   { key: 'transcribe', label: '语音转写' },
-  { key: 'compose', label: '整理讲义' },
+  { key: 'compose', label: '整理讲稿' },
+  { key: 'structure', label: '生成讲义' },
 ]
 const STAGE_LABEL = Object.fromEntries(STEPS.map((s) => [s.key, s.label]))
 
@@ -219,6 +281,8 @@ function payloadFor(links) {
     transcript_source: settings.transcriptSource,
     expand: settings.expand,
     slides: settings.slides,
+    // 讲义产出档位：`lecture` 在导入阶段就把切片与正文做完，用户不用再点「结构化这集」
+    level: settings.lectureLevel,
   }
   const langs = subtitleLanguages()
   if (langs.length) payload.languages = langs
@@ -373,7 +437,7 @@ function itemDocId(item) {
 function openLectureView(item) {
   const docId = itemDocId(item)
   if (!docId) return
-  emit('open-lecture', { docId, title: item.title || '' })
+  goLecture(docId, item.title || '')
 }
 
 async function openPreview(item) {
@@ -415,11 +479,11 @@ watch(() => store.importProgress, (p) => {
   }
 })
 
-// 后台任务已落库的通知（kb_updated）→ 立刻重拉
-watch(() => store.kbEpoch, refreshSoon)
+// 后台任务已落库的通知（kb_updated）→ 立刻重拉队列与讲义目录
+watch(() => store.kbEpoch, () => { refreshSoon(); refreshKbLectures() })
 
 onMounted(async () => {
-  await Promise.all([probe(), refreshQueue()])
+  await Promise.all([probe(), refreshQueue(), refreshKbLectures()])
   clockTimer = setInterval(() => { tick.value += 1 }, 1000)
 })
 
@@ -432,7 +496,30 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="page-scroll">
+  <div class="li-layout">
+    <!-- 左栏：课程库（导入中任务 + 已产出讲义），与对话/图谱侧栏同一套可拖宽/可折叠 -->
+    <SidePanel
+      class="li-library"
+      side="left"
+      label="课程库"
+      storage-key="lecture-lib"
+      :min="220"
+      :max="400"
+      v-model:width="libraryWidth"
+      v-model:collapsed="libraryCollapsed"
+    >
+      <LectureLibraryPanel
+        :tasks="tasks"
+        :kb-lectures="kbLectures"
+        :active-doc-id="activeDocId"
+        @new-import="scrollToTop"
+        @focus-task="focusTask"
+        @select="selectLecture"
+        @go-kb="emit('go-kb')"
+      />
+    </SidePanel>
+
+    <div ref="mainRef" class="page-scroll li-main-scroll">
     <main class="page-inner page-inner--narrow li">
       <header class="li-head">
         <div>
@@ -667,6 +754,7 @@ onBeforeUnmount(() => {
         <button type="button" class="li-link" @click="emit('go-kb')">去知识库</button>
       </p>
     </main>
+    </div>
 
     <!-- B 站扫码登录 -->
     <el-dialog v-model="qr.visible" title="登录 B 站" width="300px" align-center
@@ -698,6 +786,19 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* ── 两栏布局：左「课程库」侧栏 + 右滚动内容（对齐 KbView 的两栏范式）── */
+.li-layout {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-bg-page);
+}
+.li-main-scroll {
+  flex: 1;
+  min-width: 0;
+}
+
 .li {
   display: flex;
   flex-direction: column;

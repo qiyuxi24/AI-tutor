@@ -28,13 +28,14 @@ import re
 import shutil
 import tempfile
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
 from app.core import runtime
 from app.core.event_bus import ERROR, IMPORT_PROGRESS, KB_UPDATED, notify
-from app.core.kb import video_import
+from app.core.kb import lecture_builder, video_import
 from app.core.kb.bili import urls as bili_urls
 from app.core.kb.kb_manager import kb_manager
 from app.core.kb.timeline import FrameEvent, TranscriptEvent, dump_jsonl
@@ -44,6 +45,12 @@ logger = logging.getLogger("ai-tutor")
 # 每用户一个 worker（user_id → 协程 task）
 _WORKERS: dict[int, asyncio.Task] = {}
 
+# 导入落点：知识库里固定一个「视频课程」书架，合集/单集各自成文件夹
+# （用户显式传 `parent_id` 时不建书架，直接落在它下面）
+VIDEO_SHELF = "视频课程"
+# 每集文件夹里的固定文件名：文件夹名已经说明是哪一集，文件名再带标题只会重复
+LECTURE_FILE_NAME = "讲义.md"
+
 _UNSAFE = re.compile(r'[\\/:*?"<>|\s]+')
 
 
@@ -52,31 +59,43 @@ def _safe_name(text: str, fallback: str = "lecture") -> str:
     return (_UNSAFE.sub("_", (text or "").strip()).strip("_")[:60]) or fallback
 
 
+# 目录名只需去掉**路径分隔符与控制字符**：空格在中文标题里是正常成分
+# （"第 1 讲 · 拉普拉斯变换"），净化成 `第_1_讲` 会让整个目录树变成下划线墙。
+_FOLDER_UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+
+
+def _folder_name(text: str, fallback: str = "lecture") -> str:
+    """文件夹显示名：保留空格（只去路径分隔符、控制符与首尾点）。"""
+    name = _FOLDER_UNSAFE.sub("_", (text or "").strip())
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    return name[:60] or fallback
+
+
 def _lecture_filename(item: dict) -> str:
-    """一集的落盘文件名：优先分集标题（合集里 bvid 名字对用户毫无意义）。"""
-    stem = _safe_name(item.get("title") or "", "")
-    if not stem:
-        try:
-            stem = bili_urls.normalize(item["url"]).filename_stem
-        except ValueError:
-            stem = ""
-    return f"课程讲义-{stem or 'lecture'}.md"
+    """一集的落盘文件名 = `讲义.md`（文件夹名才是这一集的标题）。"""
+    return LECTURE_FILE_NAME
 
 
 async def submit(user_id: int, links: list[str], *, parent_id: Optional[int] = None,
                  transcript_source: str = "auto", asr_model: Optional[str] = None,
                  slides: bool = False, expand: bool = True,
-                 languages: tuple = video_import.DEFAULT_SUBTITLE_LANGS) -> dict:
+                 languages: tuple = video_import.DEFAULT_SUBTITLE_LANGS,
+                 lecture_level: str = "lecture") -> dict:
     """把一批链接（含合集展开）入队，立即返回；真正的取词在 worker 里跑。
 
     `expand=True` 时逐个链接问 B 站"这里面有几集"——网络调用放进线程池，
     不阻塞事件循环；展开失败只会降级成单集（见 `video_import.expand`）。
+
+    **收纳**：文件夹不在提交时建（那时标题还是 bvid），而在每集取到真标题后由
+    `_item_folder` 建：`视频课程/{合集}/{NN 集标题}/讲义.md`、单集则
+    `视频课程/{视频标题}/讲义.md`。`collection` / `folder_seq` 只是把"这一集属于
+    哪个合集、合集内第几集"带到 worker，不提前建空目录。
     """
     cleaned = [link.strip() for link in links if link and link.strip()]
     if not cleaned:
         raise ValueError("没有可导入的链接")
 
-    items: list[tuple[str, str]] = []
+    groups: list[tuple[str, list[tuple[str, str]]]] = []
     seen: set[str] = set()
     collection_title = ""
     for raw in cleaned:
@@ -86,20 +105,22 @@ async def submit(user_id: int, links: list[str], *, parent_id: Optional[int] = N
             ref = bili_urls.normalize(raw)
             title, episodes = "", [(ref.url, ref.filename_stem)]
         collection_title = collection_title or title
+        fresh: list[tuple[str, str]] = []
         for url, item_title in episodes:
             if url in seen:          # 同一集被重复粘贴（多链接/合集重叠）
                 continue
             seen.add(url)
-            items.append((url, item_title))
+            fresh.append((url, item_title))
+        if fresh:
+            # 只有"这一次链接真的展开出多集"才当合集：单个视频硬套一层合集目录
+            # 会得到 `标题/01 标题/` 的套娃，用户点三层才看到一页讲义。
+            groups.append((title if (title and len(fresh) > 1) else "", fresh))
 
-    # 合集落成 KB 里的一个文件夹（对齐 course2md 的 `<标题>/<ID>/` 归档）
-    target_parent = parent_id
-    if collection_title and len(items) > 1:
-        try:
-            target_parent = kb_manager.ensure_folder(
-                user_id, [_safe_name(collection_title, "课程合集")])
-        except ValueError as e:  # 父目录被别处删了等：退回根目录，不让入队失败
-            logger.warning("合集文件夹创建失败，导入到原目录：%s", e)
+    # (url, 分集标题, 合集名, 合集内序号) —— 后两项只用于"落哪个文件夹"
+    items: list[tuple] = []
+    for collection, episodes in groups:
+        for seq, (url, item_title) in enumerate(episodes):
+            items.append((url, item_title, collection, seq))
 
     store = kb_manager.store(user_id)
     # 单集也带标题：队列里显示"未命名导入"对用户没有任何信息量
@@ -107,13 +128,14 @@ async def submit(user_id: int, links: list[str], *, parent_id: Optional[int] = N
     task_id = store.create_import_task(
         user_id, items,
         transcript_source=transcript_source, asr_model=asr_model or "",
-        slides=slides, parent_id=target_parent, title=title,
+        slides=slides, parent_id=parent_id, title=title,
+        lecture_level=lecture_level,
     )
     ensure_worker(user_id)
-    logger.info("课程导入入队 user=%s task=%s items=%s 合集=%s",
-                user_id, task_id, len(items), bool(collection_title))
+    logger.info("课程导入入队 user=%s task=%s items=%s 合集=%s 档位=%s",
+                user_id, task_id, len(items), bool(collection_title), lecture_level)
     return {"task_id": task_id, "items": len(items), "title": title,
-            "parent_id": target_parent, "status": "pending"}
+            "parent_id": parent_id, "status": "pending"}
 
 
 def ensure_worker(user_id: int) -> None:
@@ -185,7 +207,7 @@ async def _run_task(user_id: int, task: dict, store) -> None:
 
 async def _process_item(user_id: int, task: dict, item: dict, index: int,
                         total: int, store) -> tuple[int, int, str]:
-    """一集：取词 → 入库。返回 `(node_id, 字符数, 来源标签)`。"""
+    """一集：取词 →（按档位）结构化讲义 → 入库。返回 `(node_id, 字符数, 来源标签)`。"""
     workdir = Path(tempfile.mkdtemp(prefix="kb-lecture-"))
     asset_key = uuid.uuid4().hex if task.get("slides") else ""
     slide_dir = kb_manager.slides_dir(user_id, asset_key) if asset_key else None
@@ -202,11 +224,37 @@ async def _process_item(user_id: int, task: dict, item: dict, index: int,
             slide_url_prefix=f"/api/v1/kb/slides/{asset_key}/" if asset_key else "",
             on_progress=progress,
         )
+
+        # ── 一步到位出讲义 ──
+        # 字幕/转写只是原料；`lecture` 档位在这里直接做完语义切片 + 逐点成文，
+        # 入库的就是**讲义**而不是转写稿（用户不用再去课时页点"结构化这集"）。
+        # 构建器自带降级：模型不可用时退回时间等分 + 原文，导入不因此失败。
+        frames, speech = _timeline_events(meta)
+        title = meta.get("title") or item.get("title") or ""
+        built = None
+        if (task.get("lecture_level") or "lecture") == "lecture" and speech:
+            progress(video_import.STAGE_STRUCTURE)
+            built = await lecture_builder.build(
+                user_id, title=title, frames=frames, speech=speech,
+                duration=float(meta.get("duration") or 0),
+                url=_playback_url(item),
+                uploader=meta.get("uploader") or "",
+                source_label=meta.get("source_label") or "",
+                slide_url_prefix=f"/api/v1/kb/slides/{asset_key}/" if asset_key else "",
+                on_progress=lambda done, segs: progress(
+                    # ⚠️ 键名不能叫 `index`/`total`：`_progress` 已把它们当位置参数
+                    # （item_index/item_total），重名会 TypeError，整集直接判失败。
+                    video_import.STAGE_STRUCTURE, sub_index=done, sub_total=segs),
+            )
+            if built.get("text"):
+                text = built["text"]
+
         filename = _lecture_filename(item)
+        parent = _item_folder(user_id, task, item, meta)
         try:
             node_id = await kb_manager.upload_and_index(
                 user_id=user_id, filename=filename,
-                content=text.encode("utf-8"), parent_id=task.get("parent_id"),
+                content=text.encode("utf-8"), parent_id=parent,
                 asset_key=asset_key,
             )
         except BaseException:
@@ -214,19 +262,79 @@ async def _process_item(user_id: int, task: dict, item: dict, index: int,
                 shutil.rmtree(kb_manager.slides_dir(user_id, asset_key),
                               ignore_errors=True)
             raise
-        logger.info("课程导入完成 user=%s node=%s source=%s 来自 %s",
-                    user_id, node_id, meta.get("source"), item["url"])
-        _store_timeline(store, user_id, node_id, item, meta)
+        logger.info("课程导入完成 user=%s node=%s source=%s 来自 %s（讲义=%s）",
+                    user_id, node_id, meta.get("source"), item["url"],
+                    "结构化" if built else "字幕稿")
+        _store_timeline(store, user_id, node_id, item, meta, built=built)
         notify(user_id, KB_UPDATED, {"node_id": node_id, "filename": filename,
-                                     "title": meta.get("title", "")})
-        return node_id, meta.get("chars", 0), meta.get("source_label") or ""
+                                     "title": title})
+        return node_id, len(text), meta.get("source_label") or ""
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _timeline_events(meta: dict) -> tuple[list[FrameEvent], list[TranscriptEvent]]:
+    """`fetch_lecture` 的 meta → 时间线事件（切片、落库共用同一份解析）。"""
+    speech = [TranscriptEvent(start=c["start"], end=c["end"],
+                              text=c.get("text") or "", raw=c.get("raw"))
+              for c in (meta.get("cues") or [])]
+    frames = [FrameEvent(t=f["t"], image=f.get("image") or "")
+              for f in (meta.get("frames") or [])]
+    return frames, speech
+
+
+def _playback_url(item: dict) -> str:
+    """可点的原视频链接（归一化失败就用用户粘的原文）。"""
+    try:
+        return bili_urls.normalize(item["url"]).url
+    except ValueError:
+        return item["url"]
+
+
+def _item_folder(user_id: int, task: dict, item: dict, meta: dict) -> Optional[int]:
+    """这一集落到哪个文件夹（**收纳**的唯一实现）。
+
+    - 用户指定了 `parent_id` → 就在它下面，不再另建书架；
+    - 合集 → `书架/{合集}/{NN 集标题}/`：序号保证目录树里按讲次排列（节点按 name 排序，
+      中文标题本身不保序），也顺手解决"同名两集"撞进同一个目录；
+    - 单集 → `书架/{视频标题}/`。
+
+    ⚠️ 文件夹名必须用 `fetch_lecture` 拿到的**真标题**：提交时只有 bvid（`BV1xx`），
+    那时建目录会得到一屏 `BV1xx` 目录。
+    """
+    shelf = task.get("parent_id")
+    if shelf is None:
+        try:
+            shelf = kb_manager.ensure_folder(user_id, [VIDEO_SHELF])
+        except ValueError as e:      # 书架被删/父目录异常：退回根目录，别让导入失败
+            logger.warning("视频课程书架创建失败，导入到根目录：%s", e)
+            return None
+
+    collection = (item.get("collection") or "").strip()
+    title = (meta.get("title") or item.get("title") or "").strip()
+    try:
+        base = shelf
+        if collection:
+            base = kb_manager.ensure_child(
+                user_id, shelf, _folder_name(collection, "课程合集"))
+        name = _folder_name(title, "lecture")
+        if collection:
+            name = f"{int(item.get('folder_seq') or 0) + 1:02d} {name}"
+        return kb_manager.ensure_child(user_id, base, name)
+    except ValueError as e:
+        logger.warning("分集文件夹创建失败，落到上级目录：%s", e)
+        return shelf
+
+
 def _store_timeline(store, user_id: int, node_id: int, item: dict,
-                    meta: dict) -> None:
-    """入库成功后**顺手**把原始时间线存进 `lectures`（视频资产层）。
+                    meta: dict, built: dict | None = None) -> None:
+    """入库成功后**顺手**把原始时间线存进 `lectures`（视频资产层），
+    并把这一集的讲义切片与 `structured_at` 一起落下。
+
+    为什么要落切片（2026-11-16）：导入时 `lecture_builder.build` 已经把语义切片 +
+    逐点成文做完，切片不落库就等于又回到"导入完仍显示未结构化、要用户手点一次"
+    —— `structured_at` 是目录树「看讲义」入口与课时页时间轴的唯一判据。
+    构建器降级（时间等分）时也落：有切片就能按时间跳转，`kind='fallback'` 已标明。
 
     为什么在这里而不是 `fetch_lecture` 里：时间线的落点要 `doc_id`，而 `doc_id`
     是入库之后才有的（`upload_and_index` 返回的 node_id）。所以只能在两步之间补一刀。
@@ -239,11 +347,7 @@ def _store_timeline(store, user_id: int, node_id: int, item: dict,
     if not cues:
         return
     try:
-        speech = [TranscriptEvent(start=c["start"], end=c["end"],
-                                  text=c.get("text") or "", raw=c.get("raw"))
-                  for c in cues]
-        frames = [FrameEvent(t=f["t"], image=f.get("image") or "")
-                  for f in (meta.get("frames") or [])]
+        frames, speech = _timeline_events(meta)
         try:
             ref = bili_urls.normalize(item["url"])
         except ValueError:
@@ -255,6 +359,10 @@ def _store_timeline(store, user_id: int, node_id: int, item: dict,
             "url": (ref.url if ref is not None else item["url"]),
             "title": meta.get("title") or item.get("title") or "",
             "source_kind": meta.get("source") or "",
+            "uploader": meta.get("uploader") or "",
+            # 时长来自时间条末端（见 `video_import._cues_duration`）：切片、进度条、
+            # "这一集多长"都读它，不再各算一遍。
+            "duration": float(meta.get("duration") or 0.0),
             "raw_timeline": dump_jsonl(frames, speech),
         }
         if ref is not None:
@@ -262,6 +370,12 @@ def _store_timeline(store, user_id: int, node_id: int, item: dict,
             fields["video_id"] = ref.bvid or (f"av{ref.aid}" if ref.aid else "")
             fields["page"] = ref.page
         store.upsert_lecture(node_id, **fields)
+        # 讲义切片与 `structured_at` 一起落：树上的「看讲义」入口与课时页的
+        # 时间轴都只认 `structured_at`，不落它等于导入完仍显示"未结构化"。
+        if built and built.get("segments"):
+            store.replace_lecture_segments(node_id, built["segments"])
+            store.upsert_lecture(
+                node_id, structured_at=datetime.now().isoformat(timespec="seconds"))
     except Exception as e:  # noqa: BLE001 - 见 docstring：优化失败不许拖垮导入
         logger.warning("时间线落库失败 user=%s node=%s（不影响本次导入）：%s",
                        user_id, node_id, e)

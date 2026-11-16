@@ -793,23 +793,29 @@ class KbManager:
     def create_folder(self, user_id: int, name: str, parent_id: Optional[int]) -> int:
         return self._get_store(user_id).create_folder(user_id, name, parent_id)
 
+    def ensure_child(self, user_id: int, parent_id: Optional[int], name: str) -> int:
+        """在 `parent_id` 下定位/创建**同名子文件夹**，已存在就复用（返回其 ID）。
+
+        为什么要有这一层（而不只用 `ensure_folder` 从根拼路径）：视频导入的收纳是
+        「视频课程/{合集}/{集}」，合集目录由第一批链接建、后续每条都要**在它下面**
+        建子目录 —— 从根重拼 path 也能对，但只要有人把合集改名/移动就会错建到根。
+        按 parent 定位才是真正的"就位"。
+        """
+        store = self._get_store(user_id)
+        for child in store.get_children(user_id, parent_id):
+            if child["type"] == "folder" and child["name"] == name:
+                return child["id"]
+        return store.create_folder(user_id, name, parent_id)
+
     def ensure_folder(self, user_id: int, parts: list[str]) -> int:
         """
         从根目录按 parts 逐级定位文件夹，不存在则创建，返回末级节点 ID。
 
         供采集模块入库使用（目录树表达「自动采集/L{level}/{subject}」，零迁移）。
         """
-        store = self._get_store(user_id)
         parent: Optional[int] = None
         for name in parts:
-            target = None
-            for ch in store.get_children(user_id, parent):
-                if ch["type"] == "folder" and ch["name"] == name:
-                    target = ch["id"]
-                    break
-            if target is None:
-                target = store.create_folder(user_id, name, parent)
-            parent = target
+            parent = self.ensure_child(user_id, parent, name)
         return parent
 
     def collect_files(self, user_id: int, node_id: int,

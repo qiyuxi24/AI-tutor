@@ -11,6 +11,9 @@
 - 导入前预检：集数 / 总时长 / 字幕可用性 / 缺依赖
 - **视频资产层**：有 cues 就把原始时间线落进 `lectures`（url 归一化 + cues 原文可回读）；
   没有 cues 不建行；落库失败不拖垮导入；平台名归一
+- **收纳**：合集 → `视频课程/{合集}/{NN 集标题}/讲义.md`；单集 → `视频课程/{标题}/讲义.md`
+- **一步到位出讲义**：`lecture` 档位在导入时就落切片 + `structured_at`；
+  `transcript` 档位只存转写稿（省额度）
 """
 import asyncio
 import sqlite3
@@ -392,3 +395,118 @@ def test_platform_of_covers_bilibili_youtube_local_and_other():
                            "file:///C:/a.mp4") == "local"
     assert iq._platform_of(bili_urls.normalize("https://coursera.org/x"),
                            "https://coursera.org/x") == "other"
+
+
+# ── 收纳：按视频 / 合集落成文件夹 ────────────────────────────────
+#
+# 原先所有集都平铺在根目录（合集只建一个空壳目录），几十集混在一起没法找。
+# 现在复用知识库目录树：`视频课程/{合集}/{NN 集标题}/讲义.md`，序号前缀保证
+# 目录按讲次排列（节点按 name 排序，中文标题本身不保序）。
+
+def _chain_names(manager, node_id, limit=5):
+    """从节点向上取目录链（`[集, 合集, 书架]`），用来断言收纳层级。"""
+    names = []
+    node = manager.get_node(USER, node_id)
+    while node and len(names) < limit:
+        names.append(node["name"])
+        if node["parent_id"] is None:
+            break
+        node = manager.get_node(USER, node["parent_id"])
+    return names
+
+
+def test_collection_import_nests_each_episode_in_its_own_folder(queue, monkeypatch):
+    iq_mod, manager, uploaded = queue
+    monkeypatch.setattr(
+        iq_mod.video_import, "expand",
+        lambda url: ("高数下册", [(url, "第 1 讲"), (url + "?p=2", "第 2 讲")]))
+
+    async def fake_fetch(url, workdir, **kwargs):
+        title = "第 2 讲" if "p=2" in url else "第 1 讲"
+        return "# 转写\n", {"chars": 3, "source": "x", "source_label": "平台字幕",
+                             "title": title}
+
+    monkeypatch.setattr(iq_mod.video_import, "fetch_lecture", fake_fetch)
+
+    async def scenario():
+        result = await iq_mod.submit(
+            USER, ["https://www.bilibili.com/video/BV1xx411c7mD"],
+            expand=True, lecture_level="transcript")
+        return await _drain(iq_mod, result["task_id"])
+
+    _run(scenario())
+
+    assert len(uploaded) == 2
+    for upload, episode in zip(uploaded, ("01 第 1 讲", "02 第 2 讲")):
+        assert _chain_names(manager, upload["parent_id"]) == [episode, "高数下册",
+                                                              iq.VIDEO_SHELF]
+        assert upload["filename"] == iq.LECTURE_FILE_NAME
+
+
+def test_single_video_gets_its_own_folder(queue):
+    """单集不套合集层：`视频课程/{标题}/讲义.md`，点两层就看到讲义。"""
+    iq_mod, manager, uploaded = queue
+
+    async def scenario():
+        result = await iq_mod.submit(USER, ["https://a/1"], expand=False,
+                                     lecture_level="transcript")
+        return await _drain(iq_mod, result["task_id"])
+
+    _run(scenario())
+
+    assert _chain_names(manager, uploaded[0]["parent_id"]) == ["第 1 讲", iq.VIDEO_SHELF]
+
+
+def test_transcript_level_skips_lecture_builder(queue, monkeypatch):
+    """`transcript` 档位只存转写稿：结构化很贵，不该在"只想留个字幕"时偷偷跑。"""
+    iq_mod, manager, uploaded = queue
+    called = []
+
+    async def fake_build(*args, **kwargs):
+        called.append(kwargs)
+        return {"text": "# 讲义\n", "segments": [], "degraded": True, "note": ""}
+
+    monkeypatch.setattr(iq_mod.lecture_builder, "build", fake_build)
+    _with_cues(monkeypatch, iq_mod, [{"start": 0.0, "end": 5.0, "text": "第一句。"}])
+
+    async def scenario():
+        result = await iq_mod.submit(USER, ["https://a/1"], expand=False,
+                                     lecture_level="transcript")
+        return await _drain(iq_mod, result["task_id"])
+
+    assert _run(scenario())["status"] == "done"
+    assert called == []
+    assert uploaded[0]["content"] == "# 讲义\n".encode("utf-8")
+
+
+def test_lecture_level_writes_segments_and_marks_structured(queue, monkeypatch):
+    """`lecture` 档位（默认）：导入即落讲义正文 + 切片 + `structured_at`。
+
+    `structured_at` 是目录树「看讲义」入口与课时页时间轴的唯一判据 ——
+    不写它，用户导入完仍然看到"未结构化"，等于还得手动点一次。
+    """
+    iq_mod, manager, uploaded = queue
+    segments = [{"seq": 1, "title": "定义", "kind": "definition", "brief": "先立定义",
+                 "content": "正文", "t_start": 0.0, "t_end": 30.0,
+                 "slide": "", "node_id": ""}]
+
+    async def fake_build(*args, **kwargs):
+        return {"text": "# 讲义\n\n## 1. 定义\n\n正文\n", "segments": segments,
+                "degraded": False, "note": ""}
+
+    monkeypatch.setattr(iq_mod.lecture_builder, "build", fake_build)
+    _with_cues(monkeypatch, iq_mod, [{"start": 0.0, "end": 30.0, "text": "定义是这样。"}],
+               title="第 1 讲")
+
+    async def scenario():
+        result = await iq_mod.submit(USER, ["https://a/1"], expand=False)
+        return await _drain(iq_mod, result["task_id"])
+
+    assert _run(scenario())["status"] == "done"
+    assert uploaded[0]["content"].startswith("# 讲义".encode("utf-8")), \
+        "入库正文 = 构建器产出的讲义（不是 fetch 的转写稿）"
+
+    store = manager.store(USER)
+    doc = store.list_lecture_docs()[0]
+    assert store.get_lecture(doc)["structured_at"], "导入即结构化，别再等用户手点"
+    assert [s["title"] for s in store.list_lecture_segments(doc)] == ["定义"]

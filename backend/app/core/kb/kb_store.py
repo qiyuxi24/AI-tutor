@@ -170,6 +170,7 @@ class KbStore:
                     asr_model         TEXT DEFAULT '',
                     slides            INTEGER DEFAULT 0,
                     parent_id         INTEGER,
+                    lecture_level     TEXT DEFAULT 'lecture',  -- transcript / lecture（见 lecture_builder）
                     total             INTEGER DEFAULT 0,
                     done              INTEGER DEFAULT 0,
                     failed            INTEGER DEFAULT 0,
@@ -192,6 +193,8 @@ class KbStore:
                     source     TEXT DEFAULT '',
                     error      TEXT DEFAULT '',
                     position   INTEGER DEFAULT 0,
+                    collection TEXT DEFAULT '',         -- 所属合集名（空 = 单集，收纳用）
+                    folder_seq INTEGER DEFAULT 0,       -- 合集内序号（目录前缀 NN 用它）
                     created_at TEXT DEFAULT (datetime('now')),
                     started_at TEXT,
                     finished_at TEXT
@@ -209,10 +212,21 @@ class KbStore:
             for column, ddl in (
                 ("stage", "TEXT DEFAULT ''"),
                 ("started_at", "TEXT"),
+                # 收纳：合集名 + 合集内序号（`视频课程/{合集}/{NN 集标题}/` 靠这两列）
+                ("collection", "TEXT DEFAULT ''"),
+                ("folder_seq", "INTEGER DEFAULT 0"),
             ):
                 if column not in cols:
                     self._conn.execute(
                         f"ALTER TABLE import_items ADD COLUMN {column} {ddl}")
+            task_cols = {row["name"] for row in
+                         self._conn.execute("PRAGMA table_info(import_tasks)").fetchall()}
+            for column, ddl in (
+                ("lecture_level", "TEXT DEFAULT 'lecture'"),
+            ):
+                if column not in task_cols:
+                    self._conn.execute(
+                        f"ALTER TABLE import_tasks ADD COLUMN {column} {ddl}")
 
     # ────────────────────────────────────────────
     #  结构化讲义（视频资产 + 知识点切片，见 _create_lecture_tables）
@@ -570,27 +584,36 @@ class KbStore:
     #  视频导入队列（持久化，见 _create_import_tables）
     # ────────────────────────────────────────────
 
-    def create_import_task(self, user_id: int, items: list[tuple[str, str]], *,
+    def create_import_task(self, user_id: int, items: list[tuple], *,
                            transcript_source: str = "auto", asr_model: str = "",
                            slides: bool = False, parent_id: Optional[int] = None,
-                           title: str = "") -> str:
-        """建任务 + 全部待办分集（一次提交 = 一个任务）。返回 task_id。"""
+                           title: str = "", lecture_level: str = "lecture") -> str:
+        """建任务 + 全部待办分集（一次提交 = 一个任务）。返回 task_id。
+
+        `items` 每项是 `(url, title)` 或 `(url, title, collection, folder_seq)`：
+        后两项只用于**收纳**（这一集属于哪个合集、合集内第几集），单集传空串/0。
+        只给两项（老调用方）就全部落根目录/任务级 `parent_id`，行为与改造前一致。
+        """
         import uuid
 
         task_id = uuid.uuid4().hex[:12]
         with self._conn:
             self._conn.execute(
                 "INSERT INTO import_tasks (id, user_id, title, transcript_source,"
-                " asr_model, slides, parent_id, total, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+                " asr_model, slides, parent_id, total, lecture_level, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
                 (task_id, user_id, (title or "")[:200], transcript_source, asr_model or "",
-                 int(bool(slides)), parent_id, len(items)),
+                 int(bool(slides)), parent_id, len(items), lecture_level or "lecture"),
             )
-            for position, (url, item_title) in enumerate(items):
+            for position, row in enumerate(items):
+                url, item_title = row[0], row[1]
+                collection = row[2] if len(row) > 2 else ""
+                folder_seq = row[3] if len(row) > 3 else 0
                 self._conn.execute(
-                    "INSERT INTO import_items (task_id, url, title, status, position)"
-                    " VALUES (?, ?, ?, 'pending', ?)",
-                    (task_id, url, (item_title or "")[:200], position),
+                    "INSERT INTO import_items (task_id, url, title, status, position,"
+                    " collection, folder_seq) VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+                    (task_id, url, (item_title or "")[:200], position,
+                     (collection or "")[:200], int(folder_seq or 0)),
                 )
         return task_id
 

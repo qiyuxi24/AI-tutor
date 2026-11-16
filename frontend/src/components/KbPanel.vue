@@ -116,15 +116,6 @@
       <p>还没有文件</p>
     </div>
 
-    <!-- 当前对话上下文（每对话绑定，读 store.selection） -->
-    <div v-if="selDocs.length" class="kb-context">
-      <div class="kb-context-label">当前对话上下文</div>
-      <div v-for="d in selDocs" :key="d.id" class="kb-context-item">
-        <span>{{ d.name }}{{ d.type === 'folder' && d.fileCount ? `（${d.fileCount} 个文件）` : '' }}</span>
-        <button class="kb-clear-btn" @click="store.toggleSelectionItem('docs', d)">移除</button>
-      </div>
-    </div>
-
     <!-- 索引统计 -->
     <div v-if="stats.files" class="kb-stats">
       {{ stats.files }} 个文件 · {{ stats.chunks }} 个向量分块
@@ -135,12 +126,6 @@
     <ContextMenu :visible="menuVisible" :x="menuX" :y="menuY" @close="closeMenu">
       <template #default="{ close }">
         <template v-if="menuNode">
-          <div class="menu-item" @click="close(); setContext(menuNode)">
-            <span class="menu-icon">
-              <AppIcon name="plus" :size="14" />
-            </span>
-            加入对话上下文
-          </div>
           <template v-if="menuNode.type === 'file'">
             <div class="menu-item" @click="close(); emitShowInGraph(menuNode)">
               <span class="menu-icon">
@@ -202,10 +187,12 @@
  * KbPanel.vue — 知识库侧栏（知识图谱页右侧，展开/收起由 HomeView 的容器控制）
  *
  * 职责：
- *   - 目录树：建文件夹 / 上传 / 勾选（生成来源）/ 条目三点菜单（预览 · 在浏览器中打开 · 加入对话上下文 · 删除）
+ *   - 目录树：建文件夹 / 上传 / 勾选（生成来源）/ 条目三点菜单（预览 · 在浏览器中打开 · 删除）
  *   - 顶部一键生成：勾选文件或文件夹 → 输入学科名 → 生成该学科知识图谱
- *   - 底部：当前对话已引用的资料（读 `chatStore.selection`，**每对话绑定** ——
- *     本面板只是它的第二个入口，主入口在输入框的引用按钮）
+ *
+ * 这里**没有**"加入对话上下文"的入口（2026-11-16 删）：引用资料/知识点只有对话输入区
+ * 那个 `+` 一个入口（`InputArea.vue` + `ContextPicker.vue`）。选区状态本来就只有一份
+ * （`conv.selection`），多几个入口只是让同一件事看起来像几件事。
  *
  * 数据流：本组件直接读写 store（与 GraphSubjectBar 同款），
  * 不向父级转发动作——HomeView 只管它的展开与收起。
@@ -221,7 +208,7 @@
  *   - **知识库独立页（pageMode）**：只发 `open-file` 事件，正文交给右侧常驻工作区。
  *     （那里右侧的屏比这里宽得多，塞进窄栏反而更差。）
  */
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmAction } from '../utils/feedback'
 import {
@@ -229,7 +216,6 @@ import {
   createKbFolder,
   uploadKbFile,
   deleteKbNode,
-  getKbContext,
   getKbNodeText,
   getKbNodeRaw,
   getKbStats,
@@ -264,11 +250,6 @@ const selectedNode = ref(null)
 const showCreateDialog = ref(false)
 const newFolderName = ref('')
 const creating = ref(false)
-
-// 对话上下文选区**直接读 store**（每对话绑定，见 chatStore.selection）。
-// 曾经这里是两个组件内 ref（contextNode/contextLabel）→ 切对话后底部条还显示
-// 上一个对话的范围，与真正发出去的请求不一致。
-const selDocs = computed(() => store.selection?.docs || [])
 
 // 索引统计（文件数 / 向量分块数）
 const stats = ref({ files: 0, chunks: 0 })
@@ -518,30 +499,6 @@ async function handleGenerate() {
   }
 }
 
-/** 把节点设为对话上下文（写进 store 的**当前对话选区**，对话请求据此带上它） */
-async function setContext(data) {
-  if (!data) return
-  try {
-    const res = await getKbContext(data.id)
-    const fileCount = res.data.file_count
-    if (fileCount === 0) {
-      ElMessage.warning('该节点下没有文件')
-      return
-    }
-    // 选区是"每对话绑定"的（见 chatStore.selection）：直接塞进当前对话，
-    // 切对话即自动跟着走 —— 旧实现写的是一个全局 ref，切对话既不清空也不恢复。
-    store.toggleSelectionItem('docs', {
-      id: data.id,
-      name: data.name,
-      type: data.type,
-      fileCount,
-    })
-    ElMessage.success(`已加入对话上下文：${data.name}${data.type === 'folder' ? `（${fileCount} 个文件）` : ''}`)
-  } catch (e) {
-    ElMessage.error('设置失败：' + (e.response?.data?.detail || e.message))
-  }
-}
-
 async function confirmDelete(data) {
   const ok = await confirmAction(
     data.type === 'folder'
@@ -601,7 +558,8 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 12px 8px;
+  /* 右侧让开折叠按钮（知识库栏是右栏，按钮在右边）；左栏下 --sp-head-pad-r 为 0，max() 回落 12px */
+  padding: 12px max(12px, var(--sp-head-pad-r, 0px)) 8px max(12px, var(--sp-head-pad-l, 0px));
   flex-shrink: 0;
 }
 
@@ -831,37 +789,6 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeydown))
   color: var(--color-text-tertiary);
   font-size: 13px;
   text-align: center;
-}
-
-.kb-context {
-  padding: 10px 12px;
-  border-top: 1px solid var(--color-border);
-  flex-shrink: 0;
-}
-.kb-context-label {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  margin-bottom: 6px;
-}
-.kb-context-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px;
-  background: var(--color-green-light);
-  border-radius: var(--radius-md);
-  font-size: 13px;
-  color: var(--color-green);
-}
-.kb-clear-btn {
-  border: none;
-  background: transparent;
-  color: var(--color-green);
-  cursor: pointer;
-  font-size: 12px;
-}
-.kb-clear-btn:hover {
-  text-decoration: underline;
 }
 
 .kb-stats {

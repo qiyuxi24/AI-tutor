@@ -63,13 +63,6 @@ export const searchKb = (q, nodeId = null, topK = 5) => {
   return apiClient.get('/api/v1/kb/search', { params })
 }
 
-/** 收集目录范围内所有文件节点 ID（选择进上下文） */
-export const getKbContext = (nodeId, maxDepth = null) => {
-  const body = { node_id: nodeId }
-  if (maxDepth) body.max_depth = maxDepth
-  return apiClient.post('/api/v1/kb/context', body)
-}
-
 /** 知识库索引统计 */
 export const getKbStats = () => apiClient.get('/api/v1/kb/stats')
 
@@ -102,12 +95,18 @@ export const biliLoginPoll = (qrcodeKey) =>
 /**
  * 导入课程链接为讲义（**入队即返回**，队列串行处理）
  * payload: { url?, urls?: string[], parent_id?, transcript_source?, asr_model?,
- *            languages?, expand?, slides? }
+ *            languages?, expand?, slides?, level? }
+ *   level = 'lecture'（默认，字幕/转写完成后直接出结构化讲义）/ 'transcript'
+ *   （只存转写稿，省模型额度）—— 对应后端 `import_tasks.lecture_level`。
  * resp: { status: 'queued', task_id, items, title, parent_id, message }
  *
+ * 收纳（后端做，前端不用管）：合集 → `视频课程/{合集}/NN {集标题}/讲义.md`，
+ * 单集 → `视频课程/{视频标题}/讲义.md`，复用知识库同一棵目录树。
+ *
  * 三条 SSE 通知（都在 chatStore 里消费）：
- *   - `import_progress` { task_id, item_id, item_index, item_total, stage, index?, total? }
- *     —— **瞬态**（后端只把 stage 落库，段内进度不落）；终态 done/failed
+ *   - `import_progress` { task_id, item_id, item_index, item_total, stage, sub_index?, sub_total? }
+ *     —— **瞬态**（后端只把 stage 落库，段内进度不落）；stage 里的 `structure`
+ *     是「生成讲义」（语义切片 + 逐点成文），`sub_*` 是这一集已写好几段
  *   - `kb_updated` { node_id, filename, title } —— 已落库，离线也能补拉
  *   - `error` { message } —— 已落库
  * 400 = 缺 yt-dlp 等前置条件 / 没有链接（detail 给原因）

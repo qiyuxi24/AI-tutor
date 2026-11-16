@@ -11,9 +11,8 @@
 ------------------------------------------
 - ✅ 骨架：`structure()` 的输入/输出契约、幂等落库、降级兜底（时间等分）、
   以及"不重新取词/不重新 ASR"（原料来自 `lectures.raw_timeline`）。
-- ⏳ LLM 知识点切片：**未实现**。真正的切片（按语义找知识点边界、命名、写讲解）
-  是下一步；`structurer_hook` 就是留给它的插口 —— 挂上之后 `structure()` 走它，
-  没挂（默认）就走 `degraded_segments`。
+- ✅ 语义切片 + 逐点成文：不在本模块 —→ `kb/lecture_builder.py`（导入队列与
+  restructure 端点共用）。本模块只留"保底"：等分、机械标题、起名钩子。
 
 降级兜底为什么是"时间等分"而不是"不产出"
 ----------------------------------------
@@ -52,6 +51,11 @@ def _segment(*, seq: int, title: str, kind: str, brief: str, content: str,
         "content": content, "t_start": float(t_start), "t_end": float(t_end),
         "slide": slide, "node_id": node_id,
     }
+
+
+def make_segment(**kwargs) -> dict:
+    """公开构造点：`lecture_builder` 也要造切片行，别让它抄一遍字段名。"""
+    return _segment(**kwargs)
 
 
 def _media_duration(sections: Sequence[Section], duration: float) -> float:
@@ -120,8 +124,8 @@ def _fallback_title(text: str, index: int, count: int) -> str:
     return _clip(best)
 
 
-def _window_speech(sections: Sequence[Section], start: float,
-                   end: float) -> list:
+def window_speech(sections: Sequence[Section], start: float,
+                  end: float) -> list:
     """取落在 `[start, end)` 的语音事件，按开始时间排序。
 
     为什么按**语音事件**筛而不是按 `Section` 筛：`Section` 的粒度是"一页截图"。
@@ -139,7 +143,30 @@ def _window_speech(sections: Sequence[Section], start: float,
     return picked
 
 
-def _window_image(sections: Sequence[Section], start: float, end: float) -> str:
+def window_text(sections: Sequence[Section], start: float, end: float) -> str:
+    """该时间窗内的语音 → 可直接渲染的**段落文本**（短 cue 并到上一段）。
+
+    为什么按**语音条**分段而不是拼成一整块：ASR 出来的每条 cue 本来就是一口气说完
+    的一小段（实测 20-40 字），拼成一整块 400 字无标点的黑墙完全没法读。
+    条内仍走 `join_text`（CJK 不插空格）。
+
+    公开给 `lecture_builder`（逐点成文与降级正文都要"这一段的原文"，不该各自再抄
+    一遍窗口筛选逻辑）。
+    """
+    paras: list[str] = []
+    for event in window_speech(sections, start, end):
+        part = (event.text or "").strip()
+        if not part:
+            continue
+        if paras and len(paras[-1]) < 60:
+            # 极短的 cue（"对吧""然后呢"）并到上一段，避免一行两三个字
+            paras[-1] = join_text(paras[-1], part)
+        else:
+            paras.append(part)
+    return "\n\n".join(paras).strip()
+
+
+def window_image(sections: Sequence[Section], start: float, end: float) -> str:
     """该时间窗内的第一张截图（没有就空串）：兜底切片没有语义归属，
     拿一张图只是为时间轴 UI 留个锚点。"""
     for section in sections:
@@ -150,43 +177,33 @@ def _window_image(sections: Sequence[Section], start: float, end: float) -> str:
 
 
 def degraded_segments(sections: Sequence[Section],
-                      duration: float) -> list[dict]:
-    """降级兜底：整集按 `MIN_SEGMENT_SECS` **时间等分**，正文取落在该区间的语音。
+                      duration: float,
+                      min_secs: float = MIN_SEGMENT_SECS) -> list[dict]:
+    """降级兜底：整集按 `min_secs`（默认 `MIN_SEGMENT_SECS`）**时间等分**，正文取该区间语音。
 
-    - 段数 = `ceil(时长 / MIN_SEGMENT_SECS)`；时长为 0 → 一段也产不出（返回 []，
+    - 段数 = `ceil(时长 / min_secs)`；时长为 0 → 一段也产不出（返回 []，
       调用方据此判"没有可结构化的时间线"，而不是造一个 0-0 的假知识点）；
-    - 每段正文 = 该时间窗内的语音（按事件筛，见 `_window_speech`）；
-    - 每段 `slide` 取"该区间内第一张截图"（见 `_window_image`）；
+    - 每段正文 = 该时间窗内的语音（按事件筛，见 `window_text`）；
+    - 每段 `slide` 取"该区间内第一张截图"（见 `window_image`）；
     - 标题取该段首句（见 `_fallback_title`），不是编号 —— 编号在时间轴上没有信息量；
     - `kind='fallback'` + 外层 `degraded=True`：绝不假装这是知识点边界。
+
+    `min_secs` 由调用方放大时（如长课要压到 `MAX_SEGMENTS` 段以内），段数随之变少、
+    正文变长 —— 这是**成本闸**，不是粒度偏好。
     """
     total = _media_duration(sections, duration)
     if total <= 0:
         return []
 
-    count = max(1, int(math.ceil(total / MIN_SEGMENT_SECS)))
+    unit = max(1.0, float(min_secs or MIN_SEGMENT_SECS))
+    count = max(1, int(math.ceil(total / unit)))
     step = total / count
     out: list[dict] = []
     used_titles: set[str] = set()
     for index in range(count):
         start = round(index * step, 3)
         end = round(total if index == count - 1 else (index + 1) * step, 3)
-        events = _window_speech(sections, start, end) or _window_speech(
-            sections, 0.0, total)   # 整集都没有事件时才退回全量
-        # 正文按**语音条**分段，而不是拼成一整块：ASR 出来的每条 cue 本来就是
-        # 一口气说完的一小段（实测 20-40 字），拼成一整块 400 字无标点的黑墙
-        # 完全没法读。条内仍走 `join_text`（CJK 不插空格）。
-        paras: list[str] = []
-        for event in events:
-            part = (event.text or "").strip()
-            if not part:
-                continue
-            if paras and len(paras[-1]) < 60:
-                # 极短的 cue（"对吧""然后呢"）并到上一段，避免一行两三个字
-                paras[-1] = join_text(paras[-1], part)
-            else:
-                paras.append(part)
-        text = "\n\n".join(paras).strip()
+        text = window_text(sections, start, end) or window_text(sections, 0.0, total)
         title = _fallback_title(text, index + 1, count)
         # 相邻段机械标题撞车（口语里"那么""对吧"开头极常见）时补序号区分 ——
         # 时间轴上一列同名条目等于没有标题。LLM 起名成功时会被覆盖，但模型
@@ -205,7 +222,7 @@ def degraded_segments(sections: Sequence[Section],
             content=text,
             t_start=start,
             t_end=end,
-            slide=_window_image(sections, start, end),
+            slide=window_image(sections, start, end),
         ))
     return out
 
@@ -279,15 +296,18 @@ async def name_segments(lecture_title: str, segments: list[dict],
         return {}
 
 
-def structure(sections: Sequence[Section], duration: float) -> dict:
+def structure(sections: Sequence[Section], duration: float,
+              min_secs: float = MIN_SEGMENT_SECS) -> dict:
     """把时间线切成知识点切片；返回 `{"segments": [...], "degraded": bool, "note": str}`。
 
     - 挂了 `structurer_hook`（LLM 切片，下一步）→ 走它，`degraded=False`；
       它返回空/抛异常 → **降级到兜底**（结构化失败不该让整集没有时间轴）；
-    - 没挂 → 直接兜底，`degraded=True`，`note` 说明"LLM 切片未接入"。
+    - 没挂 → 直接兜底，`degraded=True`，`note` 说明"只有时间等分"。
+      导入/重跑时 `lecture_builder` 会再尝试语义切片，本函数只负责**保底**。
 
-    调用方（`/kb/lecture/{id}/restructure`）只关心 `segments` 与非空的 `note`，
-    **不要**把 `degraded` 写进 `structured_at` 的判断 —— 有切片就是已结构化。
+    调用方（`/kb/lecture/{id}/restructure`、导入队列、`lecture_builder`）只关心
+    `segments` 与非空的 `note`，**不要**把 `degraded` 写进 `structured_at` 的判断
+    —— 有切片就是已结构化。
     """
     if structurer_hook is not None:
         try:
@@ -300,9 +320,9 @@ def structure(sections: Sequence[Section], duration: float) -> dict:
             # 兜底至少让用户能按时间跳转。异常本身由调用方记日志。
             note = f"结构化失败，已降级为时间等分：{type(e).__name__}: {e}"
     else:
-        note = "LLM 知识点切片尚未接入，当前按时间等分兜底（下一步）"
+        note = "语义切片未产出（模型不可用或本集无语音），已按时间等分"
 
-    return {"segments": degraded_segments(sections, duration),
+    return {"segments": degraded_segments(sections, duration, min_secs=min_secs),
             "degraded": True, "note": note}
 
 
@@ -311,7 +331,11 @@ __all__ = [
     "BRIEF_CHARS",
     "NAMING_SYSTEM",
     "structurer_hook",
+    "make_segment",
     "degraded_segments",
+    "window_speech",
+    "window_text",
+    "window_image",
     "name_segments",
     "structure",
 ]

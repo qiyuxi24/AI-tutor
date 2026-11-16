@@ -3,7 +3,7 @@
  * LecturePane.vue — 设置 · 视频课程导入
  *
  * 三层内容都收在这里：
- *   ① 导入偏好：取词方式 / 合集展开 / 幻灯片截图 / 字幕语言 / 转写模型
+ *   ① 导入偏好：取词方式 / 合集展开 / 幻灯片截图 / 讲义产出 / 字幕语言 / 转写模型
  *      （本机偏好，localStorage，见 `utils/lectureSettings.js`，不入后端）
  *   ② 运行环境自检：yt-dlp / ffmpeg / ASR 模型（后端 `GET /kb/import/probe`）
  *   ③ B 站扫码登录：凭证只落服务端 `data/bili/cookies.txt`，这里只有二维码与状态
@@ -14,12 +14,16 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { biliLoginPoll, biliLoginQrcode, probeLectureImport } from '../../api/kb.js'
-import { TRANSCRIPT_SOURCES, useLectureSettings } from '../../utils/lectureSettings'
+import { LECTURE_LEVELS, TRANSCRIPT_SOURCES, useLectureSettings } from '../../utils/lectureSettings'
 
 const settings = useLectureSettings()
 
 const currentSource = computed(
   () => TRANSCRIPT_SOURCES.find((s) => s.key === settings.transcriptSource) || TRANSCRIPT_SOURCES[0],
+)
+
+const currentLevel = computed(
+  () => LECTURE_LEVELS.find((s) => s.key === settings.lectureLevel) || LECTURE_LEVELS[0],
 )
 
 // ── 运行环境自检（后端 probe；失败当"未知"，不阻断任何操作）──
@@ -154,6 +158,24 @@ onBeforeUnmount(stopQrTimer)
           <div class="sc-row-desc">画面变化时抽帧去重，图片插到对应讲解段落前（需下载视频，慢一些）</div>
         </div>
         <el-switch v-model="settings.slides" />
+      </div>
+
+      <div class="sc-row">
+        <div class="sc-row-info">
+          <div class="sc-row-title">讲义产出</div>
+          <div class="sc-row-desc">{{ currentLevel.desc }}</div>
+        </div>
+        <div class="theme-toggle-group">
+          <button
+            v-for="opt in LECTURE_LEVELS"
+            :key="opt.key"
+            type="button"
+            class="theme-option"
+            :class="{ active: settings.lectureLevel === opt.key }"
+            :title="opt.desc"
+            @click="settings.lectureLevel = opt.key"
+          >{{ opt.title }}</button>
+        </div>
       </div>
 
       <div class="sc-row sc-row--stack">
