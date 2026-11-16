@@ -524,10 +524,19 @@ export const useChatStore = defineStore('chat', () => {
   async function refreshGraph(fromUserAction = false) {
     // 学科列表与分量统计可能因 CRUD 变化（新增学科、节点数变动）→ 刷新收藏栏
     await fetchSubjects()
-    // 图从空变非空（如对话中新建首个节点）时自动选中学科，否则会停在空态
-    await ensureSubjectSelected()
-    graphLoaded.value = false
-    await fetchGraph(true)
+    // 图从空变非空（如对话中新建首个节点）时自动选中学科，否则会停在空态。
+    //
+    // 只拉一次：ensureSubjectSelected 自己动过图时（自动选中 → setSubject → fetchGraph(true)；
+    // 或列表为空 → fetchGraph(true) 清画布）不必再补。这里是 refreshGraph 不是 init，
+    // **不能**靠 graphLoaded 守卫兜底 —— 那次传的是 force=true，守卫根本不生效，
+    // 旧实现因此在未选学科时连发 2 个图请求（第二个纯浪费）。
+    // 反过来，返回 false 表示当前学科原样保留、那边没碰图 —— refreshGraph 的定位是
+    // "后台数据变了必须重拉"，这次 force 由这里补上（graphLoaded 已 true 也要拉）。
+    const refreshedByEnsure = await ensureSubjectSelected()
+    if (!refreshedByEnsure) {
+      graphLoaded.value = false
+      await fetchGraph(true)
+    }
     if (fromUserAction) {
       suppressSSE()
     }

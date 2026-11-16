@@ -703,6 +703,95 @@ describe('init 加载图谱的请求数', () => {
   })
 })
 
+// ─────────────────────────────────────────────────────────────────────────────
+// refreshGraph 也只走一次图：复用 ensureSubjectSelected 的返回值（2026-11-16）
+//
+// 旧 refreshGraph：`await ensureSubjectSelected()` 之后**无条件** `await fetchGraph(true)`。
+// 与 init 不同，这里传的是 force=true，**绕过 graphLoaded 守卫** —— 未选学科时
+// ensureSubjectSelected → setSubject(names[0]) → fetchGraph(true) 已经真发过一次，
+// 后面那次于是必然再发一次（实测 2 次，第二个约 47.9KB 纯浪费）。
+//
+// 但 refreshGraph 的定位是「后台数据变了，必须重拉」—— 收敛请求数**不能**把强制语义
+// 一起收掉：当前学科本来就有效时 ensureSubjectSelected 返回 false 且什么都没做，
+// 那次 force 重拉必须由 refreshGraph 自己补上（就算 graphLoaded 已经是 true）。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('refreshGraph 加载图谱的请求数', () => {
+  /** 让 stats 返回给定学科列表；graph 返回空图（或按需失败）。 */
+  function mockBackend({ subjects = [], graphFails = false } = {}) {
+    apiClient.get.mockImplementation((url) => {
+      if (url === '/api/v1/knowledge/stats') {
+        return Promise.resolve({
+          data: { by_subject: subjects.map(subject => ({ subject, node_count: 1 })) },
+        })
+      }
+      if (url === '/api/v1/knowledge/graph') {
+        if (graphFails) return Promise.reject(new Error('graph down'))
+        return Promise.resolve({ data: { nodes: [], edges: [] } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+  }
+
+  /** fetchGraph 发出的请求数（唯一可观测信号就是这个端点）。 */
+  function graphGets() {
+    return apiClient.get.mock.calls.filter(([u]) => u === '/api/v1/knowledge/graph')
+  }
+
+  it('未选学科、有学科列表 → refreshGraph 只发 1 次图请求（旧实现 2 次）', async () => {
+    mockBackend({ subjects: ['数据结构', '操作系统'] })
+    const store = useChatStore()
+    expect(store.currentSubject).toBeNull()
+
+    await store.refreshGraph()
+
+    const calls = graphGets()
+    expect(calls).toHaveLength(1)                        // 旧实现这里是 2
+    expect(calls[0][1].params.subject).toBe('数据结构')   // 自动选中第一个学科
+    expect(store.currentSubject).toBe('数据结构')
+    expect(store.graphLoaded).toBe(true)
+  })
+
+  it('未选学科 + 图请求失败 → 仍只发 1 次（force 不再重打一遍）', async () => {
+    mockBackend({ subjects: ['数据结构'], graphFails: true })
+    const store = useChatStore()
+
+    await store.refreshGraph()
+
+    expect(graphGets()).toHaveLength(1)                  // 旧实现这里是 2
+    expect(store.graphError).toBeTruthy()                // 失败仍然可见，不静默
+  })
+
+  it('当前学科仍有效 → refreshGraph 依旧强制拉，且每次刷新都拉 1 次', async () => {
+    mockBackend({ subjects: ['数据结构', '操作系统'] })
+    const store = useChatStore()
+    store.currentSubject = '操作系统'                    // 上一轮已选、仍然有效
+
+    await store.refreshGraph()
+
+    // ensureSubjectSelected 提前返回（没动图）→ 由 refreshGraph 自己补这一次 force
+    expect(graphGets()).toHaveLength(1)
+    expect(graphGets()[0][1].params.subject).toBe('操作系统')
+    expect(store.currentSubject).toBe('操作系统')        // 不被自动选中改写成第一个
+
+    // graphLoaded 已是 true，refreshGraph 的 force 语义要求照样再拉一次
+    await store.refreshGraph()
+    expect(graphGets()).toHaveLength(2)
+  })
+
+  it('学科被删光（列表为空）→ 不发图请求，画布清空', async () => {
+    mockBackend({ subjects: [] })
+    const store = useChatStore()
+    store.currentSubject = '数据结构'                    // 这个学科已经不存在了
+
+    await store.refreshGraph()
+
+    expect(graphGets()).toHaveLength(0)                  // 无学科 = 不请求，空态
+    expect(store.currentSubject).toBeNull()
+    expect(store.knowledgeNodes).toEqual([])
+    expect(store.graphLoaded).toBe(true)
+  })
+})
+
 describe('刷新后恢复「生成中」（TODO §11.3/§11.4-B）', () => {
   // 背景：建图已后台化（后端 `runtime.spawn`），刷新**不再取消**它。
   // 但前端 `graphGenerating` 是纯内存 ref —— 刷新后归零，按钮显示"一键生成图谱"，
