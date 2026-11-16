@@ -190,6 +190,6 @@
 
 ## 7. 提交与测试纪律
 
-- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **2187 passed + 1 skipped / 7 deselected**（2026-11-16 复核，108.94s）。比 2026-11-15 的 1982 +1（本轮新增 `test_by_subject_*` 2 例与 `test_stats_is_subject_aggregation_only` 改写）。**前端 vitest 基线 = 80 passed（5 files）**（2026-11-16 复核，3.56s）。**后台套件基线 = `backend-admin/tests` 43 passed**。历史：1982/47（2026-11-15）、1968/42（2026-11-10）、1959（2026-11-09）、1946（2026-11-06）、1932（2026-11-04）、1654（2026-10-12）、1590（2026-10-10）、1549（2026-10-09）、1512 + 1 failed（2026-10-07）。
+- 测试口径写进回复/PR：`pytest backend/tests -q -m "not llm_api"` → 期望 **2231 passed + 1 skipped / 7 deselected**（2026-11-16 晚复核，192.55s）。`core/auth.py` 的 `_ensure_user_active`（token 的 uid 必须真实存在于 `users`，否则 401 `[E-AUTH-003]`）已落地，原先用它「拿不存在的 uid 42 造 token」的 `test_auth.py::test_valid_token_returns_user_id_without_warning` 与 `test_no_deprecated_api.py::test_created_token_round_trips_through_auth_layer` 已改为**先往 tmp 库插一行 uid=42 再验**（不再依赖"不查库也放行"那个旧契约）。同日另一并发会话（服务商方言表 `core/llm/provider.py`）自身验证时点 = 2220 passed + 1 skipped、零失败。**前端 vitest 基线 = 84 passed（5 files）**（2026-11-16 复核，4.17s）。**后台套件基线 = `backend-admin/tests` 43 passed**。历史：2187/80（2026-11-16 早）、1982/47（2026-11-15）、1968/42（2026-11-10）、1959（2026-11-09）、1946（2026-11-06）、1932（2026-11-04）、1654（2026-10-12）、1590（2026-10-10）、1549（2026-10-09）、1512 + 1 failed（2026-10-07）。
 - 提交按**文件族**拆；单文件跨主题按**依赖方向**排序（先被调用方）；测试与其修复同一提交；不混无关改动。
 - 与其他 AI 会话共存：提交前 `git status` 看清别人 WIP，**路径限定 add**。
