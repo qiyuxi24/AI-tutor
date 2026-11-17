@@ -12,6 +12,17 @@ composeBom = "2026.02.01"
 # 再套一层 Retrofit 只会让两个 HTTP 抽象互相翻译。REST 与 SSE 共用同一个 OkHttpClient。
 okhttp = "4.12.0"
 gson = "2.11.0"
+# 协程：SSE 读流、ViewModel 的 viewModelScope 都要用。
+# 版本与 lifecycle-runtime-ktx 传递依赖保持同一大版本，避免 duplicate class。
+coroutines = "1.7.3"
+# JWT 落盘必须加密（Android/README.md §5.2「别存明文 SharedPreferences」）。
+securityCrypto = "1.1.0"
+# LaTeX 公式排版（矩阵/分式/积分）。**MIT 许可**，与项目协议兼容。
+# 选 1.6.3-kt2.1.0 而不是最新 1.7.2：作者明确写了 1.6.3-kt2.1.0 是
+# Kotlin 2.1 兼容线的最后一版，依赖 kotlin-stdlib 2.2.10（与本项目一致）；
+# 1.7.x 会把 Kotlin 拉到 2.4.21、Compose 拉到 1.12.2，与现有 BOM 冲突。
+# ⚠️ 不要换成 ru.noties:jlatexmath-android —— 那个是 GPL-2.0，会传染整个项目。
+latex = "1.6.3-kt2.1.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -29,6 +40,16 @@ androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "u
 androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
 androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+# 图标：底栏 5 个 tab + 设置项都要图标。extended 比 core 多几千个图标，
+# 只在 debug 变体会被 R8 裁掉未用项（release 走 R8，包里不会全带上）。
+androidx-compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
+# LaTeX 渲染（MIT）。-android 后缀是该 KMP 库的 Android 变体；
+# renderer 会传递依赖 parser + base，不用单独引。
+latex-renderer = { group = "io.github.huarangmeng", name = "latex-renderer-android", version.ref = "latex" }
+# KaTeX 配套字体：不引也能跑（回落系统字体），但矩阵/分式的字形会不标准
+latex-fonts-katex = { group = "io.github.huarangmeng", name = "latex-fonts-katex-android", version.ref = "latex" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 okhttp-logging = { group = "com.squareup.okhttp3", name = "logging-interceptor", version.ref = "okhttp" }
 gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
